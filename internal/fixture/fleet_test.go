@@ -120,6 +120,62 @@ func TestDatasetContainsCrossClusterFlows(t *testing.T) {
 	t.Error("no cross-cluster flow in the dataset; the enforcement gap cannot be demonstrated")
 }
 
+// 数据集的验收标准不是"字段长得对"，而是"跑完引擎真的产出了这些结论"。
+// 形状测试挡不住有人改掉 buildFlows 后 demo 悄悄变成全绿 —— 而全绿正是
+// 这个平台最不该给人的印象。断言非零而不锁定具体数量：锁死计数会让
+// 以后每次调数据都变成一次假报警。
+func TestDatasetProducesAllDeliberateGaps(t *testing.T) {
+	f := fixture.Load()
+
+	evaluators := map[string]*replay.Evaluator{}
+	for _, c := range f.Clusters {
+		var opts []replay.Option
+		if c.CCNPPresent {
+			opts = append(opts, replay.WithCCNPPresent(true))
+		}
+		evaluators[c.ID] = replay.NewEvaluator(c.ID, c.Policies, c.Namespaces, opts...)
+	}
+
+	var degraded, crossCluster int
+	reasons := map[replay.UnknownReason]int{}
+
+	for _, fl := range f.Flows {
+		clusterID := fl.Flow.Dest.ClusterID
+		if clusterID == "" {
+			clusterID = fl.Flow.Source.ClusterID
+		}
+		e, ok := evaluators[clusterID]
+		if !ok {
+			continue
+		}
+		d := e.Evaluate(fl.Flow)
+		if d.Confidence == replay.ConfidenceDegraded {
+			degraded++
+		}
+		if d.CrossCluster {
+			crossCluster++
+		}
+		if d.UnknownReason != replay.ReasonNone {
+			reasons[d.UnknownReason]++
+		}
+	}
+
+	if degraded == 0 {
+		t.Error("no DEGRADED verdicts; the mesh namespace no longer demonstrates obscured L4 identity")
+	}
+	if crossCluster == 0 {
+		t.Error("no cross-cluster flows; the known enforcement gap is no longer demonstrated")
+	}
+	for _, want := range []replay.UnknownReason{
+		replay.ReasonPolicyMalformed,
+		replay.ReasonSnapshotMissing,
+	} {
+		if reasons[want] == 0 {
+			t.Errorf("no %s verdicts; that gap is no longer demonstrated", want)
+		}
+	}
+}
+
 // 每条 flow 的两端要么身份完整，要么明确是外部/未还原 —— 不能是半拉子数据。
 func TestFlowEndpointsAreCoherent(t *testing.T) {
 	f := fixture.Load()

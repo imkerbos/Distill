@@ -238,6 +238,20 @@ func externalEndpoint(ip string) replay.Endpoint {
 	return replay.Endpoint{IP: ip}
 }
 
+// hostNetworkPod 返回 pods 中第一个 HostNetwork Pod。
+//
+// buildFlows 用它把 kube-system 流量的目的地锁定在真正不受管控的 Pod
+// 上——如果传入的切片里没有 hostNetwork Pod，说明数据集本身已经不满足
+// 前提，panic 比生成一批文不对题的"unmanaged"流量更早暴露问题。
+func hostNetworkPod(pods []replay.PodRef) replay.PodRef {
+	for _, p := range pods {
+		if p.HostNetwork {
+			return p
+		}
+	}
+	panic("fixture: no hostNetwork pod found")
+}
+
 // unresolvedEndpoint 构造一个"声称属于某集群、但身份没能还原"的端点，
 // 模拟采集管线丢事件：flow 记录了源 IP 与它所在的集群，唯独没能把 IP
 // 对应回具体 Pod。求值引擎必须把这种情况判成 SNAPSHOT_MISSING，
@@ -322,12 +336,15 @@ func buildFlows(asia, eu Cluster) []Flow {
 		b.add(podEndpoint(src), podEndpoint(dst), replay.ProtocolTCP, 8080)
 	}
 
-	// -> kube-system：hostNetwork Pod 不在 Pod 网络内，NetworkPolicy 管不到它。
+	// -> kube-system 的 hostNetwork Pod：不在 Pod 网络内，NetworkPolicy 管
+	// 不到它。全部 20 条都打到这一个 Pod 上，而不是在 namespace 内的两个
+	// Pod 间轮换——轮换会让一半流量只是打到"无策略的普通 Pod"，稀释掉
+	// hostNetwork 这个场景本该有的分量。
 	kubeSystemSources := append(append([]replay.PodRef{}, gateway...), payment...)
+	unmanaged := hostNetworkPod(kubeSystem)
 	for i := 0; i < 20; i++ {
 		src := kubeSystemSources[i%len(kubeSystemSources)]
-		dst := kubeSystem[i%len(kubeSystem)]
-		b.add(podEndpoint(src), podEndpoint(dst), replay.ProtocolTCP, 9100)
+		b.add(podEndpoint(src), podEndpoint(unmanaged), replay.ProtocolTCP, 9100)
 	}
 
 	// 源身份未还原，模拟采集丢事件 -> SNAPSHOT_MISSING。
