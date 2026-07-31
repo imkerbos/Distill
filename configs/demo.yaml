@@ -1,0 +1,14 @@
+server:
+  addr: ":10100"
+  read_timeout: 10s
+  write_timeout: 20s
+  shutdown_timeout: 15s
+
+auth:
+  session_ttl: 8h
+  users:
+    - username: demo
+      password_hash: "$2a$10$mK1c.i91UhppAqPiuftvvO2ua4MZhupy0thLDhjLtU8mN.KLlqJ1m"
+
+log:
+  level: INFO

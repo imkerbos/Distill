@@ -1,0 +1,20 @@
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  cmd = "go build -o ./tmp/distill-api ./cmd/distill-api"
+  bin = "./tmp/distill-api -config configs/demo.yaml"
+  include_ext = ["go", "yaml"]
+  exclude_dir = ["tmp", "web", "docs", ".superpowers", ".git"]
+  exclude_regex = ["_test\\.go"]
+  delay = 300
+  stop_on_error = true
+
+  # macOS 上 Docker Desktop 的 bind mount 经由虚拟机，fsnotify 事件会丢失
+  # 或延迟数秒，症状是"改了代码没反应"，极易被误判为 air 故障。
+  # 轮询换来可靠触发，代价是轻微 CPU 占用。
+  poll = true
+  poll_interval = 500
+
+[log]
+  time = true

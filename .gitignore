@@ -1,5 +1,8 @@
 /.superpowers/
 
+# air 热更新的编译产物目录（.air.toml 的 tmp_dir）。
+/tmp/
+
 # Local working notes and agent context. These are kept out of the repository
 # only by happening to be untracked today, so a `git add -A` on any future
 # branch would stage them. Name them explicitly instead.
