@@ -58,35 +58,65 @@ func rulesOf(p networkingv1.NetworkPolicy, dir Direction) []rule {
 func (e *Evaluator) Evaluate(f Flow) Decision {
 	d := Decision{Verdict: VerdictAllow, Confidence: ConfidenceTrusted}
 	d.Reason.MatchedRuleIdx = -1
+	d.Reason.Unmanaged = e.hasUnmanagedEndpoint(f)
 
 	if src := e.localPod(f.Source); src != nil {
 		out := e.evaluateSide(*src, f.Dest, f, DirectionEgress)
 		if out.Verdict != VerdictAllow {
+			out.Reason.Unmanaged = d.Reason.Unmanaged
 			return out
 		}
 		// 出向放行仍要保留其 Reason（如匹配到的规则），否则最终结论会
 		// 丢失"为什么放行"，解释器就只能展示一个空理由。
+		out.Reason.Unmanaged = d.Reason.Unmanaged
 		d = out
 	}
 	if dst := e.localPod(f.Dest); dst != nil {
 		in := e.evaluateSide(*dst, f.Source, f, DirectionIngress)
 		if in.Verdict != VerdictAllow {
+			in.Reason.Unmanaged = d.Reason.Unmanaged
 			return in
 		}
+		// 放行侧的 Reason 必须保留，否则最终结论会丢失"为什么放行"，
+		// 解释器就只能展示一个空理由。
+		in.Reason.Unmanaged = d.Reason.Unmanaged
 		d = in
 	}
 	return d
 }
 
-// localPod 返回该端点在本集群内的 Pod；不属于本集群时返回 nil。
+// localPod 返回该端点在本集群内、且受 NetworkPolicy 管控的 Pod。
 //
-// 本集群的 NetworkPolicy 无法选中其他集群的 Pod，对端只能通过
-// ipBlock 匹配其 IP。
+// 返回 nil 的两种情况：
+//   - 属于其他集群：本集群策略无法选中它，只能靠 ipBlock 匹配 IP
+//   - hostNetwork Pod：使用 Node IP、不在 Pod 网络内，策略对其不生效
 func (e *Evaluator) localPod(endpoint Endpoint) *PodRef {
 	if endpoint.Pod == nil || endpoint.Pod.ClusterID != e.clusterID {
 		return nil
 	}
+	if IsUnmanaged(*endpoint.Pod) {
+		return nil
+	}
 	return endpoint.Pod
+}
+
+// hasUnmanagedEndpoint 判断连接是否有任一端不受 NetworkPolicy 管控。
+func (e *Evaluator) hasUnmanagedEndpoint(f Flow) bool {
+	for _, endpoint := range []Endpoint{f.Source, f.Dest} {
+		if endpoint.Pod != nil && endpoint.Pod.ClusterID == e.clusterID && IsUnmanaged(*endpoint.Pod) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsUnmanaged 判断 Pod 是否不受 NetworkPolicy 管控。
+//
+// hostNetwork Pod 使用宿主网络命名空间，其流量不经过 Pod 网络，
+// NetworkPolicy 对其基本不生效。这类 Pod 必须排除出覆盖率统计，
+// 否则"已保护比例"是虚假的 —— 而它们往往正是特权组件。
+func IsUnmanaged(pod PodRef) bool {
+	return pod.HostNetwork
 }
 
 // evaluateSide 判定单个方向：subject 是被策略选中的主体，peer 是对端。
