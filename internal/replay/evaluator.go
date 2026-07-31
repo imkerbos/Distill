@@ -59,30 +59,47 @@ func (e *Evaluator) Evaluate(f Flow) Decision {
 	d := Decision{Verdict: VerdictAllow, Confidence: ConfidenceTrusted}
 	d.Reason.MatchedRuleIdx = -1
 	d.Reason.Unmanaged = e.hasUnmanagedEndpoint(f)
+	d.CrossCluster = isCrossCluster(f)
 
 	if src := e.localPod(f.Source); src != nil {
 		out := e.evaluateSide(*src, f.Dest, f, DirectionEgress)
 		if out.Verdict != VerdictAllow {
-			out.Reason.Unmanaged = d.Reason.Unmanaged
-			return out
+			return carryFlags(out, d)
 		}
 		// 出向放行仍要保留其 Reason（如匹配到的规则），否则最终结论会
 		// 丢失"为什么放行"，解释器就只能展示一个空理由。
-		out.Reason.Unmanaged = d.Reason.Unmanaged
-		d = out
+		d = carryFlags(out, d)
 	}
 	if dst := e.localPod(f.Dest); dst != nil {
 		in := e.evaluateSide(*dst, f.Source, f, DirectionIngress)
 		if in.Verdict != VerdictAllow {
-			in.Reason.Unmanaged = d.Reason.Unmanaged
-			return in
+			return carryFlags(in, d)
 		}
 		// 放行侧的 Reason 必须保留，否则最终结论会丢失"为什么放行"，
 		// 解释器就只能展示一个空理由。
-		in.Reason.Unmanaged = d.Reason.Unmanaged
-		d = in
+		d = carryFlags(in, d)
 	}
 	return d
+}
+
+// isCrossCluster 判断连接两端是否分属不同集群。
+//
+// V4 对跨集群流量只做可见性、不做 enforce：标准 NetworkPolicy 跨集群
+// 只能靠 ipBlock 表达，过于粗粒度。这个标记让该敞口在指标中持续可见。
+func isCrossCluster(f Flow) bool {
+	a, b := f.Source.ClusterID, f.Dest.ClusterID
+	return a != "" && b != "" && a != b
+}
+
+// carryFlags 把连接级别的标记（Unmanaged、CrossCluster）从 base 透传到
+// 方向级判定结果 side 上，同时保留 side 自身的 Verdict/Reason/UnknownReason。
+//
+// 这两个标记只在 Evaluate 顶层依据整条 flow 算一次；evaluateSide 看不到
+// 对端的集群归属，不能自己算，所以必须由调用方在每条返回路径上补回去。
+func carryFlags(side, base Decision) Decision {
+	side.CrossCluster = base.CrossCluster
+	side.Reason.Unmanaged = base.Reason.Unmanaged
+	return side
 }
 
 // localPod 返回该端点在本集群内、且受 NetworkPolicy 管控的 Pod。
@@ -184,6 +201,12 @@ func (e *Evaluator) ruleAllows(r rule, policyNamespace string, peer Endpoint, f 
 		return true, ReasonNone, nil
 	}
 	for _, p := range r.peers {
+		if p.IPBlock == nil && peer.Pod != nil && peer.Pod.ClusterID != e.clusterID {
+			// podSelector/namespaceSelector 只能选中本集群的 Pod：NetworkPolicy
+			// 是集群本地对象，跨集群语义只能靠 ipBlock 表达。不跳过的话，
+			// 恰好同名的命名空间/标签会让本地策略误"选中"其他集群的 Pod。
+			continue
+		}
 		matched, err := peerMatches(p, policyNamespace, peer, e.namespaces)
 		if err != nil {
 			return false, ReasonNone, err
