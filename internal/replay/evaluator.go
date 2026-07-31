@@ -9,20 +9,57 @@ import (
 // 每个集群一个实例：NetworkPolicy 是集群本地对象，跨集群策略集混用
 // 会让本集群策略"选中"其他集群的 Pod。
 type Evaluator struct {
-	clusterID  string
-	policies   []networkingv1.NetworkPolicy
-	namespaces map[string]NamespaceRef
+	clusterID   string
+	policies    []networkingv1.NetworkPolicy
+	namespaces  map[string]NamespaceRef
+	ccnpPresent bool
+}
+
+// Option 调整求值器的行为。
+type Option func(*Evaluator)
+
+// WithCCNPPresent 声明集群中存在 Cilium 策略。
+//
+// CCNP 具有 deny 语义，与标准 NetworkPolicy 的 additive-allow 不同：
+// 存在 CCNP 时，仅基于标准策略的判定可能是错的，且是"看起来对"的错。
+// 平台不管控 CCNP，但必须把这类结论降级。
+func WithCCNPPresent(present bool) Option {
+	return func(e *Evaluator) { e.ccnpPresent = present }
 }
 
 // NewEvaluator 构造针对指定集群的求值器。
-func NewEvaluator(clusterID string, policies []networkingv1.NetworkPolicy, namespaces []NamespaceRef) *Evaluator {
+func NewEvaluator(
+	clusterID string,
+	policies []networkingv1.NetworkPolicy,
+	namespaces []NamespaceRef,
+	opts ...Option,
+) *Evaluator {
 	idx := make(map[string]NamespaceRef, len(namespaces))
 	for _, ns := range namespaces {
 		if ns.ClusterID == clusterID {
 			idx[ns.Name] = ns
 		}
 	}
-	return &Evaluator{clusterID: clusterID, policies: policies, namespaces: idx}
+	e := &Evaluator{clusterID: clusterID, policies: policies, namespaces: idx}
+	for _, opt := range opts {
+		opt(e)
+	}
+	return e
+}
+
+// confidenceFor 判断该连接的结论可信度。
+//
+// 降级不改变结论本身：DENY 仍然是 DENY，只是不得作为策略推荐的依据。
+func (e *Evaluator) confidenceFor(f Flow) Confidence {
+	if e.ccnpPresent {
+		return ConfidenceDegraded
+	}
+	for _, endpoint := range []Endpoint{f.Source, f.Dest} {
+		if endpoint.Pod != nil && endpoint.Pod.InMesh {
+			return ConfidenceDegraded
+		}
+	}
+	return ConfidenceTrusted
 }
 
 // rule 是 ingress 与 egress 规则的统一视图。
@@ -56,7 +93,7 @@ func rulesOf(p networkingv1.NetworkPolicy, dir Direction) []rule {
 // 任一方向数据不足即整体 UNKNOWN —— 宁可承认不知道，也不给出可能
 // 错误的 ALLOW，后者会变成一次漏报的策略推荐。
 func (e *Evaluator) Evaluate(f Flow) Decision {
-	d := Decision{Verdict: VerdictAllow, Confidence: ConfidenceTrusted}
+	d := Decision{Verdict: VerdictAllow, Confidence: e.confidenceFor(f)}
 	d.Reason.MatchedRuleIdx = -1
 	d.Reason.Unmanaged = e.hasUnmanagedEndpoint(f)
 	d.CrossCluster = isCrossCluster(f)
@@ -91,13 +128,16 @@ func isCrossCluster(f Flow) bool {
 	return a != "" && b != "" && a != b
 }
 
-// carryFlags 把连接级别的标记（Unmanaged、CrossCluster）从 base 透传到
-// 方向级判定结果 side 上，同时保留 side 自身的 Verdict/Reason/UnknownReason。
+// carryFlags 把连接级别的标记（Unmanaged、CrossCluster、Confidence）从 base
+// 透传到方向级判定结果 side 上，同时保留 side 自身的 Verdict/Reason/UnknownReason。
 //
-// 这两个标记只在 Evaluate 顶层依据整条 flow 算一次；evaluateSide 看不到
-// 对端的集群归属，不能自己算，所以必须由调用方在每条返回路径上补回去。
+// 这些标记只在 Evaluate 顶层依据整条 flow 算一次；evaluateSide 看不到
+// 对端的集群归属或是否处于 mesh 中，不能自己算，所以必须由调用方在每条
+// 返回路径上补回去 —— 否则一个 DEGRADED 的判定会在早退路径上悄悄退回
+// TRUSTED，而这正是本该被拦下的情形。
 func carryFlags(side, base Decision) Decision {
 	side.CrossCluster = base.CrossCluster
+	side.Confidence = base.Confidence
 	side.Reason.Unmanaged = base.Reason.Unmanaged
 	return side
 }
