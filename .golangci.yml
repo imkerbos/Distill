@@ -1,0 +1,24 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard
+  enable:
+    - revive
+    - gosec
+    - errorlint
+    - bodyclose
+    - nilerr
+
+  settings:
+    revive:
+      rules:
+        - name: exported
+          severity: error
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
