@@ -1,10 +1,12 @@
 package fixture_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/imkerbos/Distill/internal/fixture"
 	"github.com/imkerbos/Distill/internal/replay"
+	"github.com/imkerbos/Distill/internal/store"
 )
 
 func TestLoadHasTwoClusters(t *testing.T) {
@@ -124,39 +126,33 @@ func TestDatasetContainsCrossClusterFlows(t *testing.T) {
 // 形状测试挡不住有人改掉 buildFlows 后 demo 悄悄变成全绿 —— 而全绿正是
 // 这个平台最不该给人的印象。断言非零而不锁定具体数量：锁死计数会让
 // 以后每次调数据都变成一次假报警。
+//
+// 求值走 store.NewFixtureReader 而不是在测试里另搭一套求值器：自己搭的
+// 那套可以和生产装配（CCNP 选项、按目的端集群取求值器）慢慢分叉，
+// 到那时这道守卫验的就不再是产品实际跑的东西了。
 func TestDatasetProducesAllDeliberateGaps(t *testing.T) {
 	f := fixture.Load()
-
-	evaluators := map[string]*replay.Evaluator{}
-	for _, c := range f.Clusters {
-		var opts []replay.Option
-		if c.CCNPPresent {
-			opts = append(opts, replay.WithCCNPPresent(true))
-		}
-		evaluators[c.ID] = replay.NewEvaluator(c.ID, c.Policies, c.Namespaces, opts...)
+	page, err := store.NewFixtureReader(f).Flows(context.Background(),
+		store.FlowFilter{Limit: len(f.Flows)})
+	if err != nil {
+		t.Fatalf("Flows: %v", err)
+	}
+	if len(page.Items) != len(f.Flows) {
+		t.Fatalf("evaluated %d of %d flows", len(page.Items), len(f.Flows))
 	}
 
 	var degraded, crossCluster int
-	reasons := map[replay.UnknownReason]int{}
+	reasons := map[string]int{}
 
-	for _, fl := range f.Flows {
-		clusterID := fl.Flow.Dest.ClusterID
-		if clusterID == "" {
-			clusterID = fl.Flow.Source.ClusterID
-		}
-		e, ok := evaluators[clusterID]
-		if !ok {
-			continue
-		}
-		d := e.Evaluate(fl.Flow)
-		if d.Confidence == replay.ConfidenceDegraded {
+	for _, rec := range page.Items {
+		if rec.Confidence == string(replay.ConfidenceDegraded) {
 			degraded++
 		}
-		if d.CrossCluster {
+		if rec.CrossCluster {
 			crossCluster++
 		}
-		if d.UnknownReason != replay.ReasonNone {
-			reasons[d.UnknownReason]++
+		if rec.UnknownReason != "" {
+			reasons[rec.UnknownReason]++
 		}
 	}
 
@@ -170,7 +166,7 @@ func TestDatasetProducesAllDeliberateGaps(t *testing.T) {
 		replay.ReasonPolicyMalformed,
 		replay.ReasonSnapshotMissing,
 	} {
-		if reasons[want] == 0 {
+		if reasons[string(want)] == 0 {
 			t.Errorf("no %s verdicts; that gap is no longer demonstrated", want)
 		}
 	}

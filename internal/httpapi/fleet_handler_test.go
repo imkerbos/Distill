@@ -4,61 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
-	"golang.org/x/crypto/bcrypt"
-
-	"github.com/imkerbos/Distill/internal/auth"
-	"github.com/imkerbos/Distill/internal/config"
-	"github.com/imkerbos/Distill/internal/fixture"
-	"github.com/imkerbos/Distill/internal/httpapi"
-	applog "github.com/imkerbos/Distill/internal/log"
 	"github.com/imkerbos/Distill/internal/store"
 )
-
-// newFullRouter 装配一个带真实数据源的路由，并返回一个已登录的 Cookie。
-func newFullRouter(t *testing.T) (http.Handler, *http.Cookie) {
-	t.Helper()
-	return newRouterWithReader(t, store.NewFixtureReader(fixture.Load()))
-}
-
-// newRouterWithReader 装配一个使用给定 Reader 的路由，并返回一个已登录的 Cookie。
-//
-// 独立于 newFullRouter：错误路径测试需要一个所有查询都失败的 Reader，
-// 与真实 fixture 数据无关，但登录、Cookie 装配这部分逻辑不该重复一份。
-func newRouterWithReader(t *testing.T, reader store.Reader) (http.Handler, *http.Cookie) {
-	t.Helper()
-
-	hash, err := bcrypt.GenerateFromPassword([]byte(testPassword), bcrypt.MinCost)
-	if err != nil {
-		t.Fatalf("hash: %v", err)
-	}
-	logger, err := applog.New("ERROR", io.Discard)
-	if err != nil {
-		t.Fatalf("logger: %v", err)
-	}
-
-	h := httpapi.NewRouter(httpapi.Deps{
-		Sessions: auth.NewSessionStore(time.Hour, nil),
-		Verifier: auth.NewVerifier([]config.User{{Username: "demo", PasswordHash: string(hash)}}),
-		Logger:   logger,
-		Reader:   reader,
-	})
-
-	login := postJSON(t, h, "/api/v1/sessions", map[string]string{
-		"username": "demo", "password": testPassword,
-	})
-	cookies := login.Result().Cookies()
-	if len(cookies) == 0 {
-		t.Fatal("login returned no cookie")
-	}
-	return h, cookies[0]
-}
 
 // brokenReader 让每个查询都失败，用来锁住内部错误的处理方式。
 type brokenReader struct{}
@@ -71,8 +23,8 @@ func (brokenReader) Topology(context.Context, string) (store.Topology, error) {
 	return store.Topology{}, errors.New("bigquery: connection refused at 10.0.0.5:9050")
 }
 
-func (brokenReader) Flows(context.Context, store.FlowFilter) ([]store.FlowRecord, error) {
-	return nil, errors.New("bigquery: connection refused at 10.0.0.5:9050")
+func (brokenReader) Flows(context.Context, store.FlowFilter) (store.FlowPage, error) {
+	return store.FlowPage{}, errors.New("bigquery: connection refused at 10.0.0.5:9050")
 }
 
 func (brokenReader) Flow(context.Context, string) (store.Decision, bool, error) {
@@ -93,7 +45,7 @@ func authedGet(t *testing.T, h http.Handler, cookie *http.Cookie, path string) *
 }
 
 func TestClustersEndpoint(t *testing.T) {
-	h, cookie := newFullRouter(t)
+	h, _, cookie := newTestRouter(t, fixtureReader())
 	rec := authedGet(t, h, cookie, "/api/v1/clusters")
 
 	if rec.Code != http.StatusOK {
@@ -115,7 +67,7 @@ func TestClustersEndpoint(t *testing.T) {
 }
 
 func TestClustersRequiresAuth(t *testing.T) {
-	h, _ := newFullRouter(t)
+	h, _, _ := newTestRouter(t, fixtureReader())
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/clusters", nil))
 
@@ -125,7 +77,7 @@ func TestClustersRequiresAuth(t *testing.T) {
 }
 
 func TestTopologyEndpoint(t *testing.T) {
-	h, cookie := newFullRouter(t)
+	h, _, cookie := newTestRouter(t, fixtureReader())
 	rec := authedGet(t, h, cookie, "/api/v1/clusters/prod-asia-1/topology")
 
 	if rec.Code != http.StatusOK {
@@ -145,7 +97,7 @@ func TestTopologyEndpoint(t *testing.T) {
 
 // 集群不存在是业务级失败：HTTP 200 + 20002，不计入服务错误率。
 func TestTopologyUnknownClusterIsBusinessError(t *testing.T) {
-	h, cookie := newFullRouter(t)
+	h, _, cookie := newTestRouter(t, fixtureReader())
 	rec := authedGet(t, h, cookie, "/api/v1/clusters/no-such/topology")
 
 	if rec.Code != http.StatusOK {
@@ -160,7 +112,7 @@ func TestTopologyUnknownClusterIsBusinessError(t *testing.T) {
 }
 
 func TestQualityEndpoint(t *testing.T) {
-	h, cookie := newFullRouter(t)
+	h, _, cookie := newTestRouter(t, fixtureReader())
 	rec := authedGet(t, h, cookie, "/api/v1/clusters/prod-asia-1/quality")
 
 	if rec.Code != http.StatusOK {
@@ -185,12 +137,16 @@ func TestQualityEndpoint(t *testing.T) {
 // 把 "connection refused at 10.0.0.5:9050" 这类信息回给调用方，
 // 等于顺着 API 把内部拓扑交出去。
 func TestReaderFailureIsInternalErrorAndLeaksNothing(t *testing.T) {
-	h, cookie := newRouterWithReader(t, brokenReader{})
+	h, _, cookie := newTestRouter(t, brokenReader{})
 
+	// 流量两条也要覆盖：它们走同一个 writeReaderError，
+	// 只测 fleet 三条等于默认另外两条不会退化。
 	for _, path := range []string{
 		"/api/v1/clusters",
 		"/api/v1/clusters/prod-asia-1/topology",
 		"/api/v1/clusters/prod-asia-1/quality",
+		"/api/v1/flows",
+		"/api/v1/flows/flow-0001/decision",
 	} {
 		rec := authedGet(t, h, cookie, path)
 

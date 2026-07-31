@@ -15,7 +15,17 @@ import (
 )
 
 // defaultFlowLimit 是流量列表未指定 Limit 时的返回条数上限。
-const defaultFlowLimit = 100
+//
+// 取值必须大于整个数据集（spec §3.4：规模刻意小到能实时求值），否则默认
+// 视图会沿 ID 序截断，而 UNKNOWN 与跨集群流量恰好排在序列后段 —— 一个把
+// 敞口切掉的默认值比没有默认值更糟。
+const defaultFlowLimit = 500
+
+// unspecifiedUnknownReason 是 UNKNOWN 但未给出原因时在构成明细里的归类。
+//
+// 不能因为没有原因就不计入：明细各项之和必须等于 UNKNOWN 总数，
+// 否则运维会照着一份自己少加了一项的账去排查。
+const unspecifiedUnknownReason = "UNSPECIFIED"
 
 // ErrClusterNotFound 表示请求的集群不存在。
 var ErrClusterNotFound = errors.New("cluster not found")
@@ -43,14 +53,27 @@ func NewFixtureReader(f fixture.Fleet) *FixtureReader {
 }
 
 // owningCluster 返回负责对该 flow 求值的集群：优先取目的端集群，目的端
-// 没有集群归属（如出公网）时退回源端。Clusters、Flows、Topology、Quality
-// 统一用这一条规则判断"这条 flow 算谁的"，避免同一份数据在不同接口上
-// 因为口径不一致而报出互相矛盾的计数。
+// 没有集群归属（如出公网）时退回源端。策略在目的端生效，所以"归谁判"
+// 只能有这一个答案；Clusters 的流量计数与 Flows 的集群筛选也沿用它，
+// 保证同一条 flow 不会在两个集群下各算一次。
+//
+// 注意它回答的不是"这条 flow 与谁有关"——跨集群流量与两端都有关，
+// 那个问题由 involvesCluster 回答。
 func owningCluster(f replay.Flow) string {
 	if f.Dest.ClusterID != "" {
 		return f.Dest.ClusterID
 	}
 	return f.Source.ClusterID
+}
+
+// involvesCluster 判断该 flow 是否与指定集群有关：任一端属于它即算。
+//
+// 拓扑与数据质量用这条规则而非 owningCluster：跨集群流量只归给目的端集群
+// 的话，源端集群的界面会报出 crossClusterCount: 0 —— 那不是"没有跨集群
+// 流量"，而是一句斩钉截铁的假话，它自己的 namespace 正在往外集群发流量。
+// 判定仍然由目的端集群的求值器做出（策略在目的端生效），这两件事不冲突。
+func involvesCluster(f replay.Flow, clusterID string) bool {
+	return f.Source.ClusterID == clusterID || f.Dest.ClusterID == clusterID
 }
 
 // decide 对一条 flow 求值。
@@ -93,6 +116,7 @@ func (r *FixtureReader) toFlowRecord(f fixture.Flow) (FlowRecord, replay.Decisio
 		Confidence:    string(d.Confidence),
 		UnknownReason: string(d.UnknownReason),
 		CrossCluster:  d.CrossCluster,
+		Unmanaged:     d.Reason.Unmanaged,
 	}
 	return rec, d
 }
@@ -202,18 +226,28 @@ func nsNodeID(ep replay.Endpoint) (string, bool) {
 	return ep.Pod.ClusterID + "/" + ep.Pod.Namespace, true
 }
 
-// verdictSeverity 给三种结论排定严重程度，用于多条 flow 聚合成一条边时
-// 取最严重者：UNKNOWN 未知优先于 DENY 已知阻断，两者都优先于 ALLOW——
-// 一条边下只要有一条 flow 不是单纯放行，就不能让边整体显示 ALLOW。
-var verdictSeverity = map[string]int{
-	string(replay.VerdictAllow):   1,
-	string(replay.VerdictDeny):    2,
-	string(replay.VerdictUnknown): 3,
+// verdictSeverity 给结论排定严重程度，用于多条 flow 聚合成一条边时取最
+// 严重者：UNKNOWN 未知优先于 DENY 已知阻断，两者都优先于 ALLOW——一条边
+// 下只要有一条 flow 不是单纯放行，就不能让边整体显示 ALLOW。
+//
+// 未登记的 verdict 排在最严重一档，而不是落到 0：新增一种结论却漏改这里
+// 时，它会被顶到边上显眼处，而不是永远输给 ALLOW、悄悄消失在一片绿里。
+func verdictSeverity(v string) int {
+	switch replay.Verdict(v) {
+	case replay.VerdictAllow:
+		return 1
+	case replay.VerdictDeny:
+		return 2
+	case replay.VerdictUnknown:
+		return 3
+	default:
+		return 4
+	}
 }
 
 // mergeVerdict 在聚合同一条边的多条 flow 时取更严重的 verdict。
 func mergeVerdict(cur, next string) string {
-	if cur == "" || verdictSeverity[next] > verdictSeverity[cur] {
+	if cur == "" || verdictSeverity(next) > verdictSeverity(cur) {
 		return next
 	}
 	return cur
@@ -242,6 +276,7 @@ type edgeAccumulator struct {
 	verdict      string
 	confidence   string
 	crossCluster bool
+	unmanaged    bool
 	flowCount    int
 	ports        map[int32]struct{}
 }
@@ -272,20 +307,22 @@ func recordForeignNode(foreign map[string]TopologyNode, known map[string]bool, e
 }
 
 // topologyEdges 把该集群相关的 flow 按 (源命名空间, 目的命名空间) 聚合成边，
-// 同时收集边所引用、但不属于 known（本集群自有命名空间）的对端节点。
-func (r *FixtureReader) topologyEdges(clusterID string, known map[string]bool) ([]TopologyEdge, []TopologyNode) {
+// 同时收集边所引用、但不属于 known（本集群自有命名空间）的对端节点，
+// 以及因端点无法定位而没能落到任何一条边上的流量条数。
+func (r *FixtureReader) topologyEdges(clusterID string, known map[string]bool) ([]TopologyEdge, []TopologyNode, int) {
 	acc := make(map[edgeKey]*edgeAccumulator)
 	foreign := make(map[string]TopologyNode)
+	var unplaceable int
 	for _, f := range r.fleet.Flows {
-		if owningCluster(f.Flow) != clusterID {
+		if !involvesCluster(f.Flow, clusterID) {
 			continue
 		}
-		srcID, ok := nsNodeID(f.Flow.Source)
-		if !ok {
-			continue
-		}
-		dstID, ok := nsNodeID(f.Flow.Dest)
-		if !ok {
+		srcID, srcOK := nsNodeID(f.Flow.Source)
+		dstID, dstOK := nsNodeID(f.Flow.Dest)
+		if !srcOK || !dstOK {
+			// 画不出这条边，但它确实存在。计数后由 Topology 一并报出，
+			// 否则拓扑页的流量总和会比数据质量页少一截且无人解释。
+			unplaceable++
 			continue
 		}
 		recordForeignNode(foreign, known, f.Flow.Source)
@@ -301,6 +338,7 @@ func (r *FixtureReader) topologyEdges(clusterID string, known map[string]bool) (
 		a.verdict = mergeVerdict(a.verdict, string(d.Verdict))
 		a.confidence = mergeConfidence(a.confidence, string(d.Confidence))
 		a.crossCluster = a.crossCluster || d.CrossCluster
+		a.unmanaged = a.unmanaged || d.Reason.Unmanaged
 		a.flowCount++
 		a.ports[f.Flow.Port] = struct{}{}
 	}
@@ -320,6 +358,7 @@ func (r *FixtureReader) topologyEdges(clusterID string, known map[string]bool) (
 			CrossCluster: a.crossCluster,
 			FlowCount:    a.flowCount,
 			Ports:        ports,
+			Unmanaged:    a.unmanaged,
 		})
 	}
 	sort.Slice(edges, func(i, j int) bool {
@@ -333,7 +372,7 @@ func (r *FixtureReader) topologyEdges(clusterID string, known map[string]bool) (
 	for _, n := range foreign {
 		foreignNodes = append(foreignNodes, n)
 	}
-	return edges, foreignNodes
+	return edges, foreignNodes, unplaceable
 }
 
 // Topology 返回指定集群的通信拓扑。集群不存在时返回错误。
@@ -349,15 +388,24 @@ func (r *FixtureReader) Topology(_ context.Context, clusterID string) (Topology,
 		known[n.ID] = true
 	}
 
-	edges, foreignNodes := r.topologyEdges(c.ID, known)
+	edges, foreignNodes, unplaceable := r.topologyEdges(c.ID, known)
 	nodes = append(nodes, foreignNodes...)
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].ID < nodes[j].ID })
 
-	return Topology{Nodes: nodes, Edges: edges}, nil
+	return Topology{Nodes: nodes, Edges: edges, UnplaceableFlowCount: unplaceable}, nil
 }
 
-// Flows 按条件返回流量列表。
-func (r *FixtureReader) Flows(_ context.Context, filter FlowFilter) ([]FlowRecord, error) {
+// Flows 按条件返回流量列表。筛选条件指向不存在的集群时返回错误。
+func (r *FixtureReader) Flows(_ context.Context, filter FlowFilter) (FlowPage, error) {
+	if filter.Cluster != "" {
+		if _, ok := r.fleet.Cluster(filter.Cluster); !ok {
+			// 与 Topology、Quality 一致地把"集群不存在"报成错误：同一个
+			// 条件在一个接口上返回空列表、在另一个接口上返回 20002，
+			// 会让前端把打错的集群名读成"这个集群没有流量"。
+			return FlowPage{}, fmt.Errorf("%w: %s", ErrClusterNotFound, filter.Cluster)
+		}
+	}
+
 	limit := filter.Limit
 	if limit == 0 {
 		limit = defaultFlowLimit
@@ -381,10 +429,11 @@ func (r *FixtureReader) Flows(_ context.Context, filter FlowFilter) ([]FlowRecor
 	// 按 ID 排序保证多次调用顺序稳定；flow-XXXX 是固定宽度的十进制序号，
 	// 字符串序与数值序一致。
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	total := len(out)
 	if len(out) > limit {
 		out = out[:limit]
 	}
-	return out, nil
+	return FlowPage{Items: out, Total: total, Limit: limit}, nil
 }
 
 // Flow 返回单条流量的完整判定。不存在时第二个返回值为 false。
@@ -440,9 +489,9 @@ func (r *FixtureReader) Quality(_ context.Context, clusterID string) (Quality, e
 	}
 
 	q := Quality{Cluster: clusterID, UnknownComposition: make(map[string]int)}
-	var trusted, unknown, degraded int
+	var trusted, degraded int
 	for _, f := range r.fleet.Flows {
-		if owningCluster(f.Flow) != clusterID {
+		if !involvesCluster(f.Flow, clusterID) {
 			continue
 		}
 		q.TotalFlows++
@@ -454,9 +503,11 @@ func (r *FixtureReader) Quality(_ context.Context, clusterID string) (Quality, e
 			degraded++
 		}
 		if d.Verdict == replay.VerdictUnknown {
-			unknown++
+			q.UnknownCount++
 			if d.UnknownReason != replay.ReasonNone {
 				q.UnknownComposition[string(d.UnknownReason)]++
+			} else {
+				q.UnknownComposition[unspecifiedUnknownReason]++
 			}
 		}
 		if d.CrossCluster {
@@ -464,7 +515,7 @@ func (r *FixtureReader) Quality(_ context.Context, clusterID string) (Quality, e
 		}
 	}
 	q.TrustedRate = safeRate(trusted, q.TotalFlows)
-	q.UnknownRate = safeRate(unknown, q.TotalFlows)
+	q.UnknownRate = safeRate(q.UnknownCount, q.TotalFlows)
 	q.DegradedRate = safeRate(degraded, q.TotalFlows)
 
 	var covered, nonHostNetwork int

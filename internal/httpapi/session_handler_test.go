@@ -13,13 +13,22 @@ import (
 
 	"github.com/imkerbos/Distill/internal/auth"
 	"github.com/imkerbos/Distill/internal/config"
+	"github.com/imkerbos/Distill/internal/fixture"
 	"github.com/imkerbos/Distill/internal/httpapi"
 	applog "github.com/imkerbos/Distill/internal/log"
+	"github.com/imkerbos/Distill/internal/store"
 )
 
 const testPassword = "distill-demo"
 
-func newTestRouter(t *testing.T) (http.Handler, *auth.SessionStore) {
+// newTestRouter 装配一个使用给定 Reader 的路由，返回路由、会话存储，
+// 以及一个已登录的 Cookie。
+//
+// 全包只此一个装配入口：认证测试要会话存储、数据测试要 Cookie、错误路径
+// 测试要一个全失败的 Reader，但登录与依赖装配这段逻辑三处都一样，
+// 分成几个签名不同的构造器只会让它们慢慢长歪。reader 可以为 nil，
+// 用于不触达数据层的测试。
+func newTestRouter(t *testing.T, reader store.Reader) (http.Handler, *auth.SessionStore, *http.Cookie) {
 	t.Helper()
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(testPassword), bcrypt.MinCost)
@@ -32,11 +41,26 @@ func newTestRouter(t *testing.T) (http.Handler, *auth.SessionStore) {
 		t.Fatalf("logger: %v", err)
 	}
 
-	return httpapi.NewRouter(httpapi.Deps{
+	h := httpapi.NewRouter(httpapi.Deps{
 		Sessions: sessions,
 		Verifier: auth.NewVerifier([]config.User{{Username: "demo", PasswordHash: string(hash)}}),
 		Logger:   logger,
-	}), sessions
+		Reader:   reader,
+	})
+
+	login := postJSON(t, h, "/api/v1/sessions", map[string]string{
+		"username": "demo", "password": testPassword,
+	})
+	cookies := login.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("login returned no cookie")
+	}
+	return h, sessions, cookies[0]
+}
+
+// fixtureReader 是走真实合成数据的 Reader，供需要真实响应内容的测试使用。
+func fixtureReader() store.Reader {
+	return store.NewFixtureReader(fixture.Load())
 }
 
 func postJSON(t *testing.T, h http.Handler, path string, body any) *httptest.ResponseRecorder {
@@ -62,7 +86,7 @@ func bodyOf(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
 }
 
 func TestLoginSuccessSetsCookie(t *testing.T) {
-	h, _ := newTestRouter(t)
+	h, _, _ := newTestRouter(t, nil)
 
 	rec := postJSON(t, h, "/api/v1/sessions", map[string]string{
 		"username": "demo", "password": testPassword,
@@ -96,7 +120,7 @@ func TestLoginSuccessSetsCookie(t *testing.T) {
 }
 
 func TestLoginWrongPassword(t *testing.T) {
-	h, _ := newTestRouter(t)
+	h, _, _ := newTestRouter(t, nil)
 
 	rec := postJSON(t, h, "/api/v1/sessions", map[string]string{
 		"username": "demo", "password": "wrong",
@@ -112,7 +136,7 @@ func TestLoginWrongPassword(t *testing.T) {
 
 // 不存在的用户与错误密码必须返回完全相同的响应，否则等于提供账号枚举接口。
 func TestLoginUnknownUserIsIndistinguishable(t *testing.T) {
-	h, _ := newTestRouter(t)
+	h, _, _ := newTestRouter(t, nil)
 
 	wrongPass := postJSON(t, h, "/api/v1/sessions", map[string]string{"username": "demo", "password": "wrong"})
 	unknown := postJSON(t, h, "/api/v1/sessions", map[string]string{"username": "ghost", "password": "wrong"})
@@ -124,7 +148,7 @@ func TestLoginUnknownUserIsIndistinguishable(t *testing.T) {
 }
 
 func TestLoginRejectsMalformedJSON(t *testing.T) {
-	h, _ := newTestRouter(t)
+	h, _, _ := newTestRouter(t, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions", bytes.NewReader([]byte("{not json")))
 	req.Header.Set("Content-Type", "application/json")
@@ -137,7 +161,7 @@ func TestLoginRejectsMalformedJSON(t *testing.T) {
 }
 
 func TestCurrentSessionReturnsUsername(t *testing.T) {
-	h, _ := newTestRouter(t)
+	h, _, _ := newTestRouter(t, nil)
 
 	login := postJSON(t, h, "/api/v1/sessions", map[string]string{"username": "demo", "password": testPassword})
 	cookie := login.Result().Cookies()[0]
@@ -159,7 +183,7 @@ func TestCurrentSessionReturnsUsername(t *testing.T) {
 // 登出必须销毁服务端会话，而不是仅清 Cookie：
 // 只清 Cookie 的话，已泄露的会话 ID 仍然有效直到过期。
 func TestLogoutInvalidatesSessionServerSide(t *testing.T) {
-	h, sessions := newTestRouter(t)
+	h, sessions, _ := newTestRouter(t, nil)
 
 	login := postJSON(t, h, "/api/v1/sessions", map[string]string{"username": "demo", "password": testPassword})
 	cookie := login.Result().Cookies()[0]
@@ -187,7 +211,7 @@ func TestLogoutInvalidatesSessionServerSide(t *testing.T) {
 }
 
 func TestProtectedEndpointRequiresSession(t *testing.T) {
-	h, _ := newTestRouter(t)
+	h, _, _ := newTestRouter(t, nil)
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/sessions/current", nil))
@@ -198,7 +222,7 @@ func TestProtectedEndpointRequiresSession(t *testing.T) {
 }
 
 func TestUnknownRouteReturns404(t *testing.T) {
-	h, _ := newTestRouter(t)
+	h, _, _ := newTestRouter(t, nil)
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/nope", nil))

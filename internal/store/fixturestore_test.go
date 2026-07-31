@@ -2,7 +2,9 @@ package store_test
 
 import (
 	"context"
+	"errors"
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/imkerbos/Distill/internal/fixture"
@@ -100,8 +102,66 @@ func TestFlowsRespectsLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Flows: %v", err)
 	}
-	if len(got) != 10 {
-		t.Errorf("got %d flows, want 10", len(got))
+	if len(got.Items) != 10 {
+		t.Errorf("got %d flows, want 10", len(got.Items))
+	}
+}
+
+// 截断必须能被调用方看见：Total 报的是筛选后、截断前的条数。
+// 只回一个被切短的切片，界面会把"只给你看了 10 条"显示成"一共就这些"。
+func TestFlowsReportsTotalBeforeTruncation(t *testing.T) {
+	r := newReader()
+	all, err := r.Flows(context.Background(), store.FlowFilter{Limit: 1000})
+	if err != nil {
+		t.Fatalf("Flows: %v", err)
+	}
+	page, err := r.Flows(context.Background(), store.FlowFilter{Limit: 10})
+	if err != nil {
+		t.Fatalf("Flows: %v", err)
+	}
+	if page.Total != all.Total {
+		t.Errorf("truncated page reports Total = %d, want %d", page.Total, all.Total)
+	}
+	if page.Total <= len(page.Items) {
+		t.Errorf("Total = %d but %d items returned; truncation is invisible", page.Total, len(page.Items))
+	}
+	if page.Limit != 10 {
+		t.Errorf("Limit = %d, want 10", page.Limit)
+	}
+}
+
+// 默认查询必须包含"不知道"的那部分。数据集刻意制造了 UNKNOWN 与跨集群
+// 流量，而它们恰好排在 ID 序列的后段 —— 一个截断在前段的默认视图会让
+// demo 开屏全绿，正是这个平台最不该给人的印象。
+func TestDefaultFlowsIncludeTheGaps(t *testing.T) {
+	page, err := newReader().Flows(context.Background(), store.FlowFilter{})
+	if err != nil {
+		t.Fatalf("Flows: %v", err)
+	}
+
+	var unknown, cross int
+	for _, f := range page.Items {
+		if f.Verdict == "UNKNOWN" {
+			unknown++
+		}
+		if f.CrossCluster {
+			cross++
+		}
+	}
+	if unknown == 0 {
+		t.Error("the default flow list contains no UNKNOWN rows; the demo opens all-green")
+	}
+	if cross == 0 {
+		t.Error("the default flow list contains no cross-cluster rows; the known enforcement gap is invisible")
+	}
+}
+
+// 不存在的集群在 Flows 上也必须报错。返回空列表会让同一个笔误在拓扑页
+// 得到 20002、在流量页得到"没有流量"，两块屏对同一件事给出两种解释。
+func TestFlowsUnknownClusterIsNotFound(t *testing.T) {
+	_, err := newReader().Flows(context.Background(), store.FlowFilter{Cluster: "no-such"})
+	if !errors.Is(err, store.ErrClusterNotFound) {
+		t.Errorf("Flows(cluster=no-such) error = %v, want ErrClusterNotFound", err)
 	}
 }
 
@@ -110,10 +170,10 @@ func TestFlowsFilterByVerdict(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Flows: %v", err)
 	}
-	if len(got) == 0 {
+	if len(got.Items) == 0 {
 		t.Fatal("no DENY flows; the dataset should produce some")
 	}
-	for _, f := range got {
+	for _, f := range got.Items {
 		if f.Verdict != "DENY" {
 			t.Fatalf("filter returned a %s flow", f.Verdict)
 		}
@@ -125,24 +185,42 @@ func TestFlowsFilterByConfidence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Flows: %v", err)
 	}
-	if len(got) == 0 {
+	if len(got.Items) == 0 {
 		t.Fatal("no DEGRADED flows; the mesh namespace should produce some")
 	}
+}
+
+// NetworkPolicy 管不到 hostNetwork Pod。这类流量拿到的 ALLOW 与"策略确实
+// 放行了它"必须能区分开，否则界面会把一个封不住的敞口画成一条绿边。
+func TestFlowToHostNetworkPodIsMarkedUnmanaged(t *testing.T) {
+	page, err := newReader().Flows(context.Background(), store.FlowFilter{Limit: 1000})
+	if err != nil {
+		t.Fatalf("Flows: %v", err)
+	}
+	for _, f := range page.Items {
+		if strings.Contains(f.DestLabel, "kube-proxy") {
+			if !f.Unmanaged {
+				t.Errorf("flow %s to a hostNetwork pod is not marked unmanaged: %+v", f.ID, f)
+			}
+			return
+		}
+	}
+	t.Fatal("no flow to the hostNetwork pod; the dataset should contain some")
 }
 
 func TestFlowReturnsFullDecision(t *testing.T) {
 	r := newReader()
 	list, _ := r.Flows(context.Background(), store.FlowFilter{Limit: 1})
-	if len(list) == 0 {
+	if len(list.Items) == 0 {
 		t.Fatal("no flows")
 	}
 
-	dec, ok, err := r.Flow(context.Background(), list[0].ID)
+	dec, ok, err := r.Flow(context.Background(), list.Items[0].ID)
 	if err != nil {
 		t.Fatalf("Flow: %v", err)
 	}
 	if !ok {
-		t.Fatalf("flow %s not found", list[0].ID)
+		t.Fatalf("flow %s not found", list.Items[0].ID)
 	}
 	if dec.Reason.Direction == "" && dec.Verdict != "ALLOW" {
 		t.Error("a non-ALLOW decision must record which direction decided it")
@@ -176,6 +254,91 @@ func TestQualityReportsUnknownComposition(t *testing.T) {
 	}
 }
 
+// 明细各项之和必须等于 UNKNOWN 总数：一条没写原因的 UNKNOWN 若被丢掉，
+// 运维照着这份账去排查时，永远找不齐那几条。
+func TestQualityUnknownCompositionSumsToUnknownCount(t *testing.T) {
+	q, err := newReader().Quality(context.Background(), "prod-asia-1")
+	if err != nil {
+		t.Fatalf("Quality: %v", err)
+	}
+	sum := 0
+	for _, n := range q.UnknownComposition {
+		sum += n
+	}
+	if sum != q.UnknownCount {
+		t.Errorf("composition sums to %d but UnknownCount = %d; the parts do not add up to the whole",
+			sum, q.UnknownCount)
+	}
+	if q.UnknownCount == 0 {
+		t.Error("UnknownCount is zero; the dataset deliberately contains unknowns")
+	}
+}
+
+// 源端集群同样要看到自己发出的跨集群流量。eu 的 partner 正在往 asia 发流量，
+// 而 eu 的界面报 crossClusterCount: 0 —— 那不是"没有"，是一句确信的假话。
+func TestQualityCountsCrossClusterOnTheSourceCluster(t *testing.T) {
+	q, err := newReader().Quality(context.Background(), "prod-eu-1")
+	if err != nil {
+		t.Fatalf("Quality: %v", err)
+	}
+	if q.CrossClusterCount == 0 {
+		t.Error("prod-eu-1 reports no cross-cluster flows, but its partner namespace sends them")
+	}
+}
+
+// 同一条敞口在拓扑上也必须画得出来，否则 eu 的图里看不到任何出集群的边。
+func TestTopologyShowsCrossClusterEdgeOnTheSourceCluster(t *testing.T) {
+	topo, err := newReader().Topology(context.Background(), "prod-eu-1")
+	if err != nil {
+		t.Fatalf("Topology: %v", err)
+	}
+	for _, e := range topo.Edges {
+		if e.CrossCluster {
+			return
+		}
+	}
+	t.Error("prod-eu-1 topology has no cross-cluster edge; the enforcement gap is invisible there")
+}
+
+// 画不出的 flow 必须被计数报出来。默默 continue 会让拓扑页与数据质量页
+// 对同一个集群给出两个不同的总数，而差额里装着刻意制造的那几类"不知道"。
+func TestTopologyReportsUnplaceableFlows(t *testing.T) {
+	topo, err := newReader().Topology(context.Background(), "prod-asia-1")
+	if err != nil {
+		t.Fatalf("Topology: %v", err)
+	}
+	if topo.UnplaceableFlowCount == 0 {
+		t.Error("UnplaceableFlowCount is zero, but the dataset contains flows with no resolvable endpoint")
+	}
+
+	var placed int
+	for _, e := range topo.Edges {
+		placed += e.FlowCount
+	}
+	q, err := newReader().Quality(context.Background(), "prod-asia-1")
+	if err != nil {
+		t.Fatalf("Quality: %v", err)
+	}
+	if placed+topo.UnplaceableFlowCount != q.TotalFlows {
+		t.Errorf("topology accounts for %d+%d flows but quality reports %d; the two screens disagree",
+			placed, topo.UnplaceableFlowCount, q.TotalFlows)
+	}
+}
+
+// 一条通往 hostNetwork Pod 的边不能显示成普通放行。
+func TestTopologyMarksUnmanagedEdge(t *testing.T) {
+	topo, err := newReader().Topology(context.Background(), "prod-asia-1")
+	if err != nil {
+		t.Fatalf("Topology: %v", err)
+	}
+	for _, e := range topo.Edges {
+		if strings.HasSuffix(e.Target, "/kube-system") && e.Unmanaged {
+			return
+		}
+	}
+	t.Error("no edge into kube-system is marked unmanaged; NetworkPolicy cannot govern that traffic")
+}
+
 func TestQualityRatesAreFractions(t *testing.T) {
 	q, _ := newReader().Quality(context.Background(), "prod-asia-1")
 	for name, v := range map[string]float64{
@@ -187,6 +350,27 @@ func TestQualityRatesAreFractions(t *testing.T) {
 		}
 		if math.IsNaN(v) {
 			t.Errorf("%s is NaN; a zero denominator must yield 0, not NaN", name)
+		}
+	}
+}
+
+// 筛选取值是封闭枚举：大小写不同、拼错的取值都必须被拒，
+// 否则界面会把一次输入错误显示成"没有这类流量"。
+func TestFilterValueEnumsAreClosed(t *testing.T) {
+	for value, want := range map[string]bool{
+		"ALLOW": true, "DENY": true, "UNKNOWN": true,
+		"allow": false, "ALOW": false, "": false, "TRUSTED": false,
+	} {
+		if got := store.ValidVerdict(value); got != want {
+			t.Errorf("ValidVerdict(%q) = %v, want %v", value, got, want)
+		}
+	}
+	for value, want := range map[string]bool{
+		"TRUSTED": true, "DEGRADED": true,
+		"trusted": false, "TRUSTD": false, "": false, "ALLOW": false,
+	} {
+		if got := store.ValidConfidence(value); got != want {
+			t.Errorf("ValidConfidence(%q) = %v, want %v", value, got, want)
 		}
 	}
 }
