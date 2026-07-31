@@ -47,6 +47,9 @@ func NewRouter(d Deps) http.Handler {
 			protected.Use(RequireSession(d.Sessions))
 			protected.Delete("/sessions/current", handleDeleteSession(d))
 			protected.Get("/sessions/current", handleCurrentSession())
+			protected.Get("/clusters", handleListClusters(d))
+			protected.Get("/clusters/{clusterID}/topology", handleTopology(d))
+			protected.Get("/clusters/{clusterID}/quality", handleQuality(d))
 		})
 	})
 
