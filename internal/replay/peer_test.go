@@ -112,7 +112,8 @@ func TestPeerSelectorMatches(t *testing.T) {
 	}
 }
 
-// 身份未还原的端点无法被 selector 匹配 —— 只有 ipBlock 能覆盖它。
+// 外部地址没有 ClusterID，本地 selector 本来就选不中它 —— 只有 ipBlock
+// 能覆盖。这里的"不匹配"是正确结论，不是数据不足（§6.2）。
 func TestPeerSelectorMatchesRequiresIdentity(t *testing.T) {
 	peer := networkingv1.NetworkPolicyPeer{PodSelector: &metav1.LabelSelector{}}
 	ep := Endpoint{IP: "8.8.8.8"}
@@ -126,6 +127,44 @@ func TestPeerSelectorMatchesRequiresIdentity(t *testing.T) {
 	}
 	if reason != ReasonNone {
 		t.Errorf("reason = %q, want ReasonNone; there is no namespace snapshot lookup without a resolved pod", reason)
+	}
+}
+
+// Endpoint.Pod 为 nil 有两种成因：外部地址，或快照缺失。压成同一个 false
+// 会让后者变成一个可信的 DENY —— 本集群内的 Pod 本该能被 selector 选中，
+// 选不中只说明我们不知道它是谁，不说明它不匹配。
+func TestPeerSelectorMatchesUnresolvedLocalEndpointIsUnknown(t *testing.T) {
+	peer := networkingv1.NetworkPolicyPeer{PodSelector: &metav1.LabelSelector{}}
+	ep := Endpoint{ClusterID: "c1", IP: "10.4.0.77"}
+
+	got, reason, err := peerSelectorMatches(peer, "payment", "c1", ep, nil)
+	if err != nil {
+		t.Fatalf("peerSelectorMatches: %v", err)
+	}
+	if got {
+		t.Error("an unresolved endpoint must not be reported as a match either")
+	}
+	if reason != ReasonSnapshotMissing {
+		t.Errorf("reason = %q, want %q; an in-cluster endpoint with no identity is missing data, not a non-match",
+			reason, ReasonSnapshotMissing)
+	}
+}
+
+// 其他集群的端点即使身份未还原也不是数据不足：本地 selector 无论如何
+// 都选不中它，判不匹配是正确结论。
+func TestPeerSelectorMatchesUnresolvedRemoteEndpointIsADefiniteNonMatch(t *testing.T) {
+	peer := networkingv1.NetworkPolicyPeer{PodSelector: &metav1.LabelSelector{}}
+	ep := Endpoint{ClusterID: "c2", IP: "172.16.0.9"}
+
+	got, reason, err := peerSelectorMatches(peer, "payment", "c1", ep, nil)
+	if err != nil {
+		t.Fatalf("peerSelectorMatches: %v", err)
+	}
+	if got {
+		t.Error("another cluster's endpoint must not match a local selector")
+	}
+	if reason != ReasonNone {
+		t.Errorf("reason = %q, want ReasonNone; a local selector genuinely cannot reach another cluster", reason)
 	}
 }
 

@@ -15,8 +15,10 @@ import (
 //   - 两者同时存在：取交集
 //   - 两者均未设置：本函数不处理，由 ipBlock 分支负责
 //
-// 端点身份未还原（Pod 为 nil）时一律不匹配：selector 作用于标签，
-// 没有标签就没有匹配依据，此时只有 ipBlock 能覆盖。
+// 端点身份未还原（Pod 为 nil）时 selector 没有匹配依据，但"没有依据"分成
+// 两种结论完全相反的情况，必须分开：本集群内的端点本该能被 selector 选中，
+// 身份没还原是数据缺失；外部地址或其他集群的端点本来就选不中，判不匹配
+// 是正确结论。见下方分支。
 //
 // 返回的 UnknownReason 非 ReasonNone 时表示匹配本身不可判定（如命名空间
 // 快照缺失），由本函数直接携带原因返回，不再委托调用方重建——旧版本
@@ -33,6 +35,12 @@ func peerSelectorMatches(
 		return false, ReasonNone, nil
 	}
 	if ep.Pod == nil {
+		if ep.ClusterID == clusterID {
+			// 本集群内但身份未还原：selector 匹配无法判定，不是"不匹配"。
+			return false, ReasonSnapshotMissing, nil
+		}
+		// 外部地址或其他集群：本地 selector 本就选不中，只能靠 ipBlock。
+		// 见 §6.2 —— 这种情况判 DENY 是正确结论，不是数据不足。
 		return false, ReasonNone, nil
 	}
 	pod := ep.Pod
@@ -75,36 +83,58 @@ func peerSelectorMatches(
 
 // ipBlockMatches 判断 IP 是否落在 ipBlock 的 CIDR 内且未被 except 排除。
 //
-// 解析失败返回错误而非静默 false：一条写错的 CIDR 静默不匹配，会让
-// 本该放行的流量被判成 DENY，进而生成一条错误的策略推荐。
-func ipBlockMatches(block *networkingv1.IPBlock, ip string) (bool, error) {
+// 解析失败一律不静默判 false：一条写错的 CIDR 静默不匹配，会让本该放行的
+// 流量被判成 DENY，进而生成一条错误的策略推荐。
+//
+// 但两类解析失败的归属完全不同，必须分开返回：
+//   - block.CIDR / block.Except 解析失败 —— 策略写错了，返回 error，由调用方
+//     归入 POLICY_MALFORMED，修复方式是改 YAML
+//   - ip 解析失败 —— 这是流量数据的问题（如流日志没带上源地址），返回
+//     ReasonSnapshotMissing。§6.5 单列 POLICY_MALFORMED 就是为了不把人指错
+//     子系统，把缺失的流量字段报成策略非法是同一个错误的反方向
+func ipBlockMatches(block *networkingv1.IPBlock, ip string) (bool, UnknownReason, error) {
 	if block == nil {
-		return false, nil
+		return false, ReasonNone, nil
 	}
 
-	addr, err := netip.ParseAddr(ip)
-	if err != nil {
-		return false, fmt.Errorf("parse endpoint ip %q: %w", ip, err)
+	addr, ok := parseEndpointAddr(ip)
+	if !ok {
+		return false, ReasonSnapshotMissing, nil
 	}
 
 	cidr, err := netip.ParsePrefix(block.CIDR)
 	if err != nil {
-		return false, fmt.Errorf("parse ipBlock cidr %q: %w", block.CIDR, err)
+		return false, ReasonNone, fmt.Errorf("parse ipBlock cidr %q: %w", block.CIDR, err)
 	}
 	if !cidr.Contains(addr) {
-		return false, nil
+		return false, ReasonNone, nil
 	}
 
 	for _, e := range block.Except {
 		ex, err := netip.ParsePrefix(e)
 		if err != nil {
-			return false, fmt.Errorf("parse ipBlock except %q: %w", e, err)
+			return false, ReasonNone, fmt.Errorf("parse ipBlock except %q: %w", e, err)
 		}
 		if ex.Contains(addr) {
-			return false, nil
+			return false, ReasonNone, nil
 		}
 	}
-	return true, nil
+	return true, ReasonNone, nil
+}
+
+// parseEndpointAddr 解析端点地址，失败只报"不可用"而不报错——调用方要把
+// 它归到数据缺失，而不是策略非法。
+//
+// 归一化 IPv4-mapped IPv6：::ffff:10.0.0.1 与 10.0.0.1 是同一个地址，但
+// netip 视为不同族，不 Unmap 会让它落不进任何 IPv4 CIDR，静默判出错误的
+// DENY。Kubernetes 的 PodIP 目前一定是规范形式，但流日志的对端地址不是
+// 本包能约束的输入。
+func parseEndpointAddr(ip string) (netip.Addr, bool) {
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	return addr.Unmap(), true
 }
 
 // peerMatches 是 peer 匹配的统一入口。
@@ -120,9 +150,8 @@ func peerMatches(
 ) (bool, UnknownReason, error) {
 	if peer.IPBlock != nil {
 		// ipBlock 按 IP 匹配，不看 Pod 归属的集群，也不涉及命名空间快照——
-		// 一个 IP 要么落在 CIDR 内要么不落在，没有"不可判定"这一档。
-		matched, err := ipBlockMatches(peer.IPBlock, ep.IP)
-		return matched, ReasonNone, err
+		// 唯一的"不可判定"来自端点 IP 本身缺失或非法，由 ipBlockMatches 归类。
+		return ipBlockMatches(peer.IPBlock, ep.IP)
 	}
 	return peerSelectorMatches(peer, policyNamespace, clusterID, ep, namespaces)
 }
