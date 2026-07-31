@@ -5,6 +5,7 @@ import (
 
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"github.com/imkerbos/Distill/internal/replay"
 )
@@ -177,6 +178,62 @@ func TestEvaluateDecidingSideReasonSurvivesPopulatedBase(t *testing.T) {
 	}
 	if got.Reason.Detail == "" {
 		t.Error("Reason.Detail must keep the parse error: it is the only record of where the evaluation got stuck")
+	}
+}
+
+// 策略无法解析与规则级未决原因同时出现时，分类必须由固定优先级决定，
+// 不能由"先测哪个分支"决定。POLICY_MALFORMED 输给排名更低的原因，就等于
+// 把一个 YAML 笔误指向快照或服务发现管线去查，而真正该改的是那份 YAML。
+func TestEvaluateMalformedPolicyOutranksCoOccurringReasons(t *testing.T) {
+	namedPort := intstr.FromString("http")
+	// api 没有声明 http 这个命名端口，所以这条规则只能给出 NAMED_PORT_UNRESOLVED。
+	unresolvableNamedPort := npIngress("payment", "named-port", nil,
+		[]networkingv1.NetworkPolicyIngressRule{{
+			Ports: []networkingv1.NetworkPolicyPort{{Port: &namedPort}},
+		}})
+	// role=edge 只能在命名空间快照里判定，而源 Pod 所在的命名空间不在快照中。
+	missingSnapshot := npIngress("payment", "missing-ns", nil,
+		[]networkingv1.NetworkPolicyIngressRule{{
+			From: []networkingv1.NetworkPolicyPeer{{
+				NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"role": "edge"}},
+			}},
+		}})
+	bad := brokenSelectorPolicy("payment", "broken-selector")
+
+	src := pod("unlisted-ns", "src-1", "10.4.0.50", map[string]string{"app": "src"})
+	api := pod("payment", "api-1", "10.4.0.1", map[string]string{"app": "api"})
+	flow := flowBetween(src, api, 8080)
+
+	tests := []struct {
+		name       string
+		coOccurent networkingv1.NetworkPolicy
+	}{
+		{name: "with an unresolvable named port", coOccurent: unresolvableNamedPort},
+		{name: "with a missing namespace snapshot", coOccurent: missingSnapshot},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			forward, backward := evaluateBothOrders(t,
+				[]networkingv1.NetworkPolicy{tt.coOccurent, bad}, flow)
+
+			if forward != backward {
+				t.Errorf("policy slice order changed the decision:\n forward  = %+v\n backward = %+v",
+					forward, backward)
+			}
+			for _, got := range []replay.Decision{forward, backward} {
+				if got.Verdict != replay.VerdictUnknown {
+					t.Fatalf("Verdict = %q, want UNKNOWN", got.Verdict)
+				}
+				if got.UnknownReason != replay.ReasonPolicyMalformed {
+					t.Errorf("UnknownReason = %q, want %q; an unparseable policy outranks every other reason",
+						got.UnknownReason, replay.ReasonPolicyMalformed)
+				}
+				if got.Reason.Detail == "" {
+					t.Error("Reason.Detail must name the policy that failed to parse")
+				}
+			}
+		})
 	}
 }
 

@@ -274,14 +274,21 @@ func (e *Evaluator) evaluateSide(subject PodRef, peer Endpoint, f Flow, dir Dire
 		}
 	}
 
+	// 策略无法解析与规则级未决原因可能同时出现，两者必须走同一套优先级。
+	// 分成两个先后测试的分支等于让"先判到哪个"决定分类：POLICY_MALFORMED
+	// 会输给排名更低的原因，把一个 YAML 笔误指向快照管线去查——正是 §6.5
+	// 点名要避免的误导。
+	if malformed {
+		unresolved = escalate(unresolved, ReasonPolicyMalformed)
+		// Detail 描述的是那条解析失败的策略，只有 POLICY_MALFORMED 真正
+		// 胜出时它才与结论对得上，否则会附上一段与 UnknownReason 无关的说明。
+		if unresolved == ReasonPolicyMalformed {
+			reason.Detail = malformedDetail
+		}
+	}
 	if unresolved != ReasonNone {
 		return Decision{Verdict: VerdictUnknown, Confidence: ConfidenceTrusted,
 			Reason: reason, UnknownReason: unresolved}
-	}
-	if malformed {
-		reason.Detail = malformedDetail
-		return Decision{Verdict: VerdictUnknown, Confidence: ConfidenceTrusted,
-			Reason: reason, UnknownReason: ReasonPolicyMalformed}
 	}
 	if !isIsolated {
 		return Decision{Verdict: VerdictAllow, Confidence: ConfidenceTrusted, Reason: reason}
