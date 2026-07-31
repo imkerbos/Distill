@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	networkingv1 "k8s.io/api/networking/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/imkerbos/Distill/internal/replay"
 )
@@ -76,5 +77,34 @@ func TestEvaluateUnmanagedFlagSurvivesDenyPath(t *testing.T) {
 	}
 	if !got.Reason.Unmanaged {
 		t.Error("Reason.Unmanaged must survive the deny early-return path")
+	}
+}
+
+// 对称覆盖：出向早退路径上的 Unmanaged 同样不能丢。
+// 源是普通 Pod（参与 egress 判定并被拒），目的是 hostNetwork Pod
+// （使该连接带上 unmanaged 标记）。
+func TestEvaluateUnmanagedFlagSurvivesEgressDenyPath(t *testing.T) {
+	egressDeny := networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "payment", Name: "default-deny-egress"},
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{},
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeEgress},
+		},
+	}
+
+	e := replay.NewEvaluator(testCluster, []networkingv1.NetworkPolicy{egressDeny}, namespaces())
+
+	src := pod("payment", "api-1", "10.4.0.1", map[string]string{"app": "api"})
+	dst := hostNetworkPod("kube-system", "agent", "192.168.1.7")
+
+	got := e.Evaluate(flowBetween(src, dst, 9100))
+	if got.Verdict != replay.VerdictDeny {
+		t.Fatalf("Verdict = %q, want DENY; the source is egress-isolated with no matching rule", got.Verdict)
+	}
+	if !got.Reason.Unmanaged {
+		t.Error("Reason.Unmanaged must survive the egress deny early-return path")
+	}
+	if got.Reason.Direction != replay.DirectionEgress {
+		t.Errorf("Reason.Direction = %q, want EGRESS", got.Reason.Direction)
 	}
 }
