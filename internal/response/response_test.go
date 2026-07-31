@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/imkerbos/Distill/internal/response"
@@ -76,29 +77,51 @@ func TestInternalMessageLeaksNothing(t *testing.T) {
 		t.Fatal("internal code has an empty message")
 	}
 	for _, leak := range []string{"panic", "goroutine", ".go:", "/Users/", "sql"} {
-		if contains(msg, leak) {
+		if strings.Contains(msg, leak) {
 			t.Errorf("internal message %q leaks %q", msg, leak)
 		}
 	}
 }
 
-func contains(s, sub string) bool {
-	return len(sub) > 0 && len(s) >= len(sub) &&
-		(func() bool {
-			for i := 0; i+len(sub) <= len(s); i++ {
-				if s[i:i+len(sub)] == sub {
-					return true
-				}
-			}
-			return false
-		})()
+// 每个已登记的码都必须有文案，否则前端会收到空提示。
+//
+// 不能通过 Message() == "" 判断：Message() 对未登记的码会退回
+// CodeInternal 文案（见其注释），永远不返回空串，用它做探针只会让
+// 这个测试形同虚设。必须直接比对 MessagedCodes()。
+func TestEveryCodeHasMessage(t *testing.T) {
+	messaged := map[response.Code]bool{}
+	for _, c := range response.MessagedCodes() {
+		messaged[c] = true
+	}
+	for _, c := range response.AllCodes() {
+		if !messaged[c] {
+			t.Errorf("code %d is registered but has no message", c)
+		}
+	}
 }
 
-// 每个已登记的码都必须有文案，否则前端会收到空提示。
-func TestEveryCodeHasMessage(t *testing.T) {
+// 反方向：文案表里不能有未登记的码，否则 AllCodes 会漏掉它，
+// 上一个测试就成了摆设。
+func TestNoMessageWithoutRegistration(t *testing.T) {
+	registered := map[response.Code]bool{}
 	for _, c := range response.AllCodes() {
-		if c.Message() == "" {
-			t.Errorf("code %d has no message", c)
+		registered[c] = true
+	}
+	for _, c := range response.MessagedCodes() {
+		if !registered[c] {
+			t.Errorf("code %d has a message but is not in AllCodes()", c)
 		}
+	}
+}
+
+// 未登记的码必须退回内部错误文案，而不是空串：空 msg 会让前端渲染
+// 一个没有任何说明的错误框，用户和排障的人都无从下手。
+func TestMessageFallsBackForUnregisteredCode(t *testing.T) {
+	got := response.Code(987654).Message()
+	if got == "" {
+		t.Fatal("an unregistered code produced an empty message; the UI would render a blank error")
+	}
+	if got != response.CodeInternal.Message() {
+		t.Errorf("Message() = %q, want the internal-error text", got)
 	}
 }

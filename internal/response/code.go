@@ -47,12 +47,44 @@ var messages = map[Code]string{
 }
 
 // Message 返回该码对应的用户可见文案。
+//
+// 未登记的码退回内部错误文案而不是空串：一个没有任何说明的错误提示，
+// 对用户和排障的人都毫无价值，而空 msg 的成因（漏登记、码被删）
+// 恰恰是最难在代码评审里看出来的。
 func (c Code) Message() string {
-	return messages[c]
+	if m, ok := messages[c]; ok {
+		return m
+	}
+	return messages[CodeInternal]
+}
+
+// registered 列出全部已登记的 Code 常量。
+//
+// 有意手工维护、与 messages 分离：如果从 messages 反推这份列表，
+// 一个漏配文案的码永远不会出现在列表里，也就永远逃过校验它的测试。
+var registered = []Code{
+	CodeOK,
+	CodeInvalidCredentials,
+	CodeSessionExpired,
+	CodeUnauthenticated,
+	CodeInvalidParam,
+	CodeNotFound,
+	CodeInternal,
+	CodeDependencyUnavailable,
 }
 
 // AllCodes 返回全部已登记的错误码，供测试校验文案完整性。
 func AllCodes() []Code {
+	out := make([]Code, len(registered))
+	copy(out, registered)
+	return out
+}
+
+// MessagedCodes 返回文案表中登记的全部码。
+//
+// 仅供测试校验它与 registered 保持一致 —— 两张表脱节时，
+// 封闭枚举的保证就名存实亡。
+func MessagedCodes() []Code {
 	out := make([]Code, 0, len(messages))
 	for c := range messages {
 		out = append(out, c)
