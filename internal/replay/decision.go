@@ -45,6 +45,15 @@ const (
 	ReasonIPAmbiguous UnknownReason = "IP_AMBIGUOUS"
 	// ReasonClusterAmbiguous 表示跨集群网段重叠，归属不唯一。
 	ReasonClusterAmbiguous UnknownReason = "CLUSTER_AMBIGUOUS"
+	// ReasonIdentityLostMesh 与 ReasonCCNPPresent 是 DEGRADED 通道的标记位，
+	// 保留给可信度路径使用，本引擎永远不会把它们写进 Decision.UnknownReason。
+	//
+	// 依据 spec §6.4：mesh 与 CCNP 不是"无法判定"，而是可检测的系统性降级——
+	// 仍然给出 ALLOW/DENY 结论、仍然展示拓扑，只是 confidence=DEGRADED、
+	// 不得作为策略推荐的依据。把它们当成 UNKNOWN 原因输出等于把整个 mesh
+	// namespace 判死，正是 V3 的错误。二者登记在枚举里是为了让下游（看板、
+	// 指标聚合）有一个封闭的取值全集，不代表本层会产出它们。
+
 	// ReasonIdentityLostMesh 表示 sidecar 导致源身份丢失。
 	ReasonIdentityLostMesh UnknownReason = "IDENTITY_LOST_MESH"
 	// ReasonCCNPPresent 表示存在 CCNP，标准 NetworkPolicy 结论不可靠。
@@ -96,6 +105,32 @@ func (r UnknownReason) Valid() bool {
 		}
 	}
 	return false
+}
+
+// escalate 在多个未决原因并存时选出优先级最高的一个。
+//
+// 顺序反映"该去修哪里"的紧急程度：策略写错 > 快照缺失 > 命名端口未解析。
+// 用固定优先级而非后写覆盖，是因为 §17 要统计 UNKNOWN 构成，让遍历顺序
+// 决定分类会让这个指标不可复现——同一份策略集换个切片顺序就换一个分类。
+func escalate(cur, next UnknownReason) UnknownReason {
+	if unknownReasonRank(next) > unknownReasonRank(cur) {
+		return next
+	}
+	return cur
+}
+
+// unknownReasonRank 给本层可产出的原因排定优先级，未产出的一律为 0。
+func unknownReasonRank(r UnknownReason) int {
+	switch r {
+	case ReasonPolicyMalformed:
+		return 3
+	case ReasonSnapshotMissing:
+		return 2
+	case ReasonNamedPortUnresolved:
+		return 1
+	default:
+		return 0
+	}
 }
 
 // Direction 是策略作用方向。
