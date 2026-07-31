@@ -56,4 +56,25 @@ func TestEvaluateHostNetworkSourceIsNotEgressIsolated(t *testing.T) {
 	if got.Verdict != replay.VerdictAllow {
 		t.Errorf("Verdict = %q, want ALLOW for a hostNetwork source", got.Verdict)
 	}
+	if !got.Reason.Unmanaged {
+		t.Error("Reason.Unmanaged must be set when the source is a hostNetwork pod")
+	}
+}
+
+// Unmanaged 必须在 DENY 早退路径上也传出去：覆盖率统计依赖它，
+// 把 hostNetwork Pod 算成"已保护"会让覆盖率数字失真。
+func TestEvaluateUnmanagedFlagSurvivesDenyPath(t *testing.T) {
+	e := replay.NewEvaluator(testCluster,
+		[]networkingv1.NetworkPolicy{denyAllIngress("payment")}, namespaces())
+
+	src := hostNetworkPod("kube-system", "agent", "192.168.1.7")
+	dst := pod("payment", "api-1", "10.4.0.1", map[string]string{"app": "api"})
+
+	got := e.Evaluate(flowBetween(src, dst, 8080))
+	if got.Verdict != replay.VerdictDeny {
+		t.Fatalf("Verdict = %q, want DENY; the destination is ingress-isolated", got.Verdict)
+	}
+	if !got.Reason.Unmanaged {
+		t.Error("Reason.Unmanaged must survive the deny early-return path")
+	}
 }
