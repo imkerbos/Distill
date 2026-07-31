@@ -98,6 +98,21 @@ func (e *Evaluator) Evaluate(f Flow) Decision {
 	d.Reason.Unmanaged = e.hasUnmanagedEndpoint(f)
 	d.CrossCluster = isCrossCluster(f)
 
+	// localPod 对"其他集群""hostNetwork""身份未还原"三种情况都返回 nil，
+	// 而 Evaluate 对 nil 的处理是跳过该方向 —— 那等于一次隐式 ALLOW。
+	// 前两种跳过是对的（本集群策略确实管不到它们），第三种不是：端点声称
+	// 属于本集群却没还原出身份，说明快照缺了，此时任何方向都无从判起。
+	// 这里必须先拦下，否则会输出一个标着 TRUSTED、Reason 全空、结构上
+	// 无法解释的 ALLOW —— 本引擎最危险的输出形态。
+	for _, endpoint := range []Endpoint{f.Source, f.Dest} {
+		if endpoint.ClusterID == e.clusterID && endpoint.Pod == nil {
+			d.Verdict = VerdictUnknown
+			d.UnknownReason = ReasonSnapshotMissing
+			d.Reason.Detail = "endpoint " + endpoint.IP + " is in this cluster but its identity was not resolved"
+			return d
+		}
+	}
+
 	if src := e.localPod(f.Source); src != nil {
 		out := e.evaluateSide(*src, f.Dest, f, DirectionEgress)
 		if out.Verdict != VerdictAllow {
@@ -138,15 +153,32 @@ func isCrossCluster(f Flow) bool {
 func carryFlags(side, base Decision) Decision {
 	side.CrossCluster = base.CrossCluster
 	side.Confidence = base.Confidence
+
+	// side.Reason 会整体覆盖 base.Reason。当这一侧什么都没解释（既没命中
+	// 策略，也没进入隔离）而 base 有内容时，覆盖会把另一侧真正的放行理由
+	// 抹掉：出向命中了 egress-allow、入向只是没被任何策略选中，最终 ALLOW
+	// 就报不出命中的 policy 和 rule 下标，§6.6 要求的解释成了一片空白。
+	// 因此保留信息量更大的那一侧；两侧都为空时保留 side，它至少带着方向。
+	sideExplains := side.Reason.MatchedPolicy != "" || side.Reason.Isolated
+	baseExplains := base.Reason.MatchedPolicy != "" || base.Reason.Isolated
+	if !sideExplains && baseExplains {
+		side.Reason = base.Reason
+	}
+
 	side.Reason.Unmanaged = base.Reason.Unmanaged
 	return side
 }
 
 // localPod 返回该端点在本集群内、且受 NetworkPolicy 管控的 Pod。
 //
-// 返回 nil 的两种情况：
+// 返回 nil 的三种情况：
 //   - 属于其他集群：本集群策略无法选中它，只能靠 ipBlock 匹配 IP
 //   - hostNetwork Pod：使用 Node IP、不在 Pod 网络内，策略对其不生效
+//   - 身份未还原（Pod 为 nil）：既可能是外部地址，也可能是快照缺失
+//
+// 前两种可以安全跳过该方向，第三种不行——它是"不知道"，不是"管不到"。
+// 调用方 Evaluate 必须在调用本函数之前把本集群内身份未还原的端点拦成
+// UNKNOWN，否则跳过就成了一次隐式 ALLOW。
 func (e *Evaluator) localPod(endpoint Endpoint) *PodRef {
 	if endpoint.Pod == nil || endpoint.Pod.ClusterID != e.clusterID {
 		return nil
@@ -177,52 +209,58 @@ func IsUnmanaged(pod PodRef) bool {
 }
 
 // evaluateSide 判定单个方向：subject 是被策略选中的主体，peer 是对端。
+//
+// 隔离判定与候选规则匹配走同一趟遍历，不可拆成两趟。拆开时两趟必须对
+// "策略无法解析"采取同一种处置，而这是做不到的：隔离判定一旦遇错就得
+// 当场决定，候选匹配却必须累积后继续——于是同一份策略集，把写坏的那条
+// 排在前面得到 UNKNOWN、排在后面得到 ALLOW。Kubernetes List 不保证顺序，
+// 同一集群、同一 commit、同一条流量就会回放出两个不同答案。
+//
+// 合并后的处置是唯一正确的那一种：先把整个策略集看完再下结论。
+// NetworkPolicy 是纯 additive-allow，一条无法解析的策略最多只能"多放行"，
+// 绝不可能撤销另一条策略已经给出的放行，所以真实命中必须立即胜出。
 func (e *Evaluator) evaluateSide(subject PodRef, peer Endpoint, f Flow, dir Direction) Decision {
 	reason := NewReason(dir)
 
-	// isolated 唯一的错误来源是 selectsPod -> selectorMatches：某条策略的
-	// PodSelector 本身写错了。这不是快照缺失，是策略格式非法，必须归类为
-	// ReasonPolicyMalformed，否则 UNKNOWN 构成的仪表盘会把人指向快照管线
-	// 去排查一个其实是 YAML 手误的问题。
-	isIsolated, err := isolated(e.policies, e.clusterID, subject, dir)
-	if err != nil {
-		reason.Detail = err.Error()
-		return Decision{Verdict: VerdictUnknown, Confidence: ConfidenceTrusted,
-			Reason: reason, UnknownReason: ReasonPolicyMalformed}
-	}
-	if !isIsolated {
-		return Decision{Verdict: VerdictAllow, Confidence: ConfidenceTrusted, Reason: reason}
-	}
-	reason.Isolated = true
-
+	malformed := false
+	malformedDetail := ""
+	isIsolated := false
 	unresolved := ReasonNone
+
 	for _, p := range e.policies {
 		if !policyCovers(p, dir) {
 			continue
 		}
 		selected, err := selectsPod(p, e.clusterID, subject)
 		if err != nil {
-			// 策略的 PodSelector 无法解析时不能当作"没选中"跳过：那会让一条
-			// 本可放行的策略凭空消失，最终输出一个可信的 DENY —— 建立在
-			// 无法解析的策略之上的可信结论，是本引擎最危险的输出。
-			unresolved = ReasonPolicyMalformed
+			// 只记录，不当场决定：这条策略既不能算"选中"（会凭空隔离主体），
+			// 也不能算"没选中"（会让一条本可放行的策略消失，产出一个建立在
+			// 无法解析的策略之上的可信 DENY）。
+			malformed = true
+			// Detail 只用于展示，但仍取一个与切片顺序无关的确定值，
+			// 否则整个 Decision 又会随策略顺序变化。
+			if detail := err.Error(); malformedDetail == "" || detail < malformedDetail {
+				malformedDetail = detail
+			}
 			continue
 		}
 		if !selected {
 			continue
 		}
+		isIsolated = true
+		reason.Isolated = true
 
 		for idx, r := range rulesOf(p, dir) {
 			matched, reasonCode, err := e.ruleAllows(r, p.Namespace, peer, f)
 			if err != nil {
-				// 策略无法求值时不能当作"规则不匹配"跳过：那会退化成
-				// 静默 false，把本该放行的流量判成 DENY。
-				unresolved = ReasonPolicyMalformed
+				// 规则无法求值时不能当作"不匹配"跳过：那会退化成静默 false，
+				// 把本该放行的流量判成 DENY。reasonCode 里可能还带着这条规则
+				// 在出错之前已经累积的原因，一并计入，不能丢。
+				unresolved = escalate(unresolved, ReasonPolicyMalformed)
+				unresolved = escalate(unresolved, reasonCode)
 				continue
 			}
-			if reasonCode != ReasonNone {
-				unresolved = reasonCode
-			}
+			unresolved = escalate(unresolved, reasonCode)
 			if matched {
 				reason.MatchedPolicy = p.Namespace + "/" + p.Name
 				reason.MatchedRuleIdx = idx
@@ -234,6 +272,14 @@ func (e *Evaluator) evaluateSide(subject PodRef, peer Endpoint, f Flow, dir Dire
 	if unresolved != ReasonNone {
 		return Decision{Verdict: VerdictUnknown, Confidence: ConfidenceTrusted,
 			Reason: reason, UnknownReason: unresolved}
+	}
+	if malformed {
+		reason.Detail = malformedDetail
+		return Decision{Verdict: VerdictUnknown, Confidence: ConfidenceTrusted,
+			Reason: reason, UnknownReason: ReasonPolicyMalformed}
+	}
+	if !isIsolated {
+		return Decision{Verdict: VerdictAllow, Confidence: ConfidenceTrusted, Reason: reason}
 	}
 	return Decision{Verdict: VerdictDeny, Confidence: ConfidenceTrusted, Reason: reason}
 }
@@ -258,14 +304,14 @@ func (e *Evaluator) ruleAllows(r rule, policyNamespace string, peer Endpoint, f 
 	for _, p := range r.peers {
 		matched, reasonCode, err := peerMatches(p, policyNamespace, e.clusterID, peer, e.namespaces)
 		if err != nil {
-			return false, ReasonNone, err
+			// 出错时也要把已累积的原因带回去：丢掉它等于让"哪个子系统该修"
+			// 这个分类取决于 peer 在列表里的排列顺序。
+			return false, unresolved, err
 		}
 		if matched {
 			return true, ReasonNone, nil
 		}
-		if reasonCode != ReasonNone {
-			unresolved = reasonCode
-		}
+		unresolved = escalate(unresolved, reasonCode)
 	}
 	return false, unresolved, nil
 }
