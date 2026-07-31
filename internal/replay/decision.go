@@ -57,6 +57,10 @@ const (
 	ReasonNamedPortUnresolved UnknownReason = "NAMED_PORT_UNRESOLVED"
 	// ReasonLogSampledOut 表示日志采样或限流导致记录缺失。
 	ReasonLogSampledOut UnknownReason = "LOG_SAMPLED_OUT"
+	// ReasonPolicyMalformed 表示策略对象本身无法解析，例如 ipBlock 的
+	// CIDR 或 except 条目格式非法。与其它原因不同，这不是数据缺失，
+	// 而是策略写错了 —— 修复方式是改 YAML，不是补数据。
+	ReasonPolicyMalformed UnknownReason = "POLICY_MALFORMED"
 )
 
 // allUnknownReasons 是枚举的唯一登记处。新增原因必须同步登记，
@@ -71,6 +75,7 @@ var allUnknownReasons = []UnknownReason{
 	ReasonExternalNoIdentity,
 	ReasonNamedPortUnresolved,
 	ReasonLogSampledOut,
+	ReasonPolicyMalformed,
 }
 
 // AllUnknownReasons 返回全部已登记的未知原因。

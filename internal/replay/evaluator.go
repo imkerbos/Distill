@@ -117,6 +117,9 @@ func (e *Evaluator) evaluateSide(subject PodRef, peer Endpoint, f Flow, dir Dire
 		for idx, r := range rulesOf(p, dir) {
 			matched, reasonCode, err := e.ruleAllows(r, p.Namespace, peer, f)
 			if err != nil {
+				// 策略无法求值时不能当作"规则不匹配"跳过：那会退化成
+				// 静默 false，把本该放行的流量判成 DENY。
+				unresolved = ReasonPolicyMalformed
 				continue
 			}
 			if reasonCode != ReasonNone {

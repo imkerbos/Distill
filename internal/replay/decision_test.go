@@ -19,6 +19,7 @@ func TestUnknownReasonIsClosedEnum(t *testing.T) {
 		replay.ReasonExternalNoIdentity,
 		replay.ReasonNamedPortUnresolved,
 		replay.ReasonLogSampledOut,
+		replay.ReasonPolicyMalformed,
 	}
 
 	got := replay.AllUnknownReasons()

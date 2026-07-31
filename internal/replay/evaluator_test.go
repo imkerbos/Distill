@@ -178,3 +178,32 @@ func TestEvaluateUnresolvedNamedPortIsUnknown(t *testing.T) {
 		t.Errorf("UnknownReason = %q, want %q", got.UnknownReason, replay.ReasonNamedPortUnresolved)
 	}
 }
+
+// 策略格式非法时必须判 UNKNOWN 而非 DENY —— 静默跳过一条无法求值的
+// 规则，会生成一条建立在错误前提上的策略推荐。
+func TestEvaluateMalformedPolicyIsUnknown(t *testing.T) {
+	p := networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "payment", Name: "bad-cidr"},
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{},
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+			Ingress: []networkingv1.NetworkPolicyIngressRule{{
+				From: []networkingv1.NetworkPolicyPeer{{
+					IPBlock: &networkingv1.IPBlock{CIDR: "not-a-cidr"},
+				}},
+			}},
+		},
+	}
+
+	e := replay.NewEvaluator(testCluster, []networkingv1.NetworkPolicy{p}, namespaces())
+	src := pod("gateway", "gw-1", "10.4.0.9", map[string]string{"app": "gateway"})
+	dst := pod("payment", "api-1", "10.4.0.1", map[string]string{"app": "api"})
+
+	got := e.Evaluate(flowBetween(src, dst, 8080))
+	if got.Verdict != replay.VerdictUnknown {
+		t.Errorf("Verdict = %q, want UNKNOWN", got.Verdict)
+	}
+	if got.UnknownReason != replay.ReasonPolicyMalformed {
+		t.Errorf("UnknownReason = %q, want %q", got.UnknownReason, replay.ReasonPolicyMalformed)
+	}
+}
