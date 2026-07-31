@@ -283,9 +283,13 @@ func (b *flowBuilder) add(src, dst replay.Endpoint, proto replay.Protocol, port 
 	b.at = b.at.Add(time.Second)
 }
 
-// buildFlows 生成 asia、eu 两个集群之间的合成流量，覆盖 payment 的正常
-// 放行/拒绝、mesh 降级、策略写错、无策略的 batch、hostNetwork 直连、
-// 采集丢事件、跨集群、出公网八类场景。用循环而非手写字面量，是因为
+// buildFlows 生成 asia、eu 两个集群之间以及各自内部的合成流量，覆盖
+// payment 的正常放行/拒绝、mesh 降级、策略写错、无策略的 batch、
+// hostNetwork 直连、采集丢事件、跨集群、出公网、以及 eu 集群自身的
+// 内部流量共九类场景。此前的版本只有 asia 有自己的内部流量，eu 只
+// 作为跨集群 flow 的源端出现——一个集群有拓扑和数据质量、另一个
+// 全是空白，观众第一反应会是"多集群是不是没做完"，而不是平台想
+// 传达的"这个集群还没上线策略管控"。用循环而非手写字面量，是因为
 // 单条 flow 本身没有个体意义，量级和分布才是 demo 要展示的东西。
 func buildFlows(asia, eu Cluster) []Flow {
 	b := &flowBuilder{at: baseTime}
@@ -297,6 +301,7 @@ func buildFlows(asia, eu Cluster) []Flow {
 	kubeSystem := podsByNamespace(asia, "kube-system")
 	legacy := podsByNamespace(asia, "legacy")
 	partner := podsByNamespace(eu, "partner")
+	paymentEU := podsByNamespace(eu, "payment")
 
 	// gateway -> payment:8080，命中 allow-gateway（NamespaceSelector role:edge）。
 	for i := 0; i < 45; i++ {
@@ -367,6 +372,24 @@ func buildFlows(asia, eu Cluster) []Flow {
 	for i := 0; i < 10; i++ {
 		src := gateway[i%len(gateway)]
 		dst := externalEndpoint(externalIPs[i%len(externalIPs)])
+		b.add(podEndpoint(src), dst, replay.ProtocolTCP, 443)
+	}
+
+	// partner -> payment(eu)：eu 集群没有任何 NetworkPolicy，全部放行
+	// ALLOW——这是一个尚未上线策略管控的集群该有的样子，不是求值引擎
+	// 的漏洞。这批流量让 eu 拥有自己的拓扑边与数据质量数字，而不是只
+	// 在 asia 的跨集群边里以对端身份出现。
+	for i := 0; i < 30; i++ {
+		src := partner[i%len(partner)]
+		dst := paymentEU[i%len(paymentEU)]
+		b.add(podEndpoint(src), podEndpoint(dst), replay.ProtocolTCP, 8080)
+	}
+
+	// eu 少量出公网流量，与 asia 的出公网场景对称。
+	externalIPsEU := []string{"9.9.9.9"}
+	for i := 0; i < 6; i++ {
+		src := partner[i%len(partner)]
+		dst := externalEndpoint(externalIPsEU[i%len(externalIPsEU)])
 		b.add(podEndpoint(src), dst, replay.ProtocolTCP, 443)
 	}
 

@@ -21,6 +21,10 @@ type TopologyNode struct {
 	HasPolicy         bool   `json:"hasPolicy"`
 	PodCount          int    `json:"podCount"`
 	UnmanagedPodCount int    `json:"unmanagedPodCount"`
+	// Foreign 表示该命名空间不属于本次查询的集群。
+	// 跨集群边的对端必须作为节点出现，否则前端图会拿到悬空引用；
+	// 但它不受本集群策略管辖，展示上要能区分。
+	Foreign bool `json:"foreign"`
 }
 
 // TopologyEdge 是命名空间之间聚合后的通信关系。

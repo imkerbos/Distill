@@ -246,9 +246,36 @@ type edgeAccumulator struct {
 	ports        map[int32]struct{}
 }
 
-// topologyEdges 把该集群相关的 flow 按 (源命名空间, 目的命名空间) 聚合成边。
-func (r *FixtureReader) topologyEdges(clusterID string) []TopologyEdge {
+// recordForeignNode 在端点所在命名空间不属于本次查询集群的已知节点集合时，
+// 记一个 Foreign 占位节点。跨集群边如果只画边、不画对端节点，前端图会拿到
+// 一条指向不存在节点的悬空引用——渲染器要么报错，要么把这条边悄悄丢掉，
+// 而丢掉的恰恰是"跨集群没有策略管控"这个平台最该展示出来的敞口。
+// pod 计数与 HasPolicy 留空：本集群的快照里确实不认识对面集群的资产，
+// 编一个数字比坦白"不知道"更危险。
+func recordForeignNode(foreign map[string]TopologyNode, known map[string]bool, ep replay.Endpoint) {
+	if ep.Pod == nil {
+		return
+	}
+	id := ep.Pod.ClusterID + "/" + ep.Pod.Namespace
+	if known[id] {
+		return
+	}
+	if _, seen := foreign[id]; seen {
+		return
+	}
+	foreign[id] = TopologyNode{
+		ID:        id,
+		Cluster:   ep.Pod.ClusterID,
+		Namespace: ep.Pod.Namespace,
+		Foreign:   true,
+	}
+}
+
+// topologyEdges 把该集群相关的 flow 按 (源命名空间, 目的命名空间) 聚合成边，
+// 同时收集边所引用、但不属于 known（本集群自有命名空间）的对端节点。
+func (r *FixtureReader) topologyEdges(clusterID string, known map[string]bool) ([]TopologyEdge, []TopologyNode) {
 	acc := make(map[edgeKey]*edgeAccumulator)
+	foreign := make(map[string]TopologyNode)
 	for _, f := range r.fleet.Flows {
 		if owningCluster(f.Flow) != clusterID {
 			continue
@@ -261,6 +288,8 @@ func (r *FixtureReader) topologyEdges(clusterID string) []TopologyEdge {
 		if !ok {
 			continue
 		}
+		recordForeignNode(foreign, known, f.Flow.Source)
+		recordForeignNode(foreign, known, f.Flow.Dest)
 
 		d := r.decide(f)
 		k := edgeKey{source: srcID, target: dstID}
@@ -299,7 +328,12 @@ func (r *FixtureReader) topologyEdges(clusterID string) []TopologyEdge {
 		}
 		return edges[i].Target < edges[j].Target
 	})
-	return edges
+
+	foreignNodes := make([]TopologyNode, 0, len(foreign))
+	for _, n := range foreign {
+		foreignNodes = append(foreignNodes, n)
+	}
+	return edges, foreignNodes
 }
 
 // Topology 返回指定集群的通信拓扑。集群不存在时返回错误。
@@ -308,10 +342,18 @@ func (r *FixtureReader) Topology(_ context.Context, clusterID string) (Topology,
 	if !ok {
 		return Topology{}, fmt.Errorf("%w: %s", ErrClusterNotFound, clusterID)
 	}
-	return Topology{
-		Nodes: topologyNodes(c),
-		Edges: r.topologyEdges(c.ID),
-	}, nil
+
+	nodes := topologyNodes(c)
+	known := make(map[string]bool, len(nodes))
+	for _, n := range nodes {
+		known[n.ID] = true
+	}
+
+	edges, foreignNodes := r.topologyEdges(c.ID, known)
+	nodes = append(nodes, foreignNodes...)
+	sort.Slice(nodes, func(i, j int) bool { return nodes[i].ID < nodes[j].ID })
+
+	return Topology{Nodes: nodes, Edges: edges}, nil
 }
 
 // Flows 按条件返回流量列表。

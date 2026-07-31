@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"math"
 	"testing"
 
 	"github.com/imkerbos/Distill/internal/fixture"
@@ -61,6 +62,37 @@ func TestTopologyMarksMeshNamespace(t *testing.T) {
 		}
 	}
 	t.Error("checkout namespace is not marked InMesh")
+}
+
+// 每条边的两端都必须出现在节点集合里。悬空引用会让前端图要么报错，
+// 要么静默丢掉这条边 —— 而跨集群敞口正是最不该被静默丢掉的东西。
+func TestTopologyEdgesOnlyReferenceKnownNodes(t *testing.T) {
+	topo, err := newReader().Topology(context.Background(), "prod-asia-1")
+	if err != nil {
+		t.Fatalf("Topology: %v", err)
+	}
+
+	known := map[string]bool{}
+	for _, n := range topo.Nodes {
+		known[n.ID] = true
+	}
+	for _, e := range topo.Edges {
+		if !known[e.Source] {
+			t.Errorf("edge source %q has no node", e.Source)
+		}
+		if !known[e.Target] {
+			t.Errorf("edge target %q has no node", e.Target)
+		}
+	}
+}
+
+func TestTopologyMarksForeignNamespace(t *testing.T) {
+	topo, _ := newReader().Topology(context.Background(), "prod-asia-1")
+	for _, n := range topo.Nodes {
+		if n.Cluster != "prod-asia-1" && !n.Foreign {
+			t.Errorf("node %q is from another cluster but is not marked Foreign", n.ID)
+		}
+	}
 }
 
 func TestFlowsRespectsLimit(t *testing.T) {
@@ -152,6 +184,9 @@ func TestQualityRatesAreFractions(t *testing.T) {
 	} {
 		if v < 0 || v > 1 {
 			t.Errorf("%s = %v, want a fraction in [0,1]", name, v)
+		}
+		if math.IsNaN(v) {
+			t.Errorf("%s is NaN; a zero denominator must yield 0, not NaN", name)
 		}
 	}
 }
