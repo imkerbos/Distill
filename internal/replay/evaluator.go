@@ -180,11 +180,15 @@ func IsUnmanaged(pod PodRef) bool {
 func (e *Evaluator) evaluateSide(subject PodRef, peer Endpoint, f Flow, dir Direction) Decision {
 	reason := NewReason(dir)
 
+	// isolated 唯一的错误来源是 selectsPod -> selectorMatches：某条策略的
+	// PodSelector 本身写错了。这不是快照缺失，是策略格式非法，必须归类为
+	// ReasonPolicyMalformed，否则 UNKNOWN 构成的仪表盘会把人指向快照管线
+	// 去排查一个其实是 YAML 手误的问题。
 	isIsolated, err := isolated(e.policies, e.clusterID, subject, dir)
 	if err != nil {
 		reason.Detail = err.Error()
 		return Decision{Verdict: VerdictUnknown, Confidence: ConfidenceTrusted,
-			Reason: reason, UnknownReason: ReasonSnapshotMissing}
+			Reason: reason, UnknownReason: ReasonPolicyMalformed}
 	}
 	if !isIsolated {
 		return Decision{Verdict: VerdictAllow, Confidence: ConfidenceTrusted, Reason: reason}
@@ -197,7 +201,14 @@ func (e *Evaluator) evaluateSide(subject PodRef, peer Endpoint, f Flow, dir Dire
 			continue
 		}
 		selected, err := selectsPod(p, e.clusterID, subject)
-		if err != nil || !selected {
+		if err != nil {
+			// 策略的 PodSelector 无法解析时不能当作"没选中"跳过：那会让一条
+			// 本可放行的策略凭空消失，最终输出一个可信的 DENY —— 建立在
+			// 无法解析的策略之上的可信结论，是本引擎最危险的输出。
+			unresolved = ReasonPolicyMalformed
+			continue
+		}
+		if !selected {
 			continue
 		}
 

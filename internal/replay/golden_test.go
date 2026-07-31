@@ -226,6 +226,49 @@ func TestGoldenEvaluationSemantics(t *testing.T) {
 			wantVerdict: replay.VerdictAllow,
 			wantConf:    replay.ConfidenceTrusted,
 		},
+		// 候选放行策略的 PodSelector 无法解析时不能被静默当作"没选中"：
+		// 那会让一条本可放行的策略凭空消失，最终吐出一个可信的 DENY——
+		// 建立在无法解析的策略之上的可信结论，是本引擎最危险的输出。
+		{
+			name: "malformed candidate policy selector yields unknown, not a silent deny",
+			policies: []networkingv1.NetworkPolicy{
+				npIngress("payment", "deny", nil, nil),
+				func() networkingv1.NetworkPolicy {
+					p := npIngress("payment", "allow-broken-selector", nil, []networkingv1.NetworkPolicyIngressRule{{}})
+					p.Spec.PodSelector = metav1.LabelSelector{
+						MatchExpressions: []metav1.LabelSelectorRequirement{
+							{Key: "app", Operator: "BogusOperator", Values: []string{"x"}},
+						},
+					}
+					return p
+				}(),
+			},
+			flow:        flowBetween(gw, api, 8080),
+			wantVerdict: replay.VerdictUnknown,
+			wantConf:    replay.ConfidenceTrusted,
+			wantUnknown: replay.ReasonPolicyMalformed,
+		},
+		// 同一个缺陷类别，触发点是隔离判定本身：唯一一条策略的 PodSelector
+		// 就无法解析，isolated() 直接报错。结论必须仍是 UNKNOWN/POLICY_MALFORMED，
+		// 而不是把这次求值失败误归类成快照缺失。
+		{
+			name: "malformed isolating policy selector yields unknown",
+			policies: []networkingv1.NetworkPolicy{
+				func() networkingv1.NetworkPolicy {
+					p := npIngress("payment", "broken-selector", nil, nil)
+					p.Spec.PodSelector = metav1.LabelSelector{
+						MatchExpressions: []metav1.LabelSelectorRequirement{
+							{Key: "app", Operator: "BogusOperator", Values: []string{"x"}},
+						},
+					}
+					return p
+				}(),
+			},
+			flow:        flowBetween(gw, api, 8080),
+			wantVerdict: replay.VerdictUnknown,
+			wantConf:    replay.ConfidenceTrusted,
+			wantUnknown: replay.ReasonPolicyMalformed,
+		},
 	}
 
 	for _, tc := range cases {
