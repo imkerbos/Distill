@@ -12,10 +12,14 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/imkerbos/Distill/internal/auth"
 	"github.com/imkerbos/Distill/internal/buildinfo"
 	"github.com/imkerbos/Distill/internal/config"
+	"github.com/imkerbos/Distill/internal/fixture"
+	"github.com/imkerbos/Distill/internal/httpapi"
 	applog "github.com/imkerbos/Distill/internal/log"
 	"github.com/imkerbos/Distill/internal/response"
+	"github.com/imkerbos/Distill/internal/store"
 )
 
 func main() {
@@ -44,6 +48,12 @@ func run(configPath string) error {
 
 	r := chi.NewRouter()
 	r.Mount("/healthz", newHealthHandler())
+	r.Mount("/", httpapi.NewRouter(httpapi.Deps{
+		Sessions: auth.NewSessionStore(cfg.Auth.SessionTTL, nil),
+		Verifier: auth.NewVerifier(cfg.Auth.Users),
+		Logger:   logger,
+		Reader:   store.NewFixtureReader(fixture.Load()),
+	}))
 
 	srv := &http.Server{
 		Addr:         cfg.Server.Addr,

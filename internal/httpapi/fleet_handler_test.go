@@ -209,5 +209,14 @@ func TestReaderFailureIsInternalErrorAndLeaksNothing(t *testing.T) {
 				t.Errorf("%s response leaked %q: %s", path, secret, rec.Body.String())
 			}
 		}
+		for _, values := range rec.Header() {
+			for _, v := range values {
+				for _, secret := range []string{"bigquery", "connection refused", "10.0.0.5", "9050"} {
+					if strings.Contains(v, secret) {
+						t.Errorf("%s response header leaked %q", path, secret)
+					}
+				}
+			}
+		}
 	}
 }
