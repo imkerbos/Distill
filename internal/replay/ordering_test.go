@@ -140,6 +140,46 @@ func TestEvaluateCoOccurringUnknownReasonsPickHighestPrecedence(t *testing.T) {
 	}
 }
 
+// 决定结论的那一侧是非 ALLOW 时，它的 Reason 就是"结论从哪来"的唯一记录。
+// 出向已经命中过一条 allow 规则、入向因策略无法解析判 UNKNOWN 时，若用出向
+// 那份信息量更大的 Reason 覆盖入向，解释器就会在一条 UNKNOWN 上报告另一个
+// 方向的成功命中，同时丢掉 Detail 里"卡在哪"——§6.6 要的正是这一项。
+func TestEvaluateDecidingSideReasonSurvivesPopulatedBase(t *testing.T) {
+	policies := []networkingv1.NetworkPolicy{
+		npEgress("gateway", "egress-allow", nil, []networkingv1.NetworkPolicyEgressRule{{
+			To: []networkingv1.NetworkPolicyPeer{{
+				NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"env": "prod"}},
+			}},
+		}}),
+		brokenSelectorPolicy("payment", "broken-selector"),
+	}
+
+	gw := pod("gateway", "gw-1", "10.4.0.9", map[string]string{"app": "gateway"})
+	api := pod("payment", "api-1", "10.4.0.1", map[string]string{"app": "api"})
+
+	got := replay.NewEvaluator(testCluster, policies, namespaces()).Evaluate(flowBetween(gw, api, 8080))
+
+	if got.Verdict != replay.VerdictUnknown {
+		t.Fatalf("Verdict = %q, want UNKNOWN", got.Verdict)
+	}
+	if got.UnknownReason != replay.ReasonPolicyMalformed {
+		t.Errorf("UnknownReason = %q, want %q", got.UnknownReason, replay.ReasonPolicyMalformed)
+	}
+	if got.Reason.Direction != replay.DirectionIngress {
+		t.Errorf("Reason.Direction = %q, want INGRESS; the deciding side is ingress", got.Reason.Direction)
+	}
+	if got.Reason.MatchedPolicy != "" {
+		t.Errorf("Reason.MatchedPolicy = %q, want empty; an UNKNOWN never matched an allow rule",
+			got.Reason.MatchedPolicy)
+	}
+	if got.Reason.MatchedRuleIdx != -1 {
+		t.Errorf("Reason.MatchedRuleIdx = %d, want -1", got.Reason.MatchedRuleIdx)
+	}
+	if got.Reason.Detail == "" {
+		t.Error("Reason.Detail must keep the parse error: it is the only record of where the evaluation got stuck")
+	}
+}
+
 // 端点声称属于本集群却没还原出身份时，跳过该方向等于一次隐式 ALLOW——
 // 一个标着 TRUSTED、Reason 全空、结构上无法解释的 ALLOW。必须判 UNKNOWN。
 func TestEvaluateUnresolvedLocalEndpointIsUnknown(t *testing.T) {

@@ -158,10 +158,15 @@ func carryFlags(side, base Decision) Decision {
 	// 策略，也没进入隔离）而 base 有内容时，覆盖会把另一侧真正的放行理由
 	// 抹掉：出向命中了 egress-allow、入向只是没被任何策略选中，最终 ALLOW
 	// 就报不出命中的 policy 和 rule 下标，§6.6 要求的解释成了一片空白。
-	// 因此保留信息量更大的那一侧；两侧都为空时保留 side，它至少带着方向。
+	// 因此在两侧都放行时保留信息量更大的那一侧。
+	//
+	// 这条偏好只对 ALLOW 成立：非 ALLOW 的 side 就是决定最终结论的那一侧，
+	// 它的 Reason 是"结论从哪来"的唯一记录，绝不能被另一个方向的解释替换。
+	// 典型的是策略无法解析产出的 UNKNOWN——它既没命中策略也没进入隔离，
+	// 但 Detail 里装着"卡在哪"，换成对侧的成功命中等于报告一个与结论矛盾的理由。
 	sideExplains := side.Reason.MatchedPolicy != "" || side.Reason.Isolated
 	baseExplains := base.Reason.MatchedPolicy != "" || base.Reason.Isolated
-	if !sideExplains && baseExplains {
+	if side.Verdict == VerdictAllow && !sideExplains && baseExplains {
 		side.Reason = base.Reason
 	}
 
