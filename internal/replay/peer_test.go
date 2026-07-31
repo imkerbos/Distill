@@ -98,12 +98,15 @@ func TestPeerSelectorMatches(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := peerSelectorMatches(tt.peer, "payment", "c1", tt.ep, namespaces)
+			got, reason, err := peerSelectorMatches(tt.peer, "payment", "c1", tt.ep, namespaces)
 			if err != nil {
 				t.Fatalf("peerSelectorMatches: %v", err)
 			}
 			if got != tt.want {
 				t.Errorf("peerSelectorMatches = %v, want %v", got, tt.want)
+			}
+			if reason != ReasonNone {
+				t.Errorf("reason = %q, want ReasonNone; every namespace referenced here is in the fixture", reason)
 			}
 		})
 	}
@@ -114,25 +117,33 @@ func TestPeerSelectorMatchesRequiresIdentity(t *testing.T) {
 	peer := networkingv1.NetworkPolicyPeer{PodSelector: &metav1.LabelSelector{}}
 	ep := Endpoint{IP: "8.8.8.8"}
 
-	got, err := peerSelectorMatches(peer, "payment", "c1", ep, nil)
+	got, reason, err := peerSelectorMatches(peer, "payment", "c1", ep, nil)
 	if err != nil {
 		t.Fatalf("peerSelectorMatches: %v", err)
 	}
 	if got {
 		t.Error("endpoint without resolved identity must not match a selector-based peer")
 	}
+	if reason != ReasonNone {
+		t.Errorf("reason = %q, want ReasonNone; there is no namespace snapshot lookup without a resolved pod", reason)
+	}
 }
 
-// 命名空间快照缺失时不能猜：猜错会放行本应阻断的流量。
+// 命名空间快照缺失时不能猜：猜错会放行本应阻断的流量。这里必须直接
+// 携带 ReasonSnapshotMissing 返回，而不是退化成一个无法区分的 false——
+// 后者曾经让调用链把这种情况悄悄当成"不匹配"，产出一个可信的 DENY。
 func TestPeerSelectorMatchesMissingNamespaceSnapshot(t *testing.T) {
 	peer := networkingv1.NetworkPolicyPeer{NamespaceSelector: &metav1.LabelSelector{}}
 	pod := PodRef{ClusterID: "c1", Namespace: "unknown-ns", Name: "x"}
 
-	got, err := peerSelectorMatches(peer, "payment", "c1", endpointOf(pod), nsIndex())
+	got, reason, err := peerSelectorMatches(peer, "payment", "c1", endpointOf(pod), nsIndex())
 	if err != nil {
 		t.Fatalf("peerSelectorMatches: %v", err)
 	}
 	if got {
-		t.Error("missing namespace snapshot must not match; callers surface SNAPSHOT_MISSING")
+		t.Error("missing namespace snapshot must not match")
+	}
+	if reason != ReasonSnapshotMissing {
+		t.Errorf("reason = %q, want ReasonSnapshotMissing", reason)
 	}
 }

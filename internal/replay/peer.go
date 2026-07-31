@@ -17,18 +17,23 @@ import (
 //
 // 端点身份未还原（Pod 为 nil）时一律不匹配：selector 作用于标签，
 // 没有标签就没有匹配依据，此时只有 ipBlock 能覆盖。
+//
+// 返回的 UnknownReason 非 ReasonNone 时表示匹配本身不可判定（如命名空间
+// 快照缺失），由本函数直接携带原因返回，不再委托调用方重建——旧版本
+// 只返回 bool，调用链里没有任何一层真正把这种情况变成 SNAPSHOT_MISSING，
+// 结果是一条本可能放行的流量被静默判成一个可信的 DENY。
 func peerSelectorMatches(
 	peer networkingv1.NetworkPolicyPeer,
 	policyNamespace string,
 	clusterID string,
 	ep Endpoint,
 	namespaces map[string]NamespaceRef,
-) (bool, error) {
+) (bool, UnknownReason, error) {
 	if peer.PodSelector == nil && peer.NamespaceSelector == nil {
-		return false, nil
+		return false, ReasonNone, nil
 	}
 	if ep.Pod == nil {
-		return false, nil
+		return false, ReasonNone, nil
 	}
 	pod := ep.Pod
 	if pod.ClusterID != clusterID {
@@ -37,35 +42,35 @@ func peerSelectorMatches(
 		// 否则恰好同名的命名空间/标签会让本地策略误"选中"其他集群的 Pod
 		// —— 这正是 selectsPod 对策略主体一侧做的同一件事，这里对 peer 侧
 		// 补上，保持两侧语义对称。
-		return false, nil
+		return false, ReasonNone, nil
 	}
 
 	if peer.NamespaceSelector == nil {
 		// 仅 podSelector：限定在策略自身的命名空间内。
 		if pod.Namespace != policyNamespace {
-			return false, nil
+			return false, ReasonNone, nil
 		}
 	} else {
 		ns, ok := namespaces[pod.Namespace]
 		if !ok {
 			// 快照缺失时不猜：猜错会放行本应阻断的流量。
-			// 调用方负责把这种情况暴露为 SNAPSHOT_MISSING。
-			return false, nil
+			return false, ReasonSnapshotMissing, nil
 		}
 		matched, err := selectorMatches(peer.NamespaceSelector, ns.Labels)
 		if err != nil {
-			return false, err
+			return false, ReasonNone, err
 		}
 		if !matched {
-			return false, nil
+			return false, ReasonNone, nil
 		}
 	}
 
 	if peer.PodSelector == nil {
 		// 仅 namespaceSelector：命名空间内全部 Pod。
-		return true, nil
+		return true, ReasonNone, nil
 	}
-	return selectorMatches(peer.PodSelector, pod.Labels)
+	matched, err := selectorMatches(peer.PodSelector, pod.Labels)
+	return matched, ReasonNone, err
 }
 
 // ipBlockMatches 判断 IP 是否落在 ipBlock 的 CIDR 内且未被 except 排除。
@@ -112,11 +117,12 @@ func peerMatches(
 	clusterID string,
 	ep Endpoint,
 	namespaces map[string]NamespaceRef,
-) (bool, error) {
+) (bool, UnknownReason, error) {
 	if peer.IPBlock != nil {
-		// ipBlock 按 IP 匹配，不看 Pod 归属的集群 —— 这正是它能表达跨集群
-		// 对端的原因，因此这里不做集群校验。
-		return ipBlockMatches(peer.IPBlock, ep.IP)
+		// ipBlock 按 IP 匹配，不看 Pod 归属的集群，也不涉及命名空间快照——
+		// 一个 IP 要么落在 CIDR 内要么不落在，没有"不可判定"这一档。
+		matched, err := ipBlockMatches(peer.IPBlock, ep.IP)
+		return matched, ReasonNone, err
 	}
 	return peerSelectorMatches(peer, policyNamespace, clusterID, ep, namespaces)
 }

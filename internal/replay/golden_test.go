@@ -269,6 +269,26 @@ func TestGoldenEvaluationSemantics(t *testing.T) {
 			wantConf:    replay.ConfidenceTrusted,
 			wantUnknown: replay.ReasonPolicyMalformed,
 		},
+		// namespaceSelector 求值需要查快照里对端 Pod 所在命名空间的标签。
+		// 当那个命名空间不在快照索引里时，静默判 false 会把一条本可能
+		// 放行的流量变成一个可信的 DENY——namespaces() 里的所有用例都
+		// 恰好覆盖了它们引用的命名空间，这条用例故意用一个不在其中的
+		// 命名空间，才能把这条路径暴露出来。
+		{
+			name: "missing namespace snapshot yields unknown, not a silent deny",
+			policies: []networkingv1.NetworkPolicy{
+				npIngress("payment", "deny", nil, nil),
+				npIngress("payment", "allow-edge", nil, []networkingv1.NetworkPolicyIngressRule{{
+					From: []networkingv1.NetworkPolicyPeer{{
+						NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"role": "edge"}},
+					}},
+				}}),
+			},
+			flow:        flowBetween(pod("unlisted-ns", "src-1", "10.4.0.50", map[string]string{"app": "src"}), api, 8080),
+			wantVerdict: replay.VerdictUnknown,
+			wantConf:    replay.ConfidenceTrusted,
+			wantUnknown: replay.ReasonSnapshotMissing,
+		},
 	}
 
 	for _, tc := range cases {

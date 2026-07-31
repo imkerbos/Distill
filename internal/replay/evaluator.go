@@ -251,14 +251,21 @@ func (e *Evaluator) ruleAllows(r rule, policyNamespace string, peer Endpoint, f 
 	if len(r.peers) == 0 {
 		return true, ReasonNone, nil
 	}
+	// 与 portMatches 相同的累积模式：一个不可判定的 peer（如命名空间快照
+	// 缺失）不能让整条规则静默 false——但一旦后面某个 peer 真正匹配，
+	// ALLOW 必须照常成立，不可判定的 peer 不能倒过来拖累一个有效放行。
+	unresolved := ReasonNone
 	for _, p := range r.peers {
-		matched, err := peerMatches(p, policyNamespace, e.clusterID, peer, e.namespaces)
+		matched, reasonCode, err := peerMatches(p, policyNamespace, e.clusterID, peer, e.namespaces)
 		if err != nil {
 			return false, ReasonNone, err
 		}
 		if matched {
 			return true, ReasonNone, nil
 		}
+		if reasonCode != ReasonNone {
+			unresolved = reasonCode
+		}
 	}
-	return false, ReasonNone, nil
+	return false, unresolved, nil
 }
