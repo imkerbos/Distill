@@ -1,6 +1,9 @@
 package replay
 
 import (
+	"fmt"
+	"net/netip"
+
 	networkingv1 "k8s.io/api/networking/v1"
 )
 
@@ -54,4 +57,54 @@ func peerSelectorMatches(
 		return true, nil
 	}
 	return selectorMatches(peer.PodSelector, pod.Labels)
+}
+
+// ipBlockMatches 判断 IP 是否落在 ipBlock 的 CIDR 内且未被 except 排除。
+//
+// 解析失败返回错误而非静默 false：一条写错的 CIDR 静默不匹配，会让
+// 本该放行的流量被判成 DENY，进而生成一条错误的策略推荐。
+func ipBlockMatches(block *networkingv1.IPBlock, ip string) (bool, error) {
+	if block == nil {
+		return false, nil
+	}
+
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
+		return false, fmt.Errorf("parse endpoint ip %q: %w", ip, err)
+	}
+
+	cidr, err := netip.ParsePrefix(block.CIDR)
+	if err != nil {
+		return false, fmt.Errorf("parse ipBlock cidr %q: %w", block.CIDR, err)
+	}
+	if !cidr.Contains(addr) {
+		return false, nil
+	}
+
+	for _, e := range block.Except {
+		ex, err := netip.ParsePrefix(e)
+		if err != nil {
+			return false, fmt.Errorf("parse ipBlock except %q: %w", e, err)
+		}
+		if ex.Contains(addr) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// peerMatches 是 peer 匹配的统一入口。
+//
+// ipBlock 与 selector 在同一个 peer 内互斥（API 校验保证），因此
+// 按字段存在性分派即可。
+func peerMatches(
+	peer networkingv1.NetworkPolicyPeer,
+	policyNamespace string,
+	ep Endpoint,
+	namespaces map[string]NamespaceRef,
+) (bool, error) {
+	if peer.IPBlock != nil {
+		return ipBlockMatches(peer.IPBlock, ep.IP)
+	}
+	return peerSelectorMatches(peer, policyNamespace, ep, namespaces)
 }
