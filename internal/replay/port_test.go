@@ -141,3 +141,36 @@ func TestPortMatchesResolvedRuleWinsOverUnresolvedOne(t *testing.T) {
 		t.Errorf("reason = %q, want none once a rule matched", reason)
 	}
 }
+
+// 没有任何规则匹配时，未解析的命名端口必须浮出来 —— 静默判 false
+// 会变成一条错误的 DENY 预测，是本平台最危险的漏报方向。
+func TestPortMatchesUnresolvedSurfacesWhenNothingMatched(t *testing.T) {
+	ports := []networkingv1.NetworkPolicyPort{
+		namedPortRule("http", corev1.ProtocolTCP),
+		numericPort(8080, corev1.ProtocolTCP),
+	}
+
+	ok, reason := portMatches(ports, ProtocolTCP, 9090, nil)
+	if ok {
+		t.Error("no rule matches port 9090; want false")
+	}
+	if reason != ReasonNamedPortUnresolved {
+		t.Errorf("reason = %q, want %q — the accumulator must survive the loop", reason, ReasonNamedPortUnresolved)
+	}
+}
+
+// 命名端口必须同时匹配名字与协议：只对上名字就解析，会放行本应阻断的流量。
+func TestPortMatchesNamedPortRequiresProtocolMatch(t *testing.T) {
+	dest := &PodRef{
+		NamedPorts: []NamedPort{{Name: "http", Port: 8080, Protocol: ProtocolUDP}},
+	}
+	ports := []networkingv1.NetworkPolicyPort{namedPortRule("http", corev1.ProtocolTCP)}
+
+	ok, reason := portMatches(ports, ProtocolTCP, 8080, dest)
+	if ok {
+		t.Error("named port declared on UDP must not resolve for a TCP rule")
+	}
+	if reason != ReasonNamedPortUnresolved {
+		t.Errorf("reason = %q, want %q", reason, ReasonNamedPortUnresolved)
+	}
+}
