@@ -91,7 +91,7 @@ func TestPeerMatchesDispatchesToIPBlock(t *testing.T) {
 	peer := networkingv1.NetworkPolicyPeer{IPBlock: &networkingv1.IPBlock{CIDR: "8.8.8.0/24"}}
 	ep := Endpoint{IP: "8.8.8.8"}
 
-	got, err := peerMatches(peer, "payment", ep, nil)
+	got, err := peerMatches(peer, "payment", "c1", ep, nil)
 	if err != nil {
 		t.Fatalf("peerMatches: %v", err)
 	}

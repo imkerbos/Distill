@@ -201,13 +201,7 @@ func (e *Evaluator) ruleAllows(r rule, policyNamespace string, peer Endpoint, f 
 		return true, ReasonNone, nil
 	}
 	for _, p := range r.peers {
-		if p.IPBlock == nil && peer.Pod != nil && peer.Pod.ClusterID != e.clusterID {
-			// podSelector/namespaceSelector 只能选中本集群的 Pod：NetworkPolicy
-			// 是集群本地对象，跨集群语义只能靠 ipBlock 表达。不跳过的话，
-			// 恰好同名的命名空间/标签会让本地策略误"选中"其他集群的 Pod。
-			continue
-		}
-		matched, err := peerMatches(p, policyNamespace, peer, e.namespaces)
+		matched, err := peerMatches(p, policyNamespace, e.clusterID, peer, e.namespaces)
 		if err != nil {
 			return false, ReasonNone, err
 		}

@@ -98,7 +98,7 @@ func TestPeerSelectorMatches(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := peerSelectorMatches(tt.peer, "payment", tt.ep, namespaces)
+			got, err := peerSelectorMatches(tt.peer, "payment", "c1", tt.ep, namespaces)
 			if err != nil {
 				t.Fatalf("peerSelectorMatches: %v", err)
 			}
@@ -114,7 +114,7 @@ func TestPeerSelectorMatchesRequiresIdentity(t *testing.T) {
 	peer := networkingv1.NetworkPolicyPeer{PodSelector: &metav1.LabelSelector{}}
 	ep := Endpoint{IP: "8.8.8.8"}
 
-	got, err := peerSelectorMatches(peer, "payment", ep, nil)
+	got, err := peerSelectorMatches(peer, "payment", "c1", ep, nil)
 	if err != nil {
 		t.Fatalf("peerSelectorMatches: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestPeerSelectorMatchesMissingNamespaceSnapshot(t *testing.T) {
 	peer := networkingv1.NetworkPolicyPeer{NamespaceSelector: &metav1.LabelSelector{}}
 	pod := PodRef{ClusterID: "c1", Namespace: "unknown-ns", Name: "x"}
 
-	got, err := peerSelectorMatches(peer, "payment", endpointOf(pod), nsIndex())
+	got, err := peerSelectorMatches(peer, "payment", "c1", endpointOf(pod), nsIndex())
 	if err != nil {
 		t.Fatalf("peerSelectorMatches: %v", err)
 	}

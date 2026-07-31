@@ -20,6 +20,7 @@ import (
 func peerSelectorMatches(
 	peer networkingv1.NetworkPolicyPeer,
 	policyNamespace string,
+	clusterID string,
 	ep Endpoint,
 	namespaces map[string]NamespaceRef,
 ) (bool, error) {
@@ -30,6 +31,14 @@ func peerSelectorMatches(
 		return false, nil
 	}
 	pod := ep.Pod
+	if pod.ClusterID != clusterID {
+		// NetworkPolicy 是集群本地对象：podSelector/namespaceSelector 只能
+		// 选中发起策略所在集群里的 Pod。跨集群对端只能靠 ipBlock 匹配 IP，
+		// 否则恰好同名的命名空间/标签会让本地策略误"选中"其他集群的 Pod
+		// —— 这正是 selectsPod 对策略主体一侧做的同一件事，这里对 peer 侧
+		// 补上，保持两侧语义对称。
+		return false, nil
+	}
 
 	if peer.NamespaceSelector == nil {
 		// 仅 podSelector：限定在策略自身的命名空间内。
@@ -100,11 +109,14 @@ func ipBlockMatches(block *networkingv1.IPBlock, ip string) (bool, error) {
 func peerMatches(
 	peer networkingv1.NetworkPolicyPeer,
 	policyNamespace string,
+	clusterID string,
 	ep Endpoint,
 	namespaces map[string]NamespaceRef,
 ) (bool, error) {
 	if peer.IPBlock != nil {
+		// ipBlock 按 IP 匹配，不看 Pod 归属的集群 —— 这正是它能表达跨集群
+		// 对端的原因，因此这里不做集群校验。
 		return ipBlockMatches(peer.IPBlock, ep.IP)
 	}
-	return peerSelectorMatches(peer, policyNamespace, ep, namespaces)
+	return peerSelectorMatches(peer, policyNamespace, clusterID, ep, namespaces)
 }

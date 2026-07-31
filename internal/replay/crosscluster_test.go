@@ -28,6 +28,22 @@ func TestEvaluateMarksCrossClusterFlows(t *testing.T) {
 	}
 }
 
+// 外部地址没有 ClusterID，不能被当成跨集群流量：CrossCluster 是平台
+// 对外公布的已知敞口规模，把公网出向算进去会虚增这个数字。
+func TestEvaluateExternalEndpointIsNotCrossCluster(t *testing.T) {
+	e := replay.NewEvaluator(testCluster, nil, namespaces())
+
+	src := pod("gateway", "gw-1", "10.4.0.9", map[string]string{"app": "gateway"})
+	external := replay.Endpoint{IP: "8.8.8.8"}
+
+	got := e.Evaluate(replay.Flow{
+		Source: ep(src), Dest: external, Protocol: replay.ProtocolTCP, Port: 443,
+	})
+	if got.CrossCluster {
+		t.Error("an endpoint with no ClusterID must not be marked cross-cluster")
+	}
+}
+
 func TestEvaluateSameClusterIsNotCrossCluster(t *testing.T) {
 	e := replay.NewEvaluator(testCluster, nil, namespaces())
 
