@@ -5,8 +5,10 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"time"
 
 	"github.com/imkerbos/Distill/internal/auth"
@@ -49,15 +51,22 @@ func RequestIDFrom(ctx context.Context) string {
 	return id
 }
 
-// statusRecorder 记录实际写出的状态码，供日志使用。
+// statusRecorder 记录实际写出的状态码与业务码，供日志使用。
 type statusRecorder struct {
 	http.ResponseWriter
 	status int
+	code   response.Code
 }
 
-func (s *statusRecorder) WriteHeader(code int) {
-	s.status = code
-	s.ResponseWriter.WriteHeader(code)
+func (s *statusRecorder) WriteHeader(status int) {
+	s.status = status
+	s.ResponseWriter.WriteHeader(status)
+}
+
+// RecordCode 实现 response.CodeRecorder：业务失败一律 200，
+// 只有把 code 记进日志，运维才能在状态码之外看到另一半失败。
+func (s *statusRecorder) RecordCode(code response.Code) {
+	s.code = code
 }
 
 // RequestLogger 为每个请求输出一条完成日志。
@@ -77,12 +86,43 @@ func RequestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 				"method", r.Method,
 				"path", r.URL.Path,
 				"status", rec.status,
+				"code", int(rec.code),
 				"duration_ms", time.Since(start).Milliseconds(),
 			}
 			if sess, ok := SessionFrom(r.Context()); ok {
 				attrs = append(attrs, "user", sess.Username)
 			}
 			logger.Info("request completed", attrs...)
+		})
+	}
+}
+
+// Recoverer 拦截 handler 里逃逸出来的 panic。
+//
+// 必须装在 RequestID 与 RequestLogger 之后：panic 若一路冲出中间件栈，
+// 连接会被直接掐断，既没有响应包络，也不会产生那条完成日志——用户拿着
+// X-Request-Id 来报障时，日志里什么都查不到；panic 的堆栈还会以非 JSON
+// 的纯文本打到 stderr，破坏"日志全是 JSON"这条对采集侧的保证。
+//
+// panic 值本身只进日志，绝不回给调用方：它常常带着内部地址与文件路径。
+func Recoverer(logger *slog.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			defer func() {
+				rec := recover()
+				if rec == nil {
+					return
+				}
+				logger.Error("panic recovered",
+					"request_id", RequestIDFrom(r.Context()),
+					"method", r.Method,
+					"path", r.URL.Path,
+					"panic", fmt.Sprint(rec),
+					"stack", string(debug.Stack()))
+				response.WriteSystem(w, http.StatusInternalServerError, response.CodeInternal)
+			}()
+
+			next.ServeHTTP(w, r)
 		})
 	}
 }

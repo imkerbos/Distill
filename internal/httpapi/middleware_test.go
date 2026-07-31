@@ -12,6 +12,7 @@ import (
 	"github.com/imkerbos/Distill/internal/auth"
 	"github.com/imkerbos/Distill/internal/httpapi"
 	applog "github.com/imkerbos/Distill/internal/log"
+	"github.com/imkerbos/Distill/internal/response"
 )
 
 func TestRequestIDIsGeneratedAndEchoed(t *testing.T) {
@@ -49,13 +50,93 @@ func TestRequestLoggerEmitsJSONWithRequestID(t *testing.T) {
 	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
 		t.Fatalf("log line is not JSON: %v (%q)", err, buf.String())
 	}
-	for _, field := range []string{"request_id", "method", "path", "status", "duration_ms"} {
+	// code 与 status 同样必要：业务失败一律 200，日志里的 code 是运维
+	// 统计业务失败率的唯一信号（spec §4.3）。
+	for _, field := range []string{"request_id", "method", "path", "status", "code", "duration_ms"} {
 		if _, ok := got[field]; !ok {
 			t.Errorf("log line is missing %q: %v", field, got)
 		}
 	}
 	if got["path"] != "/api/v1/flows" {
 		t.Errorf("path = %v", got["path"])
+	}
+}
+
+// 业务失败的 code 必须进日志，否则一次 200 + 20002 在两侧都看不见：
+// 状态码统计看不到它，日志里也没有可告警的字段。
+func TestRequestLoggerRecordsBusinessCode(t *testing.T) {
+	var buf bytes.Buffer
+	logger, err := applog.New("INFO", &buf)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	h := httpapi.RequestID(httpapi.RequestLogger(logger)(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			response.WriteBusiness(w, response.CodeNotFound)
+		}),
+	))
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/v1/flows", nil))
+
+	var got map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("log line is not JSON: %v (%q)", err, buf.String())
+	}
+	if got["status"] != float64(200) {
+		t.Errorf("status = %v, want 200", got["status"])
+	}
+	if got["code"] != float64(20002) {
+		t.Errorf("code = %v, want 20002 — business failures are invisible to status-code alerts", got["code"])
+	}
+}
+
+// panic 必须被拦成一个正常的 500 包络，并且仍然留下带 request_id 的日志：
+// 让它冲出中间件栈，用户报障时手上的 request_id 会查不到任何东西。
+func TestRecovererTurnsPanicIntoInternalError(t *testing.T) {
+	var buf bytes.Buffer
+	logger, err := applog.New("INFO", &buf)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	h := httpapi.RequestID(httpapi.RequestLogger(logger)(httpapi.Recoverer(logger)(
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			panic("boom at 10.0.0.5:9050")
+		}),
+	)))
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/flows", nil))
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("body is not JSON: %v (%q)", err, rec.Body.String())
+	}
+	if body["code"] != float64(50001) {
+		t.Errorf("code = %v, want 50001", body["code"])
+	}
+	if strings.Contains(rec.Body.String(), "boom") {
+		t.Errorf("the panic value reached the response: %s", rec.Body.String())
+	}
+
+	requestID := rec.Header().Get("X-Request-Id")
+	if requestID == "" {
+		t.Fatal("no X-Request-Id on the response")
+	}
+	if !strings.Contains(buf.String(), requestID) {
+		t.Errorf("no log line carries request_id %q; a user reporting it would find nothing:\n%s",
+			requestID, buf.String())
+	}
+	if !strings.Contains(buf.String(), "request completed") {
+		t.Errorf("a panicking request produced no completion log line:\n%s", buf.String())
+	}
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if !json.Valid([]byte(line)) {
+			t.Errorf("log line is not JSON: %q", line)
+		}
 	}
 }
 

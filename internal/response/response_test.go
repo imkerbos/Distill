@@ -125,3 +125,49 @@ func TestMessageFallsBackForUnregisteredCode(t *testing.T) {
 		t.Errorf("Message() = %q, want the internal-error text", got)
 	}
 }
+
+// codeSpy 是一个实现了 CodeRecorder 的 ResponseWriter，代替日志中间件
+// 观察写出的业务码。
+type codeSpy struct {
+	*httptest.ResponseRecorder
+	seen []response.Code
+}
+
+func (c *codeSpy) RecordCode(code response.Code) {
+	c.seen = append(c.seen, code)
+}
+
+// 三个写出口都必须把 code 汇报给中间件：业务失败一律 200，
+// 日志里的 code 是运维统计业务失败率的唯一信号（spec §4.3）。
+func TestWritersReportCodeToRecorder(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		write func(http.ResponseWriter)
+		want  response.Code
+	}{
+		{"ok", func(w http.ResponseWriter) { response.WriteOK(w, nil) }, response.CodeOK},
+		{"business", func(w http.ResponseWriter) {
+			response.WriteBusiness(w, response.CodeNotFound)
+		}, response.CodeNotFound},
+		{"system", func(w http.ResponseWriter) {
+			response.WriteSystem(w, http.StatusInternalServerError, response.CodeInternal)
+		}, response.CodeInternal},
+	} {
+		spy := &codeSpy{ResponseRecorder: httptest.NewRecorder()}
+		tc.write(spy)
+		if len(spy.seen) != 1 || spy.seen[0] != tc.want {
+			t.Errorf("%s: recorded %v, want [%d]", tc.name, spy.seen, tc.want)
+		}
+	}
+}
+
+// 不实现 CodeRecorder 的 ResponseWriter 必须照常工作：
+// 中间件是可选的，响应本身不能依赖它存在。
+func TestWriteWorksWithoutRecorder(t *testing.T) {
+	rec := httptest.NewRecorder()
+	response.WriteBusiness(rec, response.CodeInvalidParam)
+
+	if got := decode(t, rec)["code"]; got != float64(20001) {
+		t.Errorf("code = %v, want 20001", got)
+	}
+}

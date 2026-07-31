@@ -35,6 +35,32 @@ func (brokenReader) Quality(context.Context, string) (store.Quality, error) {
 	return store.Quality{}, errors.New("bigquery: connection refused at 10.0.0.5:9050")
 }
 
+// panicReader 在查询时 panic，用来验证路由本身确实装了 Recoverer——
+// 单独测中间件只能证明它管用，证明不了它被挂上去了。
+type panicReader struct{ brokenReader }
+
+func (panicReader) Clusters(context.Context) ([]store.ClusterSummary, error) {
+	panic("reader exploded at 10.0.0.5:9050")
+}
+
+func TestRouterRecoversPanics(t *testing.T) {
+	h, _, cookie := newTestRouter(t, panicReader{})
+	rec := authedGet(t, h, cookie, "/api/v1/clusters")
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+	body := bodyOf(t, rec)
+	if body["code"] != float64(50001) {
+		t.Errorf("code = %v, want 50001", body["code"])
+	}
+	for _, secret := range []string{"exploded", "10.0.0.5", "9050"} {
+		if strings.Contains(rec.Body.String(), secret) {
+			t.Errorf("panic response leaked %q: %s", secret, rec.Body.String())
+		}
+	}
+}
+
 func authedGet(t *testing.T, h http.Handler, cookie *http.Cookie, path string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, path, nil)

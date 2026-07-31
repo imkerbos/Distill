@@ -31,6 +31,9 @@ func NewRouter(d Deps) http.Handler {
 	r := chi.NewRouter()
 	r.Use(RequestID)
 	r.Use(RequestLogger(d.Logger))
+	// Recoverer 在日志之后：panic 的请求同样要留下一条完成日志，
+	// 且日志里要有可供用户报障的 request_id。
+	r.Use(Recoverer(d.Logger))
 
 	r.NotFound(func(w http.ResponseWriter, _ *http.Request) {
 		response.WriteSystem(w, http.StatusNotFound, response.CodeNotFound)

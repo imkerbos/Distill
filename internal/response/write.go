@@ -38,8 +38,20 @@ func WriteSystem(w http.ResponseWriter, status int, code Code) {
 	write(w, status, Envelope{Code: code, Msg: code.Message(), Data: nil})
 }
 
+// CodeRecorder 让中间件观察到 handler 实际写出的业务码。
+//
+// HTTP 状态码看不出业务失败（业务失败一律 200），日志里的 code 是唯一能
+// 统计业务失败率的信号 —— 见 spec §4.3 的运维提示。
+type CodeRecorder interface {
+	// RecordCode 记录本次响应写出的业务码。
+	RecordCode(Code)
+}
+
 // write 序列化并写出包络。
 func write(w http.ResponseWriter, status int, env Envelope) {
+	if rec, ok := w.(CodeRecorder); ok {
+		rec.RecordCode(env.Code)
+	}
 	w.Header().Set("Content-Type", contentType)
 	w.WriteHeader(status)
 	// 编码失败时响应头已发出，无法再改状态码；错误留给上层的日志中间件记录。
