@@ -11,8 +11,6 @@ import (
 //
 // 不这样做的话，未知用户会立即返回，而存在的用户要等一次 bcrypt 计算，
 // 响应耗时的差异足以让攻击者枚举出哪些账号真实存在。
-//
-//nolint:gosec // G101: 这不是凭据，是固定的 bcrypt 哈希，只用于拉平耗时。
 var dummyHash = []byte("$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy")
 
 // Verifier 校验本地账号。
