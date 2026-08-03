@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -112,6 +113,10 @@ func Recoverer(logger *slog.Logger) func(http.Handler) http.Handler {
 				rec := recover()
 				if rec == nil {
 					return
+				}
+				if err, ok := rec.(error); ok && errors.Is(err, http.ErrAbortHandler) {
+					// 标准库约定：这个哨兵表示"静默中止"，不该被当成 panic 记录。
+					panic(rec)
 				}
 				logger.Error("panic recovered",
 					"request_id", RequestIDFrom(r.Context()),

@@ -374,3 +374,49 @@ func TestFilterValueEnumsAreClosed(t *testing.T) {
 		}
 	}
 }
+
+// 从质量页点进流量列表必须看到同一批流量。两个数字对不上时，
+// total 字段会把一个不完整的集合断言成完整的 —— 而差额恰好是
+// 跨集群敞口，正是这个界面存在的理由。
+func TestFlowsClusterFilterMatchesQualityTotal(t *testing.T) {
+	r := newReader()
+	ctx := context.Background()
+
+	for _, cluster := range []string{"prod-asia-1", "prod-eu-1"} {
+		q, err := r.Quality(ctx, cluster)
+		if err != nil {
+			t.Fatalf("Quality(%s): %v", cluster, err)
+		}
+		page, err := r.Flows(ctx, store.FlowFilter{Cluster: cluster, Limit: 1000})
+		if err != nil {
+			t.Fatalf("Flows(%s): %v", cluster, err)
+		}
+		if page.Total != q.TotalFlows {
+			t.Errorf("%s: flow list total %d != quality totalFlows %d — the drill-down disagrees with the screen it came from",
+				cluster, page.Total, q.TotalFlows)
+		}
+	}
+}
+
+// 跨集群流量必须出现在它涉及的两个集群的列表里，否则从任一侧看
+// 这个敞口都是隐形的。
+func TestCrossClusterFlowsAppearForBothClusters(t *testing.T) {
+	r := newReader()
+	ctx := context.Background()
+
+	for _, cluster := range []string{"prod-asia-1", "prod-eu-1"} {
+		page, err := r.Flows(ctx, store.FlowFilter{Cluster: cluster, Limit: 1000})
+		if err != nil {
+			t.Fatalf("Flows(%s): %v", cluster, err)
+		}
+		cross := 0
+		for _, f := range page.Items {
+			if f.CrossCluster {
+				cross++
+			}
+		}
+		if cross == 0 {
+			t.Errorf("%s: no cross-cluster rows in its own flow list", cluster)
+		}
+	}
+}

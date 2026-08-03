@@ -413,7 +413,10 @@ func (r *FixtureReader) Flows(_ context.Context, filter FlowFilter) (FlowPage, e
 
 	out := make([]FlowRecord, 0, len(r.fleet.Flows))
 	for _, f := range r.fleet.Flows {
-		if filter.Cluster != "" && owningCluster(f.Flow) != filter.Cluster {
+		// involvesCluster，不是 owningCluster：这个筛选器是从 Topology/Quality
+		// 点进来的钻取入口，要用它们同一条"是否算这个集群的"规则，否则跨集群
+		// flow 在概览页被计入源集群，点进列表却因为目的端不是它而被过滤掉。
+		if filter.Cluster != "" && !involvesCluster(f.Flow, filter.Cluster) {
 			continue
 		}
 		rec, _ := r.toFlowRecord(f)
