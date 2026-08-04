@@ -66,7 +66,7 @@ export default function LoginPage() {
 
         <button type="submit" disabled={busy} style={{
           width: '100%', padding: '10px', fontSize: 14, fontWeight: 500,
-          color: '#fff', background: busy ? 'var(--text-muted)' : 'var(--text)',
+          color: 'var(--text-on-dark)', background: busy ? 'var(--text-muted)' : 'var(--text)',
           border: 'none', borderRadius: 'var(--radius)',
           cursor: busy ? 'default' : 'pointer',
         }}>

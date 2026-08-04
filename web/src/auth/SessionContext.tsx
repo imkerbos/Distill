@@ -38,8 +38,14 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const logout = useCallback(async () => {
-    await api.logout()
-    setIdentity(null)
+    // 服务端调用失败（网络、5xx）也要在本地清空身份：用户点了登出，
+    // 就不能让他继续以为自己还挂在一个可能已经失效的会话上。
+    // 401 会经 onUnauthorized 自愈，这里兜底非 401 的失败路径。
+    try {
+      await api.logout()
+    } finally {
+      setIdentity(null)
+    }
   }, [])
 
   const value = useMemo(

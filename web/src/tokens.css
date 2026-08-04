@@ -26,6 +26,8 @@
   --border: #e3e3e0;
   --text: #1c1c1a;
   --text-muted: #6b6b66;
+  /* 深色底（如按钮）上的文字色，与 --text 分开维护，避免深浅两套底色抢同一个变量。 */
+  --text-on-dark: #ffffff;
 
   --space-1: 4px;
   --space-2: 8px;
