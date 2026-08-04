@@ -1,9 +1,25 @@
-/** App 是应用根组件。Task 4 接入路由，此处先验证工程与代理可用。 */
-export default function App() {
+import { SessionProvider, useSession } from './auth/SessionContext'
+import LoginPage from './pages/LoginPage'
+
+function Shell() {
+  const { identity, loading, logout } = useSession()
+
+  if (loading) return <div style={{ padding: 'var(--space-5)' }}>加载中…</div>
+  if (!identity) return <LoginPage />
+
   return (
     <main style={{ padding: 'var(--space-5)' }}>
-      <h1>Distill</h1>
-      <p style={{ color: 'var(--text-muted)' }}>骨架就绪。</p>
+      <p>已登录：{identity.username}</p>
+      <button onClick={logout}>登出</button>
     </main>
+  )
+}
+
+/** App 是应用根组件。Task 4 用真实路由替换 Shell 的占位内容。 */
+export default function App() {
+  return (
+    <SessionProvider>
+      <Shell />
+    </SessionProvider>
   )
 }
