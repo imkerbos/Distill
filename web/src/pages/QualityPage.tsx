@@ -1,6 +1,5 @@
-import { useEffect, useState } from 'react'
 import { api } from '../api/client'
-import type { Quality } from '../api/types'
+import { useResource } from '../api/useResource'
 
 const REASON_LABEL: Record<string, string> = {
   POLICY_MALFORMED: '策略无法解析',
@@ -19,17 +18,10 @@ const REASON_LABEL: Record<string, string> = {
 const pct = (v: number) => `${(v * 100).toFixed(1)}%`
 
 export default function QualityPage({ cluster }: { cluster: string }) {
-  const [q, setQ] = useState<Quality | null>(null)
-  const [error, setError] = useState('')
-
-  useEffect(() => {
-    if (!cluster) return
-    setQ(null); setError('')
-    api.quality(cluster).then(setQ).catch((e) => setError(String(e.message ?? e)))
-  }, [cluster])
+  const { data: q, error, loading } = useResource(cluster, () => api.quality(cluster))
 
   if (error) return <p style={{ color: 'var(--verdict-deny)' }}>{error}</p>
-  if (!q) return <p style={{ color: 'var(--text-muted)' }}>加载中…</p>
+  if (loading || !q) return <p style={{ color: 'var(--text-muted)' }}>加载中…</p>
 
   return (
     <div>

@@ -1,6 +1,5 @@
-import { useEffect, useState } from 'react'
 import { api } from '../api/client'
-import type { Decision } from '../api/types'
+import { useResource } from '../api/useResource'
 import { CrossClusterMark, UnmanagedMark, VerdictBadge } from './Verdict'
 
 const REASON_LABEL: Record<string, string> = {
@@ -18,13 +17,7 @@ const REASON_LABEL: Record<string, string> = {
 }
 
 export default function DecisionDrawer({ flowID, onClose }: { flowID: string; onClose: () => void }) {
-  const [d, setD] = useState<Decision | null>(null)
-  const [error, setError] = useState('')
-
-  useEffect(() => {
-    setD(null); setError('')
-    api.decision(flowID).then(setD).catch((e) => setError(String(e.message ?? e)))
-  }, [flowID])
+  const { data: d, error } = useResource(flowID, () => api.decision(flowID))
 
   return (
     <aside style={{

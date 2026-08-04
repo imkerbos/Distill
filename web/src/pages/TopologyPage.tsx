@@ -1,20 +1,12 @@
-import { useEffect, useState } from 'react'
 import { api } from '../api/client'
-import type { Topology } from '../api/types'
+import { useResource } from '../api/useResource'
 import TopologyGraph from '../components/TopologyGraph'
 
 export default function TopologyPage({ cluster }: { cluster: string }) {
-  const [topo, setTopo] = useState<Topology | null>(null)
-  const [error, setError] = useState('')
-
-  useEffect(() => {
-    if (!cluster) return
-    setTopo(null); setError('')
-    api.topology(cluster).then(setTopo).catch((e) => setError(String(e.message ?? e)))
-  }, [cluster])
+  const { data: topo, error, loading } = useResource(cluster, () => api.topology(cluster))
 
   if (error) return <p style={{ color: 'var(--verdict-deny)' }}>{error}</p>
-  if (!topo) return <p style={{ color: 'var(--text-muted)' }}>加载中…</p>
+  if (loading || !topo) return <p style={{ color: 'var(--text-muted)' }}>加载中…</p>
 
   return (
     <div>

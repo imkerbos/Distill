@@ -1,25 +1,24 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { api } from '../api/client'
-import type { Confidence, FlowPage, Verdict } from '../api/types'
+import type { Confidence, Verdict } from '../api/types'
+import { useResource } from '../api/useResource'
 import DecisionDrawer from '../components/DecisionDrawer'
 import { CrossClusterMark, UnmanagedMark, VerdictBadge } from '../components/Verdict'
 
 export default function FlowsPage({ cluster }: { cluster: string }) {
-  const [page, setPage] = useState<FlowPage | null>(null)
   const [verdict, setVerdict] = useState<Verdict | ''>('')
   const [confidence, setConfidence] = useState<Confidence | ''>('')
   const [selected, setSelected] = useState<string | null>(null)
-  const [error, setError] = useState('')
 
-  useEffect(() => {
-    if (!cluster) return
-    setPage(null); setError('')
-    api.flows({
-      cluster,
-      verdict: verdict || undefined,
-      confidence: confidence || undefined,
-    }).then(setPage).catch((e) => setError(String(e.message ?? e)))
-  }, [cluster, verdict, confidence])
+  // key 编码了这次请求依赖的全部筛选条件：集群、判定、可信度任意一个
+  // 变了都必须作废飞行中的旧请求，否则慢的旧响应可能落在快的新响应
+  // 之后，把已经切换好的筛选结果重新覆盖回旧数据。
+  const key = cluster ? `${cluster}|${verdict}|${confidence}` : ''
+  const { data: page, error } = useResource(key, () => api.flows({
+    cluster,
+    verdict: verdict || undefined,
+    confidence: confidence || undefined,
+  }))
 
   return (
     <div>
