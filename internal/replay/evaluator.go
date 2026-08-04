@@ -1,6 +1,8 @@
 package replay
 
 import (
+	"fmt"
+
 	networkingv1 "k8s.io/api/networking/v1"
 )
 
@@ -263,6 +265,15 @@ func (e *Evaluator) evaluateSide(subject PodRef, peer Endpoint, f Flow, dir Dire
 				// 在出错之前已经累积的原因，一并计入，不能丢。
 				unresolved = escalate(unresolved, ReasonPolicyMalformed)
 				unresolved = escalate(unresolved, reasonCode)
+
+				// 规则级错误（典型是 ipBlock 的 CIDR 写错）比 selectsPod 级
+				// 错误常见得多，之前却没有留下 Detail：解释器只能显示一个
+				// 空理由，找不到该改哪条策略。命名策略与规则下标，让它和
+				// selectsPod 分支给出的解释同样具体、可定位。
+				malformed = true
+				if detail := fmt.Sprintf("policy %s/%s rule %d: %s", p.Namespace, p.Name, idx, err); malformedDetail == "" || detail < malformedDetail {
+					malformedDetail = detail
+				}
 				continue
 			}
 			unresolved = escalate(unresolved, reasonCode)
