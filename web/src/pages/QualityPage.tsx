@@ -1,19 +1,6 @@
 import { api } from '../api/client'
+import { UNKNOWN_REASON_LABEL } from '../api/types'
 import { useResource } from '../api/useResource'
-
-const REASON_LABEL: Record<string, string> = {
-  POLICY_MALFORMED: '策略无法解析',
-  SNAPSHOT_MISSING: '资产快照缺失',
-  IP_AMBIGUOUS: 'IP 复用不可区分',
-  CLUSTER_AMBIGUOUS: '跨集群网段重叠',
-  IDENTITY_LOST_MESH: 'sidecar 遮蔽身份',
-  CCNP_PRESENT: '存在 Cilium 策略',
-  NAT_TRANSLATED: '地址被转换',
-  EXTERNAL_NO_IDENTITY: '公网流量无主体',
-  NAMED_PORT_UNRESOLVED: '命名端口无法解析',
-  LOG_SAMPLED_OUT: '日志采样丢失',
-  UNSPECIFIED: '未记录原因',
-}
 
 const pct = (v: number) => `${(v * 100).toFixed(1)}%`
 
@@ -60,7 +47,7 @@ export default function QualityPage({ cluster }: { cluster: string }) {
                 .sort((a, b) => b[1] - a[1])
                 .map(([reason, count]) => (
                   <tr key={reason} style={{ borderTop: '1px solid var(--border)' }}>
-                    <td style={{ padding: '8px', width: 220 }}>{REASON_LABEL[reason] ?? reason}</td>
+                    <td style={{ padding: '8px', width: 220 }}>{UNKNOWN_REASON_LABEL[reason] ?? reason}</td>
                     <td style={{ padding: '8px', fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-muted)' }}>{reason}</td>
                     <td style={{ padding: '8px', textAlign: 'right', fontWeight: 500 }}>{count} 条</td>
                   </tr>

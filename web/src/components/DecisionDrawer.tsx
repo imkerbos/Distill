@@ -1,20 +1,7 @@
 import { api } from '../api/client'
+import { UNKNOWN_REASON_LABEL } from '../api/types'
 import { useResource } from '../api/useResource'
 import { CrossClusterMark, UnmanagedMark, VerdictBadge } from './Verdict'
-
-const REASON_LABEL: Record<string, string> = {
-  POLICY_MALFORMED: '策略本身无法解析',
-  SNAPSHOT_MISSING: '缺少对应时刻的资产快照',
-  IP_AMBIGUOUS: '同集群内 IP 复用，时间上不可区分',
-  CLUSTER_AMBIGUOUS: '跨集群网段重叠，归属不唯一',
-  IDENTITY_LOST_MESH: 'sidecar 导致源身份丢失',
-  CCNP_PRESENT: '存在 Cilium 策略，标准 NetworkPolicy 结论不可靠',
-  NAT_TRANSLATED: '地址被转换，无法还原原始主体',
-  EXTERNAL_NO_IDENTITY: '公网流量无可归属主体',
-  NAMED_PORT_UNRESOLVED: '命名端口无法解析为具体端口号',
-  LOG_SAMPLED_OUT: '日志采样或限流导致记录缺失',
-  UNSPECIFIED: '未记录具体原因',
-}
 
 export default function DecisionDrawer({ flowID, onClose }: { flowID: string; onClose: () => void }) {
   const { data: d, error } = useResource(flowID, () => api.decision(flowID))
@@ -55,7 +42,7 @@ export default function DecisionDrawer({ flowID, onClose }: { flowID: string; on
           {d.verdict === 'UNKNOWN' && (
             <Field label="为什么无法判定">
               <div style={{ color: 'var(--verdict-unknown)', fontWeight: 500 }}>
-                {REASON_LABEL[d.unknownReason] ?? d.unknownReason}
+                {UNKNOWN_REASON_LABEL[d.unknownReason] ?? d.unknownReason}
               </div>
               {d.reason.detail && (
                 <pre style={{

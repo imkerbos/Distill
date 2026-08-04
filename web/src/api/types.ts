@@ -104,3 +104,24 @@ export interface FlowFilter {
   confidence?: Confidence
   limit?: number
 }
+
+/**
+ * unknownReason 是后端的封闭枚举；这份文案是唯一副本，抽屉和数据质量页
+ * 都从这里取，不各自维护一份——两份文案一旦分别维护就必然措辞漂移，
+ * 而后端新增枚举值时也只有一处需要同步（对应 CLAUDE.md「新增原因要
+ * 同步更新枚举与统计口径」）。未收录的值直接展示原始字符串，不丢弃、
+ * 不留空。
+ */
+export const UNKNOWN_REASON_LABEL: Record<string, string> = {
+  POLICY_MALFORMED: '策略本身无法解析',
+  SNAPSHOT_MISSING: '缺少对应时刻的资产快照',
+  IP_AMBIGUOUS: '同集群内 IP 复用，时间上不可区分',
+  CLUSTER_AMBIGUOUS: '跨集群网段重叠，归属不唯一',
+  IDENTITY_LOST_MESH: 'sidecar 导致源身份丢失',
+  CCNP_PRESENT: '存在 Cilium 策略，标准 NetworkPolicy 结论不可靠',
+  NAT_TRANSLATED: '地址被转换，无法还原原始主体',
+  EXTERNAL_NO_IDENTITY: '公网流量无可归属主体',
+  NAMED_PORT_UNRESOLVED: '命名端口无法解析为具体端口号',
+  LOG_SAMPLED_OUT: '日志采样或限流导致记录缺失',
+  UNSPECIFIED: '未记录具体原因',
+}
