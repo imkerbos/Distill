@@ -1,0 +1,53 @@
+/*
+ * 语义色是硬约束，不是主题。ALLOW / DENY / UNKNOWN 各自唯一，
+ * 全站不得把它们用于非语义场景（例如拿 DENY 的红做删除按钮）——
+ * 一旦复用，用户就无法再从颜色读出判定结论。
+ */
+:root {
+  /* 判定语义色 */
+  --verdict-allow: #1a7f5a;
+  --verdict-allow-bg: #e8f5f0;
+  --verdict-deny: #b3261e;
+  --verdict-deny-bg: #fdeceb;
+  --verdict-unknown: #8a6d1f;
+  --verdict-unknown-bg: #fdf6e3;
+
+  /*
+   * DEGRADED 用描边表达，不设独立填充色也不降低对比度。
+   * 弱化它等同于隐瞒平台的能力边界 —— 它的结论仍然成立，
+   * 只是不可信，必须与正常结论同等显著。
+   */
+  --degraded-stroke: #6b4fbb;
+  --degraded-stroke-width: 2px;
+
+  /* 中性色：克制、低饱和，让语义色成为画面上唯一的强信号 */
+  --bg: #fbfbfa;
+  --surface: #ffffff;
+  --border: #e3e3e0;
+  --text: #1c1c1a;
+  --text-muted: #6b6b66;
+  /* 深色底（如按钮）上的文字色，与 --text 分开维护，避免深浅两套底色抢同一个变量。 */
+  --text-on-dark: #ffffff;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 16px;
+  --space-4: 24px;
+  --space-5: 40px;
+
+  --radius: 6px;
+  --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+          'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.5;
+}
