@@ -1,6 +1,7 @@
 package replay_test
 
 import (
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -30,6 +31,11 @@ type goldenCase struct {
 	wantCrossClus      bool
 	wantMatchedPolicy  string
 	wantMatchedRuleIdx int
+	// wantDetailContains, when set, pins a substring Reason.Detail must
+	// contain. Left empty on cases where Detail is not part of what this
+	// row is fixing in place, so it opts out of the check rather than
+	// asserting an empty string.
+	wantDetailContains string
 }
 
 // assertUnknownReasonInvariant 固化 verdict 与 unknown_reason 的互相绑定：
@@ -323,6 +329,27 @@ func TestGoldenEvaluationSemantics(t *testing.T) {
 			wantMatchedPolicy:  "",
 			wantMatchedRuleIdx: -1,
 		},
+		// 同一个缺陷类别，触发点在规则级而非 selectsPod：ipBlock 的 CIDR
+		// 写错了。这是三种触发点里在真实数据集中最常见的一种（一次 YAML
+		// 笔误），Detail 必须像 podSelector 那条一样指名是哪条策略、哪个
+		// 规则下标出的错，否则解释器对着这条 UNKNOWN 只能交白卷。
+		{
+			name: "malformed rule-level ipblock yields unknown with a named detail",
+			policies: []networkingv1.NetworkPolicy{
+				npIngress("payment", "bad-cidr", nil, []networkingv1.NetworkPolicyIngressRule{{
+					From: []networkingv1.NetworkPolicyPeer{{
+						IPBlock: &networkingv1.IPBlock{CIDR: "not-a-cidr"},
+					}},
+				}}),
+			},
+			flow:               flowBetween(gw, api, 8080),
+			wantVerdict:        replay.VerdictUnknown,
+			wantConf:           replay.ConfidenceTrusted,
+			wantUnknown:        replay.ReasonPolicyMalformed,
+			wantMatchedPolicy:  "",
+			wantMatchedRuleIdx: -1,
+			wantDetailContains: "payment/bad-cidr",
+		},
 		// namespaceSelector 求值需要查快照里对端 Pod 所在命名空间的标签。
 		// 当那个命名空间不在快照索引里时，静默判 false 会把一条本可能
 		// 放行的流量变成一个可信的 DENY——namespaces() 里的所有用例都
@@ -388,6 +415,9 @@ func TestGoldenEvaluationSemantics(t *testing.T) {
 			}
 			if got.Reason.MatchedRuleIdx != tc.wantMatchedRuleIdx {
 				t.Errorf("Reason.MatchedRuleIdx = %d, want %d", got.Reason.MatchedRuleIdx, tc.wantMatchedRuleIdx)
+			}
+			if tc.wantDetailContains != "" && !strings.Contains(got.Reason.Detail, tc.wantDetailContains) {
+				t.Errorf("Reason.Detail = %q, want it to contain %q", got.Reason.Detail, tc.wantDetailContains)
 			}
 			assertUnknownReasonInvariant(t, got)
 		})
