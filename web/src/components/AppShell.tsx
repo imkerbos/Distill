@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { NavLink, useNavigate } from 'react-router-dom'
 import { api } from '../api/client'
 import type { ClusterSummary } from '../api/types'
@@ -13,14 +13,22 @@ interface Props {
 export default function AppShell({ cluster, onClusterChange, children }: Props) {
   const { identity, logout } = useSession()
   const [clusters, setClusters] = useState<ClusterSummary[]>([])
+  const [clustersError, setClustersError] = useState(false)
   const navigate = useNavigate()
+
+  // 只在挂载时取一次集群列表：切换集群不会改变"有哪些集群"这个事实，
+  // 把 cluster 放进依赖数组会让每次手动选择都重新拉一遍列表，纯浪费。
+  // 用 ref 读最新的 cluster，避免在只运行一次的 effect 里闭包住挂载时的旧值。
+  const clusterRef = useRef(cluster)
+  clusterRef.current = cluster
 
   useEffect(() => {
     api.clusters().then((cs) => {
       setClusters(cs)
-      if (!cluster && cs.length > 0) onClusterChange(cs[0].id)
-    }).catch(() => setClusters([]))
-  }, [cluster, onClusterChange])
+      setClustersError(false)
+      if (!clusterRef.current && cs.length > 0) onClusterChange(cs[0].id)
+    }).catch(() => setClustersError(true))
+  }, [onClusterChange])
 
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '220px 1fr', minHeight: '100vh' }}>
@@ -47,6 +55,13 @@ export default function AppShell({ cluster, onClusterChange, children }: Props) 
               <option key={c.id} value={c.id}>{c.id}</option>
             ))}
           </select>
+          {clustersError && (
+            <span style={{
+              display: 'block', marginTop: 4, fontSize: 12, color: 'var(--verdict-deny)',
+            }}>
+              集群列表加载失败
+            </span>
+          )}
         </label>
 
         {[

@@ -38,11 +38,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const logout = useCallback(async () => {
-    // 服务端调用失败（网络、5xx）也要在本地清空身份：用户点了登出，
-    // 就不能让他继续以为自己还挂在一个可能已经失效的会话上。
-    // 401 会经 onUnauthorized 自愈，这里兜底非 401 的失败路径。
     try {
       await api.logout()
+    } catch {
+      // 服务端登出失败（网络、5xx）不阻止本地登出：用户点了登出就必须登出。
+      // 吞掉异常是刻意的 —— 让它逃逸只会变成一条没人处理的 rejection，
+      // 而本地身份无论如何都要清空，下面的 finally 负责这件事。
     } finally {
       setIdentity(null)
     }
