@@ -1,0 +1,16 @@
+services:
+  distill-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    ports:
+      - "10100:10100"
+    volumes:
+      - .:/app
+      # 命名卷保存 module cache，否则每次重建都要重拉 k8s.io 依赖。
+      - distill-gomod:/go/pkg/mod
+    environment:
+      DISTILL_LOG__LEVEL: INFO
+
+volumes:
+  distill-gomod:

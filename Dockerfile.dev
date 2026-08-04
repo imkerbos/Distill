@@ -1,0 +1,11 @@
+# 开发镜像：含完整 Go 工具链与 air，源码由 compose 挂载进来。
+# 刻意不用精简运行时镜像 —— 热更新需要在容器内重新编译。
+FROM golang:1.25
+
+WORKDIR /app
+
+RUN go install github.com/air-verse/air@v1.61.5
+
+EXPOSE 10100
+
+CMD ["air", "-c", ".air.toml"]
