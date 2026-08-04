@@ -3,6 +3,7 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import AppShell from './components/AppShell'
 import { SessionProvider, useSession } from './auth/SessionContext'
 import LoginPage from './pages/LoginPage'
+import TopologyPage from './pages/TopologyPage'
 
 function Protected() {
   const { identity, loading } = useSession()
@@ -15,7 +16,7 @@ function Protected() {
   return (
     <AppShell cluster={cluster} onClusterChange={setCluster}>
       <Routes>
-        <Route path="/topology" element={<Placeholder name="网络拓扑" cluster={cluster} />} />
+        <Route path="/topology" element={<TopologyPage cluster={cluster} />} />
         <Route path="/flows" element={<Placeholder name="流量与判定" cluster={cluster} />} />
         <Route path="/quality" element={<Placeholder name="数据质量" cluster={cluster} />} />
         <Route path="*" element={<Navigate to="/topology" replace />} />
