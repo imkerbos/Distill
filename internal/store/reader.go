@@ -210,4 +210,6 @@ type Reader interface {
 	Flow(ctx context.Context, id string) (Decision, bool, error)
 	// Quality 返回指定集群的数据质量。集群不存在时返回错误。
 	Quality(ctx context.Context, clusterID string) (Quality, error)
+	// Security 返回指定集群的安全发现。集群不存在时返回错误。
+	Security(ctx context.Context, clusterID string, window TimeWindow) (SecurityReport, error)
 }
