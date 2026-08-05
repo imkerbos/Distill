@@ -7,8 +7,10 @@ server:
 auth:
   session_ttl: 8h
   users:
-    - username: demo
-      password_hash: "$2a$10$mK1c.i91UhppAqPiuftvvO2ua4MZhupy0thLDhjLtU8mN.KLlqJ1m"
+    # 本地 demo 凭据：admin / admin123。明文只应出现在这条注释和 README 里 ——
+    # 这套账号仅用于 fixture 数据的本地演示，不得随配置进入任何真实环境。
+    - username: admin
+      password_hash: "$2a$10$xoVvLW2pGWd/EStkHBl31OzDnxv9ImRRRPUT5vFSHRDQxiSCoRV1u"
 
 log:
   level: INFO
