@@ -138,3 +138,47 @@ export const UNKNOWN_REASON_LABEL: Record<string, string> = {
   LOG_SAMPLED_OUT: '日志采样或限流导致记录缺失',
   UNSPECIFIED: '未记录具体原因',
 }
+
+/** 高风险端口的风险来源。封闭枚举，与后端 store.RiskCategory 对齐。 */
+export type RiskCategory = 'ADMIN_PLAINTEXT' | 'DATABASE' | 'FILE_SHARE'
+
+/** 风险连接所处的位置。与 RiskCategory 分列，不合成单一分数。 */
+export type RiskPosition = 'EGRESS_INTERNET' | 'CROSS_NAMESPACE' | 'SAME_NAMESPACE'
+
+export interface RiskPort {
+  port: number
+  name: string
+  category: RiskCategory
+}
+
+export interface RiskyFlow extends FlowRecord {
+  category: RiskCategory
+  position: RiskPosition
+  portName: string
+}
+
+export interface EgressTarget {
+  address: string
+  ports: number[]
+  flowCount: number
+  /** 被放行的条数。与总数分列：畅通的外联与已被挡住的外联不是一回事。 */
+  allowedCount: number
+  unknownCount: number
+}
+
+export interface NakedPod {
+  cluster: string
+  namespace: string
+  name: string
+}
+
+export interface SecurityReport {
+  cluster: string
+  /** 流量类发现的时间窗。nakedPods 来自资产快照，不受此窗口约束。 */
+  window: TimeWindow
+  riskyFlows: RiskyFlow[]
+  egressTargets: EgressTarget[]
+  nakedPods: NakedPod[]
+  /** 判定所用的端口清单。报告为空时靠它区分"查过没发现"与"没查"。 */
+  riskPortCatalog: RiskPort[]
+}

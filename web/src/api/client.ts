@@ -1,6 +1,6 @@
 import type {
   ClusterSummary, Decision, Envelope, FlowFilter, FlowPage,
-  Identity, Quality, Topology,
+  Identity, Quality, SecurityReport, Topology,
 } from './types'
 
 /** ApiError 同时携带 HTTP 状态与业务码，调用方两者都可能需要判断。 */
@@ -83,6 +83,8 @@ export const api = {
 
   quality: (cluster: string) =>
     request<Quality>(`/api/v1/clusters/${encodeURIComponent(cluster)}/quality`),
+  security: (cluster: string) =>
+    request<SecurityReport>(`/api/v1/clusters/${encodeURIComponent(cluster)}/security`),
 
   flows: (filter: FlowFilter = {}) =>
     request<FlowPage>(`/api/v1/flows${query(filter)}`),
