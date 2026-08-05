@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { NavLink, useNavigate } from 'react-router-dom'
 import { api } from '../api/client'
+import { Select } from './ui'
 import type { ClusterSummary } from '../api/types'
 import { useSession } from '../auth/SessionContext'
 
@@ -53,19 +54,13 @@ export default function AppShell({ cluster, onClusterChange, children }: Props) 
           <span style={{ display: 'block', fontSize: 12, color: 'var(--text-muted)', marginBottom: 4 }}>
             集群
           </span>
-          <select
+          <Select
             value={cluster}
-            onChange={(e) => onClusterChange(e.target.value)}
-            style={{
-              width: '100%', padding: '6px 8px', fontSize: 13,
-              border: '1px solid var(--border)', borderRadius: 'var(--radius)',
-              background: 'var(--surface)',
-            }}
-          >
-            {clusters.map((c) => (
-              <option key={c.id} value={c.id}>{c.id}</option>
-            ))}
-          </select>
+            ariaLabel="集群"
+            onChange={onClusterChange}
+            options={clusters.map((c) => [c.id, c.id] as [string, string])}
+            style={{ width: '100%' }}
+          />
           {clustersError && (
             <span style={{
               display: 'block', marginTop: 4, fontSize: 12, color: 'var(--verdict-deny)',

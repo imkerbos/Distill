@@ -3,7 +3,7 @@ import { api } from '../api/client'
 import type { Topology, TopologyLevel } from '../api/types'
 import { useResource } from '../api/useResource'
 import TopologyGraph from '../components/TopologyGraph'
-import { Card, Chip, Field, Notice, PageHeader, Section, TableCard, Toolbar } from '../components/ui'
+import { Card, Chip, Field, Notice, PageHeader, Section, Select, TableCard, Toolbar } from '../components/ui'
 
 export default function TopologyPage({ cluster }: { cluster: string }) {
   const [level, setLevel] = useState<TopologyLevel>('namespace')
@@ -26,18 +26,12 @@ export default function TopologyPage({ cluster }: { cluster: string }) {
 
       <Toolbar>
         <Field label="粒度">
-          <select
+          <Select
             value={level}
-            onChange={(e) => setLevel(e.target.value as TopologyLevel)}
-            style={{
-              padding: '4px 8px', border: '1px solid var(--border)',
-              borderRadius: 'var(--radius-sm)', background: 'var(--surface)',
-              fontSize: 'var(--text-sm)',
-            }}
-          >
-            <option value="namespace">Namespace</option>
-            <option value="workload">Workload</option>
-          </select>
+            ariaLabel="拓扑粒度"
+            onChange={(v) => setLevel(v as TopologyLevel)}
+            options={[['namespace', 'Namespace'], ['workload', 'Workload']]}
+          />
         </Field>
       </Toolbar>
 

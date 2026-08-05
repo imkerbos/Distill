@@ -202,6 +202,32 @@ export function Field({ label, children }: { label: string; children: ReactNode 
   )
 }
 
+/**
+ * 下拉选择。
+ *
+ * 统一外观后各页共用一个实现 —— 之前集群选择器、判定筛选、粒度切换
+ * 三处各写一套内联样式，尺寸与圆角都不一致，界面看起来是拼出来的。
+ */
+export function Select({ value, onChange, options, ariaLabel, style }: {
+  value: string
+  onChange: (v: string) => void
+  options: [string, string][]
+  ariaLabel?: string
+  style?: CSSProperties
+}) {
+  return (
+    <select
+      className="ctl"
+      aria-label={ariaLabel}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      style={style}
+    >
+      {options.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+    </select>
+  )
+}
+
 /** 提示条：用于"有一部分内容没能展示"这类必须被看到的说明。 */
 export function Notice({ children }: { children: ReactNode }) {
   return (

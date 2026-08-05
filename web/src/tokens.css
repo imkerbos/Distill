@@ -59,6 +59,9 @@
   --shadow-card: 0 1px 2px rgba(28, 28, 26, 0.04);
   --content-max: 1180px;
 
+  /* 表单控件统一规格，避免各处自己拍尺寸。 */
+  --control-h: 32px;
+
   --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
           'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
   --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
@@ -96,7 +99,9 @@ body {
   white-space: nowrap;
 }
 .dt tbody td {
-  padding: 10px var(--space-3);
+  /* 行高偏松会让一屏能看的记录变少，而这类界面的价值正来自横向比对。
+     8px 上下内边距在 13px 字号下仍有足够点击热区。 */
+  padding: 8px var(--space-3);
   border-bottom: 1px solid var(--border);
   vertical-align: middle;
 }
@@ -113,4 +118,38 @@ body {
   font-family: var(--mono);
   font-size: var(--text-xs);
   color: var(--text-muted);
+}
+
+/*
+ * 表单控件。
+ *
+ * 浏览器原生 select 在 macOS 与 Windows 上外观差异很大，与卡片、表格
+ * 的质感对不上，界面会显得是几段拼起来的。这里统一外观，只保留原生
+ * 的键盘与无障碍行为。
+ */
+.ctl {
+  height: var(--control-h);
+  padding: 0 var(--space-3) 0 10px;
+  font-size: var(--text-sm);
+  font-family: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  line-height: calc(var(--control-h) - 2px);
+}
+select.ctl {
+  appearance: none;
+  padding-right: 26px;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--text-muted) 50%),
+    linear-gradient(135deg, var(--text-muted) 50%, transparent 50%);
+  background-position: calc(100% - 14px) 13px, calc(100% - 9px) 13px;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  cursor: pointer;
+}
+.ctl:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
