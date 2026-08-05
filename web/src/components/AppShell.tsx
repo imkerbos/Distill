@@ -67,6 +67,7 @@ export default function AppShell({ cluster, onClusterChange, children }: Props) 
         {[
           { to: '/topology', label: '网络拓扑' },
           { to: '/flows', label: '流量与判定' },
+          { to: '/security', label: '安全发现' },
           { to: '/quality', label: '数据质量' },
         ].map((item) => (
           <NavLink

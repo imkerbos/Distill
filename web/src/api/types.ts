@@ -40,13 +40,25 @@ export interface TopologyEdge {
   ports: number[]
   /** 任一条成员流量的一端不受 NetworkPolicy 管控（如 hostNetwork Pod）。 */
   unmanaged: boolean
+  /**
+   * 做出判定的方向。NetworkPolicy 是有方向的，一条 DENY 边究竟该改
+   * 源端的 egress 规则还是目的端的 ingress 规则，只看边本身答不出来。
+   * 两侧都出现过时为 MIXED —— 给一个五五开的答案比不给更糟。
+   */
+  decidedBy: 'INGRESS' | 'EGRESS' | 'MIXED' | ''
 }
+
+/** 拓扑聚合粒度。 */
+export type TopologyLevel = 'namespace' | 'workload'
+
 
 export interface Topology {
   nodes: TopologyNode[]
   edges: TopologyEdge[]
   /** 因端点身份缺失而无法定位到节点的流量数。必须展示，不得静默忽略。 */
   unplaceableFlowCount: number
+  /** 实际生效的聚合粒度，回显给界面。 */
+  level: TopologyLevel
 }
 
 export interface FlowRecord {
@@ -137,4 +149,48 @@ export const UNKNOWN_REASON_LABEL: Record<string, string> = {
   NAMED_PORT_UNRESOLVED: '命名端口无法解析为具体端口号',
   LOG_SAMPLED_OUT: '日志采样或限流导致记录缺失',
   UNSPECIFIED: '未记录具体原因',
+}
+
+/** 高风险端口的风险来源。封闭枚举，与后端 store.RiskCategory 对齐。 */
+export type RiskCategory = 'ADMIN_PLAINTEXT' | 'DATABASE' | 'FILE_SHARE'
+
+/** 风险连接所处的位置。与 RiskCategory 分列，不合成单一分数。 */
+export type RiskPosition = 'EGRESS_INTERNET' | 'CROSS_NAMESPACE' | 'SAME_NAMESPACE'
+
+export interface RiskPort {
+  port: number
+  name: string
+  category: RiskCategory
+}
+
+export interface RiskyFlow extends FlowRecord {
+  category: RiskCategory
+  position: RiskPosition
+  portName: string
+}
+
+export interface EgressTarget {
+  address: string
+  ports: number[]
+  flowCount: number
+  /** 被放行的条数。与总数分列：畅通的外联与已被挡住的外联不是一回事。 */
+  allowedCount: number
+  unknownCount: number
+}
+
+export interface NakedPod {
+  cluster: string
+  namespace: string
+  name: string
+}
+
+export interface SecurityReport {
+  cluster: string
+  /** 流量类发现的时间窗。nakedPods 来自资产快照，不受此窗口约束。 */
+  window: TimeWindow
+  riskyFlows: RiskyFlow[]
+  egressTargets: EgressTarget[]
+  nakedPods: NakedPod[]
+  /** 判定所用的端口清单。报告为空时靠它区分"查过没发现"与"没查"。 */
+  riskPortCatalog: RiskPort[]
 }
