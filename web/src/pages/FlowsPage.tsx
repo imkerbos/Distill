@@ -4,7 +4,7 @@ import type { Confidence, TimeWindow, Verdict } from '../api/types'
 import { useResource } from '../api/useResource'
 import DecisionDrawer from '../components/DecisionDrawer'
 import { CrossClusterMark, UnmanagedMark, VerdictBadge } from '../components/Verdict'
-import { Chip, PageHeader, Section, TableCard, Toolbar } from '../components/ui'
+import { Chip, Field, PageHeader, Section, Select, TableCard, Toolbar } from '../components/ui'
 
 /**
  * 把时间窗格式化成可读区间。用 UTC 而非本地时区：判定与快照都以 UTC
@@ -44,10 +44,14 @@ export default function FlowsPage({ cluster }: { cluster: string }) {
       />
 
       <Toolbar>
-        <Select label="判定" value={verdict} onChange={(v) => setVerdict(v as Verdict | '')}
-          options={[['', '全部'], ['ALLOW', '放行'], ['DENY', '阻断'], ['UNKNOWN', '无法判定']]} />
-        <Select label="可信度" value={confidence} onChange={(v) => setConfidence(v as Confidence | '')}
-          options={[['', '全部'], ['TRUSTED', '可信'], ['DEGRADED', '降级']]} />
+        <Field label="判定">
+          <Select value={verdict} ariaLabel="判定" onChange={(v) => setVerdict(v as Verdict | '')}
+            options={[['', '全部'], ['ALLOW', '放行'], ['DENY', '阻断'], ['UNKNOWN', '无法判定']]} />
+        </Field>
+        <Field label="可信度">
+          <Select value={confidence} ariaLabel="可信度" onChange={(v) => setConfidence(v as Confidence | '')}
+            options={[['', '全部'], ['TRUSTED', '可信'], ['DEGRADED', '降级']]} />
+        </Field>
       </Toolbar>
 
       {error && <p style={{ color: 'var(--verdict-deny)' }}>{error}</p>}
@@ -174,18 +178,3 @@ function PagerButton({ disabled, onClick, children }: {
   )
 }
 
-function Select({ label, value, onChange, options }: {
-  label: string; value: string; onChange: (v: string) => void; options: [string, string][]
-}) {
-  return (
-    <label style={{ fontSize: 13 }}>
-      <span style={{ color: 'var(--text-muted)', marginRight: 6 }}>{label}</span>
-      <select value={value} onChange={(e) => onChange(e.target.value)} style={{
-        padding: '4px 8px', border: '1px solid var(--border)',
-        borderRadius: 'var(--radius)', background: 'var(--surface)', fontSize: 13,
-      }}>
-        {options.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-      </select>
-    </label>
-  )
-}
