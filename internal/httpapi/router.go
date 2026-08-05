@@ -24,6 +24,13 @@ type Deps struct {
 	Logger *slog.Logger
 	// Reader 提供 Fleet 数据查询。
 	Reader store.Reader
+	// DefaultWindow 是流量查询未指定 from/to 时使用的时间窗。
+	//
+	// 由装配方注入而非在此取默认值：合适的默认窗口取决于部署形态。
+	// demo 用覆盖 fixture 全量的窗口（数据固定在过去某一天，任何
+	// "最近 N 天"都会在某天悄悄返回 0 条）；真实部署应注入一个有界
+	// 窗口，与事实层的 require_partition_filter 相称。
+	DefaultWindow store.TimeWindow
 }
 
 // NewRouter 装配 HTTP 路由。

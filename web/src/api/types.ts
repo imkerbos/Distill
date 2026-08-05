@@ -51,6 +51,8 @@ export interface Topology {
 
 export interface FlowRecord {
   id: string
+  /** 流量发生时刻，RFC3339。 */
+  timestamp: string
   sourceLabel: string
   destLabel: string
   protocol: string
@@ -62,12 +64,23 @@ export interface FlowRecord {
   unmanaged: boolean
 }
 
+/** 左闭右开的查询时间窗 [from, to)。 */
+export interface TimeWindow {
+  from: string
+  to: string
+}
+
 /** 分页信息必须完整传到界面：returned < total 时用户有权知道被截断了。 */
 export interface FlowPage {
   items: FlowRecord[]
   total: number
   returned: number
   limit: number
+  /**
+   * 实际生效的时间窗。理由同 total：一个按时间筛过的列表若不说明筛的是
+   * 哪一段，在界面上与全量列表无法区分。
+   */
+  window: TimeWindow
 }
 
 export interface DecisionReason {

@@ -3,6 +3,7 @@ package httpapi
 import (
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -23,6 +24,43 @@ type flowListResponse struct {
 	Total    int                `json:"total"`
 	Returned int                `json:"returned"`
 	Limit    int                `json:"limit"`
+	// Window 是实际生效的查询时间窗。理由同上：一个按时间筛过的列表
+	// 若不说明筛的是哪一段，与全量列表在界面上无法区分。
+	Window store.TimeWindow `json:"window"`
+}
+
+// parseWindow 解析 from / to 查询参数。
+//
+// 二者必须同时给出或同时省略：只给一端时，另一端要么取"现在"、要么取
+// "开天辟地"，两个默认都会让返回范围与用户以为筛的范围不一致，而界面
+// 只会照实回显那个它并没有要求的窗口。省略时用装配方注入的默认窗口。
+func parseWindow(q map[string][]string, fallback store.TimeWindow) (store.TimeWindow, bool) {
+	get := func(k string) string {
+		if v := q[k]; len(v) > 0 {
+			return v[0]
+		}
+		return ""
+	}
+	rawFrom, rawTo := get("from"), get("to")
+	if rawFrom == "" && rawTo == "" {
+		return fallback, true
+	}
+	if rawFrom == "" || rawTo == "" {
+		return store.TimeWindow{}, false
+	}
+	from, err := time.Parse(time.RFC3339, rawFrom)
+	if err != nil {
+		return store.TimeWindow{}, false
+	}
+	to, err := time.Parse(time.RFC3339, rawTo)
+	if err != nil {
+		return store.TimeWindow{}, false
+	}
+	win := store.TimeWindow{From: from, To: to}
+	if !win.Valid() {
+		return store.TimeWindow{}, false
+	}
+	return win, true
 }
 
 // handleListFlows 返回按条件筛选的流量列表。
@@ -53,11 +91,18 @@ func handleListFlows(d Deps) http.HandlerFunc {
 			return
 		}
 
+		window, ok := parseWindow(q, d.DefaultWindow)
+		if !ok {
+			response.WriteBusiness(w, response.CodeInvalidParam)
+			return
+		}
+
 		page, err := d.Reader.Flows(r.Context(), store.FlowFilter{
 			Cluster:    q.Get("cluster"),
 			Verdict:    verdict,
 			Confidence: confidence,
 			Limit:      limit,
+			Window:     window,
 		})
 		if err != nil {
 			writeReaderError(w, r, d, err)
@@ -68,6 +113,7 @@ func handleListFlows(d Deps) http.HandlerFunc {
 			Total:    page.Total,
 			Returned: len(page.Items),
 			Limit:    page.Limit,
+			Window:   page.Window,
 		})
 	}
 }
