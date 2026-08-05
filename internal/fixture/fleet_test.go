@@ -132,8 +132,9 @@ func TestDatasetContainsCrossClusterFlows(t *testing.T) {
 // 到那时这道守卫验的就不再是产品实际跑的东西了。
 func TestDatasetProducesAllDeliberateGaps(t *testing.T) {
 	f := fixture.Load()
-	page, err := store.NewFixtureReader(f).Flows(context.Background(),
-		store.FlowFilter{Limit: len(f.Flows)})
+	r := store.NewFixtureReader(f)
+	page, err := r.Flows(context.Background(),
+		store.FlowFilter{Limit: len(f.Flows), Window: r.DataWindow()})
 	if err != nil {
 		t.Fatalf("Flows: %v", err)
 	}
