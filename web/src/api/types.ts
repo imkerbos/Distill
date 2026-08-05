@@ -40,13 +40,25 @@ export interface TopologyEdge {
   ports: number[]
   /** 任一条成员流量的一端不受 NetworkPolicy 管控（如 hostNetwork Pod）。 */
   unmanaged: boolean
+  /**
+   * 做出判定的方向。NetworkPolicy 是有方向的，一条 DENY 边究竟该改
+   * 源端的 egress 规则还是目的端的 ingress 规则，只看边本身答不出来。
+   * 两侧都出现过时为 MIXED —— 给一个五五开的答案比不给更糟。
+   */
+  decidedBy: 'INGRESS' | 'EGRESS' | 'MIXED' | ''
 }
+
+/** 拓扑聚合粒度。 */
+export type TopologyLevel = 'namespace' | 'workload'
+
 
 export interface Topology {
   nodes: TopologyNode[]
   edges: TopologyEdge[]
   /** 因端点身份缺失而无法定位到节点的流量数。必须展示，不得静默忽略。 */
   unplaceableFlowCount: number
+  /** 实际生效的聚合粒度，回显给界面。 */
+  level: TopologyLevel
 }
 
 export interface FlowRecord {

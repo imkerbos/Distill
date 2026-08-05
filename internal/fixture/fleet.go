@@ -149,6 +149,15 @@ func buildAsia() Cluster {
 			IP: ip(14 + i), Labels: map[string]string{"app": "legacy"},
 		})
 	}
+	// 一个没有 app 标签的 Pod。真实集群里这类工作负载相当常见 ——
+	// 老服务、手工建的 Pod、第三方 Chart 用了别的标签约定。
+	// workload 级拓扑必须把它显示成 UNKNOWN，而不是靠 Pod 名猜一个
+	// 看起来合理的归属。数据集里没有这类 Pod，这条路径就永远走不到，
+	// 而真实集群上线第一天就会遇到。
+	pods = append(pods, replay.PodRef{
+		ClusterID: clusterID, Namespace: "legacy", Name: "legacy-unlabelled",
+		IP: ip(17), Labels: map[string]string{"env": "prod"},
+	})
 
 	emptySelector := metav1.LabelSelector{}
 	apiSelector := metav1.LabelSelector{MatchLabels: map[string]string{"app": "api"}}

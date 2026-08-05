@@ -1,6 +1,6 @@
 import type {
   ClusterSummary, Decision, Envelope, FlowFilter, FlowPage,
-  Identity, Quality, SecurityReport, Topology,
+  Identity, Quality, SecurityReport, Topology, TopologyLevel,
 } from './types'
 
 /** ApiError 同时携带 HTTP 状态与业务码，调用方两者都可能需要判断。 */
@@ -78,8 +78,10 @@ export const api = {
 
   clusters: () => request<ClusterSummary[]>('/api/v1/clusters'),
 
-  topology: (cluster: string) =>
-    request<Topology>(`/api/v1/clusters/${encodeURIComponent(cluster)}/topology`),
+  topology: (cluster: string, level: TopologyLevel = 'namespace') =>
+    request<Topology>(
+      `/api/v1/clusters/${encodeURIComponent(cluster)}/topology?level=${level}`,
+    ),
 
   quality: (cluster: string) =>
     request<Quality>(`/api/v1/clusters/${encodeURIComponent(cluster)}/quality`),

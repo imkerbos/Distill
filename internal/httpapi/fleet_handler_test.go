@@ -19,7 +19,7 @@ func (brokenReader) Clusters(context.Context) ([]store.ClusterSummary, error) {
 	return nil, errors.New("bigquery: connection refused at 10.0.0.5:9050")
 }
 
-func (brokenReader) Topology(context.Context, string) (store.Topology, error) {
+func (brokenReader) Topology(context.Context, string, store.TopologyLevel) (store.Topology, error) {
 	return store.Topology{}, errors.New("bigquery: connection refused at 10.0.0.5:9050")
 }
 

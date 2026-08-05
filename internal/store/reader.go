@@ -45,6 +45,11 @@ type TopologyEdge struct {
 	// Pod）。缺了它，一条通往特权组件的边会渲染成普通的绿色放行，
 	// 与"策略确实允许了它"无法区分 —— 而这两件事的处置方式完全不同。
 	Unmanaged bool `json:"unmanaged"`
+	// DecidedBy 是做出判定的方向：INGRESS、EGRESS 或 MIXED。
+	//
+	// NetworkPolicy 是有方向的，一条 DENY 边究竟该改源端的 egress 规则
+	// 还是目的端的 ingress 规则，只看边本身答不出来。
+	DecidedBy string `json:"decidedBy"`
 }
 
 // Topology 是一个集群的通信拓扑。
@@ -56,6 +61,8 @@ type Topology struct {
 	// 质量页会对同一个集群给出两个互不相同的流量总数，而差额里恰恰装着
 	// 这个平台最该展示的那部分"不知道"。
 	UnplaceableFlowCount int `json:"unplaceableFlowCount"`
+	// Level 是本次聚合粒度，回显给调用方。
+	Level string `json:"level"`
 }
 
 // TimeWindow 是一个左闭右开的时间区间 [From, To)。
@@ -203,7 +210,7 @@ type Reader interface {
 	// Clusters 返回全部集群概览。
 	Clusters(ctx context.Context) ([]ClusterSummary, error)
 	// Topology 返回指定集群的通信拓扑。集群不存在时返回错误。
-	Topology(ctx context.Context, clusterID string) (Topology, error)
+	Topology(ctx context.Context, clusterID string, level TopologyLevel) (Topology, error)
 	// Flows 按条件返回流量列表。筛选条件指向不存在的集群时返回错误。
 	Flows(ctx context.Context, filter FlowFilter) (FlowPage, error)
 	// Flow 返回单条流量的完整判定。不存在时第二个返回值为 false。

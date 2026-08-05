@@ -221,6 +221,72 @@ func topologyNodes(c fixture.Cluster) []TopologyNode {
 	return nodes
 }
 
+// workloadNodes 按 (namespace, workload) 聚合出节点。
+//
+// Workload 归属只认 app 标签，缺失者归入 UNKNOWN 并照常成节点 ——
+// 真实集群里大量 Pod 没有规范标签，把它们藏起来会让 workload 拓扑
+// 看上去比实际完整。这个缺口现在就该显示出来。
+func workloadNodes(c fixture.Cluster) []TopologyNode {
+	acc := map[string]*TopologyNode{}
+	for _, p := range c.Pods {
+		wl := workloadOf(&p)
+		id := c.ID + "/" + p.Namespace + "/" + wl
+		n, ok := acc[id]
+		if !ok {
+			ns, found := namespaceByName(c.Namespaces, p.Namespace)
+			n = &TopologyNode{
+				ID:        id,
+				Cluster:   c.ID,
+				Namespace: p.Namespace + "/" + wl,
+				HasPolicy: namespaceHasPolicy(c.Policies, p.Namespace),
+			}
+			if found {
+				n.InMesh = namespaceInMesh(ns, []replay.PodRef{p})
+			}
+			acc[id] = n
+		}
+		n.PodCount++
+		if p.HostNetwork {
+			n.UnmanagedPodCount++
+		}
+		if p.InMesh {
+			n.InMesh = true
+		}
+	}
+	nodes := make([]TopologyNode, 0, len(acc))
+	for _, n := range acc {
+		nodes = append(nodes, *n)
+	}
+	sort.Slice(nodes, func(i, j int) bool { return nodes[i].ID < nodes[j].ID })
+	return nodes
+}
+
+// namespaceByName 按名字取命名空间快照。
+func namespaceByName(nss []replay.NamespaceRef, name string) (replay.NamespaceRef, bool) {
+	for _, ns := range nss {
+		if ns.Name == name {
+			return ns, true
+		}
+	}
+	return replay.NamespaceRef{}, false
+}
+
+// decidedBy 汇总一条边上做出判定的方向。
+//
+// 两侧都出现过时返回 MIXED 而不是任选其一：这条信息的用途是回答
+// "该改哪边的策略"，给一个五五开的答案比不给更糟。
+func decidedBy(dirs map[string]struct{}) string {
+	switch len(dirs) {
+	case 0:
+		return ""
+	case 1:
+		for d := range dirs {
+			return d
+		}
+	}
+	return "MIXED"
+}
+
 // nsNodeID 返回端点所属命名空间对应的节点 ID。身份未还原或外部地址
 // 没有命名空间可言，第二个返回值为 false，调用方据此跳过该 flow——
 // 拓扑边必须落在具体命名空间之间，无法确定一端就不该画出这条边。
@@ -229,6 +295,58 @@ func nsNodeID(ep replay.Endpoint) (string, bool) {
 		return "", false
 	}
 	return ep.Pod.ClusterID + "/" + ep.Pod.Namespace, true
+}
+
+// workloadOf 从 Pod 标签推导 workload 名。
+//
+// 只认 app 标签。**不得回退到按 Pod 名截断前缀** —— 真实集群里 Pod 名的
+// 后缀是 ReplicaSet 哈希，截断规则会把不同 workload 归成同一个，
+// 而且能查出结果、不报错。一个看起来正确、实际错误的归并，
+// 比一个明确的 UNKNOWN 危险得多。
+func workloadOf(p *replay.PodRef) string {
+	if app, ok := p.Labels["app"]; ok && app != "" {
+		return app
+	}
+	return "UNKNOWN"
+}
+
+// wlNodeID 是 workload 粒度的节点标识。
+func wlNodeID(ep replay.Endpoint) (string, bool) {
+	if ep.Pod == nil {
+		return "", false
+	}
+	return ep.Pod.ClusterID + "/" + ep.Pod.Namespace + "/" + workloadOf(ep.Pod), true
+}
+
+// TopologyLevel 是拓扑的聚合粒度。
+type TopologyLevel string
+
+const (
+	// LevelNamespace 按 namespace 聚合。
+	LevelNamespace TopologyLevel = "namespace"
+	// LevelWorkload 按 workload 聚合。
+	LevelWorkload TopologyLevel = "workload"
+)
+
+// ValidTopologyLevel 报告 l 是否属于封闭枚举。
+//
+// 校验取值而非静默回退到默认值：一个拼错的 level 会让界面展示
+// namespace 粒度却以为自己在看 workload 粒度。
+func ValidTopologyLevel(l string) bool {
+	switch TopologyLevel(l) {
+	case LevelNamespace, LevelWorkload:
+		return true
+	default:
+		return false
+	}
+}
+
+// nodeIDAt 按粒度取节点标识。
+func nodeIDAt(ep replay.Endpoint, level TopologyLevel) (string, bool) {
+	if level == LevelWorkload {
+		return wlNodeID(ep)
+	}
+	return nsNodeID(ep)
 }
 
 // verdictSeverity 给结论排定严重程度，用于多条 flow 聚合成一条边时取最
@@ -284,6 +402,10 @@ type edgeAccumulator struct {
 	unmanaged    bool
 	flowCount    int
 	ports        map[int32]struct{}
+	// directions 记录做出判定的是哪一侧。一条边下的 flow 可能由不同侧
+	// 决定，聚合时不能只留一个 —— 那会让"该改哪边的策略"这个问题
+	// 得到一个有一半概率是错的答案。
+	directions map[string]struct{}
 }
 
 // recordForeignNode 在端点所在命名空间不属于本次查询集群的已知节点集合时，
@@ -292,21 +414,27 @@ type edgeAccumulator struct {
 // 而丢掉的恰恰是"跨集群没有策略管控"这个平台最该展示出来的敞口。
 // pod 计数与 HasPolicy 留空：本集群的快照里确实不认识对面集群的资产，
 // 编一个数字比坦白"不知道"更危险。
-func recordForeignNode(foreign map[string]TopologyNode, known map[string]bool, ep replay.Endpoint) {
+func recordForeignNode(foreign map[string]TopologyNode, known map[string]bool, ep replay.Endpoint, level TopologyLevel) {
 	if ep.Pod == nil {
 		return
 	}
-	id := ep.Pod.ClusterID + "/" + ep.Pod.Namespace
-	if known[id] {
+	// 占位节点的 ID 必须与边引用的 ID 同粒度，否则 workload 视图下
+	// 每条跨集群边都会指向一个不存在的节点。
+	id, ok := nodeIDAt(ep, level)
+	if !ok || known[id] {
 		return
 	}
 	if _, seen := foreign[id]; seen {
 		return
 	}
+	label := ep.Pod.Namespace
+	if level == LevelWorkload {
+		label += "/" + workloadOf(ep.Pod)
+	}
 	foreign[id] = TopologyNode{
 		ID:        id,
 		Cluster:   ep.Pod.ClusterID,
-		Namespace: ep.Pod.Namespace,
+		Namespace: label,
 		Foreign:   true,
 	}
 }
@@ -314,7 +442,7 @@ func recordForeignNode(foreign map[string]TopologyNode, known map[string]bool, e
 // topologyEdges 把该集群相关的 flow 按 (源命名空间, 目的命名空间) 聚合成边，
 // 同时收集边所引用、但不属于 known（本集群自有命名空间）的对端节点，
 // 以及因端点无法定位而没能落到任何一条边上的流量条数。
-func (r *FixtureReader) topologyEdges(clusterID string, known map[string]bool) ([]TopologyEdge, []TopologyNode, int) {
+func (r *FixtureReader) topologyEdges(clusterID string, known map[string]bool, level TopologyLevel) ([]TopologyEdge, []TopologyNode, int) {
 	acc := make(map[edgeKey]*edgeAccumulator)
 	foreign := make(map[string]TopologyNode)
 	var unplaceable int
@@ -322,22 +450,25 @@ func (r *FixtureReader) topologyEdges(clusterID string, known map[string]bool) (
 		if !involvesCluster(f.Flow, clusterID) {
 			continue
 		}
-		srcID, srcOK := nsNodeID(f.Flow.Source)
-		dstID, dstOK := nsNodeID(f.Flow.Dest)
+		srcID, srcOK := nodeIDAt(f.Flow.Source, level)
+		dstID, dstOK := nodeIDAt(f.Flow.Dest, level)
 		if !srcOK || !dstOK {
 			// 画不出这条边，但它确实存在。计数后由 Topology 一并报出，
 			// 否则拓扑页的流量总和会比数据质量页少一截且无人解释。
 			unplaceable++
 			continue
 		}
-		recordForeignNode(foreign, known, f.Flow.Source)
-		recordForeignNode(foreign, known, f.Flow.Dest)
+		recordForeignNode(foreign, known, f.Flow.Source, level)
+		recordForeignNode(foreign, known, f.Flow.Dest, level)
 
 		d := r.decide(f)
 		k := edgeKey{source: srcID, target: dstID}
 		a, ok := acc[k]
 		if !ok {
-			a = &edgeAccumulator{ports: make(map[int32]struct{})}
+			a = &edgeAccumulator{
+				ports:      make(map[int32]struct{}),
+				directions: make(map[string]struct{}),
+			}
 			acc[k] = a
 		}
 		a.verdict = mergeVerdict(a.verdict, string(d.Verdict))
@@ -346,6 +477,9 @@ func (r *FixtureReader) topologyEdges(clusterID string, known map[string]bool) (
 		a.unmanaged = a.unmanaged || d.Reason.Unmanaged
 		a.flowCount++
 		a.ports[f.Flow.Port] = struct{}{}
+		if dir := string(d.Reason.Direction); dir != "" {
+			a.directions[dir] = struct{}{}
+		}
 	}
 
 	edges := make([]TopologyEdge, 0, len(acc))
@@ -364,6 +498,7 @@ func (r *FixtureReader) topologyEdges(clusterID string, known map[string]bool) (
 			FlowCount:    a.flowCount,
 			Ports:        ports,
 			Unmanaged:    a.unmanaged,
+			DecidedBy:    decidedBy(a.directions),
 		})
 	}
 	sort.Slice(edges, func(i, j int) bool {
@@ -381,23 +516,26 @@ func (r *FixtureReader) topologyEdges(clusterID string, known map[string]bool) (
 }
 
 // Topology 返回指定集群的通信拓扑。集群不存在时返回错误。
-func (r *FixtureReader) Topology(_ context.Context, clusterID string) (Topology, error) {
+func (r *FixtureReader) Topology(_ context.Context, clusterID string, level TopologyLevel) (Topology, error) {
 	c, ok := r.fleet.Cluster(clusterID)
 	if !ok {
 		return Topology{}, fmt.Errorf("%w: %s", ErrClusterNotFound, clusterID)
 	}
 
 	nodes := topologyNodes(c)
+	if level == LevelWorkload {
+		nodes = workloadNodes(c)
+	}
 	known := make(map[string]bool, len(nodes))
 	for _, n := range nodes {
 		known[n.ID] = true
 	}
 
-	edges, foreignNodes, unplaceable := r.topologyEdges(c.ID, known)
+	edges, foreignNodes, unplaceable := r.topologyEdges(c.ID, known, level)
 	nodes = append(nodes, foreignNodes...)
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].ID < nodes[j].ID })
 
-	return Topology{Nodes: nodes, Edges: edges, UnplaceableFlowCount: unplaceable}, nil
+	return Topology{Nodes: nodes, Edges: edges, UnplaceableFlowCount: unplaceable, Level: string(level)}, nil
 }
 
 // DataWindow 返回覆盖本数据集全部流量的时间窗。

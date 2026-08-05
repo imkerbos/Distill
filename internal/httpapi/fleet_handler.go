@@ -25,7 +25,19 @@ func handleListClusters(d Deps) http.HandlerFunc {
 // handleTopology 返回指定集群的通信拓扑。
 func handleTopology(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		got, err := d.Reader.Topology(r.Context(), chi.URLParam(r, "clusterID"))
+		// 缺省 namespace 粒度；取值不在封闭枚举里必须报错而非静默回退 ——
+		// 一个拼错的 level 会让界面展示 namespace 粒度，而使用者以为
+		// 自己在看 workload 粒度。
+		level := store.LevelNamespace
+		if raw := r.URL.Query().Get("level"); raw != "" {
+			if !store.ValidTopologyLevel(raw) {
+				response.WriteBusiness(w, response.CodeInvalidParam)
+				return
+			}
+			level = store.TopologyLevel(raw)
+		}
+
+		got, err := d.Reader.Topology(r.Context(), chi.URLParam(r, "clusterID"), level)
 		if err != nil {
 			writeReaderError(w, r, d, err)
 			return
