@@ -4,6 +4,7 @@ import type { Confidence, TimeWindow, Verdict } from '../api/types'
 import { useResource } from '../api/useResource'
 import DecisionDrawer from '../components/DecisionDrawer'
 import { CrossClusterMark, UnmanagedMark, VerdictBadge } from '../components/Verdict'
+import { PageHeader, Section, TableCard, Toolbar } from '../components/ui'
 
 /**
  * 把时间窗格式化成可读区间。用 UTC 而非本地时区：判定与快照都以 UTC
@@ -32,71 +33,71 @@ export default function FlowsPage({ cluster }: { cluster: string }) {
 
   return (
     <div>
-      <h2 style={{ marginTop: 0 }}>流量与判定</h2>
+      <PageHeader
+        title="流量与判定"
+        description="点击任意一行，查看求值引擎当场算出的判定与理由。判定与可信度是两个独立维度，可分别筛选。"
+      />
 
-      <div style={{ display: 'flex', gap: 'var(--space-3)', marginBottom: 'var(--space-3)' }}>
+      <Toolbar>
         <Select label="判定" value={verdict} onChange={(v) => setVerdict(v as Verdict | '')}
           options={[['', '全部'], ['ALLOW', '放行'], ['DENY', '阻断'], ['UNKNOWN', '无法判定']]} />
         <Select label="可信度" value={confidence} onChange={(v) => setConfidence(v as Confidence | '')}
           options={[['', '全部'], ['TRUSTED', '可信'], ['DEGRADED', '降级']]} />
-      </div>
+      </Toolbar>
 
       {error && <p style={{ color: 'var(--verdict-deny)' }}>{error}</p>}
       {!page && !error && <p style={{ color: 'var(--text-muted)' }}>加载中…</p>}
 
       {page && (
         <>
-          {/*
-            截断必须可见。只给一个数组、不给 total，界面就无法区分
-            "这就是全部" 与 "只给了你一部分"，而后者恰恰会让人以为
-            平台什么都知道。
-          */}
-          <p style={{ fontSize: 13, color: 'var(--text-muted)', marginTop: 0 }}>
-            共 {page.total} 条，已显示 {page.returned} 条
-            {page.returned < page.total && (
-              <strong style={{ color: 'var(--verdict-unknown)' }}>
-                （已按上限 {page.limit} 截断，尚有 {page.total - page.returned} 条未显示）
-              </strong>
-            )}
-          </p>
-          {/*
-            时间窗与条数同等重要：列表按时间筛过却不说明筛的是哪一段，
-            与被截断却不说明截了多少是同一类问题 —— 用户会把"这段时间的
-            流量"读成"全部流量"。
-          */}
-          <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: -8 }}>
-            时间范围 {formatWindow(page.window)}
-          </p>
-
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-            <thead>
-              <tr style={{ textAlign: 'left', color: 'var(--text-muted)', fontSize: 12 }}>
-                <th style={th}>判定</th><th style={th}>源</th><th style={th}>目的</th>
-                <th style={th}>端口</th><th style={th}>标记</th>
-              </tr>
-            </thead>
-            <tbody>
-              {page.items.map((f) => (
-                <tr
-                  key={f.id}
-                  onClick={() => setSelected(f.id)}
-                  style={{
-                    cursor: 'pointer', borderTop: '1px solid var(--border)',
-                    background: selected === f.id ? 'var(--bg)' : undefined,
-                  }}
-                >
-                  <td style={td}><VerdictBadge verdict={f.verdict} confidence={f.confidence} /></td>
-                  <td style={{ ...td, fontFamily: 'var(--mono)', fontSize: 11 }}>{f.sourceLabel}</td>
-                  <td style={{ ...td, fontFamily: 'var(--mono)', fontSize: 11 }}>{f.destLabel}</td>
-                  <td style={td}>{f.protocol}:{f.port}</td>
-                  <td style={{ ...td, display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                    {f.crossCluster && <CrossClusterMark />}
-                    {f.unmanaged && <UnmanagedMark />}
-                  </td>
+          <Section
+            title="流量"
+            meta={
+              <>
+                {/*
+                  截断与时间窗必须与列表同屏。只给一个数组、不给 total，
+                  界面就无法区分"这就是全部"与"只给了你一部分"；按时间
+                  筛过却不说明筛的是哪一段，同理。
+                */}
+                共 {page.total} 条，已显示 {page.returned} 条
+                {page.returned < page.total && (
+                  <strong style={{ color: 'var(--verdict-unknown)', marginLeft: 6 }}>
+                    （已按上限 {page.limit} 截断，尚有 {page.total - page.returned} 条未显示）
+                  </strong>
+                )}
+                <span style={{ marginLeft: 10 }}>· 时间范围 {formatWindow(page.window)}</span>
+              </>
+            }
+          >
+            <TableCard>
+              <thead>
+                <tr>
+                  <th>判定</th><th>源</th><th>目的</th><th>端口</th><th>标记</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {page.items.map((f) => (
+                  <tr
+                    key={f.id}
+                    className="clickable"
+                    onClick={() => setSelected(f.id)}
+                    style={{ background: selected === f.id ? 'var(--surface-sunken)' : undefined }}
+                  >
+                    <td><VerdictBadge verdict={f.verdict} confidence={f.confidence} /></td>
+                    <td className="mono">{f.sourceLabel}</td>
+                    <td className="mono">{f.destLabel}</td>
+                    <td className="num">{f.protocol}:{f.port}</td>
+                    <td>
+                      <span style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                        {f.crossCluster && <CrossClusterMark />}
+                        {f.unmanaged && <UnmanagedMark />}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </TableCard>
+          </Section>
         </>
       )}
 
@@ -105,8 +106,6 @@ export default function FlowsPage({ cluster }: { cluster: string }) {
   )
 }
 
-const th: React.CSSProperties = { padding: '6px 8px', fontWeight: 500 }
-const td: React.CSSProperties = { padding: '8px', verticalAlign: 'top' }
 
 function Select({ label, value, onChange, options }: {
   label: string; value: string; onChange: (v: string) => void; options: [string, string][]
