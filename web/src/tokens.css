@@ -1,10 +1,14 @@
 /*
+ * 设计语言：Phenomenon Studio 路线 —— 不追求视觉冲击，追求专业感与信任感。
+ * 本平台向 SRE 与安全团队输出"这条流量会不会被拦"这类需要被信任的结论，
+ * 界面越花哨，结论越不可信。
+ *
  * 语义色是硬约束，不是主题。ALLOW / DENY / UNKNOWN 各自唯一，
- * 全站不得把它们用于非语义场景（例如拿 DENY 的红做删除按钮）——
- * 一旦复用，用户就无法再从颜色读出判定结论。
+ * 全站不得把它们用于非语义场景 —— 一旦复用（例如拿 UNKNOWN 的琥珀色
+ * 表示"跨 namespace"），用户就无法再从颜色读出判定结论。
  */
 :root {
-  /* 判定语义色 */
+  /* ---- 判定语义色：仅用于 verdict / confidence ---- */
   --verdict-allow: #1a7f5a;
   --verdict-allow-bg: #e8f5f0;
   --verdict-deny: #b3261e;
@@ -20,22 +24,41 @@
   --degraded-stroke: #6b4fbb;
   --degraded-stroke-width: 2px;
 
-  /* 中性色：克制、低饱和，让语义色成为画面上唯一的强信号 */
-  --bg: #fbfbfa;
+  /* ---- 中性色：克制、低饱和，让语义色成为画面上唯一的强信号 ---- */
+  --bg: #f7f7f6;
   --surface: #ffffff;
-  --border: #e3e3e0;
+  --surface-sunken: #fafafa;
+  --border: #e5e5e2;
+  --border-strong: #d3d3ce;
   --text: #1c1c1a;
-  --text-muted: #6b6b66;
-  /* 深色底（如按钮）上的文字色，与 --text 分开维护，避免深浅两套底色抢同一个变量。 */
+  --text-secondary: #45453f;
+  --text-muted: #74746d;
   --text-on-dark: #ffffff;
+  --accent: #2c2c28;
 
+  /* ---- 排版尺度 ---- */
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-base: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --text-2xl: 26px;
+
+  /* ---- 间距 ---- */
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 16px;
   --space-4: 24px;
   --space-5: 40px;
+  --space-6: 64px;
 
-  --radius: 6px;
+  /* ---- 形状与层次 ---- */
+  --radius: 8px;
+  --radius-sm: 5px;
+  /* 阴影极轻：卡片靠边框分层，不靠投影。投影一重就显得"演示用"。 */
+  --shadow-card: 0 1px 2px rgba(28, 28, 26, 0.04);
+  --content-max: 1180px;
+
   --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
           'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
   --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
@@ -48,6 +71,46 @@ body {
   background: var(--bg);
   color: var(--text);
   font-family: var(--font);
-  font-size: 14px;
-  line-height: 1.5;
+  font-size: var(--text-base);
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+/*
+ * 表格是本产品的主要信息载体，样式集中在此，不由各页面各写一份。
+ * 三个页面三种表格样式，读者会以为它们在讲不同性质的事。
+ */
+.dt {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+.dt thead th {
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.dt tbody td {
+  padding: 10px var(--space-3);
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.dt tbody tr:last-child td { border-bottom: none; }
+.dt tbody tr.clickable { cursor: pointer; }
+.dt tbody tr.clickable:hover { background: var(--surface-sunken); }
+
+/* 数值列右对齐并等宽，便于纵向比对量级。 */
+.dt .num {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.dt .mono {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
 }

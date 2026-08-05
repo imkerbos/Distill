@@ -36,7 +36,18 @@ export default function AppShell({ cluster, onClusterChange, children }: Props) 
         borderRight: '1px solid var(--border)', background: 'var(--surface)',
         padding: 'var(--space-4) var(--space-3)', display: 'flex', flexDirection: 'column',
       }}>
-        <div style={{ fontWeight: 600, fontSize: 16, marginBottom: 'var(--space-4)' }}>Distill</div>
+        <div style={{
+          fontWeight: 600, fontSize: 'var(--text-lg)', letterSpacing: '-0.01em',
+          marginBottom: 'var(--space-1)',
+        }}>
+          Distill
+        </div>
+        <div style={{
+          fontSize: 'var(--text-xs)', color: 'var(--text-muted)',
+          marginBottom: 'var(--space-4)',
+        }}>
+          NetworkPolicy 可见性
+        </div>
 
         <label style={{ display: 'block', marginBottom: 'var(--space-4)' }}>
           <span style={{ display: 'block', fontSize: 12, color: 'var(--text-muted)', marginBottom: 4 }}>
@@ -74,11 +85,17 @@ export default function AppShell({ cluster, onClusterChange, children }: Props) 
             key={item.to}
             to={item.to}
             style={({ isActive }) => ({
-              padding: '8px 10px', marginBottom: 2, fontSize: 14,
-              borderRadius: 'var(--radius)', textDecoration: 'none',
+              padding: '8px 10px 8px 12px', marginBottom: 2,
+              fontSize: 'var(--text-base)',
+              borderRadius: 'var(--radius-sm)', textDecoration: 'none',
               color: isActive ? 'var(--text)' : 'var(--text-muted)',
-              background: isActive ? 'var(--bg)' : 'transparent',
-              fontWeight: isActive ? 500 : 400,
+              background: isActive ? 'var(--surface-sunken)' : 'transparent',
+              fontWeight: isActive ? 600 : 400,
+              // 左侧色条：只靠底色变化的 active 态在浅色系里几乎读不出来，
+              // 使用者会不确定自己正在看哪一屏。
+              borderLeft: isActive
+                ? '3px solid var(--accent)'
+                : '3px solid transparent',
             })}
           >
             {item.label}
@@ -98,7 +115,13 @@ export default function AppShell({ cluster, onClusterChange, children }: Props) 
         </div>
       </nav>
 
-      <div style={{ padding: 'var(--space-4)', overflow: 'auto' }}>{children}</div>
+      {/*
+        限制正文宽度：宽屏下表格列会被拉到一两千像素，同一行的源与目的
+        相隔太远，读者无法把它们连成一条记录。
+      */}
+      <div style={{ padding: 'var(--space-5) var(--space-4)', overflow: 'auto' }}>
+        <div style={{ maxWidth: 'var(--content-max)' }}>{children}</div>
+      </div>
     </div>
   )
 }
