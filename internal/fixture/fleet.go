@@ -385,6 +385,39 @@ func buildFlows(asia, eu Cluster) []Flow {
 		b.add(podEndpoint(src), podEndpoint(dst), replay.ProtocolTCP, 8080)
 	}
 
+	// 三类真实可疑流量。数据集其余部分的端口全是 443/8080/9090/9100，
+	// 没有一个在语义上危险 —— 缺了这三类，高风险端口报告只能永远空着，
+	// 而一块空着的安全报告读起来是"这套集群很干净"。
+	//
+	// 三类刻意落在不同风险位置上，报告不能把它们合成一个分数：
+	// 跨 namespace 的数据库直连、跨 namespace 的管理端口、出公网的管理端口，
+	// 处置方式完全不同。
+
+	// batch -> payment:3306：跨 namespace 直连数据库端口。payment 的策略
+	// 只放行 role:edge 的来源，batch 不是，因此这批会被判 DENY——
+	// 一条被策略挡住的高风险连接，仍然是需要有人去问"谁在连数据库"的信号。
+	for i := 0; i < 8; i++ {
+		src := batch[i%len(batch)]
+		dst := payment[i%len(payment)]
+		b.add(podEndpoint(src), podEndpoint(dst), replay.ProtocolTCP, 3306)
+	}
+
+	// batch -> legacy:22：跨 namespace SSH。legacy 的策略写错了 ipBlock，
+	// 因此这批会落进 UNKNOWN —— "有人在跨 namespace 连 SSH，而我们连它
+	// 通不通都算不出来"，比单纯的 DENY 更需要出现在报告里。
+	for i := 0; i < 4; i++ {
+		src := batch[i%len(batch)]
+		dst := legacy[i%len(legacy)]
+		b.add(podEndpoint(src), podEndpoint(dst), replay.ProtocolTCP, 22)
+	}
+
+	// gateway -> 203.0.113.10:22：出公网的管理端口，风险最高的一类。
+	// 地址取 RFC 5737 的文档保留段，避免与任何真实主机重合。
+	for i := 0; i < 3; i++ {
+		src := gateway[i%len(gateway)]
+		b.add(podEndpoint(src), externalEndpoint("203.0.113.10"), replay.ProtocolTCP, 22)
+	}
+
 	// eu 少量出公网流量，与 asia 的出公网场景对称。
 	externalIPsEU := []string{"9.9.9.9"}
 	for i := 0; i < 6; i++ {
