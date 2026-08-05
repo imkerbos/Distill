@@ -3,6 +3,7 @@ package store
 
 import (
 	"context"
+	"time"
 
 	"github.com/imkerbos/Distill/internal/replay"
 )
@@ -57,12 +58,38 @@ type Topology struct {
 	UnplaceableFlowCount int `json:"unplaceableFlowCount"`
 }
 
-// FlowFilter 是流量列表的筛选条件。空字段表示不筛选。
+// TimeWindow 是一个左闭右开的时间区间 [From, To)。
+//
+// 半开而非闭区间：相邻窗口按序切分同一段时间时，闭区间会让边界上的
+// flow 被两个窗口各计一次，而对账的分母正是靠窗口累加得出的。
+type TimeWindow struct {
+	From time.Time `json:"from"`
+	To   time.Time `json:"to"`
+}
+
+// Valid 报告窗口是否可用于查询。
+func (w TimeWindow) Valid() bool {
+	return !w.From.IsZero() && !w.To.IsZero() && w.From.Before(w.To)
+}
+
+// Contains 报告 t 是否落在 [From, To) 内。
+func (w TimeWindow) Contains(t time.Time) bool {
+	return !t.Before(w.From) && t.Before(w.To)
+}
+
+// FlowFilter 是流量列表的筛选条件。除 Window 外，空字段表示不筛选。
 type FlowFilter struct {
 	Cluster    string
 	Verdict    string
 	Confidence string
 	Limit      int
+	// Window 是必填的查询时间窗。
+	//
+	// 没有默认值：事实层要求 require_partition_filter（spec §5.1），
+	// 一个缺失时间条件却照样返回结果的查询，接上真实存储后会变成一次
+	// 全表扫描，而账单要到月底才可见。默认值该由装配方按部署形态给出，
+	// 数据层只负责拒绝没带窗口的请求。
+	Window TimeWindow
 }
 
 // ValidVerdict 报告 v 是否属于 verdict 的封闭枚举。
@@ -90,15 +117,17 @@ func ValidConfidence(c string) bool {
 
 // FlowRecord 是流量列表中的一行。
 type FlowRecord struct {
-	ID            string `json:"id"`
-	SourceLabel   string `json:"sourceLabel"`
-	DestLabel     string `json:"destLabel"`
-	Protocol      string `json:"protocol"`
-	Port          int32  `json:"port"`
-	Verdict       string `json:"verdict"`
-	Confidence    string `json:"confidence"`
-	UnknownReason string `json:"unknownReason"`
-	CrossCluster  bool   `json:"crossCluster"`
+	ID string `json:"id"`
+	// Timestamp 是该条流量的发生时刻。
+	Timestamp     time.Time `json:"timestamp"`
+	SourceLabel   string    `json:"sourceLabel"`
+	DestLabel     string    `json:"destLabel"`
+	Protocol      string    `json:"protocol"`
+	Port          int32     `json:"port"`
+	Verdict       string    `json:"verdict"`
+	Confidence    string    `json:"confidence"`
+	UnknownReason string    `json:"unknownReason"`
+	CrossCluster  bool      `json:"crossCluster"`
 	// Unmanaged 表示这条流量的主体不受 NetworkPolicy 管控（如 hostNetwork
 	// Pod）。"策略放行了它"与"策略根本管不到它"都会得到 ALLOW，但前者是
 	// 一条可以照着推荐策略的证据，后者是一个必须靠别的手段封堵的敞口。
@@ -118,6 +147,11 @@ type FlowPage struct {
 	// Limit 是实际生效的条数上限。未指定时由数据层填入默认值，
 	// 由数据层而非 handler 回答，避免默认值在两处各写一份。
 	Limit int
+	// Window 是实际生效的查询时间窗。
+	//
+	// 必须回显：一个按时间筛过的列表若不说明筛的是哪一段，在界面上
+	// 与全量列表无法区分 —— 与 Total 存在的理由相同。
+	Window TimeWindow
 }
 
 // DecisionReason 是判定的结构化理由。

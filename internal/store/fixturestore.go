@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,6 +30,9 @@ const unspecifiedUnknownReason = "UNSPECIFIED"
 
 // ErrClusterNotFound 表示请求的集群不存在。
 var ErrClusterNotFound = errors.New("cluster not found")
+
+// ErrWindowRequired 表示查询缺少必填的时间窗。
+var ErrWindowRequired = errors.New("time window required")
 
 // FixtureReader 用合成数据实现 Reader。
 //
@@ -108,6 +112,7 @@ func (r *FixtureReader) toFlowRecord(f fixture.Flow) (FlowRecord, replay.Decisio
 	d := r.decide(f)
 	rec := FlowRecord{
 		ID:            f.ID,
+		Timestamp:     f.Flow.Timestamp,
 		SourceLabel:   endpointLabel(f.Flow.Source),
 		DestLabel:     endpointLabel(f.Flow.Dest),
 		Protocol:      string(f.Flow.Protocol),
@@ -395,8 +400,43 @@ func (r *FixtureReader) Topology(_ context.Context, clusterID string) (Topology,
 	return Topology{Nodes: nodes, Edges: edges, UnplaceableFlowCount: unplaceable}, nil
 }
 
+// DataWindow 返回覆盖本数据集全部流量的时间窗。
+//
+// 只在 fixture 实现上提供，不进 Reader 接口：真实存储的数据窗口是无界的，
+// "全部数据的时间范围"在那里不是一个有意义的问题。
+//
+// 存在的理由是给装配方一个不会过期的默认窗口。fixture 数据固定在 baseTime，
+// 任何"最近 N 天"的默认值都会随真实时间推移而在某天悄悄返回 0 条 —— demo
+// 会在没有人改动代码的情况下自己坏掉。
+//
+// 上界取末条 flow 之后一秒：TimeWindow 左闭右开，用末条时间戳本身会把
+// 最后一条排除在外。
+func (r *FixtureReader) DataWindow() TimeWindow {
+	if len(r.fleet.Flows) == 0 {
+		// 空数据集没有有意义的窗口，但返回零值会让调用方拿到一个
+		// Valid() 为假的窗口并在查询时才失败。给一个退化但合法的区间。
+		now := time.Time{}
+		return TimeWindow{From: now, To: now.Add(time.Second)}
+	}
+	first := r.fleet.Flows[0].Flow.Timestamp
+	last := first
+	for _, fl := range r.fleet.Flows {
+		if fl.Flow.Timestamp.Before(first) {
+			first = fl.Flow.Timestamp
+		}
+		if fl.Flow.Timestamp.After(last) {
+			last = fl.Flow.Timestamp
+		}
+	}
+	return TimeWindow{From: first, To: last.Add(time.Second)}
+}
+
 // Flows 按条件返回流量列表。筛选条件指向不存在的集群时返回错误。
 func (r *FixtureReader) Flows(_ context.Context, filter FlowFilter) (FlowPage, error) {
+	// 先于集群校验：缺时间窗是调用方用错了接口，与查哪个集群无关。
+	if !filter.Window.Valid() {
+		return FlowPage{}, ErrWindowRequired
+	}
 	if filter.Cluster != "" {
 		if _, ok := r.fleet.Cluster(filter.Cluster); !ok {
 			// 与 Topology、Quality 一致地把"集群不存在"报成错误：同一个
@@ -416,6 +456,9 @@ func (r *FixtureReader) Flows(_ context.Context, filter FlowFilter) (FlowPage, e
 		// involvesCluster，不是 owningCluster：这个筛选器是从 Topology/Quality
 		// 点进来的钻取入口，要用它们同一条"是否算这个集群的"规则，否则跨集群
 		// flow 在概览页被计入源集群，点进列表却因为目的端不是它而被过滤掉。
+		if !filter.Window.Contains(f.Flow.Timestamp) {
+			continue
+		}
 		if filter.Cluster != "" && !involvesCluster(f.Flow, filter.Cluster) {
 			continue
 		}
@@ -436,7 +479,7 @@ func (r *FixtureReader) Flows(_ context.Context, filter FlowFilter) (FlowPage, e
 	if len(out) > limit {
 		out = out[:limit]
 	}
-	return FlowPage{Items: out, Total: total, Limit: limit}, nil
+	return FlowPage{Items: out, Total: total, Limit: limit, Window: filter.Window}, nil
 }
 
 // Flow 返回单条流量的完整判定。不存在时第二个返回值为 false。

@@ -15,6 +15,12 @@ func newReader() *store.FixtureReader {
 	return store.NewFixtureReader(fixture.Load())
 }
 
+// allTime 是覆盖整个 fixture 数据集的时间窗。Flows 的时间窗是必填的
+// （见 store.FlowFilter.Window），只关心其他筛选条件的用例用它把时间维打开。
+func allTime() store.TimeWindow {
+	return newReader().DataWindow()
+}
+
 func TestClusters(t *testing.T) {
 	got, err := newReader().Clusters(context.Background())
 	if err != nil {
@@ -98,7 +104,7 @@ func TestTopologyMarksForeignNamespace(t *testing.T) {
 }
 
 func TestFlowsRespectsLimit(t *testing.T) {
-	got, err := newReader().Flows(context.Background(), store.FlowFilter{Limit: 10})
+	got, err := newReader().Flows(context.Background(), store.FlowFilter{Window: allTime(), Limit: 10})
 	if err != nil {
 		t.Fatalf("Flows: %v", err)
 	}
@@ -111,11 +117,11 @@ func TestFlowsRespectsLimit(t *testing.T) {
 // 只回一个被切短的切片，界面会把"只给你看了 10 条"显示成"一共就这些"。
 func TestFlowsReportsTotalBeforeTruncation(t *testing.T) {
 	r := newReader()
-	all, err := r.Flows(context.Background(), store.FlowFilter{Limit: 1000})
+	all, err := r.Flows(context.Background(), store.FlowFilter{Window: allTime(), Limit: 1000})
 	if err != nil {
 		t.Fatalf("Flows: %v", err)
 	}
-	page, err := r.Flows(context.Background(), store.FlowFilter{Limit: 10})
+	page, err := r.Flows(context.Background(), store.FlowFilter{Window: allTime(), Limit: 10})
 	if err != nil {
 		t.Fatalf("Flows: %v", err)
 	}
@@ -134,7 +140,7 @@ func TestFlowsReportsTotalBeforeTruncation(t *testing.T) {
 // 流量，而它们恰好排在 ID 序列的后段 —— 一个截断在前段的默认视图会让
 // demo 开屏全绿，正是这个平台最不该给人的印象。
 func TestDefaultFlowsIncludeTheGaps(t *testing.T) {
-	page, err := newReader().Flows(context.Background(), store.FlowFilter{})
+	page, err := newReader().Flows(context.Background(), store.FlowFilter{Window: allTime()})
 	if err != nil {
 		t.Fatalf("Flows: %v", err)
 	}
@@ -159,14 +165,14 @@ func TestDefaultFlowsIncludeTheGaps(t *testing.T) {
 // 不存在的集群在 Flows 上也必须报错。返回空列表会让同一个笔误在拓扑页
 // 得到 20002、在流量页得到"没有流量"，两块屏对同一件事给出两种解释。
 func TestFlowsUnknownClusterIsNotFound(t *testing.T) {
-	_, err := newReader().Flows(context.Background(), store.FlowFilter{Cluster: "no-such"})
+	_, err := newReader().Flows(context.Background(), store.FlowFilter{Window: allTime(), Cluster: "no-such"})
 	if !errors.Is(err, store.ErrClusterNotFound) {
 		t.Errorf("Flows(cluster=no-such) error = %v, want ErrClusterNotFound", err)
 	}
 }
 
 func TestFlowsFilterByVerdict(t *testing.T) {
-	got, err := newReader().Flows(context.Background(), store.FlowFilter{Verdict: "DENY", Limit: 500})
+	got, err := newReader().Flows(context.Background(), store.FlowFilter{Window: allTime(), Verdict: "DENY", Limit: 500})
 	if err != nil {
 		t.Fatalf("Flows: %v", err)
 	}
@@ -181,7 +187,7 @@ func TestFlowsFilterByVerdict(t *testing.T) {
 }
 
 func TestFlowsFilterByConfidence(t *testing.T) {
-	got, err := newReader().Flows(context.Background(), store.FlowFilter{Confidence: "DEGRADED", Limit: 500})
+	got, err := newReader().Flows(context.Background(), store.FlowFilter{Window: allTime(), Confidence: "DEGRADED", Limit: 500})
 	if err != nil {
 		t.Fatalf("Flows: %v", err)
 	}
@@ -193,7 +199,7 @@ func TestFlowsFilterByConfidence(t *testing.T) {
 // NetworkPolicy 管不到 hostNetwork Pod。这类流量拿到的 ALLOW 与"策略确实
 // 放行了它"必须能区分开，否则界面会把一个封不住的敞口画成一条绿边。
 func TestFlowToHostNetworkPodIsMarkedUnmanaged(t *testing.T) {
-	page, err := newReader().Flows(context.Background(), store.FlowFilter{Limit: 1000})
+	page, err := newReader().Flows(context.Background(), store.FlowFilter{Window: allTime(), Limit: 1000})
 	if err != nil {
 		t.Fatalf("Flows: %v", err)
 	}
@@ -210,7 +216,7 @@ func TestFlowToHostNetworkPodIsMarkedUnmanaged(t *testing.T) {
 
 func TestFlowReturnsFullDecision(t *testing.T) {
 	r := newReader()
-	list, _ := r.Flows(context.Background(), store.FlowFilter{Limit: 1})
+	list, _ := r.Flows(context.Background(), store.FlowFilter{Window: allTime(), Limit: 1})
 	if len(list.Items) == 0 {
 		t.Fatal("no flows")
 	}
@@ -387,7 +393,7 @@ func TestFlowsClusterFilterMatchesQualityTotal(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Quality(%s): %v", cluster, err)
 		}
-		page, err := r.Flows(ctx, store.FlowFilter{Cluster: cluster, Limit: 1000})
+		page, err := r.Flows(ctx, store.FlowFilter{Window: allTime(), Cluster: cluster, Limit: 1000})
 		if err != nil {
 			t.Fatalf("Flows(%s): %v", cluster, err)
 		}
@@ -405,7 +411,7 @@ func TestCrossClusterFlowsAppearForBothClusters(t *testing.T) {
 	ctx := context.Background()
 
 	for _, cluster := range []string{"prod-asia-1", "prod-eu-1"} {
-		page, err := r.Flows(ctx, store.FlowFilter{Cluster: cluster, Limit: 1000})
+		page, err := r.Flows(ctx, store.FlowFilter{Window: allTime(), Cluster: cluster, Limit: 1000})
 		if err != nil {
 			t.Fatalf("Flows(%s): %v", cluster, err)
 		}

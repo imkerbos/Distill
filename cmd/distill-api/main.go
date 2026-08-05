@@ -46,13 +46,19 @@ func run(configPath string) error {
 	}
 	logger.Info("starting", "version", buildinfo.Version(), "addr", cfg.Server.Addr)
 
+	reader := store.NewFixtureReader(fixture.Load())
+
 	r := chi.NewRouter()
 	r.Mount("/healthz", newHealthHandler())
 	r.Mount("/", httpapi.NewRouter(httpapi.Deps{
 		Sessions: auth.NewSessionStore(cfg.Auth.SessionTTL, nil),
 		Verifier: auth.NewVerifier(cfg.Auth.Users),
 		Logger:   logger,
-		Reader:   store.NewFixtureReader(fixture.Load()),
+		Reader:   reader,
+		// demo 的默认时间窗取 fixture 数据的实际范围。任何"最近 N 天"
+		// 的取值都会随真实时间推移而在某天返回 0 条 —— demo 会在没有
+		// 人改动代码的情况下自己坏掉。接真实存储时这里换成有界窗口。
+		DefaultWindow: reader.DataWindow(),
 	}))
 
 	srv := &http.Server{

@@ -3,8 +3,12 @@ package httpapi_test
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"testing"
+	"time"
 
+	"github.com/imkerbos/Distill/internal/fixture"
+	"github.com/imkerbos/Distill/internal/response"
 	"github.com/imkerbos/Distill/internal/store"
 )
 
@@ -17,7 +21,14 @@ type flowListEnvelope struct {
 		Total    int                `json:"total"`
 		Returned int                `json:"returned"`
 		Limit    int                `json:"limit"`
+		Window   store.TimeWindow   `json:"window"`
 	} `json:"data"`
+}
+
+// fixtureDataWindow 给出覆盖 fixture 全量数据的时间窗。
+// fixtureReader 返回接口类型，而数据窗口只存在于 fixture 实现上。
+func fixtureDataWindow() store.TimeWindow {
+	return store.NewFixtureReader(fixture.Load()).DataWindow()
 }
 
 func decodeFlowList(t *testing.T, body []byte) flowListEnvelope {
@@ -213,5 +224,79 @@ func TestFlowsRequiresAuth(t *testing.T) {
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401", rec.Code)
+	}
+}
+
+// 省略 from/to 时用装配方注入的默认窗口，且必须回显 —— 界面要能说清
+// 自己展示的是哪一段时间，否则按时间筛过的列表与全量列表无法区分。
+func TestFlowsEchoesDefaultWindow(t *testing.T) {
+	h, _, cookie := newTestRouter(t, fixtureReader())
+	rec := authedGet(t, h, cookie, "/api/v1/flows?limit=5")
+
+	env := decodeFlowList(t, rec.Body.Bytes())
+	if env.Data.Window.From.IsZero() || env.Data.Window.To.IsZero() {
+		t.Fatalf("默认窗口未回显: %+v", env.Data.Window)
+	}
+}
+
+func TestFlowsFiltersByExplicitWindow(t *testing.T) {
+	h, _, cookie := newTestRouter(t, fixtureReader())
+	full := fixtureDataWindow()
+
+	from := full.From.Format(time.RFC3339)
+	to := full.From.Add(10 * time.Second).Format(time.RFC3339)
+	rec := authedGet(t, h, cookie, "/api/v1/flows?from="+url.QueryEscape(from)+"&to="+url.QueryEscape(to))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	env := decodeFlowList(t, rec.Body.Bytes())
+	if env.Data.Total != 10 {
+		t.Errorf("十秒窗口 total = %d, want 10", env.Data.Total)
+	}
+	if !env.Data.Window.From.Equal(full.From) {
+		t.Errorf("回显窗口起点 = %v, want %v", env.Data.Window.From, full.From)
+	}
+}
+
+// 只给一端必须报错。补另一端要么取"现在"、要么取"开天辟地"，两个默认
+// 都会让实际范围与用户以为筛的范围不一致，而界面只会照实回显那个它
+// 并没有要求过的窗口。
+func TestFlowsRejectsHalfWindow(t *testing.T) {
+	h, _, cookie := newTestRouter(t, fixtureReader())
+	full := fixtureDataWindow()
+	from := url.QueryEscape(full.From.Format(time.RFC3339))
+
+	for _, q := range []string{"?from=" + from, "?to=" + from} {
+		rec := authedGet(t, h, cookie, "/api/v1/flows"+q)
+		env := decodeFlowList(t, rec.Body.Bytes())
+		if env.Code != int(response.CodeInvalidParam) {
+			t.Errorf("%s: code = %d, want %d", q, env.Code, int(response.CodeInvalidParam))
+		}
+	}
+}
+
+func TestFlowsRejectsMalformedWindow(t *testing.T) {
+	h, _, cookie := newTestRouter(t, fixtureReader())
+	rec := authedGet(t, h, cookie, "/api/v1/flows?from=not-a-time&to=also-not")
+
+	env := decodeFlowList(t, rec.Body.Bytes())
+	if env.Code != int(response.CodeInvalidParam) {
+		t.Errorf("code = %d, want %d", env.Code, int(response.CodeInvalidParam))
+	}
+}
+
+// From 晚于 To 是一个必然返回空列表的窗口。放行它等于让界面把一次
+// 输入错误显示成"这段时间没有流量"。
+func TestFlowsRejectsInvertedWindow(t *testing.T) {
+	h, _, cookie := newTestRouter(t, fixtureReader())
+	full := fixtureDataWindow()
+	from := url.QueryEscape(full.To.Format(time.RFC3339))
+	to := url.QueryEscape(full.From.Format(time.RFC3339))
+
+	rec := authedGet(t, h, cookie, "/api/v1/flows?from="+from+"&to="+to)
+	env := decodeFlowList(t, rec.Body.Bytes())
+	if env.Code != int(response.CodeInvalidParam) {
+		t.Errorf("code = %d, want %d", env.Code, int(response.CodeInvalidParam))
 	}
 }
