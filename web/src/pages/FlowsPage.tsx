@@ -1,9 +1,19 @@
 import { useState } from 'react'
 import { api } from '../api/client'
-import type { Confidence, Verdict } from '../api/types'
+import type { Confidence, TimeWindow, Verdict } from '../api/types'
 import { useResource } from '../api/useResource'
 import DecisionDrawer from '../components/DecisionDrawer'
 import { CrossClusterMark, UnmanagedMark, VerdictBadge } from '../components/Verdict'
+
+/**
+ * 把时间窗格式化成可读区间。用 UTC 而非本地时区：判定与快照都以 UTC
+ * 落库，界面按浏览器时区显示会让人对着两套时间核对同一条流量。
+ */
+function formatWindow(w: TimeWindow): string {
+  const fmt = (iso: string) =>
+    new Date(iso).toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC')
+  return `${fmt(w.from)} — ${fmt(w.to)}`
+}
 
 export default function FlowsPage({ cluster }: { cluster: string }) {
   const [verdict, setVerdict] = useState<Verdict | ''>('')
@@ -48,6 +58,14 @@ export default function FlowsPage({ cluster }: { cluster: string }) {
                 （已按上限 {page.limit} 截断，尚有 {page.total - page.returned} 条未显示）
               </strong>
             )}
+          </p>
+          {/*
+            时间窗与条数同等重要：列表按时间筛过却不说明筛的是哪一段，
+            与被截断却不说明截了多少是同一类问题 —— 用户会把"这段时间的
+            流量"读成"全部流量"。
+          */}
+          <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: -8 }}>
+            时间范围 {formatWindow(page.window)}
           </p>
 
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
