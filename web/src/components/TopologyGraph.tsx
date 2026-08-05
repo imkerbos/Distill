@@ -7,6 +7,26 @@ import type { Topology, TopologyEdge, TopologyNode, Verdict } from '../api/types
 
 const W = 900
 const H = 520
+// 标签在节点下方约 40px，包围盒要把它算进去，否则底部一行文字会被裁掉。
+const PAD = 48
+
+/** 把模拟结果整体平移缩放到画布内。 */
+function fitToCanvas(nodes: SimNode[]) {
+  if (nodes.length === 0) return
+  const xs = nodes.map((n) => n.x ?? 0)
+  const ys = nodes.map((n) => n.y ?? 0)
+  const minX = Math.min(...xs), maxX = Math.max(...xs)
+  const minY = Math.min(...ys), maxY = Math.max(...ys)
+  const spanX = Math.max(maxX - minX, 1)
+  const spanY = Math.max(maxY - minY, 1)
+  const scale = Math.min((W - PAD * 2) / spanX, (H - PAD * 2) / spanY, 1)
+  const offX = (W - spanX * scale) / 2 - minX * scale
+  const offY = (H - spanY * scale) / 2 - minY * scale
+  for (const n of nodes) {
+    n.x = (n.x ?? 0) * scale + offX
+    n.y = (n.y ?? 0) * scale + offY
+  }
+}
 
 const EDGE_COLOR: Record<Verdict, string> = {
   ALLOW: 'var(--verdict-allow)',
@@ -83,13 +103,21 @@ export default function TopologyGraph({
     // 到来时全图会跟着重新洗牌，等于没有增量稳定性，需要另外设计。
     sim.tick(300)
 
+    // 力导布局的坐标范围不受画布约束，节点会越出边界被容器裁掉 ——
+    // 一个被裁掉一半的节点，读者无从知道它是否还有别的连线。
+    // 模拟结束后按包围盒整体平移缩放，保证全部节点连同标签落在画布内。
+    fitToCanvas(nodes)
+
     nodesRef.current = nodes
     linksRef.current = links
     forceRender((v) => v + 1)
   }, [key, topology])
 
   return (
-    <svg width={W} height={H} style={{
+    // viewBox + 百分比宽度：固定像素宽的画布在宽屏卡片里会空出右侧一大块，
+    // 看上去像内容没加载完。用 viewBox 让图随容器缩放，坐标系保持不变。
+    <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H}
+      preserveAspectRatio="xMidYMid meet" style={{
       background: 'var(--surface)', border: '1px solid var(--border)',
       borderRadius: 'var(--radius)',
     }}>
@@ -128,8 +156,14 @@ export default function TopologyGraph({
             x={n.x} y={(n.y ?? 0) + 26} textAnchor="middle"
             fontSize={12} fill={n.foreign ? 'var(--text-muted)' : 'var(--text)'}
           >{n.namespace}</text>
+          {/*
+            "无策略"不用 DENY 的红：语义色是判定结论的专属载体（spec §17.1）。
+            这是资产状态 —— 一个没有策略的 namespace 里流量可能全部 ALLOW，
+            染成红色会让人读成"这里被阻断了"。
+          */}
           {!n.hasPolicy && !n.foreign && (
-            <text x={n.x} y={(n.y ?? 0) + 40} textAnchor="middle" fontSize={10} fill="var(--verdict-deny)">
+            <text x={n.x} y={(n.y ?? 0) + 40} textAnchor="middle" fontSize={10}
+              fill="var(--text-secondary)" fontWeight={600}>
               无策略
             </text>
           )}

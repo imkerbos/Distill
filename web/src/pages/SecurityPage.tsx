@@ -1,7 +1,8 @@
 import { api } from '../api/client'
-import type { RiskCategory, RiskPosition, SecurityReport } from '../api/types'
+import type { RiskCategory, RiskPosition, RiskyFlow, SecurityReport } from '../api/types'
 import { useResource } from '../api/useResource'
 import { VerdictBadge } from '../components/Verdict'
+import { Card, Chip, EmptyState, PageHeader, Section, TableCard } from '../components/ui'
 
 const CATEGORY_LABEL: Record<RiskCategory, string> = {
   ADMIN_PLAINTEXT: '明文管理端口',
@@ -9,31 +10,30 @@ const CATEGORY_LABEL: Record<RiskCategory, string> = {
   FILE_SHARE: '文件共享',
 }
 
-const POSITION_LABEL: Record<RiskPosition, string> = {
-  EGRESS_INTERNET: '出公网',
-  CROSS_NAMESPACE: '跨 namespace',
-  SAME_NAMESPACE: '同 namespace',
-}
-
 /**
- * 位置决定紧迫度，与端口类别是两个维度。出公网的 SSH 与同 namespace 内的
- * SSH 都是 ADMIN_PLAINTEXT，但前者要立刻处理、后者多半是正常运维通道。
+ * 位置按紧迫度从高到低排列，报告即按此顺序分组。
+ *
+ * 用分组与顺序表达严重程度，**不用颜色** —— ALLOW / DENY / UNKNOWN 的色值
+ * 是判定结论的专属载体（spec §17.1）。把"跨 namespace"染成 UNKNOWN 的琥珀色，
+ * 读者会把一条判定明确的连接读成无法判定。
  */
-const POSITION_TONE: Record<RiskPosition, string> = {
-  EGRESS_INTERNET: 'var(--verdict-deny)',
-  CROSS_NAMESPACE: 'var(--verdict-unknown)',
-  SAME_NAMESPACE: 'var(--text-muted)',
-}
-
-const th: React.CSSProperties = {
-  padding: 'var(--space-2)',
-  borderBottom: '1px solid var(--border)',
-  fontWeight: 500,
-}
-const td: React.CSSProperties = {
-  padding: 'var(--space-2)',
-  borderBottom: '1px solid var(--border)',
-}
+const POSITIONS: { key: RiskPosition; label: string; hint: string }[] = [
+  {
+    key: 'EGRESS_INTERNET',
+    label: '出公网',
+    hint: '风险最高：目标不在任何集群内，一旦通了就是一条数据出境路径。',
+  },
+  {
+    key: 'CROSS_NAMESPACE',
+    label: '跨 namespace',
+    hint: '越过了服务边界，通常应由策略明确约束。',
+  },
+  {
+    key: 'SAME_NAMESPACE',
+    label: '同 namespace',
+    hint: '多数属于正常架构，列出以便核对。',
+  },
+]
 
 export default function SecurityPage({ cluster }: { cluster: string }) {
   const { data: rep, error, loading } = useResource(cluster, () => api.security(cluster))
@@ -43,7 +43,10 @@ export default function SecurityPage({ cluster }: { cluster: string }) {
 
   return (
     <div>
-      <h2 style={{ marginTop: 0 }}>安全发现</h2>
+      <PageHeader
+        title="安全发现"
+        description="按风险位置分组的可疑连接、公网出向目标，以及未被任何策略选中的 Pod。被策略拒绝的连接同样列出 —— 挡住了不等于没有人在连。"
+      />
 
       <RiskySection rep={rep} />
       <EgressSection rep={rep} />
@@ -53,142 +56,152 @@ export default function SecurityPage({ cluster }: { cluster: string }) {
 }
 
 function RiskySection({ rep }: { rep: SecurityReport }) {
-  return (
-    <section>
-      <h3 style={{ fontSize: 14, marginBottom: 'var(--space-2)' }}>高风险端口连接</h3>
-      <p style={{ fontSize: 13, color: 'var(--text-muted)', marginTop: 0 }}>
-        风险来自端口背后的协议语义，不来自端口是否常见。
-        {/*
-          被 DENY 的连接照样列出：策略这次挡住了，不代表没有人在尝试。
-          把它们过滤掉会让报告看起来干净，同时丢掉最该被追问的那条线索。
-        */}
-        被策略拒绝的连接同样列出 —— 挡住了不等于没有人在连。
-      </p>
+  const groups = POSITIONS
+    .map((p) => ({ ...p, rows: rep.riskyFlows.filter((f) => f.position === p.key) }))
+    .filter((g) => g.rows.length > 0)
 
-      {rep.riskyFlows.length === 0 ? (
-        <EmptyWithCatalog rep={rep} />
+  return (
+    <Section
+      title="高风险端口连接"
+      description="风险来自端口背后的协议语义，不来自端口是否常见。同一个端口在不同位置的处置方式完全不同，因此按位置分组，不合成单一评分。"
+      meta={`${rep.riskyFlows.length} 条`}
+    >
+      {groups.length === 0 ? (
+        <EmptyState
+          message="本集群未发现落在高风险端口上的连接。"
+          detail={
+            <>
+              判定所用的端口清单（共 {rep.riskPortCatalog.length} 个）：
+              {rep.riskPortCatalog.map((p) => `${p.name}:${p.port}`).join('、')}。
+              列出清单是为了让这句"未发现"可被检验 —— 否则它与"根本没查"无法区分。
+            </>
+          }
+        />
       ) : (
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-          <thead>
-            <tr style={{ textAlign: 'left', color: 'var(--text-muted)', fontSize: 12 }}>
-              <th style={th}>判定</th>
-              <th style={th}>位置</th>
-              <th style={th}>端口</th>
-              <th style={th}>源</th>
-              <th style={th}>目的</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rep.riskyFlows.map((f) => (
-              <tr key={f.id}>
-                <td style={td}>
-                  <VerdictBadge verdict={f.verdict} confidence={f.confidence} />
-                </td>
-                <td style={{ ...td, color: POSITION_TONE[f.position], fontWeight: 500 }}>
-                  {POSITION_LABEL[f.position] ?? f.position}
-                </td>
-                <td style={td}>
-                  {f.portName} :{f.port}
-                  <span style={{ color: 'var(--text-muted)', marginLeft: 6, fontSize: 12 }}>
-                    {CATEGORY_LABEL[f.category] ?? f.category}
-                  </span>
-                </td>
-                <td style={td}>{f.sourceLabel}</td>
-                <td style={td}>{f.destLabel}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        groups.map((g) => (
+          <div key={g.key} style={{ marginBottom: 'var(--space-4)' }}>
+            <div style={{
+              display: 'flex', alignItems: 'baseline', gap: 'var(--space-2)',
+              marginBottom: 'var(--space-2)', flexWrap: 'wrap',
+            }}>
+              <strong style={{ fontSize: 'var(--text-sm)' }}>{g.label}</strong>
+              <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+                {g.rows.length} 条 · {g.hint}
+              </span>
+            </div>
+            <RiskyTable rows={g.rows} />
+          </div>
+        ))
       )}
-    </section>
+    </Section>
   )
 }
 
-/**
- * 空结果必须连同判定依据一起展示。
- *
- * 只显示"未发现高风险连接"，读者无从分辨这是"查过了、干净"还是
- * "根本没查"。把用过的端口清单摆出来，这句话才有分量。
- */
-function EmptyWithCatalog({ rep }: { rep: SecurityReport }) {
+function RiskyTable({ rows }: { rows: RiskyFlow[] }) {
   return (
-    <div style={{ fontSize: 13 }}>
-      <p>本集群未发现落在高风险端口上的连接。</p>
-      <p style={{ color: 'var(--text-muted)' }}>
-        判定所用的端口清单（共 {rep.riskPortCatalog.length} 个）：
-        {rep.riskPortCatalog.map((p) => `${p.name}:${p.port}`).join('、')}
-      </p>
-    </div>
+    <TableCard>
+      <thead>
+        <tr>
+          <th>判定</th>
+          <th>端口</th>
+          <th>源</th>
+          <th>目的</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((f) => (
+          <tr key={f.id}>
+            <td><VerdictBadge verdict={f.verdict} confidence={f.confidence} /></td>
+            <td>
+              <span style={{ fontWeight: 500 }}>{f.portName}</span>
+              <span className="mono" style={{ marginLeft: 6 }}>:{f.port}</span>
+              <span style={{ marginLeft: 8 }}>
+                <Chip>{CATEGORY_LABEL[f.category] ?? f.category}</Chip>
+              </span>
+            </td>
+            <td className="mono" style={{ fontSize: 'var(--text-sm)' }}>{f.sourceLabel}</td>
+            <td className="mono" style={{ fontSize: 'var(--text-sm)' }}>{f.destLabel}</td>
+          </tr>
+        ))}
+      </tbody>
+    </TableCard>
   )
 }
 
 function EgressSection({ rep }: { rep: SecurityReport }) {
   return (
-    <section style={{ marginTop: 'var(--space-5)' }}>
-      <h3 style={{ fontSize: 14, marginBottom: 'var(--space-2)' }}>公网出向目标</h3>
+    <Section
+      title="公网出向目标"
+      description="离开集群的连接去了哪里。放行数与总数分列 —— 一条畅通的外联与一条已被策略挡住的外联，只报总数会长得一样。"
+      meta={`${rep.egressTargets.length} 个目标`}
+    >
       {rep.egressTargets.length === 0 ? (
-        <p style={{ fontSize: 13 }}>本集群没有出公网流量。</p>
+        <EmptyState
+          message="本集群没有出公网流量。"
+          detail="判定依据：目的端既无 Pod 身份，也不属于任何已注册集群。"
+        />
       ) : (
-        <table style={{ borderCollapse: 'collapse', fontSize: 13, minWidth: 480 }}>
+        <TableCard>
           <thead>
-            <tr style={{ textAlign: 'left', color: 'var(--text-muted)', fontSize: 12 }}>
-              <th style={th}>目标</th>
-              <th style={th}>端口</th>
-              <th style={th}>流量</th>
-              <th style={th}>其中放行</th>
-              <th style={th}>无法判定</th>
+            <tr>
+              <th>目标</th>
+              <th>端口</th>
+              <th className="num">流量</th>
+              <th className="num">其中放行</th>
+              <th className="num">无法判定</th>
             </tr>
           </thead>
           <tbody>
             {rep.egressTargets.map((t) => (
               <tr key={t.address}>
-                <td style={td}>{t.address}</td>
-                <td style={td}>{t.ports.join('、')}</td>
-                <td style={td}>{t.flowCount} 条</td>
-                {/*
-                  放行数单列。只给总数时，一条畅通的外联与一条已被策略
-                  挡住的外联在表里长得完全一样，而这两件事的处置天差地别。
-                */}
-                <td style={{ ...td, color: t.allowedCount > 0 ? 'var(--verdict-allow)' : undefined }}>
-                  {t.allowedCount} 条
+                <td className="mono" style={{ fontSize: 'var(--text-sm)' }}>{t.address}</td>
+                <td>{t.ports.map((p) => <Chip key={p}>{p}</Chip>)}</td>
+                <td className="num">{t.flowCount}</td>
+                <td className="num" style={{
+                  color: t.allowedCount > 0 ? 'var(--verdict-allow)' : undefined,
+                  fontWeight: t.allowedCount > 0 ? 600 : 400,
+                }}>
+                  {t.allowedCount}
                 </td>
-                <td style={{ ...td, color: t.unknownCount > 0 ? 'var(--verdict-unknown)' : undefined }}>
-                  {t.unknownCount} 条
+                <td className="num" style={{
+                  color: t.unknownCount > 0 ? 'var(--verdict-unknown)' : undefined,
+                  fontWeight: t.unknownCount > 0 ? 600 : 400,
+                }}>
+                  {t.unknownCount}
                 </td>
               </tr>
             ))}
           </tbody>
-        </table>
+        </TableCard>
       )}
-    </section>
+    </Section>
   )
 }
 
 function NakedSection({ rep }: { rep: SecurityReport }) {
   return (
-    <section style={{ marginTop: 'var(--space-5)' }}>
-      <h3 style={{ fontSize: 14, marginBottom: 'var(--space-2)' }}>
-        无策略覆盖的 Pod（{rep.nakedPods.length}）
-      </h3>
-      <p style={{ fontSize: 13, color: 'var(--text-muted)', marginTop: 0 }}>
-        {/*
-          时间语义与上面两节不同，必须写出来。否则读者会把它当成
-          "这段时间内有 N 个裸奔 Pod"，而它其实来自当前资产快照。
-        */}
-        来自资产快照，不受上方时间窗约束。hostNetwork Pod 不在此列 ——
-        那是 NetworkPolicy 管不到，与没被策略选中是两回事。
-      </p>
+    <Section
+      title="无策略覆盖的 Pod"
+      description="来自资产快照，不受上方时间窗约束。hostNetwork Pod 不在此列 —— 那是 NetworkPolicy 管不到，与没被策略选中是两回事。"
+      meta={`${rep.nakedPods.length} 个`}
+    >
       {rep.nakedPods.length === 0 ? (
-        <p style={{ fontSize: 13 }}>本集群所有 Pod 都被至少一条策略选中。</p>
+        <EmptyState
+          message="本集群所有 Pod 都被至少一条策略选中。"
+          detail="统计口径：已排除 hostNetwork Pod。"
+        />
       ) : (
-        <ul style={{ fontSize: 13, margin: 0, paddingLeft: '1.2em' }}>
+        <Card style={{
+          padding: 'var(--space-3)', display: 'flex',
+          flexWrap: 'wrap', gap: 'var(--space-2)',
+        }}>
           {rep.nakedPods.map((p) => (
-            <li key={`${p.namespace}/${p.name}`}>
+            <Chip key={`${p.namespace}/${p.name}`}>
               {p.namespace}/{p.name}
-            </li>
+            </Chip>
           ))}
-        </ul>
+        </Card>
       )}
-    </section>
+    </Section>
   )
 }
