@@ -19,7 +19,7 @@ func (brokenReader) Clusters(context.Context) ([]store.ClusterSummary, error) {
 	return nil, errors.New("bigquery: connection refused at 10.0.0.5:9050")
 }
 
-func (brokenReader) Topology(context.Context, string) (store.Topology, error) {
+func (brokenReader) Topology(context.Context, string, store.TopologyLevel) (store.Topology, error) {
 	return store.Topology{}, errors.New("bigquery: connection refused at 10.0.0.5:9050")
 }
 
@@ -33,6 +33,10 @@ func (brokenReader) Flow(context.Context, string) (store.Decision, bool, error) 
 
 func (brokenReader) Quality(context.Context, string) (store.Quality, error) {
 	return store.Quality{}, errors.New("bigquery: connection refused at 10.0.0.5:9050")
+}
+
+func (brokenReader) Security(context.Context, string, store.TimeWindow) (store.SecurityReport, error) {
+	return store.SecurityReport{}, errors.New("bigquery: connection refused at 10.0.0.5:9050")
 }
 
 // panicReader 在查询时 panic，用来验证路由本身确实装了 Recoverer——

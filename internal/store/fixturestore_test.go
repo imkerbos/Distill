@@ -37,7 +37,7 @@ func TestClusters(t *testing.T) {
 }
 
 func TestTopologyHasNodesAndEdges(t *testing.T) {
-	topo, err := newReader().Topology(context.Background(), "prod-asia-1")
+	topo, err := newReader().Topology(context.Background(), "prod-asia-1", store.LevelNamespace)
 	if err != nil {
 		t.Fatalf("Topology: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestTopologyHasNodesAndEdges(t *testing.T) {
 }
 
 func TestTopologyUnknownClusterIsNotFound(t *testing.T) {
-	_, err := newReader().Topology(context.Background(), "no-such-cluster")
+	_, err := newReader().Topology(context.Background(), "no-such-cluster", store.LevelNamespace)
 	if err == nil {
 		t.Fatal("Topology() = nil error for an unknown cluster")
 	}
@@ -63,7 +63,7 @@ func TestTopologyUnknownClusterIsNotFound(t *testing.T) {
 
 // mesh namespace 的节点必须被标出来，界面靠它显示 DEGRADED。
 func TestTopologyMarksMeshNamespace(t *testing.T) {
-	topo, _ := newReader().Topology(context.Background(), "prod-asia-1")
+	topo, _ := newReader().Topology(context.Background(), "prod-asia-1", store.LevelNamespace)
 	for _, n := range topo.Nodes {
 		if n.Namespace == "checkout" && n.InMesh {
 			return
@@ -75,7 +75,7 @@ func TestTopologyMarksMeshNamespace(t *testing.T) {
 // 每条边的两端都必须出现在节点集合里。悬空引用会让前端图要么报错，
 // 要么静默丢掉这条边 —— 而跨集群敞口正是最不该被静默丢掉的东西。
 func TestTopologyEdgesOnlyReferenceKnownNodes(t *testing.T) {
-	topo, err := newReader().Topology(context.Background(), "prod-asia-1")
+	topo, err := newReader().Topology(context.Background(), "prod-asia-1", store.LevelNamespace)
 	if err != nil {
 		t.Fatalf("Topology: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestTopologyEdgesOnlyReferenceKnownNodes(t *testing.T) {
 }
 
 func TestTopologyMarksForeignNamespace(t *testing.T) {
-	topo, _ := newReader().Topology(context.Background(), "prod-asia-1")
+	topo, _ := newReader().Topology(context.Background(), "prod-asia-1", store.LevelNamespace)
 	for _, n := range topo.Nodes {
 		if n.Cluster != "prod-asia-1" && !n.Foreign {
 			t.Errorf("node %q is from another cluster but is not marked Foreign", n.ID)
@@ -294,7 +294,7 @@ func TestQualityCountsCrossClusterOnTheSourceCluster(t *testing.T) {
 
 // 同一条敞口在拓扑上也必须画得出来，否则 eu 的图里看不到任何出集群的边。
 func TestTopologyShowsCrossClusterEdgeOnTheSourceCluster(t *testing.T) {
-	topo, err := newReader().Topology(context.Background(), "prod-eu-1")
+	topo, err := newReader().Topology(context.Background(), "prod-eu-1", store.LevelNamespace)
 	if err != nil {
 		t.Fatalf("Topology: %v", err)
 	}
@@ -309,7 +309,7 @@ func TestTopologyShowsCrossClusterEdgeOnTheSourceCluster(t *testing.T) {
 // 画不出的 flow 必须被计数报出来。默默 continue 会让拓扑页与数据质量页
 // 对同一个集群给出两个不同的总数，而差额里装着刻意制造的那几类"不知道"。
 func TestTopologyReportsUnplaceableFlows(t *testing.T) {
-	topo, err := newReader().Topology(context.Background(), "prod-asia-1")
+	topo, err := newReader().Topology(context.Background(), "prod-asia-1", store.LevelNamespace)
 	if err != nil {
 		t.Fatalf("Topology: %v", err)
 	}
@@ -333,7 +333,7 @@ func TestTopologyReportsUnplaceableFlows(t *testing.T) {
 
 // 一条通往 hostNetwork Pod 的边不能显示成普通放行。
 func TestTopologyMarksUnmanagedEdge(t *testing.T) {
-	topo, err := newReader().Topology(context.Background(), "prod-asia-1")
+	topo, err := newReader().Topology(context.Background(), "prod-asia-1", store.LevelNamespace)
 	if err != nil {
 		t.Fatalf("Topology: %v", err)
 	}

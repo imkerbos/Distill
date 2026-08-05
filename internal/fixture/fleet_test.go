@@ -188,3 +188,39 @@ func TestFlowEndpointsAreCoherent(t *testing.T) {
 		}
 	}
 }
+
+// 数据集必须包含真实可疑的流量，否则高风险端口报告只能渲染成空 ——
+// 而一块永远空着的安全报告，读者读到的是"这套集群很干净"，
+// 实际含义却是"这个数据集没造这类流量"。两者差得很远。
+//
+// 断言的是场景而非条数：条数可以调，场景不能消失。
+func TestDatasetContainsHighRiskTraffic(t *testing.T) {
+	f := fixture.Load()
+
+	var crossNSDatabase, crossNSAdmin, egressAdmin int
+	for _, fl := range f.Flows {
+		src, dst := fl.Flow.Source, fl.Flow.Dest
+		switch {
+		// 出公网的管理端口：目的端没有 Pod 身份也不属于任何集群。
+		case dst.Pod == nil && dst.ClusterID == "" && fl.Flow.Port == 22:
+			egressAdmin++
+		case src.Pod != nil && dst.Pod != nil && src.Pod.Namespace != dst.Pod.Namespace:
+			switch fl.Flow.Port {
+			case 3306:
+				crossNSDatabase++
+			case 22:
+				crossNSAdmin++
+			}
+		}
+	}
+
+	if crossNSDatabase == 0 {
+		t.Error("没有跨 namespace 的数据库直连流量，高风险端口报告失去这一类样本")
+	}
+	if crossNSAdmin == 0 {
+		t.Error("没有跨 namespace 的管理端口流量，高风险端口报告失去这一类样本")
+	}
+	if egressAdmin == 0 {
+		t.Error("没有出公网的管理端口流量 —— 这是报告里最该出现的一类")
+	}
+}
