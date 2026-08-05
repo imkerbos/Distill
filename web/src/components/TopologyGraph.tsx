@@ -1,19 +1,33 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  forceCenter, forceLink, forceManyBody, forceSimulation,
+  forceCenter, forceLink, forceManyBody, forceSimulation, forceX, forceY,
   type SimulationLinkDatum, type SimulationNodeDatum,
 } from 'd3-force'
 import type { Topology, TopologyEdge, TopologyNode, Verdict } from '../api/types'
 
-// 画布宽高比要接近容器，否则 preserveAspectRatio="meet" 会在左右留出
-// 大片空白 —— 图看起来缩在中间一小条，而空白并不表示那里没有东西。
-const W = 1240
-const H = 600
-// 标签在节点下方约 40px，包围盒要把它算进去，否则底部一行文字会被裁掉。
+// 画布高度固定，宽度随容器实测。
+//
+// 之前用固定坐标系 + viewBox 缩放：布局在一个想象的画布里算好，再整体
+// 塞进真实容器，两者尺寸永远对不上 —— 宽屏下图缩成中间一小团，四周
+// 大片空白，而空白并不表示那里没有东西。现在直接按容器像素布局。
+const H = 460
 const PAD = 56
 
+/**
+ * 连线长度按可用尺寸与节点数推导。
+ *
+ * 关键是方向：节点**越少**，连线应当**越长** —— 少数几个节点摊在大画布里
+ * 本就该拉开，而不是挤成一团。先前用 sqrt(面积/n) 的密度公式方向刚好相反，
+ * 节点少时反而算出更短的连线，图就缩在中央一小块。
+ */
+function layoutScale(w: number, n: number) {
+  const usable = Math.min(w, H * 1.6)
+  const distance = Math.max(110, Math.min(300, (usable / (1 + Math.sqrt(Math.max(n, 1)))) * 1.1))
+  return { distance, charge: -distance * 2.4 }
+}
+
 /** 把模拟结果整体平移缩放到画布内。 */
-function fitToCanvas(nodes: SimNode[]) {
+function fitToCanvas(nodes: SimNode[], W: number) {
   if (nodes.length === 0) return
   const xs = nodes.map((n) => n.x ?? 0)
   const ys = nodes.map((n) => n.y ?? 0)
@@ -21,10 +35,8 @@ function fitToCanvas(nodes: SimNode[]) {
   const minY = Math.min(...ys), maxY = Math.max(...ys)
   const spanX = Math.max(maxX - minX, 1)
   const spanY = Math.max(maxY - minY, 1)
-  // 允许适度放大：节点少时布局天然紧凑，锁死在 1 倍会让图缩在画布中央
-  // 一小团，四周大片空白，读起来像"内容没加载完"。上限 1.6 是为了避免
-  // 两三个节点时把图放大到失真。
-  const scale = Math.min((W - PAD * 2) / spanX, (H - PAD * 2) / spanY, 1.6)
+  // 主要作用是兜底防裁切；允许小幅放大，吃掉布局后残留的空隙。
+  const scale = Math.min((W - PAD * 2) / spanX, (H - PAD * 2) / spanY, 1.25)
   const offX = (W - spanX * scale) / 2 - minX * scale
   const offY = (H - spanY * scale) / 2 - minY * scale
   for (const n of nodes) {
@@ -67,13 +79,13 @@ type SimLink = SimulationLinkDatum<SimNode> & { edge: TopologyEdge }
  * 界面来说，图形每次都变本身就是一种不可信。这里按节点 id 的哈希
  * 铺在一个圆上作为确定的初值。
  */
-function seedPositions(nodes: SimNode[]) {
+function seedPositions(nodes: SimNode[], W: number) {
   nodes.forEach((n, i) => {
     let h = 0
     for (const ch of n.id) h = (h * 31 + ch.charCodeAt(0)) | 0
     const angle = ((Math.abs(h) % 360) + i * 37) * (Math.PI / 180)
-    n.x = W / 2 + Math.cos(angle) * 180
-    n.y = H / 2 + Math.sin(angle) * 140
+    n.x = W / 2 + Math.cos(angle) * (W / 5)
+    n.y = H / 2 + Math.sin(angle) * (H / 4)
   })
 }
 
@@ -81,6 +93,20 @@ export default function TopologyGraph({
   topology, onSelectEdge,
 }: { topology: Topology; onSelectEdge?: (e: TopologyEdge) => void }) {
   const [, forceRender] = useState(0)
+  const boxRef = useRef<HTMLDivElement>(null)
+  // 容器实测宽度。首帧为 0，测到之后再跑模拟 —— 用一个猜出来的宽度
+  // 先画一遍会让图在加载完成时跳一下。
+  const [width, setWidth] = useState(0)
+
+  useEffect(() => {
+    const el = boxRef.current
+    if (!el) return
+    const ro = new ResizeObserver(([entry]) => {
+      setWidth(Math.round(entry.contentRect.width))
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
   const nodesRef = useRef<SimNode[]>([])
   const linksRef = useRef<SimLink[]>([])
 
@@ -90,6 +116,7 @@ export default function TopologyGraph({
   )
 
   useEffect(() => {
+    if (width === 0) return
     const nodes: SimNode[] = topology.nodes.map((n) => ({ ...n }))
     const byID = new Map(nodes.map((n) => [n.id, n]))
     const edgesWithMissingEndpoint = topology.edges.filter(
@@ -108,12 +135,18 @@ export default function TopologyGraph({
       .filter((e) => byID.has(e.source) && byID.has(e.target))
       .map((e) => ({ source: byID.get(e.source)!, target: byID.get(e.target)!, edge: e }))
 
-    seedPositions(nodes)
+    seedPositions(nodes, width)
 
+    const { distance, charge } = layoutScale(width, nodes.length)
     const sim = forceSimulation(nodes)
-      .force('link', forceLink<SimNode, SimLink>(links).id((d) => d.id).distance(170))
-      .force('charge', forceManyBody().strength(-420))
-      .force('center', forceCenter(W / 2, H / 2))
+      .force('link', forceLink<SimNode, SimLink>(links).id((d) => d.id).distance(distance))
+      .force('charge', forceManyBody().strength(charge))
+      .force('center', forceCenter(width / 2, H / 2))
+      // 各向异性定心：容器是矮而宽的，力导布局默认给出近似圆形的团。
+      // 纵向拉得更紧、横向更松，布局的形状才会去贴容器的比例，
+      // 而不是在一个宽画布里堆成一个高瘦的团、两侧空着。
+      .force('x', forceX(width / 2).strength(0.05))
+      .force('y', forceY(H / 2).strength(0.11))
       .stop()
 
     // 同步跑固定轮数而非动画：结果确定，且没有节点缓缓漂移的过程 ——
@@ -123,27 +156,23 @@ export default function TopologyGraph({
     // 静态快照"的数据形态是对的。如果将来拓扑变成原地增量更新（而不是
     // 整份替换），这里的"可复现即可建立空间记忆"就不再成立 —— 增量数据
     // 到来时全图会跟着重新洗牌，等于没有增量稳定性，需要另外设计。
-    sim.tick(300)
+    // 迭代轮数偏多：各向异性定心会把节点推开，收敛不足时连线交叉明显更多。
+    // 同步跑完再渲染，多花的是一次性的毫秒级计算，换来的是稳定可读的图。
+    sim.tick(500)
 
     // 力导布局的坐标范围不受画布约束，节点会越出边界被容器裁掉 ——
     // 一个被裁掉一半的节点，读者无从知道它是否还有别的连线。
     // 模拟结束后按包围盒整体平移缩放，保证全部节点连同标签落在画布内。
-    fitToCanvas(nodes)
+    fitToCanvas(nodes, width)
 
     nodesRef.current = nodes
     linksRef.current = links
     forceRender((v) => v + 1)
-  }, [key, topology])
+  }, [key, topology, width])
 
   return (
-    // viewBox + 百分比宽度：固定像素宽的画布在宽屏卡片里会空出右侧一大块，
-    // 看上去像内容没加载完。用 viewBox 让图随容器缩放，坐标系保持不变。
-    <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H}
-      preserveAspectRatio="xMidYMid meet" style={{
-      // 不再自带边框与底色：它现在被放在 Card 里，两层边框会显得图是
-      // 嵌进去的另一个东西。
-      display: 'block',
-    }}>
+    <div ref={boxRef} style={{ width: '100%' }}>
+      <svg width={width || '100%'} height={H} style={{ display: 'block' }}>
       {linksRef.current.map((l, i) => {
         const s = l.source as SimNode
         const t = l.target as SimNode
@@ -214,6 +243,7 @@ export default function TopologyGraph({
           </title>
         </g>
       ))}
-    </svg>
+      </svg>
+    </div>
   )
 }

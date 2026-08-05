@@ -46,21 +46,36 @@ export default function TopologyPage({ cluster }: { cluster: string }) {
         </Notice>
       )}
 
-      <Card style={{ padding: 'var(--space-3)' }}>
-        <TopologyGraph topology={topo} />
-
-        <div style={{
-          marginTop: 'var(--space-3)', fontSize: 'var(--text-xs)', color: 'var(--text-muted)',
-          display: 'flex', gap: 'var(--space-4)', flexWrap: 'wrap',
-        }}>
-          <span><Swatch color="var(--verdict-allow)" /> 放行</span>
-          <span><Swatch color="var(--verdict-deny)" /> 阻断</span>
-          <span><Swatch color="var(--verdict-unknown)" /> 无法判定</span>
-          <span><Swatch color="var(--degraded-stroke)" width={3} /> 粗线＝可信度降级</span>
-          <span>虚线＝跨集群</span>
-          <span>紫色描边节点＝在 mesh 中</span>
-          <span>虚线圆＝其他集群的节点</span>
+      {/*
+        图与侧栏并排：七八个节点的图并不需要一千多像素宽，硬把连线拉长
+        只会显得刻意。多出来的宽度拿来放图例与概览 —— 横排的图例在宽屏上
+        会拉成一长条，反而不好读。
+      */}
+      <Card style={{ padding: 'var(--space-3)', display: 'flex', gap: 'var(--space-4)' }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <TopologyGraph topology={topo} />
         </div>
+
+        <aside style={{
+          width: 216, flexShrink: 0, borderLeft: '1px solid var(--border)',
+          paddingLeft: 'var(--space-3)', fontSize: 'var(--text-xs)',
+        }}>
+          <GraphSummary topo={topo} />
+
+          <div style={{
+            marginTop: 'var(--space-4)', color: 'var(--text-muted)',
+            display: 'flex', flexDirection: 'column', gap: 6,
+          }}>
+            <span><Swatch color="var(--verdict-allow)" /> 放行</span>
+            <span><Swatch color="var(--verdict-deny)" /> 阻断</span>
+            <span><Swatch color="var(--verdict-unknown)" /> 无法判定</span>
+            <span><Swatch color="var(--degraded-stroke)" width={3} /> 粗线＝可信度降级</span>
+            <span>虚线＝跨集群</span>
+            <span>紫色描边节点＝在 mesh 中</span>
+            <span>虚线圆＝其他集群的节点</span>
+            <span>节点大小＝Pod 数量</span>
+          </div>
+        </aside>
       </Card>
 
       <div style={{ marginTop: 'var(--space-5)' }}>
@@ -126,6 +141,40 @@ function DirectionTable({ topo }: { topo: Topology }) {
   )
 }
 
+
+/**
+ * 图的规模概览。
+ *
+ * 放在图旁边而不是图下方：读者判断"这张图值不值得细看"靠的是这几个数，
+ * 而不是先把图看完。跨集群与无策略单列，它们是这一屏真正要传达的敞口。
+ */
+function GraphSummary({ topo }: { topo: Topology }) {
+  const crossCluster = topo.edges.filter((e) => e.crossCluster).length
+  const noPolicy = topo.nodes.filter((n) => !n.foreign && !n.hasPolicy).length
+  const foreign = topo.nodes.filter((n) => n.foreign).length
+
+  return (
+    <dl style={{
+      margin: 0, display: 'grid', gridTemplateColumns: '1fr auto',
+      rowGap: 6, columnGap: 'var(--space-2)',
+    }}>
+      <Item k="节点" v={`${topo.nodes.length - foreign}`} />
+      <Item k="其他集群节点" v={`${foreign}`} />
+      <Item k="边" v={`${topo.edges.length}`} />
+      <Item k="跨集群边" v={`${crossCluster}`} />
+      <Item k="无策略节点" v={`${noPolicy}`} />
+    </dl>
+  )
+}
+
+function Item({ k, v }: { k: string; v: string }) {
+  return (
+    <>
+      <dt style={{ color: 'var(--text-muted)' }}>{k}</dt>
+      <dd style={{ margin: 0, fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>{v}</dd>
+    </>
+  )
+}
 
 function Swatch({ color, width = 2 }: { color: string; width?: number }) {
   return <span style={{
