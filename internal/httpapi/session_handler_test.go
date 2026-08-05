@@ -41,11 +41,22 @@ func newTestRouter(t *testing.T, reader store.Reader) (http.Handler, *auth.Sessi
 		t.Fatalf("logger: %v", err)
 	}
 
+	// reader 允许为 nil（见上），因此默认窗口只在拿到 fixture 实现时取。
+	// 走类型断言而非扩展 store.Reader：数据窗口是 fixture 特有的概念，
+	// 真实存储没有"全部数据的时间范围"这回事。
+	var window store.TimeWindow
+	if fr, ok := reader.(*store.FixtureReader); ok {
+		window = fr.DataWindow()
+	}
+
 	h := httpapi.NewRouter(httpapi.Deps{
 		Sessions: sessions,
 		Verifier: auth.NewVerifier([]config.User{{Username: "demo", PasswordHash: string(hash)}}),
 		Logger:   logger,
 		Reader:   reader,
+		// 流量查询的时间窗是必填的；测试装配方与 cmd 一样注入覆盖
+		// 全量数据的窗口，使不关心时间维的用例无须逐个传 from/to。
+		DefaultWindow: window,
 	})
 
 	login := postJSON(t, h, "/api/v1/sessions", map[string]string{
