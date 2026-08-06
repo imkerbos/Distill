@@ -10,7 +10,7 @@ import type { Topology, TopologyEdge, TopologyNode, Verdict } from '../api/types
 // 之前用固定坐标系 + viewBox 缩放：布局在一个想象的画布里算好，再整体
 // 塞进真实容器，两者尺寸永远对不上 —— 宽屏下图缩成中间一小团，四周
 // 大片空白，而空白并不表示那里没有东西。现在直接按容器像素布局。
-const H = 460
+const H = 500
 const PAD = 56
 
 /**
@@ -26,7 +26,20 @@ function layoutScale(w: number, n: number) {
   return { distance, charge: -distance * 2.4 }
 }
 
-/** 把模拟结果整体平移缩放到画布内。 */
+/**
+ * 把模拟结果铺满画布。
+ *
+ * 关键是 x / y **独立**缩放。等比缩放会取两个方向的较小倍率，而绘图区
+ * 接近 2:1、力导布局天然接近 1:1 —— 于是高度永远是约束边，宽度再宽也
+ * 用不上，图被锁在中间一小块。SVG 宽度是 100% 没错，撑满的是画布，
+ * 不是画布里的图形。
+ *
+ * 独立缩放会改变连线的视觉长度，但拓扑图要读的是"谁连着谁"，
+ * 长度本身不携带信息（流量大小走线宽，判定走颜色）。为免拉伸到失真，
+ * 两个方向的倍率差被限制在 MAX_SKEW 之内。
+ */
+const MAX_SKEW = 1.7
+
 function fitToCanvas(nodes: SimNode[], W: number) {
   if (nodes.length === 0) return
   const xs = nodes.map((n) => n.x ?? 0)
@@ -35,13 +48,19 @@ function fitToCanvas(nodes: SimNode[], W: number) {
   const minY = Math.min(...ys), maxY = Math.max(...ys)
   const spanX = Math.max(maxX - minX, 1)
   const spanY = Math.max(maxY - minY, 1)
-  // 主要作用是兜底防裁切；允许小幅放大，吃掉布局后残留的空隙。
-  const scale = Math.min((W - PAD * 2) / spanX, (H - PAD * 2) / spanY, 1.25)
-  const offX = (W - spanX * scale) / 2 - minX * scale
-  const offY = (H - spanY * scale) / 2 - minY * scale
+
+  let sx = (W - PAD * 2) / spanX
+  let sy = (H - PAD * 2) / spanY
+  // 收敛到彼此的 MAX_SKEW 倍以内，避免一个方向被拉得过分。
+  const lo = Math.min(sx, sy)
+  sx = Math.min(sx, lo * MAX_SKEW)
+  sy = Math.min(sy, lo * MAX_SKEW)
+
+  const offX = (W - spanX * sx) / 2 - minX * sx
+  const offY = (H - spanY * sy) / 2 - minY * sy
   for (const n of nodes) {
-    n.x = (n.x ?? 0) * scale + offX
-    n.y = (n.y ?? 0) * scale + offY
+    n.x = (n.x ?? 0) * sx + offX
+    n.y = (n.y ?? 0) * sy + offY
   }
 }
 
@@ -51,7 +70,6 @@ function fitToCanvas(nodes: SimNode[], W: number) {
  * **外部节点不参与分级**：它的 podCount 在后端就是 Go 零值占位，
  * 不是测量结果（本集群的快照看不到别的集群）。按 0 去画会得到一个
  * 最小的圆点，读者会把"看不见"读成"这里几乎没有 Pod"。
- * 外部节点一律用固定尺寸 + 虚线描边表示"不可知"。
  */
 function nodeRadius(n: SimNode): number {
   if (n.foreign) return 8
