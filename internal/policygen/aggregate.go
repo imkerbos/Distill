@@ -140,14 +140,28 @@ func peerOf(o Observation, ep replay.Endpoint, clusterID string) (
 ) {
 	// 本集群内、有身份：只能用 selector，不能退到 IP。
 	if ep.Pod != nil && ep.Pod.ClusterID == clusterID {
+		// hostNetwork 判断先于标签判断：hostNetwork Pod 用宿主机网络
+		// namespace，流量以节点 IP 出现，podSelector 天生选不中它 ——
+		// 即便它带 app 标签，生成的规则也是一条谁都匹配不到的幽灵规则，
+		// 却会被分类成 TRUSTED_ALLOW、被 Task 6 标 Enabled=true，看着
+		// 正常实则空转。与 Task 4 node-agent Baseline 必须用节点网段而
+		// 非 podSelector 是同一个约束，只是这里是对端侧。
+		if replay.IsUnmanaged(*ep.Pod) {
+			return "", "", "", false, &UngeneratableItem{
+				FlowID: o.FlowID, Reason: ReasonUnmanagedEndpoint,
+				Detail: fmt.Sprintf("对端 %s/%s 使用 hostNetwork，不受 NetworkPolicy 管控",
+					ep.Pod.Namespace, ep.Pod.Name),
+			}
+		}
 		if wl := ep.Pod.Labels[workloadLabel]; wl != "" {
 			return ep.Pod.Namespace, wl, "", true, nil
 		}
-		// 集群内对端已知身份、但没有 app 标签：不能退化成 /32 ipBlock ——
-		// Pod 重建后 IP 会被别的 workload 复用，那时这条规则会静默放行
-		// 错的对象。它命中的证据类型多半是 TRUSTED_ALLOW，会被 Task 6
-		// 标 Enabled=true，直接进入默认推荐策略集，是本平台要防的那种
-		// "看起来正确、实际错误"的规则。宁可报 NO_WORKLOAD_LABEL 缺口。
+		// 集群内对端已知身份、受管控、但没有 app 标签：不能退化成 /32
+		// ipBlock —— Pod 重建后 IP 会被别的 workload 复用，那时这条规则
+		// 会静默放行错的对象。它命中的证据类型多半是 TRUSTED_ALLOW，会
+		// 被 Task 6 标 Enabled=true，直接进入默认推荐策略集，是本平台
+		// 要防的那种"看起来正确、实际错误"的规则。宁可报 NO_WORKLOAD_LABEL
+		// 缺口。
 		return "", "", "", false, &UngeneratableItem{
 			FlowID: o.FlowID, Reason: ReasonNoWorkloadLabel,
 			Detail: fmt.Sprintf("对端 %s/%s 没有 %s 标签，podSelector 无法表达",

@@ -170,17 +170,52 @@ func TestClassifyRejectsUnknownVerdict(t *testing.T) {
 	}
 }
 
-// hostNetwork 端点不受 NetworkPolicy 管控，该侧不生成规则并报原因。
-func TestClassifyReportsUnmanagedEndpoint(t *testing.T) {
+// hostNetwork 端点作为规则主体（subject）时不受 NetworkPolicy 管控，
+// 该侧不生成规则并报原因。对端设为集群外地址，避免这条 flow 顺带触发
+// 对端侧的 hostNetwork 检测，让这个用例只验证 subjectOf 那一半。
+func TestClassifyReportsUnmanagedSubjectEndpoint(t *testing.T) {
+	src := pod("c1", "kube-system", "kube-proxy-1", "kube-proxy")
+	src.HostNetwork = true
+	o := obs(src, nil, "203.0.113.5", 8080, allowDecision())
+	o.Flow.Dest.ClusterID = ""
+	items, bad := classify(o, "c1")
+	if len(bad) != 1 || bad[0].Reason != ReasonUnmanagedEndpoint {
+		t.Errorf("ungeneratable = %+v, want one UNMANAGED_ENDPOINT", bad)
+	}
+	if len(items) != 0 {
+		t.Errorf("items = %+v, want none; hostNetwork subject can't express egress "+
+			"and the peer is external so there is no ingress side to attempt", items)
+	}
+}
+
+// hostNetwork 端点作为对端（peer）时同样不受管控：podSelector 选不中走
+// 宿主机网络的 Pod，因为它的流量以节点 IP 出现。peerOf 必须和 subjectOf
+// 一样拒绝它，而不是照常退化成 selector —— 否则生成的是一条谁都匹配不到
+// 的幽灵规则，还会被分类成 TRUSTED_ALLOW、被 Task 6 标 Enabled=true，
+// 看着正常实则空转，直接进入默认推荐策略集。
+//
+// 与 TestClassifyReportsUnmanagedSubjectEndpoint 用同一个 hostNetwork Pod
+// 做源，但这里目的端在本集群内，因此这条 flow 同时触发 subject 与 peer
+// 两侧的检测；本用例只断言 peer 侧的表现：不产出 ingress 项，且缺口原因
+// 里有一条点名这个 hostNetwork 源作为对端不可表达。
+func TestClassifyReportsUnmanagedPeerEndpoint(t *testing.T) {
 	src := pod("c1", "kube-system", "kube-proxy-1", "kube-proxy")
 	src.HostNetwork = true
 	items, bad := classify(obs(src,
 		pod("c1", "payment", "payment-1", "api"), "10.4.0.4", 8080, allowDecision()), "c1")
-	if len(bad) != 1 || bad[0].Reason != ReasonUnmanagedEndpoint {
-		t.Errorf("ungeneratable = %+v, want one UNMANAGED_ENDPOINT", bad)
+	for _, it := range items {
+		if it.key.Direction == replay.DirectionIngress {
+			t.Errorf("ingress item emitted for a hostNetwork peer: %+v", it)
+		}
 	}
-	if len(items) != 1 || items[0].key.Direction != replay.DirectionIngress {
-		t.Errorf("items = %+v, want only the destination-side ingress item", items)
+	found := false
+	for _, b := range bad {
+		if b.Reason == ReasonUnmanagedEndpoint && strings.Contains(b.Detail, "kube-proxy-1") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("ungeneratable = %+v, want an UNMANAGED_ENDPOINT item naming the peer pod", bad)
 	}
 }
 
