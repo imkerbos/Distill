@@ -141,20 +141,25 @@ export function EmptyState({ message, detail }: { message: string; detail: React
  *
  * tone 只接受语义值：UNKNOWN 与 DEGRADED 必须与正常指标同等显著
  * （spec §17.1），因此用左侧色条而非灰字弱化 —— 弱化它们等同于
- * 隐瞒平台的能力边界。
+ * 隐瞒平台的能力边界。`deny` 用于 dry-run 页的 WOULD_BREAK ——
+ * 它与判定语义色里的 DENY 是同一个颜色，含义也一致："会被拦"。
+ * size='lg' 只用于页面上唯一需要盖过其它数字的那一个指标
+ * （WOULD_BREAK）：把最重要的数字做大，比任何措辞都更快传达优先级。
  */
 export function StatTile({
-  label, value, note, tone,
+  label, value, note, tone, size,
 }: {
   label: string
   value: string
   note?: ReactNode
-  tone?: 'unknown' | 'degraded'
+  tone?: 'unknown' | 'degraded' | 'deny'
+  size?: 'lg'
 }) {
   const accent =
     tone === 'unknown' ? 'var(--verdict-unknown)'
       : tone === 'degraded' ? 'var(--degraded-stroke)'
-        : undefined
+        : tone === 'deny' ? 'var(--verdict-deny)'
+          : undefined
   return (
     <Card style={{
       padding: 'var(--space-3)',
@@ -162,7 +167,8 @@ export function StatTile({
     }}>
       <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>{label}</div>
       <div style={{
-        fontSize: 'var(--text-xl)', fontWeight: 600, marginTop: 'var(--space-1)',
+        fontSize: size === 'lg' ? 'var(--text-2xl)' : 'var(--text-xl)',
+        fontWeight: 600, marginTop: 'var(--space-1)',
         color: accent ?? 'var(--text)', fontVariantNumeric: 'tabular-nums',
       }}>
         {value}

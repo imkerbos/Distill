@@ -154,6 +154,18 @@ export const UNKNOWN_REASON_LABEL: Record<string, string> = {
 /** 高风险端口的风险来源。封闭枚举，与后端 store.RiskCategory 对齐。 */
 export type RiskCategory = 'ADMIN_PLAINTEXT' | 'DATABASE' | 'FILE_SHARE'
 
+/**
+ * RiskCategory 的中文标签，供 SecurityPage 与 PolicyPage 共用——两页都会
+ * 展示同一枚举，分别维护一份必然措辞漂移（同 UNKNOWN_REASON_LABEL 的理由）。
+ * 键类型用 string 而非 RiskCategory：PolicyPage 里 CandidateRule.risk.category
+ * 是后端的裸 string，未收录的取值必须按原样展示，不丢弃、不因类型收窄而报错。
+ */
+export const RISK_CATEGORY_LABEL: Record<string, string> = {
+  ADMIN_PLAINTEXT: '明文管理端口',
+  DATABASE: '数据库直连',
+  FILE_SHARE: '文件共享',
+}
+
 /** 风险连接所处的位置。与 RiskCategory 分列，不合成单一分数。 */
 export type RiskPosition = 'EGRESS_INTERNET' | 'CROSS_NAMESPACE' | 'SAME_NAMESPACE'
 
@@ -193,4 +205,98 @@ export interface SecurityReport {
   nakedPods: NakedPod[]
   /** 判定所用的端口清单。报告为空时靠它区分"查过没发现"与"没查"。 */
   riskPortCatalog: RiskPort[]
+}
+
+/** 规则来源。BASELINE 由基础设施事实推导，LEARNED 由观测到的流量学习。 */
+export type RuleOrigin = 'BASELINE' | 'LEARNED'
+
+/** LEARNED 规则的证据等级，决定是否默认启用。 */
+export type EvidenceClass =
+  | 'TRUSTED_ALLOW' | 'TRUSTED_DENY' | 'INTERNET_EGRESS' | 'CROSS_CLUSTER'
+
+/** BASELINE 规则的五类基础设施事实。 */
+export type Kind =
+  | 'DNS' | 'LB_HEALTH_CHECK' | 'METRICS_SCRAPE' | 'CONTROL_PLANE' | 'NODE_AGENT'
+
+/** 一条流量无法生成候选规则的封闭原因枚举。 */
+export type UngeneratableReason =
+  | 'NO_WORKLOAD_LABEL' | 'IDENTITY_UNKNOWN' | 'DEGRADED_EVIDENCE' | 'UNMANAGED_ENDPOINT'
+
+/** dry-run 预测的四类变化，WOULD_OPEN 不是"通过"而是敞口扩大。 */
+export type ChangeKind = 'WOULD_BREAK' | 'WOULD_OPEN' | 'UNCHANGED' | 'UNKNOWN'
+
+/** 一条 BASELINE 规则的推导依据；CLAUDE.md §3 要求 baseline 落库带依据，不得硬编码。 */
+export interface Derivation {
+  sourceKind: string
+  cluster: string
+  namespace: string
+  name: string
+  field: string
+}
+
+export interface CandidateRule {
+  origin: RuleOrigin
+  evidence?: EvidenceClass
+  baseline?: Kind
+  derivations?: Derivation[]
+  risk?: { port: number; name: string; category: string }
+  enabled: boolean
+  direction: 'INGRESS' | 'EGRESS'
+  flowCount: number
+}
+
+export interface CandidatePolicy {
+  cluster: string
+  namespace: string
+  workload: string
+  rules: CandidateRule[]
+}
+
+export interface MissingBaseline {
+  namespace: string
+  kinds: Kind[]
+}
+
+export interface UngeneratableItem {
+  flowId: string
+  reason: UngeneratableReason
+  detail: string
+}
+
+export interface ChangedFlow {
+  flowId: string
+  sourceLabel: string
+  destLabel: string
+  protocol: string
+  port: number
+  current: string
+  predicted: string
+  unknownReason: string
+  confidence: string
+  crossCluster: boolean
+  unmanaged: boolean
+}
+
+export interface PredictionReport {
+  changes: Record<ChangeKind, ChangedFlow[]>
+  counts: Record<ChangeKind, number>
+  /** UNKNOWN 的构成明细，与 Quality 页同一口径：只报比例无法定位该修哪个子系统。 */
+  unknownComposition: Record<string, number>
+  trustedCount: number
+  degradedCount: number
+  crossClusterCount: number
+  unmanagedCount: number
+  totalEvaluated: number
+}
+
+export interface PolicyPreview {
+  cluster: string
+  namespace: string
+  window: TimeWindow
+  candidates: CandidatePolicy[]
+  missingBaselines: MissingBaseline[]
+  ungeneratable: UngeneratableItem[]
+  prediction: PredictionReport
+  /** 全量 baseline 类型清单，用于把 missingBaselines 的"没缺"与"没查"区分开。 */
+  baselineKinds: Kind[]
 }

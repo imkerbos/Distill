@@ -1,14 +1,8 @@
 import { api } from '../api/client'
-import type { RiskCategory, RiskPosition, RiskyFlow, SecurityReport } from '../api/types'
+import { RISK_CATEGORY_LABEL, type RiskPosition, type RiskyFlow, type SecurityReport } from '../api/types'
 import { useResource } from '../api/useResource'
 import { VerdictBadge } from '../components/Verdict'
 import { Card, Chip, EmptyState, PageHeader, Section, TableCard } from '../components/ui'
-
-const CATEGORY_LABEL: Record<RiskCategory, string> = {
-  ADMIN_PLAINTEXT: '明文管理端口',
-  DATABASE: '数据库直连',
-  FILE_SHARE: '文件共享',
-}
 
 /**
  * 位置按紧迫度从高到低排列，报告即按此顺序分组。
@@ -116,7 +110,7 @@ function RiskyTable({ rows }: { rows: RiskyFlow[] }) {
               <span style={{ fontWeight: 500 }}>{f.portName}</span>
               <span className="mono" style={{ marginLeft: 6 }}>:{f.port}</span>
               <span style={{ marginLeft: 8 }}>
-                <Chip>{CATEGORY_LABEL[f.category] ?? f.category}</Chip>
+                <Chip>{RISK_CATEGORY_LABEL[f.category] ?? f.category}</Chip>
               </span>
             </td>
             <td className="mono" style={{ fontSize: 'var(--text-sm)' }}>{f.sourceLabel}</td>

@@ -4,6 +4,7 @@ import AppShell from './components/AppShell'
 import { SessionProvider, useSession } from './auth/SessionContext'
 import FlowsPage from './pages/FlowsPage'
 import LoginPage from './pages/LoginPage'
+import PolicyPage from './pages/PolicyPage'
 import QualityPage from './pages/QualityPage'
 import SecurityPage from './pages/SecurityPage'
 import TopologyPage from './pages/TopologyPage'
@@ -23,6 +24,7 @@ function Protected() {
         <Route path="/flows" element={<FlowsPage cluster={cluster} />} />
         <Route path="/quality" element={<QualityPage cluster={cluster} />} />
         <Route path="/security" element={<SecurityPage cluster={cluster} />} />
+        <Route path="/policy" element={<PolicyPage cluster={cluster} />} />
         <Route path="*" element={<Navigate to="/topology" replace />} />
       </Routes>
     </AppShell>
