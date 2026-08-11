@@ -1,0 +1,233 @@
+// Package predict 回放候选策略，给出上线后的变化预测。
+//
+// 输出不是"放行多少条 / 阻断多少条"，而是四类变化。只报总数看不出
+// 谁会被打断 —— 而"谁会被打断"是这个平台唯一必须答对的问题。
+package predict
+
+import (
+	networkingv1 "k8s.io/api/networking/v1"
+
+	"github.com/imkerbos/Distill/internal/policygen"
+	"github.com/imkerbos/Distill/internal/replay"
+)
+
+// ChangeKind 是候选策略相对当前策略的变化类型。封闭枚举。
+type ChangeKind string
+
+const (
+	// ChangeWouldBreak 表示现在放行、候选策略下阻断。
+	//
+	// 上线即生产阻断。这一类的绝对数是整份报告唯一真正要人看的数字。
+	ChangeWouldBreak ChangeKind = "WOULD_BREAK"
+	// ChangeWouldOpen 表示现在阻断、候选策略下放行。
+	//
+	// 敌方面扩大。候选策略不该无意放开东西。
+	ChangeWouldOpen ChangeKind = "WOULD_OPEN"
+	// ChangeUnchanged 表示两侧判定一致，且都不是 UNKNOWN。
+	ChangeUnchanged ChangeKind = "UNCHANGED"
+	// ChangeUnknown 表示当前判定或候选策略判定中任一侧判不出。
+	ChangeUnknown ChangeKind = "UNKNOWN"
+)
+
+// allChangeKinds 是枚举的唯一登记处。
+var allChangeKinds = []ChangeKind{
+	ChangeWouldBreak, ChangeWouldOpen, ChangeUnchanged, ChangeUnknown,
+}
+
+// AllChangeKinds 返回全部已登记的变化类型。
+func AllChangeKinds() []ChangeKind {
+	out := make([]ChangeKind, len(allChangeKinds))
+	copy(out, allChangeKinds)
+	return out
+}
+
+// Valid 判断该变化类型是否已登记。
+func (c ChangeKind) Valid() bool {
+	for _, known := range allChangeKinds {
+		if c == known {
+			return true
+		}
+	}
+	return false
+}
+
+// ChangedFlow 是一条流量在候选策略下的变化。
+type ChangedFlow struct {
+	// FlowID 是流量标识。
+	FlowID string `json:"flowId"`
+	// SourceLabel 与 DestLabel 是端点的展示名。
+	SourceLabel string `json:"sourceLabel"`
+	DestLabel   string `json:"destLabel"`
+	// Protocol 与 Port 是连接的传输层信息。
+	Protocol string `json:"protocol"`
+	Port     int32  `json:"port"`
+	// Current 是当前策略下的判定。
+	Current string `json:"current"`
+	// Predicted 是候选策略下的判定。
+	Predicted string `json:"predicted"`
+	// UnknownReason 在任一侧判定为 UNKNOWN 时说明原因，取该侧的原因。
+	UnknownReason string `json:"unknownReason"`
+	// Confidence 是预测结论的可信度。
+	Confidence string `json:"confidence"`
+	// CrossCluster 表示这是一条跨集群连接。
+	CrossCluster bool `json:"crossCluster"`
+	// Unmanaged 表示主体不受 NetworkPolicy 管控。
+	Unmanaged bool `json:"unmanaged"`
+}
+
+// Report 是一次预测的完整结果。
+type Report struct {
+	// Changes 是四类变化各自的完整连接清单。
+	//
+	// 保留完整清单而非只留计数（spec §8.1）：一个"会打断 12 条"的数字
+	// 无法让任何人去修，必须能点开看到是哪 12 条。
+	Changes map[ChangeKind][]ChangedFlow `json:"changes"`
+	// Counts 是四类变化的条数。
+	Counts map[ChangeKind]int `json:"counts"`
+	// UnknownComposition 是 UNKNOWN 按原因的构成，绝对数。
+	UnknownComposition map[string]int `json:"unknownComposition"`
+	// TrustedCount 与 DegradedCount 是预测结论的可信度分布。
+	//
+	// 必须与结论分列：90% DEGRADED 的预测不应与 90% TRUSTED 同等对待。
+	TrustedCount  int `json:"trustedCount"`
+	DegradedCount int `json:"degradedCount"`
+	// UnratedCount 是可信度取值不在枚举内的连接数，正常恒为 0。
+	//
+	// 单列而非并进 TrustedCount：三者之和必须等于 TotalEvaluated，
+	// 若把枚举外取值折进 TRUSTED，回放层新增一档可信度时这里会静默地
+	// 把它报成"可信"，而分布看上去仍然自洽。
+	UnratedCount int `json:"unratedCount"`
+	// CrossClusterCount 是跨集群连接数，已知敞口规模。
+	CrossClusterCount int `json:"crossClusterCount"`
+	// UnmanagedCount 是不受 NetworkPolicy 管控的连接数。
+	UnmanagedCount int `json:"unmanagedCount"`
+	// TotalEvaluated 是参与预测的连接总数，四类计数之和。
+	TotalEvaluated int `json:"totalEvaluated"`
+}
+
+// Input 是一次预测所需的全部输入。
+type Input struct {
+	// ClusterID 是预测的目标集群。
+	ClusterID string
+	// Policies 是候选策略集，只含启用规则。
+	Policies []networkingv1.NetworkPolicy
+	// Namespaces 是该集群的命名空间快照。
+	Namespaces []replay.NamespaceRef
+	// CCNPPresent 表示该集群存在 Cilium 策略，预测结论需降级。
+	CCNPPresent bool
+	// Observations 是带当前判定的观测流量。
+	Observations []policygen.Observation
+	// Label 把端点渲染成展示名；为空时用 IP。
+	//
+	// 由调用方注入而非在本包实现：展示名的格式属于消费方的呈现决策，
+	// 写死在这里会让预测报告与流量列表用两套不同的名字指同一个 Pod。
+	Label func(replay.Endpoint) string
+}
+
+// Run 回放候选策略并给出变化预测。纯函数。
+func Run(in Input) Report {
+	ev := replay.NewEvaluator(in.ClusterID, in.Policies, in.Namespaces,
+		replay.WithCCNPPresent(in.CCNPPresent))
+
+	rep := Report{
+		Changes:            map[ChangeKind][]ChangedFlow{},
+		Counts:             map[ChangeKind]int{},
+		UnknownComposition: map[string]int{},
+	}
+	for _, k := range allChangeKinds {
+		rep.Changes[k] = []ChangedFlow{}
+		rep.Counts[k] = 0
+	}
+
+	for _, o := range in.Observations {
+		predicted := ev.Evaluate(o.Flow)
+		kind := classifyChange(o.Decision.Verdict, predicted.Verdict)
+		reason := unknownReasonOf(o.Decision, predicted)
+
+		rep.Counts[kind]++
+		rep.TotalEvaluated++
+		switch predicted.Confidence {
+		case replay.ConfidenceTrusted:
+			rep.TrustedCount++
+		case replay.ConfidenceDegraded:
+			rep.DegradedCount++
+		default:
+			// 枚举外的取值单独计数，不并进 TRUSTED：把一个说不清可信度的
+			// 结论算成可信，是往让人放心的方向报数，正是本平台不许犯的错。
+			rep.UnratedCount++
+		}
+		if predicted.CrossCluster {
+			rep.CrossClusterCount++
+		}
+		if predicted.Reason.Unmanaged {
+			rep.UnmanagedCount++
+		}
+		if kind == ChangeUnknown {
+			rep.UnknownComposition[string(reason)]++
+		}
+
+		rep.Changes[kind] = append(rep.Changes[kind], ChangedFlow{
+			FlowID:        o.FlowID,
+			SourceLabel:   label(in.Label, o.Flow.Source),
+			DestLabel:     label(in.Label, o.Flow.Dest),
+			Protocol:      string(o.Flow.Protocol),
+			Port:          o.Flow.Port,
+			Current:       string(o.Decision.Verdict),
+			Predicted:     string(predicted.Verdict),
+			UnknownReason: string(reason),
+			Confidence:    string(predicted.Confidence),
+			CrossCluster:  predicted.CrossCluster,
+			Unmanaged:     predicted.Reason.Unmanaged,
+		})
+	}
+	return rep
+}
+
+// classifyChange 判定一条流量的变化类型。
+//
+// 两侧的 UNKNOWN 都优先于其余三类（spec §5）：任一侧判不出结论时，
+// 说它"没变"是在用一个不存在的确定性掩盖数据缺口。
+//
+// current 一侧尤其不能漏：current=UNKNOWN + predicted=DENY 落进
+// UNCHANGED，界面上会以「判定结论保持一致」呈现 —— 那等于宣称我们
+// 知道这条连接原本是通的，而事实是我们从来就没判出来过。
+func classifyChange(current, predicted replay.Verdict) ChangeKind {
+	if predicted == replay.VerdictUnknown {
+		return ChangeUnknown
+	}
+	if current == replay.VerdictUnknown {
+		return ChangeUnknown
+	}
+	switch {
+	case current == replay.VerdictAllow && predicted == replay.VerdictDeny:
+		return ChangeWouldBreak
+	case current == replay.VerdictDeny && predicted == replay.VerdictAllow:
+		return ChangeWouldOpen
+	default:
+		return ChangeUnchanged
+	}
+}
+
+// unknownReasonOf 取把这条流量推进 UNKNOWN 的那一侧的原因。
+//
+// 两侧的缺口成因不同，要修的子系统也不同：predicted 侧的 UNKNOWN 来自
+// 候选策略回放，current 侧的来自当前判定。一律记 predicted 侧会让
+// current 侧的缺口挂到一个与它无关的成因上（多数时候是空字符串），
+// 构成表既指不回源头，也不再等于 UNKNOWN 总数。
+func unknownReasonOf(current, predicted replay.Decision) replay.UnknownReason {
+	if predicted.Verdict == replay.VerdictUnknown {
+		return predicted.UnknownReason
+	}
+	if current.Verdict == replay.VerdictUnknown {
+		return current.UnknownReason
+	}
+	return ""
+}
+
+// label 渲染端点展示名，未注入渲染函数时回落到 IP。
+func label(fn func(replay.Endpoint) string, ep replay.Endpoint) string {
+	if fn != nil {
+		return fn(ep)
+	}
+	return ep.IP
+}

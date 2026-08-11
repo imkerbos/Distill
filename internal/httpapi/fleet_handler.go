@@ -63,8 +63,12 @@ func handleQuality(d Deps) http.HandlerFunc {
 // 资源不存在是业务级失败，返回 HTTP 200 + 20002 —— 查询一个不存在的
 // 集群不是服务出了问题，不该计入服务错误率。其余错误按内部故障处理，
 // 真实原因只进日志。
+//
+// 不存在的 namespace 与不存在的集群同码：两者都是"你问的东西不在"，
+// 而不是"一切正常"。少了这一条，一次 namespace 拼写错误会得到一份
+// 全绿的空报告。
 func writeReaderError(w http.ResponseWriter, r *http.Request, d Deps, err error) {
-	if errors.Is(err, store.ErrClusterNotFound) {
+	if errors.Is(err, store.ErrClusterNotFound) || errors.Is(err, store.ErrNamespaceNotFound) {
 		response.WriteBusiness(w, response.CodeNotFound)
 		return
 	}

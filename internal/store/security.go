@@ -6,6 +6,7 @@ import (
 	"sort"
 
 	"github.com/imkerbos/Distill/internal/replay"
+	"github.com/imkerbos/Distill/internal/risk"
 )
 
 // 安全发现的类型与判定依据。
@@ -15,73 +16,35 @@ import (
 // 两者混在一起会让"策略挡住了"被读成"没有风险"——一次被 DENY 的
 // 数据库直连仍然意味着有人在尝试连数据库。
 
-// RiskCategory 是高风险端口的风险来源。封闭枚举。
-type RiskCategory string
-
-const (
-	// RiskAdminPlaintext 是明文管理端口：拿到即等于拿到主机。
-	RiskAdminPlaintext RiskCategory = "ADMIN_PLAINTEXT"
-	// RiskDatabase 是数据库直连端口：绕过应用层的一切授权与审计。
-	RiskDatabase RiskCategory = "DATABASE"
-	// RiskFileShare 是文件共享端口：历史漏洞密集且常被横向移动利用。
-	RiskFileShare RiskCategory = "FILE_SHARE"
+// 风险分类定义已移入 internal/risk：候选策略生成与安全发现使用同一份
+// 判定依据，留在本包会与 policygen 成环。此处保留别名，使既有消费方
+// （handler、测试、前端契约）无需改动。
+type (
+	// RiskCategory 是高风险端口的风险来源。
+	RiskCategory = risk.Category
+	// RiskPosition 是风险连接所处的位置。
+	RiskPosition = risk.Position
+	// RiskPort 是风险端口清单中的一项。
+	RiskPort = risk.Port
 )
 
-// RiskPosition 是风险连接所处的位置。
-//
-// 必须与 RiskCategory 分开表达，不得合成一个分数：同一个 22 端口，
-// 出公网、跨 namespace、同 namespace 内的处置方式完全不同，
-// 合成之后使用者无法判断该找谁。
-type RiskPosition string
-
 const (
-	// PositionEgressInternet 是出公网，风险最高的一类。
-	PositionEgressInternet RiskPosition = "EGRESS_INTERNET"
+	// RiskAdminPlaintext 是明文管理端口。
+	RiskAdminPlaintext = risk.AdminPlaintext
+	// RiskDatabase 是数据库直连端口。
+	RiskDatabase = risk.Database
+	// RiskFileShare 是文件共享端口。
+	RiskFileShare = risk.FileShare
+	// PositionEgressInternet 是出公网。
+	PositionEgressInternet = risk.EgressInternet
 	// PositionCrossNamespace 是跨 namespace。
-	PositionCrossNamespace RiskPosition = "CROSS_NAMESPACE"
-	// PositionSameNamespace 是同 namespace 内，通常属于正常架构。
-	PositionSameNamespace RiskPosition = "SAME_NAMESPACE"
+	PositionCrossNamespace = risk.CrossNamespace
+	// PositionSameNamespace 是同 namespace 内。
+	PositionSameNamespace = risk.SameNamespace
 )
-
-// RiskPort 是风险端口清单中的一项。
-type RiskPort struct {
-	Port     int32        `json:"port"`
-	Name     string       `json:"name"`
-	Category RiskCategory `json:"category"`
-}
-
-// riskPorts 是判定所用的封闭端口清单。
-//
-// 风险来自端口背后的协议语义，不来自"端口是否常见"。任何启发式规则
-// （高位端口、非白名单端口）都会把正常架构标成风险，而一份充满误报的
-// 安全报告最终会被整体忽略。
-//
-// 刻意不包含 9090 与 9100：它们是 Prometheus 与 node-exporter 的标准端口。
-// 为了让报告有内容而给正常端口贴上风险标签，与伪造判定没有区别。
-var riskPorts = map[int32]RiskPort{
-	22:    {Port: 22, Name: "SSH", Category: RiskAdminPlaintext},
-	23:    {Port: 23, Name: "Telnet", Category: RiskAdminPlaintext},
-	3389:  {Port: 3389, Name: "RDP", Category: RiskAdminPlaintext},
-	3306:  {Port: 3306, Name: "MySQL", Category: RiskDatabase},
-	5432:  {Port: 5432, Name: "PostgreSQL", Category: RiskDatabase},
-	6379:  {Port: 6379, Name: "Redis", Category: RiskDatabase},
-	27017: {Port: 27017, Name: "MongoDB", Category: RiskDatabase},
-	9200:  {Port: 9200, Name: "Elasticsearch", Category: RiskDatabase},
-	445:   {Port: 445, Name: "SMB", Category: RiskFileShare},
-}
 
 // RiskPortCatalog 返回判定所用的完整端口清单，按端口号升序。
-//
-// 随报告一起返回：报告为空时，使用者必须能看到"我们查了哪些端口"。
-// 缺了这份清单，一份空报告与一次根本没做的检查在界面上无法区分。
-func RiskPortCatalog() []RiskPort {
-	out := make([]RiskPort, 0, len(riskPorts))
-	for _, p := range riskPorts {
-		out = append(out, p)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Port < out[j].Port })
-	return out
-}
+func RiskPortCatalog() []RiskPort { return risk.Catalog() }
 
 // RiskyFlow 是一条落在风险端口上的流量，附带风险分类与位置。
 type RiskyFlow struct {
@@ -154,7 +117,7 @@ func (r *FixtureReader) Security(ctx context.Context, clusterID string, window T
 		}
 		rec, _ := r.toFlowRecord(f)
 
-		if rp, risky := riskPorts[f.Flow.Port]; risky {
+		if rp, risky := risk.Lookup(f.Flow.Port); risky {
 			rep.RiskyFlows = append(rep.RiskyFlows, RiskyFlow{
 				FlowRecord: rec,
 				Category:   rp.Category,

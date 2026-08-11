@@ -219,4 +219,6 @@ type Reader interface {
 	Quality(ctx context.Context, clusterID string) (Quality, error)
 	// Security 返回指定集群的安全发现。集群不存在时返回错误。
 	Security(ctx context.Context, clusterID string, window TimeWindow) (SecurityReport, error)
+	// PolicyPreview 生成候选策略并回放预测。集群不存在时返回错误。
+	PolicyPreview(ctx context.Context, clusterID, namespace string, window TimeWindow) (PolicyPreview, error)
 }

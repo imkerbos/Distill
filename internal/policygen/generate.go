@@ -1,0 +1,394 @@
+package policygen
+
+import (
+	"sort"
+
+	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
+
+	"github.com/imkerbos/Distill/internal/baseline"
+	"github.com/imkerbos/Distill/internal/replay"
+	"github.com/imkerbos/Distill/internal/risk"
+	"github.com/imkerbos/Distill/internal/snapshot"
+)
+
+// nsNameLabel 是 Kubernetes 自动给每个 namespace 打上的名称标签。
+const nsNameLabel = "kubernetes.io/metadata.name"
+
+// Input 是一次生成所需的全部输入。
+type Input struct {
+	// ClusterID 是生成策略的目标集群。
+	ClusterID string
+	// Assets 是该集群的资产快照，Baseline 推导的依据。
+	Assets snapshot.Assets
+	// Namespaces 是该集群的命名空间快照。
+	Namespaces []replay.NamespaceRef
+	// Pods 是该集群的 Pod 快照，候选策略的生成单位来自它而非流量。
+	//
+	// 按流量生成会让 mesh 内（流量全 DEGRADED）与被写坏策略挡住（流量全 UNKNOWN）
+	// 的 workload 悄悄从候选集里消失，连带绕过 Baseline 的无条件注入 ——
+	// 一个不存在的策略不会缺任何东西，缺失也就报不出来。
+	Pods []replay.PodRef
+	// Observations 是带判定结果的观测流量。
+	Observations []Observation
+}
+
+// Result 是一次生成的全部产物。
+//
+// 三块必须一起返回：只报 Policies 而不报 MissingBaselines 与
+// Ungeneratable，等于宣称覆盖完整。
+type Result struct {
+	// Policies 是候选策略，按 (namespace, workload) 确定排序。
+	Policies []CandidatePolicy `json:"policies"`
+	// MissingBaselines 是本次涉及的 namespace 中尚未齐备的 Baseline 类型。
+	MissingBaselines []MissingBaseline `json:"missingBaselines"`
+	// Ungeneratable 是无法表达为规则的流量。
+	Ungeneratable []UngeneratableItem `json:"ungeneratable"`
+}
+
+// MissingBaseline 是一个 namespace 缺失的 Baseline 类型。
+type MissingBaseline struct {
+	// Namespace 是缺失所在的命名空间。
+	Namespace string `json:"namespace"`
+	// Kinds 是缺失的类型，按登记顺序。
+	Kinds []baseline.Kind `json:"kinds"`
+}
+
+// Generate 从流量证据与快照生成候选策略集。纯函数。
+//
+// 生成范围恒为整个集群，不接受 namespace 过滤：dry-run 预测必须跑在
+// 完整策略集上，一份被裁剪过的策略集配全量流量会让目的地在其他
+// namespace 的流量落到 ALLOW，凭空造出敞口告警（spec §5）。按 namespace
+// 看只是展示需求，由消费方裁剪产物完成。
+func Generate(in Input) Result {
+	counts := map[aggKey]int{}
+	var bad []UngeneratableItem
+
+	for _, o := range in.Observations {
+		items, gaps := classify(o, in.ClusterID)
+		for _, it := range items {
+			counts[it.key]++
+		}
+		// 不可生成项按 flow 收集，不受 namespace 过滤影响：一条表达不了的
+		// 流量在哪个 namespace 视图下都同样表达不了，按视图裁剪会让这个
+		// 缺口随筛选条件时隐时现。
+		bad = append(bad, gaps...)
+	}
+
+	// 候选策略的生成单位是 Pod 名册，不是流量：只按 counts 里出现过的
+	// workload 生成，会让 mesh 内（流量全 DEGRADED）与被写坏策略挡住
+	// （流量全 UNKNOWN）的 workload 连同它们的强制 Baseline 一起从候选集
+	// 里消失——这两类恰恰是最需要被看见的："平台学不出它的流量"，不是
+	// "它没有流量"。
+	//
+	// 排除条件与 subjectOf 对齐：hostNetwork Pod 选不中，没有 app 标签的
+	// Pod 无法用 podSelector 表达，两者都不能进名册，否则会生成一条谁都
+	// 匹配不到、或者选中了不该选对象的幽灵策略。
+	workloads := map[subject]bool{}
+	for _, p := range in.Pods {
+		if p.ClusterID != in.ClusterID {
+			continue
+		}
+		if replay.IsUnmanaged(p) {
+			continue
+		}
+		wl := p.Labels[workloadLabel]
+		if wl == "" {
+			continue
+		}
+		workloads[subject{namespace: p.Namespace, workload: wl}] = true
+	}
+
+	byWorkload := map[subject][]Rule{}
+	for k, n := range counts {
+		s := subject{namespace: k.SubjectNS, workload: k.Subject}
+		// 名册之外仍学到规则理论上不会发生——subjectOf 已经把 hostNetwork
+		// 与无标签 Pod 挡在外面——但稳妥起见仍然按学习结果建一条策略，
+		// 而不是静默丢弃这批规则。
+		workloads[s] = true
+		byWorkload[s] = append(byWorkload[s], learnedRule(k, n))
+	}
+
+	// Baseline 无条件追加，永不参与去重、永不被学习结果覆盖（spec §7.1）。
+	// 即使某个 namespace 一条学习规则都没有，只要它有 workload 就得有 Baseline。
+	//
+	// 每个 namespace 只 Derive 一次：它是纯函数，算两遍不会算出不同结果，
+	// 但两个调用点各自维护一份会互相漂移——比如一处加了过滤条件、另一处
+	// 忘了同步。规则与 Missing() 从同一个 Set 取，保证两者恒指同一份推导。
+	nsWithWorkload := map[string]bool{}
+	for s := range workloads {
+		nsWithWorkload[s.namespace] = true
+	}
+	baselineByNS := map[string][]Rule{}
+	baselineSetByNS := map[string]baseline.Set{}
+	for ns := range nsWithWorkload {
+		set := baseline.Derive(in.Assets, ns)
+		baselineSetByNS[ns] = set
+		for _, br := range set.Rules {
+			baselineByNS[ns] = append(baselineByNS[ns], baselineRule(br))
+		}
+	}
+
+	res := Result{Ungeneratable: dedupeGaps(bad)}
+	for s := range workloads {
+		rules := append([]Rule{}, byWorkload[s]...)
+		rules = append(rules, baselineByNS[s.namespace]...)
+		sortRules(rules)
+		res.Policies = append(res.Policies, CandidatePolicy{
+			Cluster: in.ClusterID, Namespace: s.namespace, Workload: s.workload, Rules: rules,
+		})
+	}
+	sort.Slice(res.Policies, func(i, j int) bool {
+		a, b := res.Policies[i], res.Policies[j]
+		if a.Namespace != b.Namespace {
+			return a.Namespace < b.Namespace
+		}
+		return a.Workload < b.Workload
+	})
+
+	for ns := range nsWithWorkload {
+		if missing := baselineSetByNS[ns].Missing(); len(missing) > 0 {
+			res.MissingBaselines = append(res.MissingBaselines,
+				MissingBaseline{Namespace: ns, Kinds: missing})
+		}
+	}
+	sort.Slice(res.MissingBaselines, func(i, j int) bool {
+		return res.MissingBaselines[i].Namespace < res.MissingBaselines[j].Namespace
+	})
+
+	return res
+}
+
+// learnedRule 把一个聚合键变成一条学习规则。
+//
+// Enabled 的判定是纯函数、无参数、无阈值：只有身份可信、集群内、当前
+// 放行、且端口不在风险清单里的规则才默认启用。其余全部生成、可见、
+// 待人工确认 —— 学是学，推荐是推荐。
+func learnedRule(k aggKey, flowCount int) Rule {
+	rp, risky := risk.Lookup(k.Port)
+	r := Rule{
+		Origin: OriginLearned, Evidence: k.Evidence, Direction: k.Direction,
+		FlowCount: flowCount,
+		Enabled:   k.Evidence == EvidenceTrustedAllow && !risky,
+	}
+	if risky {
+		copied := rp
+		r.Risk = &copied
+	}
+
+	proto := corev1.Protocol(k.Protocol)
+	port := intstr.FromInt32(k.Port)
+	ports := []networkingv1.NetworkPolicyPort{{Protocol: &proto, Port: &port}}
+	peer := peerSpec(k)
+
+	if k.Direction == replay.DirectionEgress {
+		r.Egress = &networkingv1.NetworkPolicyEgressRule{
+			To: []networkingv1.NetworkPolicyPeer{peer}, Ports: ports,
+		}
+	} else {
+		r.Ingress = &networkingv1.NetworkPolicyIngressRule{
+			From: []networkingv1.NetworkPolicyPeer{peer}, Ports: ports,
+		}
+	}
+	r.describe()
+	return r
+}
+
+// peerSpec 把聚合键里的对端表达成 NetworkPolicy peer。
+func peerSpec(k aggKey) networkingv1.NetworkPolicyPeer {
+	if k.PeerCIDR != "" {
+		return networkingv1.NetworkPolicyPeer{
+			IPBlock: &networkingv1.IPBlock{CIDR: k.PeerCIDR},
+		}
+	}
+	return networkingv1.NetworkPolicyPeer{
+		NamespaceSelector: &metav1.LabelSelector{
+			MatchLabels: map[string]string{nsNameLabel: k.PeerNamespace},
+		},
+		PodSelector: &metav1.LabelSelector{
+			MatchLabels: map[string]string{workloadLabel: k.PeerWorkload},
+		},
+	}
+}
+
+// baselineRule 把一条 Baseline 包装成候选策略里的规则。
+//
+// Baseline 恒为 Enabled：它们是必备项，不是建议项。
+func baselineRule(br baseline.Rule) Rule {
+	kind := br.Kind
+	r := Rule{
+		Origin: OriginBaseline, Baseline: &kind, Derivations: br.Derivations,
+		Direction: br.Direction, Enabled: true,
+		Ingress: br.Ingress, Egress: br.Egress,
+	}
+	r.describe()
+	return r
+}
+
+// sortRules 给规则定序：Baseline 在前，其后按方向、证据、端口、协议、对端。
+//
+// 确定排序不是美观问题：同一份输入两次生成必须逐字节相同，否则产物
+// diff 全是噪声，review 随之失效。比较键必须覆盖两条规则之间可能不同
+// 的每一个字段——聚合键（aggKey）本身就是 map 键，两条不同的学习规则
+// 保证在 Direction/Evidence/Port/Protocol/Peer 中至少有一处不同；若比较
+// 到端口就停手，这些规则会在同一端口打平，排序结果退化成 map 遍历顺序，
+// 也就是随机顺序。
+func sortRules(rules []Rule) {
+	sort.SliceStable(rules, func(i, j int) bool {
+		a, b := rules[i], rules[j]
+		if (a.Origin == OriginBaseline) != (b.Origin == OriginBaseline) {
+			return a.Origin == OriginBaseline
+		}
+		if a.Direction != b.Direction {
+			return a.Direction < b.Direction
+		}
+		if a.Evidence != b.Evidence {
+			return a.Evidence < b.Evidence
+		}
+		if pa, pb := rulePort(a), rulePort(b); pa != pb {
+			return pa < pb
+		}
+		if pa, pb := ruleProtocol(a), ruleProtocol(b); pa != pb {
+			return pa < pb
+		}
+		nsA, wlA, cidrA := rulePeer(a)
+		nsB, wlB, cidrB := rulePeer(b)
+		if nsA != nsB {
+			return nsA < nsB
+		}
+		if wlA != wlB {
+			return wlA < wlB
+		}
+		return cidrA < cidrB
+	})
+}
+
+// rulePort 取规则的第一个端口，供排序使用；无端口或命名端口时返回 0。
+//
+// 直接读 IntVal 而非走 IntValue()：后者对命名端口会做字符串转数字，
+// 排序不需要这一步，而 int -> int32 的强转会触发 gosec 溢出告警。
+// IntOrString.IntVal 本身就是 int32，端口号构造时也从未越界过。
+func rulePort(r Rule) int32 {
+	var ports []networkingv1.NetworkPolicyPort
+	switch {
+	case r.Ingress != nil:
+		ports = r.Ingress.Ports
+	case r.Egress != nil:
+		ports = r.Egress.Ports
+	}
+	if len(ports) == 0 || ports[0].Port == nil || ports[0].Port.Type != intstr.Int {
+		return 0
+	}
+	return ports[0].Port.IntVal
+}
+
+// ruleProtocol 取规则的第一个协议，供排序使用；无端口时返回空串。
+func ruleProtocol(r Rule) string {
+	var ports []networkingv1.NetworkPolicyPort
+	switch {
+	case r.Ingress != nil:
+		ports = r.Ingress.Ports
+	case r.Egress != nil:
+		ports = r.Egress.Ports
+	}
+	if len(ports) == 0 || ports[0].Protocol == nil {
+		return ""
+	}
+	return string(*ports[0].Protocol)
+}
+
+// rulePeer 取规则的第一个对端，供排序使用。namespace 与 workload 来自
+// selector 组合，cidr 来自 ipBlock；两种表达互斥，用不到的一律留空。
+func rulePeer(r Rule) (ns, workload, cidr string) {
+	var peers []networkingv1.NetworkPolicyPeer
+	switch {
+	case r.Ingress != nil:
+		peers = r.Ingress.From
+	case r.Egress != nil:
+		peers = r.Egress.To
+	}
+	if len(peers) == 0 {
+		return "", "", ""
+	}
+	p := peers[0]
+	if p.IPBlock != nil {
+		return "", "", p.IPBlock.CIDR
+	}
+	if p.NamespaceSelector != nil {
+		ns = p.NamespaceSelector.MatchLabels[nsNameLabel]
+	}
+	if p.PodSelector != nil {
+		workload = p.PodSelector.MatchLabels[workloadLabel]
+	}
+	return ns, workload, ""
+}
+
+// dedupeGaps 按 (flowID, reason) 去重并定序。
+//
+// 一条流量的两侧可能报出同一个原因，界面上重复列出会把缺口的规模
+// 显示成实际的两倍。
+func dedupeGaps(in []UngeneratableItem) []UngeneratableItem {
+	type gapKey struct {
+		flowID string
+		reason UngeneratableReason
+	}
+	seen := map[gapKey]bool{}
+	out := make([]UngeneratableItem, 0, len(in))
+	for _, it := range in {
+		k := gapKey{it.FlowID, it.Reason}
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, it)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Reason != out[j].Reason {
+			return out[i].Reason < out[j].Reason
+		}
+		return out[i].FlowID < out[j].FlowID
+	})
+	return out
+}
+
+// EnabledPolicies 把启用的规则渲染成可供回放的 NetworkPolicy 列表。
+//
+// 只吐启用规则：待确认的风险规则不进入生效策略集，否则 dry-run 预测
+// 出的就不是"默认推荐上线后会怎样"，而是"把所有敞口都放开后会怎样"。
+//
+// 每条策略固定 policyTypes 为 Ingress + Egress：规则为空即 default-deny，
+// 不另造一条独立的 default-deny 策略。
+func (r Result) EnabledPolicies() []networkingv1.NetworkPolicy {
+	out := make([]networkingv1.NetworkPolicy, 0, len(r.Policies))
+	for _, p := range r.Policies {
+		np := networkingv1.NetworkPolicy{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: p.Namespace,
+				Name:      "candidate-" + p.Workload,
+			},
+			Spec: networkingv1.NetworkPolicySpec{
+				PodSelector: metav1.LabelSelector{
+					MatchLabels: map[string]string{workloadLabel: p.Workload},
+				},
+				PolicyTypes: []networkingv1.PolicyType{
+					networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress,
+				},
+			},
+		}
+		for _, rule := range p.Rules {
+			if !rule.Enabled {
+				continue
+			}
+			if rule.Ingress != nil {
+				np.Spec.Ingress = append(np.Spec.Ingress, *rule.Ingress)
+			}
+			if rule.Egress != nil {
+				np.Spec.Egress = append(np.Spec.Egress, *rule.Egress)
+			}
+		}
+		out = append(out, np)
+	}
+	return out
+}

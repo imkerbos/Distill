@@ -34,6 +34,13 @@ var ErrClusterNotFound = errors.New("cluster not found")
 // ErrWindowRequired 表示查询缺少必填的时间窗。
 var ErrWindowRequired = errors.New("time window required")
 
+// ErrNamespaceNotFound 表示请求的命名空间在该集群里不存在。
+//
+// 必须报错而不是返回空结果：空结果在界面上与"这个 namespace 一切正常"
+// 完全一样 —— 候选策略 0 条、缺失 Baseline 0 项、会被拦断的连接 0 条，
+// 一次拼写错误就此伪装成一份体检报告（spec §5）。
+var ErrNamespaceNotFound = errors.New("namespace not found")
+
 // FixtureReader 用合成数据实现 Reader。
 //
 // 判定在查询时现场求值而非预计算：数据量小，性能无压力，

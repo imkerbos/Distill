@@ -61,6 +61,7 @@ func NewRouter(d Deps) http.Handler {
 			protected.Get("/clusters/{clusterID}/topology", handleTopology(d))
 			protected.Get("/clusters/{clusterID}/quality", handleQuality(d))
 			protected.Get("/clusters/{clusterID}/security", handleSecurity(d))
+			protected.Get("/clusters/{clusterID}/policy-preview", handlePolicyPreview(d))
 			protected.Get("/flows", handleListFlows(d))
 			protected.Get("/flows/{flowID}/decision", handleFlowDecision(d))
 		})

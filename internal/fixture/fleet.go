@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"github.com/imkerbos/Distill/internal/replay"
+	"github.com/imkerbos/Distill/internal/snapshot"
 )
 
 // baseTime 是数据集的基准时刻。固定值保证每次加载完全一致。
@@ -40,6 +41,8 @@ type Cluster struct {
 	Policies []networkingv1.NetworkPolicy
 	// CCNPPresent 表示该集群存在 Cilium 策略，判定需降级。
 	CCNPPresent bool
+	// Assets 是该集群的资产快照，Baseline 推导的依据来源。
+	Assets snapshot.Assets
 }
 
 // Fleet 是全部合成数据。
@@ -159,6 +162,16 @@ func buildAsia() Cluster {
 		IP: ip(17), Labels: map[string]string{"env": "prod"},
 	})
 
+	// kube-dns 的后端。DNS Baseline 的 peer 是这两个 Pod，不是 ClusterIP ——
+	// NetworkPolicy 选不中 ClusterIP。没有它们，生成的 DNS 规则指向空集。
+	for i := 1; i <= 2; i++ {
+		pods = append(pods, replay.PodRef{
+			ClusterID: clusterID, Namespace: "kube-system", Name: fmt.Sprintf("kube-dns-%d", i),
+			IP: ip(17 + i), Labels: map[string]string{"k8s-app": "kube-dns"},
+			NamedPorts: []replay.NamedPort{{Name: "dns", Port: 53, Protocol: replay.ProtocolUDP}},
+		})
+	}
+
 	emptySelector := metav1.LabelSelector{}
 	apiSelector := metav1.LabelSelector{MatchLabels: map[string]string{"app": "api"}}
 	tcpProto := corev1.ProtocolTCP
@@ -209,7 +222,7 @@ func buildAsia() Cluster {
 		},
 	}
 
-	return Cluster{ID: clusterID, Namespaces: namespaces, Pods: pods, Policies: policies}
+	return Cluster{ID: clusterID, Namespaces: namespaces, Pods: pods, Policies: policies, Assets: asiaAssets()}
 }
 
 // buildEU 构造 prod-eu-1 集群：payment 与 asia 同名但是独立对象，partner
@@ -221,6 +234,9 @@ func buildEU() Cluster {
 	namespaces := []replay.NamespaceRef{
 		{ClusterID: clusterID, Name: "payment", Labels: map[string]string{"env": "prod"}},
 		{ClusterID: clusterID, Name: "partner", Labels: map[string]string{"env": "prod"}},
+		// eu 也必须有 kube-dns：DNS Baseline 是每个集群每个 namespace 都要的，
+		// 只在一个集群里造数据会让「另一个集群缺 DNS」这种假象被当成真结论。
+		{ClusterID: clusterID, Name: "kube-system", Labels: map[string]string{"env": "prod"}},
 	}
 
 	// payment 的 IP 故意与 asia 的 gateway Pod 重叠（10.4.0.1 / .2）：
@@ -230,9 +246,21 @@ func buildEU() Cluster {
 		{ClusterID: clusterID, Namespace: "payment", Name: "payment-2", IP: "10.4.0.2", Labels: map[string]string{"app": "api"}},
 		{ClusterID: clusterID, Namespace: "partner", Name: "partner-1", IP: "10.4.1.1", Labels: map[string]string{"app": "partner"}},
 		{ClusterID: clusterID, Namespace: "partner", Name: "partner-2", IP: "10.4.1.2", Labels: map[string]string{"app": "partner"}},
+		{ClusterID: clusterID, Namespace: "kube-system", Name: "kube-dns-1", IP: "10.4.2.1",
+			Labels:     map[string]string{"k8s-app": "kube-dns"},
+			NamedPorts: []replay.NamedPort{{Name: "dns", Port: 53, Protocol: replay.ProtocolUDP}}},
+		{ClusterID: clusterID, Namespace: "kube-system", Name: "kube-dns-2", IP: "10.4.2.2",
+			Labels:     map[string]string{"k8s-app": "kube-dns"},
+			NamedPorts: []replay.NamedPort{{Name: "dns", Port: 53, Protocol: replay.ProtocolUDP}}},
+		// 抓取端必须真的存在：euAssets 登记了一条 ScrapeTarget，抓取端是
+		// kube-system 的 app=metrics-agent。没有这个 Pod，METRICS_SCRAPE
+		// 会推导出一条选不中任何东西的 ingress 规则，且齐备性校验报"已具备"
+		// —— 一条永不匹配的规则比缺失更危险，因为它让缺口消失在报告里。
+		{ClusterID: clusterID, Namespace: "kube-system", Name: "metrics-agent-1", IP: "10.4.2.3",
+			Labels: map[string]string{"app": "metrics-agent"}},
 	}
 
-	return Cluster{ID: clusterID, Namespaces: namespaces, Pods: pods}
+	return Cluster{ID: clusterID, Namespaces: namespaces, Pods: pods, Assets: euAssets()}
 }
 
 // podEndpoint 把一个已还原身份的 Pod 转成流量端点。取 p 的副本取址，
@@ -259,6 +287,20 @@ func hostNetworkPod(pods []replay.PodRef) replay.PodRef {
 		}
 	}
 	panic("fixture: no hostNetwork pod found")
+}
+
+// unlabelledPod 返回 pods 中第一个没有 app 标签的 Pod。
+//
+// 与 hostNetworkPod 同样的用意：按属性显式查找而非依赖切片下标，
+// 避免未来往这个 namespace 插入新 Pod 时，NO_WORKLOAD_LABEL 场景
+// 因为下标偏移而静默失效。
+func unlabelledPod(pods []replay.PodRef) replay.PodRef {
+	for _, p := range pods {
+		if p.Labels["app"] == "" {
+			return p
+		}
+	}
+	panic("fixture: no unlabelled pod found")
 }
 
 // unresolvedEndpoint 构造一个"声称属于某集群、但身份没能还原"的端点，
@@ -340,6 +382,19 @@ func buildFlows(asia, eu Cluster) []Flow {
 		src := legacySources[i%len(legacySources)]
 		dst := legacy[i%len(legacy)]
 		b.add(podEndpoint(src), podEndpoint(dst), replay.ProtocolTCP, 8080)
+	}
+
+	// legacy-unlabelled -> gateway：无 app 标签的 Pod 做主体，产出
+	// NO_WORKLOAD_LABEL。目的地必须换成 legacy 以外的 namespace ——
+	// broken-ipblock 只挂在 legacy 的 Ingress 方向，任何打进 legacy 的
+	// 流量都会先被判成整体 POLICY_MALFORMED（UNKNOWN），无标签 Pod
+	// 自身的表达失败反而验证不到。换成出向、目的地是没有入向策略的
+	// gateway，这条流量才会以 TRUSTED ALLOW 结论走到分类逻辑，让
+	// classify 因为源 Pod 缺 app 标签报出 NO_WORKLOAD_LABEL。
+	unlabelled := unlabelledPod(legacy)
+	for i := 0; i < 3; i++ {
+		dst := gateway[i%len(gateway)]
+		b.add(podEndpoint(unlabelled), podEndpoint(dst), replay.ProtocolTCP, 8080)
 	}
 
 	// batch -> payment：batch 没有任何 NetworkPolicy 选中它，出向不受限；
