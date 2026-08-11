@@ -1,4 +1,19 @@
 services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: distill-local
+      MYSQL_DATABASE: distill
+    # 刻意不 publish 端口：宿主机上不占端口，也就绕开了端口分配表的约束。
+    # 需要连进去调试时用 `docker compose exec mysql mysql -uroot -p`。
+    volumes:
+      - distill-mysql:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-pdistill-local"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
   distill-api:
     build:
       context: .
@@ -11,6 +26,11 @@ services:
       - distill-gomod:/go/pkg/mod
     environment:
       DISTILL_LOG__LEVEL: INFO
+      DISTILL_DATABASE__DSN: "root:distill-local@tcp(mysql:3306)/distill?parseTime=true&loc=UTC"
+    depends_on:
+      mysql:
+        condition: service_healthy
 
 volumes:
   distill-gomod:
+  distill-mysql:

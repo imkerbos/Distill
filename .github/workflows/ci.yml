@@ -8,6 +8,17 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: distill-local
+          MYSQL_DATABASE: distill
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -pdistill-local"
+          --health-interval=3s --health-timeout=3s --health-retries=20
     steps:
       - uses: actions/checkout@v4
 
@@ -21,4 +32,6 @@ jobs:
           version: latest
 
       - name: Test
+        env:
+          DISTILL_TEST_MYSQL_DSN: "root:distill-local@tcp(127.0.0.1:3306)/distill?parseTime=true&loc=UTC"
         run: go test ./... -race -count=1

@@ -30,6 +30,8 @@ auth:
   users:
     - username: demo
       password_hash: "$2a$10$abcdefghijklmnopqrstuv"
+database:
+  dsn: "root:x@tcp(mysql:3306)/distill?parseTime=true&loc=UTC"
 log:
   level: INFO
 `)
@@ -94,6 +96,8 @@ auth:
   users:
     - username: demo
       password_hash: "x"
+database:
+  dsn: "root:x@tcp(mysql:3306)/distill?parseTime=true&loc=UTC"
 `)
 	t.Setenv("DISTILL_SERVER__ADDR", ":19999")
 
@@ -117,6 +121,8 @@ auth:
   users:
     - username: demo
       password_hash: "x"
+database:
+  dsn: "root:x@tcp(mysql:3306)/distill?parseTime=true&loc=UTC"
 `)
 	t.Setenv("DISTILL_SERVER__READ_TIMEOUT", "42s")
 
@@ -126,5 +132,54 @@ auth:
 	}
 	if cfg.Server.ReadTimeout != 42*time.Second {
 		t.Errorf("ReadTimeout = %v, want 42s — a single underscore in the field name must survive the transform", cfg.Server.ReadTimeout)
+	}
+}
+
+func TestDatabaseDSNIsRequired(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "no-db.yaml")
+	//nolint:gosec // G306: 测试用临时文件，权限无关紧要
+	if err := os.WriteFile(path, []byte(`
+server:
+  addr: ":10100"
+auth:
+  users:
+    - username: admin
+      password_hash: "x"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.Load(path); err == nil {
+		t.Fatal("Load() succeeded without database.dsn, want an error")
+	}
+}
+
+// 连接池上限缺省时必须有默认值：一个没有上限的池会在故障时把
+// MySQL 的连接数打满，而症状表现为平台无响应，与数据库无关。
+func TestDatabaseDefaultsAreApplied(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "with-db.yaml")
+	//nolint:gosec // G306: 测试用临时文件，权限无关紧要
+	if err := os.WriteFile(path, []byte(`
+server:
+  addr: ":10100"
+auth:
+  users:
+    - username: admin
+      password_hash: "x"
+database:
+  dsn: "root:x@tcp(mysql:3306)/distill?parseTime=true&loc=UTC"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Database.MaxOpenConns <= 0 {
+		t.Errorf("MaxOpenConns = %d, want a positive default", cfg.Database.MaxOpenConns)
+	}
+	if cfg.Database.ConnMaxLifetime <= 0 {
+		t.Errorf("ConnMaxLifetime = %v, want a positive default", cfg.Database.ConnMaxLifetime)
 	}
 }

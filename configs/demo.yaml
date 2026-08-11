@@ -12,5 +12,14 @@ auth:
     - username: admin
       password_hash: "$2a$10$xoVvLW2pGWd/EStkHBl31OzDnxv9ImRRRPUT5vFSHRDQxiSCoRV1u"
 
+database:
+  # 本地 demo 连 compose 网络内的 mysql。真实部署用环境变量
+  # DISTILL_DATABASE__DSN 覆盖，凭据不写进仓库。
+  #
+  # 这条 DSN 刻意不带 multiStatements=true：那是迁移专用连接的能力
+  # （见 mysqlregistry.migrationDSN），运行时连接池开着它只会把任何
+  # 一次注入的影响面从单条语句放大成任意语句链。
+  dsn: "root:distill-local@tcp(mysql:3306)/distill?parseTime=true&loc=UTC"
+
 log:
   level: INFO
