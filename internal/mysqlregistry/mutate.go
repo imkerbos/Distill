@@ -76,3 +76,10 @@ func marshalOrNil(v any) (any, error) {
 	}
 	return string(b), nil
 }
+
+// 编译期确认 Store 实现了 registry.Store。放在这里而非测试里：
+// 接口漏实现应当在构建时失败，而不是等到装配时才发现。
+//
+// 直到本 task 补齐三个导入方法之前，这行断言无法通过 —— 因此它在
+// 此处一次性加入，而不是先写下再注释掉。注释掉的代码是 review 的噪声。
+var _ registry.Store = (*Store)(nil)
