@@ -83,6 +83,33 @@ func (r *FixtureReader) registeredCluster(clusterID string) (registry.Cluster, b
 	return reg, ok
 }
 
+// hasRegisteredEndpoint 判断一条 flow 的两端是否至少有一端属于已注册集群。
+//
+// 供 Flow 与不带 Cluster 筛选的 Flows 列表使用：这两个入口不像
+// Flows(filter.Cluster=X)、Topology、Quality、PolicyPreview 那样先对一个
+// 具体集群做门禁，必须自己拦住"两端都不属于任何已注册集群"的记录——
+// 否则不传 cluster 参数、或者枚举 flow ID，就能绕开别处都在做的注册校验。
+//
+// 不用 owningCluster：它按目的端优先，会把"本集群已注册、只是流量的
+// 对端集群未注册"错判成不可见。而那条记录恰恰是本集群自己的出网敞口，
+// 不该因为对端没注册就从它自己的视图里消失——Quality 对跨集群流量的
+// 处理就是这个原则（源端集群也要看到自己发出的跨集群流量）。
+// 两端都没有集群归属（纯外部到外部，当前数据集不会出现）时不拦截：
+// 那种记录不属于任何集群，谈不上"未注册"。
+func (r *FixtureReader) hasRegisteredEndpoint(f replay.Flow) bool {
+	var affiliated bool
+	for _, id := range [2]string{f.Source.ClusterID, f.Dest.ClusterID} {
+		if id == "" {
+			continue
+		}
+		affiliated = true
+		if _, ok := r.registeredCluster(id); ok {
+			return true
+		}
+	}
+	return !affiliated
+}
+
 // owningCluster 返回负责对该 flow 求值的集群：优先取目的端集群，目的端
 // 没有集群归属（如出公网）时退回源端。策略在目的端生效，所以"归谁判"
 // 只能有这一个答案；Clusters 的流量计数与 Flows 的集群筛选也沿用它，
@@ -637,6 +664,13 @@ func (r *FixtureReader) Flows(_ context.Context, filter FlowFilter) (FlowPage, e
 		if filter.Cluster != "" && !involvesCluster(f.Flow, filter.Cluster) {
 			continue
 		}
+		// filter.Cluster 非空时这一步恒真（上面已经门禁过它，而它是两端
+		// 之一）；真正拦截的是不带 Cluster 筛选的全量视图——不这样做，
+		// 不传 cluster 参数就能绕开 Topology/Quality/PolicyPreview 都在
+		// 做的注册校验，看到只属于未注册集群的记录。
+		if !r.hasRegisteredEndpoint(f.Flow) {
+			continue
+		}
 		rec, _ := r.toFlowRecord(f)
 		if filter.Verdict != "" && rec.Verdict != filter.Verdict {
 			continue
@@ -658,10 +692,19 @@ func (r *FixtureReader) Flows(_ context.Context, filter FlowFilter) (FlowPage, e
 }
 
 // Flow 返回单条流量的完整判定。不存在时第二个返回值为 false。
+//
+// ID 是不透明的序号，不像 Flows 的 Cluster 筛选那样"点名"一个集群——
+// 但效果等价：枚举 ID 就能绕过 Flows 那道注册校验，逐条要出属于未注册
+// 集群的判定详情。判给"未找到"而不是一个不同的错误：把"ID 不存在"与
+// "ID 存在但集群已隐藏"合并成同一个响应，调用方才无法靠响应差异探测出
+// 后者的存在。
 func (r *FixtureReader) Flow(_ context.Context, id string) (Decision, bool, error) {
 	for _, f := range r.fleet.Flows {
 		if f.ID != id {
 			continue
+		}
+		if !r.hasRegisteredEndpoint(f.Flow) {
+			return Decision{}, false, nil
 		}
 		rec, d := r.toFlowRecord(f)
 		return Decision{

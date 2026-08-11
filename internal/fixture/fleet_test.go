@@ -5,9 +5,31 @@ import (
 	"testing"
 
 	"github.com/imkerbos/Distill/internal/fixture"
+	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/replay"
 	"github.com/imkerbos/Distill/internal/store"
 )
+
+// fixtureClusters 镜像 internal/fixture/asset.go 里两个集群的注册信息。
+// 值必须与那里的 Registry/APIServers 逐字一致。
+func fixtureClusters() []registry.Cluster {
+	return []registry.Cluster{
+		{
+			ID: "prod-asia-1", DisplayName: "Asia Prod",
+			PodCIDR: "10.4.0.0/14", NodeCIDR: "10.128.0.0/20",
+			State:              registry.StateReady,
+			APIServers:         []registry.APIServer{{Host: "10.9.0.2", CIDR: "10.9.0.0/28", Port: 443}},
+			HealthCheckSources: []string{"35.191.0.0/16", "130.211.0.0/22"},
+		},
+		{
+			ID: "prod-eu-1", DisplayName: "EU Prod",
+			PodCIDR: "10.4.0.0/14", NodeCIDR: "10.132.0.0/20",
+			State:              registry.StateReady,
+			APIServers:         []registry.APIServer{{Host: "10.13.0.2", CIDR: "10.13.0.0/28", Port: 443}},
+			HealthCheckSources: []string{"35.191.0.0/16", "130.211.0.0/22"},
+		},
+	}
+}
 
 func TestLoadHasTwoClusters(t *testing.T) {
 	f := fixture.Load()
@@ -132,9 +154,10 @@ func TestDatasetContainsCrossClusterFlows(t *testing.T) {
 // 到那时这道守卫验的就不再是产品实际跑的东西了。
 func TestDatasetProducesAllDeliberateGaps(t *testing.T) {
 	f := fixture.Load()
-	// 这条断言只看求值结果，不看某个集群是否已注册，因此不需要传注册
-	// 信息：nil 就够了，Flows 在没有 Cluster 筛选时不会去查注册表。
-	r := store.NewFixtureReader(f, nil)
+	// 不带 Cluster 筛选的 Flows 现在也按注册状态过滤（两端都未注册的
+	// 记录不出现，见 FixtureReader.hasRegisteredEndpoint）；两个 fixture
+	// 集群都要注册，这条断言才能看到全量求值结果。
+	r := store.NewFixtureReader(f, fixtureClusters())
 	page, err := r.Flows(context.Background(),
 		store.FlowFilter{Limit: len(f.Flows), Window: r.DataWindow()})
 	if err != nil {

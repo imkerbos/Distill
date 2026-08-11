@@ -483,13 +483,102 @@ func TestReaderUsesRegisteredCIDRs(t *testing.T) {
 
 // 未注册的集群即便 fixture 里有数据也不可见：注册表是集群是否
 // 被平台管理的唯一判据。
-func TestReaderHidesUnregisteredClusters(t *testing.T) {
-	r := store.NewFixtureReader(fixture.Load(), nil)
-	list, err := r.Clusters(context.Background())
-	if err != nil {
-		t.Fatalf("Clusters() error = %v", err)
+//
+// 表驱动、按方法名逐条列出，而不是挑一个方法代表全部——早前的版本只测
+// 了 Clusters()，Security() 漏掉门禁那次事故因此在 make check 里全绿。
+// 以后新增一个"按集群解析"的 Reader 方法却忘记接门禁，表现是这张表里
+// 缺一行，而不是沉默地放过去。
+//
+// 覆盖到的方法都通过 clusterID 参数（或等价的 Cluster 筛选）指名一个
+// 集群，注册表缺席时统一报 ErrClusterNotFound。Flow 按 flow ID 而非
+// 集群解析，不适用同一条断言，单独处理并说明原因（见下）。
+func TestClusterResolvingMethodsHideUnregisteredCluster(t *testing.T) {
+	const targetCluster = "prod-asia-1"
+
+	// 注册表里只有 eu，asia 缺席：asia 在 fixture 里仍有完整数据，
+	// 这正是要验证的场景——数据在，但没登记，就必须处处不可见。
+	var registered []registry.Cluster
+	for _, c := range fixtureClusters() {
+		if c.ID != targetCluster {
+			registered = append(registered, c)
+		}
 	}
-	if len(list) != 0 {
-		t.Errorf("Clusters() = %d entries with an empty registry, want 0", len(list))
+	r := store.NewFixtureReader(fixture.Load(), registered)
+	ctx := context.Background()
+	window := r.DataWindow()
+
+	// asiaInternalFlowID 是一条两端都在 asia、不涉及 eu 的流量 ID：
+	// 如果挑一条跨集群流量，registered 的 eu 端会让 hasRegisteredEndpoint
+	// 判定"有一端已注册"而放行，测不出漏洞。
+	asiaInternalFlowID := ""
+	for _, f := range fixture.Load().Flows {
+		if f.Flow.Source.ClusterID == targetCluster && f.Flow.Dest.ClusterID == targetCluster {
+			asiaInternalFlowID = f.ID
+			break
+		}
+	}
+	if asiaInternalFlowID == "" {
+		t.Fatal("fixture has no asia-internal flow to drive the Flow() case")
+	}
+
+	cases := map[string]func(t *testing.T){
+		"Clusters": func(t *testing.T) {
+			list, err := r.Clusters(ctx)
+			if err != nil {
+				t.Fatalf("Clusters() error = %v", err)
+			}
+			for _, c := range list {
+				if c.ID == targetCluster {
+					t.Errorf("Clusters() still lists %s despite it being unregistered", targetCluster)
+				}
+			}
+		},
+		"Topology": func(t *testing.T) {
+			_, err := r.Topology(ctx, targetCluster, store.LevelNamespace)
+			if !errors.Is(err, store.ErrClusterNotFound) {
+				t.Errorf("Topology() error = %v, want ErrClusterNotFound", err)
+			}
+		},
+		"Quality": func(t *testing.T) {
+			_, err := r.Quality(ctx, targetCluster)
+			if !errors.Is(err, store.ErrClusterNotFound) {
+				t.Errorf("Quality() error = %v, want ErrClusterNotFound", err)
+			}
+		},
+		"Security": func(t *testing.T) {
+			_, err := r.Security(ctx, targetCluster, window)
+			if !errors.Is(err, store.ErrClusterNotFound) {
+				t.Errorf("Security() error = %v, want ErrClusterNotFound", err)
+			}
+		},
+		"PolicyPreview": func(t *testing.T) {
+			_, err := r.PolicyPreview(ctx, targetCluster, "", window)
+			if !errors.Is(err, store.ErrClusterNotFound) {
+				t.Errorf("PolicyPreview() error = %v, want ErrClusterNotFound", err)
+			}
+		},
+		"Flows": func(t *testing.T) {
+			_, err := r.Flows(ctx, store.FlowFilter{Window: window, Cluster: targetCluster})
+			if !errors.Is(err, store.ErrClusterNotFound) {
+				t.Errorf("Flows(cluster=%s) error = %v, want ErrClusterNotFound", targetCluster, err)
+			}
+		},
+		// Flow 按不透明的 flow ID 解析，不像其余方法那样把集群名当参数，
+		// 所以它不报 ErrClusterNotFound——那样反而会告诉调用方"这个 ID
+		// 存在，只是集群被隐藏了"，等于把隐藏本身也泄露出去。它退化成
+		// 与"ID 不存在"完全相同的响应：ok = false，err = nil。
+		"Flow": func(t *testing.T) {
+			_, ok, err := r.Flow(ctx, asiaInternalFlowID)
+			if err != nil {
+				t.Fatalf("Flow() error = %v", err)
+			}
+			if ok {
+				t.Error("Flow() resolved a flow whose only cluster is unregistered")
+			}
+		},
+	}
+
+	for name, check := range cases {
+		t.Run(name, check)
 	}
 }
