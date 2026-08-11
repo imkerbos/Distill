@@ -101,7 +101,10 @@ export const api = {
       `/api/v1/clusters/${encodeURIComponent(cluster)}/policy-imports`,
     ),
 
-  createImport: (cluster: string, body: { role: ImportRole; source: ImportSource; yaml: string }) =>
+  createImport: (
+    cluster: string,
+    body: { role: ImportRole; source: ImportSource; yaml: string; gitCommitSha: string },
+  ) =>
     request<{ importId: string }>(
       `/api/v1/clusters/${encodeURIComponent(cluster)}/policy-imports`,
       { method: 'POST', body: JSON.stringify(body) },

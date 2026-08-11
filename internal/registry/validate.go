@@ -83,13 +83,13 @@ func NewInvalidError(detail string) error {
 // 静默中断才暴露，那时恰好看不到数据。
 func ValidateCluster(c Cluster) error {
 	if c.ID == "" {
-		return invalid("cluster id is required")
+		return invalid("集群 ID 不能为空")
 	}
 	if c.DisplayName == "" {
-		return invalid("display name is required")
+		return invalid("显示名不能为空")
 	}
 	if !c.State.Valid() {
-		return invalidf("unregistered onboard state %q", c.State)
+		return invalidf("接入状态 %q 不在已登记的取值范围内", c.State)
 	}
 	if err := checkCIDR("podCIDR", c.PodCIDR); err != nil {
 		return err
@@ -99,10 +99,10 @@ func ValidateCluster(c Cluster) error {
 	}
 	for i, a := range c.APIServers {
 		if a.Host == "" {
-			return invalidf("apiserver[%d] host is required", i)
+			return invalidf("apiserver[%d] host 不能为空", i)
 		}
 		if a.Port <= 0 || a.Port > 65535 {
-			return invalidf("apiserver[%d] port %d out of range", i, a.Port)
+			return invalidf("apiserver[%d] port %d 超出 1-65535 范围", i, a.Port)
 		}
 		if err := checkCIDR(fmt.Sprintf("apiserver[%d] cidr", i), a.CIDR); err != nil {
 			return err
@@ -116,6 +116,55 @@ func ValidateCluster(c Cluster) error {
 	return validateGit(c.Git)
 }
 
+// gitCommitSHALength 是一个完整 Git commit SHA-1 的十六进制长度。
+//
+// 不接受缩写：漂移检测要拿它去仓库里定位一次提交，而缩写在仓库变大后
+// 可能歧义 —— 一个「核对过」的标记指向两个提交，比没有标记更糟。
+const gitCommitSHALength = 40
+
+// ValidatePolicyImport 校验一条导入记录。
+//
+// 除枚举取值外，这里管的是「来源」与「commit」必须互相印证（spec §4）：
+// GIT 却没有 commit，等于把一次未经核对的粘贴标成「与仓库一致的现状」，
+// 而轮 3 的漂移检测正是拿这个 commit 做基准；反过来，非 GIT 来源却带着
+// commit，是一句没有东西支撑的溯源声明 —— 两者都会让界面上的「已用 Git
+// 核对」失去含义，而它们都不会报错。
+func ValidatePolicyImport(p PolicyImport) error {
+	if !p.Role.Valid() {
+		return invalidf("导入角色 %q 不在已登记的取值范围内", p.Role)
+	}
+	if !p.Source.Valid() {
+		return invalidf("导入来源 %q 不在已登记的取值范围内", p.Source)
+	}
+	if p.Source == SourceGit && p.GitCommitSHA == "" {
+		return invalid("来源为 GIT 时必须提供 gitCommitSha —— " +
+			"没有 commit 就无法证明这份内容与仓库一致")
+	}
+	if p.Source != SourceGit && p.GitCommitSHA != "" {
+		return invalidf("来源为 %q 却带了 gitCommitSha：commit 只有在来源为 GIT 时才有依据", p.Source)
+	}
+	if p.GitCommitSHA != "" && !isHexSHA(p.GitCommitSHA) {
+		return invalidf("gitCommitSha %q 不是 %d 位十六进制的完整 commit SHA",
+			p.GitCommitSHA, gitCommitSHALength)
+	}
+	return nil
+}
+
+// isHexSHA 报告 s 是否为完整长度的十六进制 commit SHA。
+func isHexSHA(s string) bool {
+	if len(s) != gitCommitSHALength {
+		return false
+	}
+	for _, c := range s {
+		switch {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f', c >= 'A' && c <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // validateGit 要求绑定要么完整要么不填。
 //
 // 填一半的绑定会在轮 3 变成一次指向不存在路径的写入尝试，
@@ -125,7 +174,7 @@ func validateGit(g *GitBinding) error {
 		return nil
 	}
 	if g.RepoURL == "" || g.Branch == "" || g.PolicyPath == "" {
-		return invalid("git binding needs repoUrl, branch and policyPath together")
+		return invalid("Git 绑定的 repoUrl、branch、policyPath 三项必须同时填写")
 	}
 	return nil
 }
@@ -136,10 +185,10 @@ func validateGit(g *GitBinding) error {
 // 只报「非法」会让操作者逐个试。
 func checkCIDR(field, value string) error {
 	if value == "" {
-		return invalidf("%s is required", field)
+		return invalidf("%s 不能为空", field)
 	}
 	if _, err := netip.ParsePrefix(value); err != nil {
-		return invalidf("%s %q is not a valid CIDR", field, value)
+		return invalidf("%s %q 不是合法网段", field, value)
 	}
 	return nil
 }

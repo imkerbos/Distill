@@ -106,9 +106,22 @@ func fixtureClusters() []registry.Cluster {
 	}
 }
 
+// fixtureSource 是装了两个 fixture 集群的内存注册表。
+//
+// memRegistry 同时满足 registry.Store 与 store.ClusterSource：注册状态
+// 现在每个请求现查（spec §4.5），reader 与 handler 要用同一份注册信息，
+// 否则一个空注册表会让所有按集群解析的端点都报「未找到」。
+func fixtureSource() *memRegistry {
+	reg := newMemRegistry()
+	for _, c := range fixtureClusters() {
+		reg.clusters[c.ID] = c
+	}
+	return reg
+}
+
 // fixtureReader 是走真实合成数据的 Reader，供需要真实响应内容的测试使用。
 func fixtureReader() store.Reader {
-	return store.NewFixtureReader(fixture.Load(), fixtureClusters())
+	return store.NewFixtureReader(fixture.Load(), fixtureSource())
 }
 
 func postJSON(t *testing.T, h http.Handler, path string, body any) *httptest.ResponseRecorder {

@@ -357,6 +357,7 @@ function ImportSection({ clusters, refreshKey, onChanged }: {
   const [selected, setSelected] = useState('')
   const [role, setRole] = useState<ImportRole>('BASELINE_CURRENT')
   const [source, setSource] = useState<ImportSource>('PASTE')
+  const [gitCommitSha, setGitCommitSha] = useState('')
   const [yaml, setYaml] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -374,10 +375,26 @@ function ImportSection({ clusters, refreshKey, onChanged }: {
       setError('请先选择集群。')
       return
     }
+    // 来源与 commit 必须互相印证，与后端 registry.ValidatePolicyImport
+    // 同一条规则。在这里先拦一道不是为了省一次请求，而是因为这个约束
+    // 本身要在界面上说清楚：一条没有 commit 的 GIT 记录会被读成「与仓库
+    // 一致的现状」，而轮 3 的漂移检测正是拿这个 commit 做基准。
+    const sha = gitCommitSha.trim()
+    if (source === 'GIT' && !/^[0-9a-fA-F]{40}$/.test(sha)) {
+      setError('来源选择 GIT 时必须填写 40 位完整 commit SHA —— '
+        + '没有 commit 就无法证明这份 YAML 与仓库里的内容一致。')
+      return
+    }
     setBusy(true)
     try {
-      await api.createImport(selected, { role, source, yaml })
+      await api.createImport(selected, {
+        role, source, yaml,
+        // 非 GIT 来源一律不带 commit：一个不指向任何同步动作的 commit
+        // 是一句凭空的溯源声明，后端会拒绝它。
+        gitCommitSha: source === 'GIT' ? sha : '',
+      })
       setYaml('')
+      setGitCommitSha('')
       onChanged()
     } catch (err) {
       setError(err instanceof ApiError ? err.msg : '导入失败，请稍后重试')
@@ -434,6 +451,21 @@ function ImportSection({ clusters, refreshKey, onChanged }: {
                 options={Object.entries(IMPORT_SOURCE_LABEL) as [string, string][]}
               />
             </Field>
+            {/*
+              commit 字段只在来源为 GIT 时出现，且此时必填。让它常驻会诱使
+              人给一份粘贴的 YAML 填个 commit —— 那是一句没有东西支撑的
+              溯源声明；而 GIT 却不给填的话，界面就把「未经核对」做成了
+              GIT 来源的默认结局。
+            */}
+            {source === 'GIT' && (
+              <TextField
+                label="commit SHA（40 位，必填）"
+                value={gitCommitSha}
+                onChange={setGitCommitSha}
+                mono
+                placeholder="0123456789abcdef0123456789abcdef01234567"
+              />
+            )}
           </FormGrid>
 
           <SubHeading>NetworkPolicy YAML</SubHeading>

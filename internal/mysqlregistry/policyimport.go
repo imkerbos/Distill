@@ -3,6 +3,7 @@ package mysqlregistry
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 
 	"github.com/imkerbos/Distill/internal/registry"
@@ -43,15 +44,11 @@ func (s *Store) PolicyImports(ctx context.Context, clusterID string) ([]registry
 func (s *Store) CreatePolicyImport(
 	ctx context.Context, actor registry.Actor, p registry.PolicyImport,
 ) error {
-	if !p.Role.Valid() {
-		// 这两条文案是我们自己写的，用 registry.NewInvalidError 走统一的
-		// 校验错误构造路径 —— 不在这里另拼一个 fmt.Errorf(ErrInvalid...)，
-		// 否则「哪段文字可以回传给调用方」这条规则只在 internal/registry
-		// 内部成立，出了这个包就悄悄失效。
-		return registry.NewInvalidError(fmt.Sprintf("unregistered import role %q", p.Role))
-	}
-	if !p.Source.Valid() {
-		return registry.NewInvalidError(fmt.Sprintf("unregistered import source %q", p.Source))
+	// 校验规则住在纯净的 internal/registry 里，本包只负责在写之前调用它：
+	// 「来源为 GIT 就必须有 commit」这类判断不需要数据库就能测，而放在
+	// 这里会让它只能靠一个跑着 MySQL 的测试来保证。
+	if err := registry.ValidatePolicyImport(p); err != nil {
+		return err
 	}
 	target := fmt.Sprintf("policy_import/%s/%s", p.ClusterID, p.ImportID)
 	return s.mutate(ctx, actor, p.ClusterID, "CREATE_POLICY_IMPORT", target, nil, p,
@@ -65,18 +62,56 @@ func (s *Store) CreatePolicyImport(
 				p.Namespace, p.Name, p.YAML, p.SpecHash,
 				nullIfEmpty(p.GitCommitSHA), p.ImportedBy, p.ImportedAt,
 			); err != nil {
-				return fmt.Errorf("insert policy import: %w", err)
+				return writeFailure("insert policy import",
+					fmt.Sprintf("导入标识 %q 在本集群下已存在", p.ImportID),
+					fmt.Sprintf("集群 %s 未注册", p.ClusterID), err)
 			}
 			return nil
 		})
 }
 
+// policyImport 按 (cluster_id, import_id) 取一条未删除的导入。
+func (s *Store) policyImport(
+	ctx context.Context, clusterID, importID string,
+) (registry.PolicyImport, bool, error) {
+	var p registry.PolicyImport
+	var commit sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT cluster_id, import_id, plane, role, source, namespace, name,
+		        yaml, spec_hash, git_commit_sha, imported_by, imported_at
+		   FROM policy_import
+		  WHERE cluster_id = ? AND import_id = ? AND deleted_at IS NULL`,
+		clusterID, importID).
+		Scan(&p.ClusterID, &p.ImportID, &p.Plane, &p.Role, &p.Source,
+			&p.Namespace, &p.Name, &p.YAML, &p.SpecHash, &commit,
+			&p.ImportedBy, &p.ImportedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return registry.PolicyImport{}, false, nil
+	}
+	if err != nil {
+		return registry.PolicyImport{}, false, fmt.Errorf("query policy import: %w", err)
+	}
+	p.GitCommitSHA = commit.String
+	return p, true, nil
+}
+
 // SoftDeletePolicyImport 删除一条导入，同事务写审计。
+//
+// 删除前先把整行读出来当作审计的 before，与 DELETE_CLUSTER 一致：
+// 一条 before 与 after 都是 NULL 的审计记录只能证明「有人删过东西」，
+// 而复盘时要回答的是「删掉的是哪一条策略、内容是什么」。
 func (s *Store) SoftDeletePolicyImport(
 	ctx context.Context, actor registry.Actor, clusterID, importID string,
 ) error {
+	before, ok, err := s.policyImport(ctx, clusterID, importID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("%w: policy import %s/%s", ErrNotFound, clusterID, importID)
+	}
 	target := fmt.Sprintf("policy_import/%s/%s", clusterID, importID)
-	return s.mutate(ctx, actor, clusterID, "DELETE_POLICY_IMPORT", target, nil, nil,
+	return s.mutate(ctx, actor, clusterID, "DELETE_POLICY_IMPORT", target, before, nil,
 		func(tx *sql.Tx) error {
 			res, err := tx.ExecContext(ctx,
 				`UPDATE policy_import SET deleted_at = ?

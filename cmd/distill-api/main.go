@@ -63,14 +63,11 @@ func run(configPath string) error {
 	}
 
 	reg := mysqlregistry.New(db)
-	// 集群列表在启动时读取一次。后台新增集群后需要重启才生效 ——
-	// 本轮如此，因为 FixtureReader 持有的是快照而非查询接口。
-	// 接真实存储时 reader 直接查库，这个限制随之消失。
-	clusters, err := reg.Clusters(ctx)
-	if err != nil {
-		return err
-	}
-	reader := store.NewFixtureReader(fixture.Load(), clusters)
+	// reader 拿到的是注册表本身而不是启动时读出的一份集群清单：
+	// 集群是否受平台管理必须在每个请求上现查（spec §4.5）。传快照的话，
+	// 下线一个集群之后 /security 与 /policy-preview 会继续供数直到进程
+	// 重启 —— 操作者收到「已下线」的确认，事实却相反。
+	reader := store.NewFixtureReader(fixture.Load(), reg)
 
 	r := chi.NewRouter()
 	r.Mount("/healthz", newHealthHandler())

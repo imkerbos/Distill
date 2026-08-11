@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -96,6 +97,11 @@ func (m *memRegistry) PolicyImports(_ context.Context, clusterID string) ([]regi
 func (m *memRegistry) CreatePolicyImport(_ context.Context, _ registry.Actor, p registry.PolicyImport) error {
 	if m.failWith != nil {
 		return m.failWith
+	}
+	// 与 mysqlregistry.CreatePolicyImport 一样先过校验：这个替身若比真实
+	// 实现宽松，handler 测试就会在一条真实实现会拒绝的输入上通过。
+	if err := registry.ValidatePolicyImport(p); err != nil {
+		return err
 	}
 	m.imports[p.ClusterID] = append(m.imports[p.ClusterID], p)
 	return nil
@@ -362,5 +368,73 @@ func TestDeleteClusterRoundTrips(t *testing.T) {
 	}
 	if _, ok := reg.clusters["c1"]; ok {
 		t.Error("cluster still present after delete")
+	}
+}
+
+// gitBindingRef 是 Secret Manager 中那条引用的取值，凭据本身永不入库。
+//
+// 提成常量而不是写在两处字面量里：除了让期望值与请求体共用同一个值，
+// 也避免 gosec G101 把「字段名带 credential」的字面量当成硬编码凭据 ——
+// 这里存的是引用，不是凭据，而消掉误报比挂一条 //nolint 更诚实。
+const gitBindingRef = "sm://distill/git"
+
+// 请求体 → 领域对象的整体比对：逐字段挑着断言挡不住漏映射。
+//
+// 审阅时的实证是 —— 把 toCluster 里 APIServers / HealthCheckSources / Git
+// 三行赋值删掉，./internal/httpapi 全绿。而这三项正是 control-plane 与
+// 健康检查两类 Baseline 的推导依据，漏掉的后果是少一条放行规则，
+// 表现为生产阻断而不是注册时的报错。
+//
+// 比对整个结构体而不是选几个字段：新增一个字段却忘记映射时，
+// 表现必须是这个测试失败，而不是没有人注意到。
+func TestCreateClusterCarriesEveryFieldIntoTheDomainObject(t *testing.T) {
+	reg := newMemRegistry()
+	h, _, cookie := newTestRouterWithRegistry(t, fixtureReader(), reg)
+
+	rec := authedPostJSON(t, h, cookie, "/api/v1/clusters", map[string]any{
+		"id": "rt-1", "displayName": "Round Trip", "podCidr": "10.20.0.0/14",
+		"nodeCidr": "10.140.0.0/20", "ccnpPresent": true,
+		// state 是服务端决定的，请求体里给一个相反的值，
+		// 期望值里写 REGISTERED —— 这条断言顺带锁住「忽略调用方的 state」。
+		"state": "READY",
+		"apiServers": []map[string]any{
+			{"host": "10.9.0.2", "cidr": "10.9.0.0/28", "port": 443},
+			{"host": "10.9.0.3", "cidr": "10.9.0.0/28", "port": 443},
+		},
+		"healthCheckSources": []string{"35.191.0.0/16", "130.211.0.0/22"},
+		"git": map[string]any{
+			"repoUrl": "https://gitlab.example.com/net/policies.git", "branch": "main",
+			"policyPath": "clusters/rt-1", "credentialRef": gitBindingRef,
+			"lastWrittenCommit": "0123456789abcdef0123456789abcdef01234567",
+		},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	want := registry.Cluster{
+		ID: "rt-1", DisplayName: "Round Trip",
+		PodCIDR: "10.20.0.0/14", NodeCIDR: "10.140.0.0/20",
+		CCNPPresent: true, State: registry.StateRegistered,
+		APIServers: []registry.APIServer{
+			{Host: "10.9.0.2", CIDR: "10.9.0.0/28", Port: 443},
+			{Host: "10.9.0.3", CIDR: "10.9.0.0/28", Port: 443},
+		},
+		HealthCheckSources: []string{"35.191.0.0/16", "130.211.0.0/22"},
+		Git: &registry.GitBinding{
+			RepoURL: "https://gitlab.example.com/net/policies.git", Branch: "main",
+			PolicyPath: "clusters/rt-1", CredentialRef: gitBindingRef,
+			LastWrittenCommit: "0123456789abcdef0123456789abcdef01234567",
+		},
+	}
+	got, ok := reg.clusters["rt-1"]
+	if !ok {
+		t.Fatal("cluster was not stored")
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("stored cluster =\n%+v\nwant\n%+v", got, want)
+	}
+	if got.Git == nil || *got.Git != *want.Git {
+		t.Errorf("git binding = %+v, want %+v", got.Git, want.Git)
 	}
 }

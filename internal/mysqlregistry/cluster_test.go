@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/imkerbos/Distill/internal/config"
@@ -167,8 +169,10 @@ func TestSoftDeleteHidesClusterButKeepsAudit(t *testing.T) {
 		`SELECT COUNT(*) FROM audit_log WHERE cluster_id = 'prod-asia-1'`).Scan(&audits); err != nil {
 		t.Fatalf("count: %v", err)
 	}
-	if audits < 2 {
-		t.Errorf("audit rows for the deleted cluster = %d, want at least 2 (create + delete)", audits)
+	// 恰好两条，不是「至少两条」：多出来的审计行意味着某条写路径重复
+	// 记账，而复盘时一条被记了两次的操作与两次真实操作无法区分。
+	if audits != 2 {
+		t.Errorf("audit rows for the deleted cluster = %d, want exactly 2 (create + delete)", audits)
 	}
 }
 
@@ -179,5 +183,83 @@ func TestCreateClusterRejectsInvalidInput(t *testing.T) {
 	err := s.CreateCluster(context.Background(), registry.Actor{Username: "admin"}, c)
 	if !errors.Is(err, registry.ErrInvalid) {
 		t.Errorf("err = %v, want ErrInvalid", err)
+	}
+}
+
+// 重复注册一个已有的集群 ID 是操作者的输入问题，不是服务故障。
+//
+// 判据是「该不该计入服务错误率」：翻译之前，1062 会一路冒泡成
+// CodeInternal + HTTP 500，让注册页在一次正常的手滑上显示「服务器错误」，
+// 并把它计进可用性指标。翻译落在捕获驱动错误的这一层，HTTP 层因此
+// 只需要认识 registry.ErrInvalid，不必按 MySQL 错误号分支。
+func TestDuplicateClusterIDIsAnInputError(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	actor := registry.Actor{Username: "admin"}
+
+	if err := s.CreateCluster(ctx, actor, sampleCluster()); err != nil {
+		t.Fatalf("first CreateCluster() error = %v", err)
+	}
+	err := s.CreateCluster(ctx, actor, sampleCluster())
+	if !errors.Is(err, registry.ErrInvalid) {
+		t.Fatalf("err = %v, want ErrInvalid — a duplicate cluster id is the caller's problem", err)
+	}
+	// 回传通道只读 InvalidError.Detail，所以文案必须点名冲突的是什么；
+	// 同时它必须是我们自己写的话，不能是驱动那句带表名与键名的原文。
+	var ie *registry.InvalidError
+	if !errors.As(err, &ie) {
+		t.Fatalf("err = %v, want an *InvalidError carrying a returnable Detail", err)
+	}
+	if !strings.Contains(ie.Detail, "prod-asia-1") {
+		t.Errorf("Detail = %q, want it to name the conflicting cluster id", ie.Detail)
+	}
+	for _, leaked := range []string{"Duplicate entry", "PRIMARY", "Error 1062"} {
+		if strings.Contains(ie.Detail, leaked) {
+			t.Errorf("Detail = %q leaked driver text %q", ie.Detail, leaked)
+		}
+	}
+}
+
+// registry.Cluster → MySQL → registry.Cluster 的整体比对。
+//
+// 逐字段挑着断言挡不住写错值：审阅时的实证是，把 insertChildren 里的
+// apiserver cidr 写成 "0.0.0.0/0"、把 CreateCluster 的 onboard_state 写成
+// "READY"，本包全部测试依旧通过。这两个字段一个是 control-plane Baseline
+// 的推导依据、一个决定集群能不能出候选策略。
+func TestClusterSurvivesAFullRoundTripThroughMySQL(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+
+	in := sampleCluster()
+	// 两个 apiserver：HA 控制面通常不止一个端点，只写一条测不出
+	// insertChildren 少插了后面几行这种缺口。
+	in.APIServers = []registry.APIServer{
+		{Host: "10.9.0.3", CIDR: "10.9.0.16/28", Port: 6443},
+		{Host: "10.9.0.2", CIDR: "10.9.0.0/28", Port: 443},
+	}
+	if err := s.CreateCluster(ctx, registry.Actor{Username: "admin"}, in); err != nil {
+		t.Fatalf("CreateCluster() error = %v", err)
+	}
+	got, ok, err := s.Cluster(ctx, in.ID)
+	if err != nil || !ok {
+		t.Fatalf("Cluster() = %+v, %v, %v", got, ok, err)
+	}
+
+	// 期望值里子表按 host / cidr 升序，与写入顺序不同：读路径带
+	// ORDER BY，图的是两次读同一个集群必然得到同一份结果 —— 缺了它，
+	// 一份候选策略会因为 Baseline 输入的顺序抖动而在两次预览之间变样。
+	// 顺序对推导本身无意义（这些网段最终展开成一组规则），但「稳定」有。
+	want := in
+	want.APIServers = []registry.APIServer{
+		{Host: "10.9.0.2", CIDR: "10.9.0.0/28", Port: 443},
+		{Host: "10.9.0.3", CIDR: "10.9.0.16/28", Port: 6443},
+	}
+	want.HealthCheckSources = []string{"130.211.0.0/22", "35.191.0.0/16"}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("round-tripped cluster =\n%+v\nwant\n%+v", got, want)
+	}
+	if got.Git == nil || *got.Git != *want.Git {
+		t.Errorf("git binding = %+v, want %+v", got.Git, want.Git)
 	}
 }

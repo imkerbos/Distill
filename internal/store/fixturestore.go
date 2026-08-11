@@ -49,17 +49,22 @@ var ErrNamespaceNotFound = errors.New("namespace not found")
 type FixtureReader struct {
 	fleet      fixture.Fleet
 	evaluators map[string]*replay.Evaluator
-	// registered 是已注册集群，按 ID 索引。
+	// source 是注册信息的读取面，每个请求现查。
 	//
-	// 集群元数据（网段、apiserver、健康检查网段）来自注册信息而非
-	// fixture：这些值是 Baseline 的推导依据，必须能在后台修改，
-	// 而不是改一次网段就要改代码重新编译。
-	registered map[string]registry.Cluster
+	// 存接口而不是启动时读出来的那份集群清单：下线一个集群必须立刻
+	// 生效（spec §4.5）。持有快照的 reader 会在集群被下线之后继续用旧
+	// 快照回答 /security 与 /policy-preview —— 操作者收到「已下线」的
+	// 确认，而这两个最敏感的端点继续供数，时间窗没有上限也没有迹象。
+	//
+	// 集群元数据（网段、apiserver、健康检查网段）也从这里取而非 fixture：
+	// 这些值是 Baseline 的推导依据，必须能在后台修改，而不是改一次网段
+	// 就要改代码重新编译。
+	source ClusterSource
 }
 
 // NewFixtureReader 组合两个数据源：集群元数据来自注册信息，
 // 流量与 Pod 快照来自 fixture。接真实存储时替换的正是后一半。
-func NewFixtureReader(f fixture.Fleet, clusters []registry.Cluster) *FixtureReader {
+func NewFixtureReader(f fixture.Fleet, src ClusterSource) *FixtureReader {
 	evals := make(map[string]*replay.Evaluator, len(f.Clusters))
 	for _, c := range f.Clusters {
 		var opts []replay.Option
@@ -68,19 +73,32 @@ func NewFixtureReader(f fixture.Fleet, clusters []registry.Cluster) *FixtureRead
 		}
 		evals[c.ID] = replay.NewEvaluator(c.ID, c.Policies, c.Namespaces, opts...)
 	}
-	idx := make(map[string]registry.Cluster, len(clusters))
-	for _, c := range clusters {
-		idx[c.ID] = c
-	}
-	return &FixtureReader{fleet: f, evaluators: evals, registered: idx}
+	return &FixtureReader{fleet: f, evaluators: evals, source: src}
 }
 
-// registeredCluster 返回已注册集群，并校验它对 fixture 集群 c 是否可见。
+// registeredCluster 现查一个集群的注册信息。
 // 未注册即视为不存在：注册表是集群是否被平台管理的唯一判据，
 // fixture 里有数据不代表这个集群该出现在任何查询结果里。
-func (r *FixtureReader) registeredCluster(clusterID string) (registry.Cluster, bool) {
-	reg, ok := r.registered[clusterID]
-	return reg, ok
+func (r *FixtureReader) registeredCluster(
+	ctx context.Context, clusterID string,
+) (registry.Cluster, bool, error) {
+	return r.source.Cluster(ctx, clusterID)
+}
+
+// registeredIDs 在一次请求内解析一次注册表，返回已注册集群的 ID 集合。
+//
+// 逐条 flow 去查注册表会让一次列表查询变成几百次注册表查询；一次请求
+// 解析一次既保住了「不缓存跨请求状态」这条纪律，又把查询次数收敛成常数。
+func (r *FixtureReader) registeredIDs(ctx context.Context) (map[string]struct{}, error) {
+	list, err := r.source.Clusters(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ids := make(map[string]struct{}, len(list))
+	for _, c := range list {
+		ids[c.ID] = struct{}{}
+	}
+	return ids, nil
 }
 
 // hasRegisteredEndpoint 判断一条 flow 的两端是否至少有一端属于已注册集群。
@@ -96,14 +114,14 @@ func (r *FixtureReader) registeredCluster(clusterID string) (registry.Cluster, b
 // 处理就是这个原则（源端集群也要看到自己发出的跨集群流量）。
 // 两端都没有集群归属（纯外部到外部，当前数据集不会出现）时不拦截：
 // 那种记录不属于任何集群，谈不上"未注册"。
-func (r *FixtureReader) hasRegisteredEndpoint(f replay.Flow) bool {
+func hasRegisteredEndpoint(f replay.Flow, registered map[string]struct{}) bool {
 	var affiliated bool
 	for _, id := range [2]string{f.Source.ClusterID, f.Dest.ClusterID} {
 		if id == "" {
 			continue
 		}
 		affiliated = true
-		if _, ok := r.registeredCluster(id); ok {
+		if _, ok := registered[id]; ok {
 			return true
 		}
 	}
@@ -188,32 +206,6 @@ func safeRate(numerator, denominator int) float64 {
 		return 0
 	}
 	return float64(numerator) / float64(denominator)
-}
-
-// Clusters 返回全部集群概览。未注册的集群即便 fixture 里有数据也不出现：
-// 注册表是集群是否被平台管理的唯一判据。
-func (r *FixtureReader) Clusters(_ context.Context) ([]ClusterSummary, error) {
-	out := make([]ClusterSummary, 0, len(r.fleet.Clusters))
-	for _, c := range r.fleet.Clusters {
-		if _, ok := r.registeredCluster(c.ID); !ok {
-			continue
-		}
-		var flowCount int
-		for _, f := range r.fleet.Flows {
-			if owningCluster(f.Flow) == c.ID {
-				flowCount++
-			}
-		}
-		out = append(out, ClusterSummary{
-			ID:             c.ID,
-			NamespaceCount: len(c.Namespaces),
-			PodCount:       len(c.Pods),
-			FlowCount:      flowCount,
-			CCNPPresent:    c.CCNPPresent,
-		})
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	return out, nil
 }
 
 // podsInNamespace 从集群快照里筛出指定命名空间的 Pod。
@@ -574,12 +566,18 @@ func (r *FixtureReader) topologyEdges(clusterID string, known map[string]bool, l
 }
 
 // Topology 返回指定集群的通信拓扑。集群不存在时返回错误。
-func (r *FixtureReader) Topology(_ context.Context, clusterID string, level TopologyLevel) (Topology, error) {
+func (r *FixtureReader) Topology(
+	ctx context.Context, clusterID string, level TopologyLevel,
+) (Topology, error) {
 	c, ok := r.fleet.Cluster(clusterID)
 	if !ok {
 		return Topology{}, fmt.Errorf("%w: %s", ErrClusterNotFound, clusterID)
 	}
-	if _, ok := r.registeredCluster(clusterID); !ok {
+	_, ok, err := r.registeredCluster(ctx, clusterID)
+	if err != nil {
+		return Topology{}, err
+	}
+	if !ok {
 		return Topology{}, fmt.Errorf("%w: %s", ErrClusterNotFound, clusterID)
 	}
 
@@ -631,7 +629,7 @@ func (r *FixtureReader) DataWindow() TimeWindow {
 }
 
 // Flows 按条件返回流量列表。筛选条件指向不存在的集群时返回错误。
-func (r *FixtureReader) Flows(_ context.Context, filter FlowFilter) (FlowPage, error) {
+func (r *FixtureReader) Flows(ctx context.Context, filter FlowFilter) (FlowPage, error) {
 	// 先于集群校验：缺时间窗是调用方用错了接口，与查哪个集群无关。
 	if !filter.Window.Valid() {
 		return FlowPage{}, ErrWindowRequired
@@ -643,9 +641,17 @@ func (r *FixtureReader) Flows(_ context.Context, filter FlowFilter) (FlowPage, e
 			// 会让前端把打错的集群名读成"这个集群没有流量"。
 			return FlowPage{}, fmt.Errorf("%w: %s", ErrClusterNotFound, filter.Cluster)
 		}
-		if _, ok := r.registeredCluster(filter.Cluster); !ok {
+		_, ok, err := r.registeredCluster(ctx, filter.Cluster)
+		if err != nil {
+			return FlowPage{}, err
+		}
+		if !ok {
 			return FlowPage{}, fmt.Errorf("%w: %s", ErrClusterNotFound, filter.Cluster)
 		}
+	}
+	registered, err := r.registeredIDs(ctx)
+	if err != nil {
+		return FlowPage{}, err
 	}
 
 	limit := filter.Limit
@@ -668,7 +674,7 @@ func (r *FixtureReader) Flows(_ context.Context, filter FlowFilter) (FlowPage, e
 		// 之一）；真正拦截的是不带 Cluster 筛选的全量视图——不这样做，
 		// 不传 cluster 参数就能绕开 Topology/Quality/PolicyPreview 都在
 		// 做的注册校验，看到只属于未注册集群的记录。
-		if !r.hasRegisteredEndpoint(f.Flow) {
+		if !hasRegisteredEndpoint(f.Flow, registered) {
 			continue
 		}
 		rec, _ := r.toFlowRecord(f)
@@ -698,12 +704,16 @@ func (r *FixtureReader) Flows(_ context.Context, filter FlowFilter) (FlowPage, e
 // 集群的判定详情。判给"未找到"而不是一个不同的错误：把"ID 不存在"与
 // "ID 存在但集群已隐藏"合并成同一个响应，调用方才无法靠响应差异探测出
 // 后者的存在。
-func (r *FixtureReader) Flow(_ context.Context, id string) (Decision, bool, error) {
+func (r *FixtureReader) Flow(ctx context.Context, id string) (Decision, bool, error) {
 	for _, f := range r.fleet.Flows {
 		if f.ID != id {
 			continue
 		}
-		if !r.hasRegisteredEndpoint(f.Flow) {
+		registered, err := r.registeredIDs(ctx)
+		if err != nil {
+			return Decision{}, false, err
+		}
+		if !hasRegisteredEndpoint(f.Flow, registered) {
 			return Decision{}, false, nil
 		}
 		rec, d := r.toFlowRecord(f)
@@ -746,12 +756,16 @@ func podCoveredByPolicy(pod replay.PodRef, policies []networkingv1.NetworkPolicy
 }
 
 // Quality 返回指定集群的数据质量。集群不存在时返回错误。
-func (r *FixtureReader) Quality(_ context.Context, clusterID string) (Quality, error) {
+func (r *FixtureReader) Quality(ctx context.Context, clusterID string) (Quality, error) {
 	c, ok := r.fleet.Cluster(clusterID)
 	if !ok {
 		return Quality{}, fmt.Errorf("%w: %s", ErrClusterNotFound, clusterID)
 	}
-	if _, ok := r.registeredCluster(clusterID); !ok {
+	_, ok, err := r.registeredCluster(ctx, clusterID)
+	if err != nil {
+		return Quality{}, err
+	}
+	if !ok {
 		return Quality{}, fmt.Errorf("%w: %s", ErrClusterNotFound, clusterID)
 	}
 

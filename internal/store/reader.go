@@ -5,16 +5,18 @@ import (
 	"context"
 	"time"
 
+	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/replay"
 )
 
-// ClusterSummary 是集群概览。
-type ClusterSummary struct {
-	ID             string `json:"id"`
-	NamespaceCount int    `json:"namespaceCount"`
-	PodCount       int    `json:"podCount"`
-	FlowCount      int    `json:"flowCount"`
-	CCNPPresent    bool   `json:"ccnpPresent"`
+// ClusterSource 是 store 需要的最小注册信息读取面。
+//
+// 只要读的两个方法：store 不该有能力改注册表，而按请求解析而非启动时
+// 缓存，是因为下线一个集群必须立刻生效 —— 缓存快照会让「已下线」的
+// 确认与「仍在服务」的事实之间出现一个没有上限、也没有迹象的时间窗。
+type ClusterSource interface {
+	Clusters(ctx context.Context) ([]registry.Cluster, error)
+	Cluster(ctx context.Context, id string) (registry.Cluster, bool, error)
 }
 
 // TopologyNode 是拓扑图中的一个命名空间节点。
@@ -207,8 +209,6 @@ type Quality struct {
 // handler 依赖本接口而非具体实现：将来接入 BigQuery 时实现同一接口，
 // handler 一行不动。
 type Reader interface {
-	// Clusters 返回全部集群概览。
-	Clusters(ctx context.Context) ([]ClusterSummary, error)
 	// Topology 返回指定集群的通信拓扑。集群不存在时返回错误。
 	Topology(ctx context.Context, clusterID string, level TopologyLevel) (Topology, error)
 	// Flows 按条件返回流量列表。筛选条件指向不存在的集群时返回错误。

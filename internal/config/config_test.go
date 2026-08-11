@@ -136,6 +136,21 @@ database:
 }
 
 func TestDatabaseDSNIsRequired(t *testing.T) {
+	// 环境变量必须先清掉，否则这个测试断言的不是它声称的东西。
+	//
+	// docker-compose 给 api 容器导出了 DISTILL_DATABASE__DSN，koanf 的 env
+	// provider 会把它并进配置，于是 Load() 成功、测试失败 —— 而容器里正是
+	// MySQL 集成测试唯一能跑起来的地方。反过来，在宿主机与 CI 上它之所以
+	// 通过，只是因为那两处恰好没设这个变量。
+	//
+	// t.Setenv 先声明「本测试要改这个变量」，由它登记恢复；紧接着 Unsetenv
+	// 把变量整个移除 —— 只置空串不够，那样 koanf 仍会并进一个空 DSN，测的
+	// 就成了「空串也算缺失」而不是「配置里没写 dsn」。
+	t.Setenv("DISTILL_DATABASE__DSN", "")
+	if err := os.Unsetenv("DISTILL_DATABASE__DSN"); err != nil {
+		t.Fatalf("unset DISTILL_DATABASE__DSN: %v", err)
+	}
+
 	dir := t.TempDir()
 	path := filepath.Join(dir, "no-db.yaml")
 	//nolint:gosec // G306: 测试用临时文件，权限无关紧要

@@ -34,29 +34,51 @@ func fixtureClusters() []registry.Cluster {
 	}
 }
 
+// memSource 是内存版 store.ClusterSource。
+//
+// 可增删而不是构造后固定：注册状态必须每请求现查（spec §4.5），而
+// 「现查」与「启动时读一次」的差别只有在同一个 reader 实例上先后读到
+// 两个不同结果时才看得出来 —— 一个不可变的数据源测不出这件事。
+type memSource struct {
+	clusters map[string]registry.Cluster
+}
+
+func newSource(cs ...registry.Cluster) *memSource {
+	idx := make(map[string]registry.Cluster, len(cs))
+	for _, c := range cs {
+		idx[c.ID] = c
+	}
+	return &memSource{clusters: idx}
+}
+
+func (m *memSource) Clusters(context.Context) ([]registry.Cluster, error) {
+	out := make([]registry.Cluster, 0, len(m.clusters))
+	for _, c := range m.clusters {
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+func (m *memSource) Cluster(_ context.Context, id string) (registry.Cluster, bool, error) {
+	c, ok := m.clusters[id]
+	return c, ok, nil
+}
+
+// offboard 模拟一次下线：软删除之后集群不再出现在注册表的读结果里。
+func (m *memSource) offboard(id string) { delete(m.clusters, id) }
+
+func fixtureSource() *memSource {
+	return newSource(fixtureClusters()...)
+}
+
 func newReader() *store.FixtureReader {
-	return store.NewFixtureReader(fixture.Load(), fixtureClusters())
+	return store.NewFixtureReader(fixture.Load(), fixtureSource())
 }
 
 // allTime 是覆盖整个 fixture 数据集的时间窗。Flows 的时间窗是必填的
 // （见 store.FlowFilter.Window），只关心其他筛选条件的用例用它把时间维打开。
 func allTime() store.TimeWindow {
 	return newReader().DataWindow()
-}
-
-func TestClusters(t *testing.T) {
-	got, err := newReader().Clusters(context.Background())
-	if err != nil {
-		t.Fatalf("Clusters: %v", err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("got %d clusters, want 2", len(got))
-	}
-	for _, c := range got {
-		if c.PodCount == 0 {
-			t.Errorf("cluster %s reports no pods", c.ID)
-		}
-	}
 }
 
 func TestTopologyHasNodesAndEdges(t *testing.T) {
@@ -459,7 +481,7 @@ func TestReaderUsesRegisteredCIDRs(t *testing.T) {
 		APIServers:         []registry.APIServer{{Host: "10.9.0.2", CIDR: "10.9.0.0/28", Port: 443}},
 		HealthCheckSources: []string{"35.191.0.0/16"},
 	}}
-	r := store.NewFixtureReader(fixture.Load(), clusters)
+	r := store.NewFixtureReader(fixture.Load(), newSource(clusters...))
 
 	pv, err := r.PolicyPreview(context.Background(), "prod-asia-1", "", r.DataWindow())
 	if err != nil {
@@ -485,7 +507,7 @@ func TestReaderUsesRegisteredCIDRs(t *testing.T) {
 // 被平台管理的唯一判据。
 //
 // 表驱动、按方法名逐条列出，而不是挑一个方法代表全部——早前的版本只测
-// 了 Clusters()，Security() 漏掉门禁那次事故因此在 make check 里全绿。
+// 了集群列表，Security() 漏掉门禁那次事故因此在 make check 里全绿。
 // 以后新增一个"按集群解析"的 Reader 方法却忘记接门禁，表现是这张表里
 // 缺一行，而不是沉默地放过去。
 //
@@ -497,13 +519,9 @@ func TestClusterResolvingMethodsHideUnregisteredCluster(t *testing.T) {
 
 	// 注册表里只有 eu，asia 缺席：asia 在 fixture 里仍有完整数据，
 	// 这正是要验证的场景——数据在，但没登记，就必须处处不可见。
-	var registered []registry.Cluster
-	for _, c := range fixtureClusters() {
-		if c.ID != targetCluster {
-			registered = append(registered, c)
-		}
-	}
-	r := store.NewFixtureReader(fixture.Load(), registered)
+	src := fixtureSource()
+	src.offboard(targetCluster)
+	r := store.NewFixtureReader(fixture.Load(), src)
 	ctx := context.Background()
 	window := r.DataWindow()
 
@@ -522,17 +540,6 @@ func TestClusterResolvingMethodsHideUnregisteredCluster(t *testing.T) {
 	}
 
 	cases := map[string]func(t *testing.T){
-		"Clusters": func(t *testing.T) {
-			list, err := r.Clusters(ctx)
-			if err != nil {
-				t.Fatalf("Clusters() error = %v", err)
-			}
-			for _, c := range list {
-				if c.ID == targetCluster {
-					t.Errorf("Clusters() still lists %s despite it being unregistered", targetCluster)
-				}
-			}
-		},
 		"Topology": func(t *testing.T) {
 			_, err := r.Topology(ctx, targetCluster, store.LevelNamespace)
 			if !errors.Is(err, store.ErrClusterNotFound) {
@@ -580,5 +587,42 @@ func TestClusterResolvingMethodsHideUnregisteredCluster(t *testing.T) {
 
 	for name, check := range cases {
 		t.Run(name, check)
+	}
+}
+
+// 下线必须立刻生效：同一个 reader 实例，下线前读得到、下线后必须读不到。
+//
+// 这是本轮 C1 的回归测试。此前 reader 持有的是启动时读出的一份集群清单，
+// 于是 DELETE /clusters/{id} 返回成功、GET /clusters 已经不再列出它，而
+// /security 与 /policy-preview 继续返回它的完整数据，直到有人重启进程 ——
+// 操作者收到「已下线」的确认，两个最敏感的端点却在继续供数，时间窗没有
+// 上限也没有任何迹象（spec §4.5）。
+//
+// 断言落在同一个 reader 实例上：换一个新实例去读，测的是构造函数，
+// 而不是「这次请求有没有重新解析注册状态」。
+func TestOffboardingTakesEffectWithoutRebuildingTheReader(t *testing.T) {
+	const targetCluster = "prod-asia-1"
+
+	src := fixtureSource()
+	r := store.NewFixtureReader(fixture.Load(), src)
+	ctx := context.Background()
+	window := r.DataWindow()
+
+	if _, err := r.Security(ctx, targetCluster, window); err != nil {
+		t.Fatalf("Security() before offboarding = %v, want the cluster to be readable", err)
+	}
+	if _, err := r.PolicyPreview(ctx, targetCluster, "", window); err != nil {
+		t.Fatalf("PolicyPreview() before offboarding = %v, want the cluster to be readable", err)
+	}
+
+	src.offboard(targetCluster)
+
+	if _, err := r.Security(ctx, targetCluster, window); !errors.Is(err, store.ErrClusterNotFound) {
+		t.Errorf("Security() after offboarding = %v, want ErrClusterNotFound — "+
+			"the reader is still answering from a startup snapshot", err)
+	}
+	if _, err := r.PolicyPreview(ctx, targetCluster, "", window); !errors.Is(err, store.ErrClusterNotFound) {
+		t.Errorf("PolicyPreview() after offboarding = %v, want ErrClusterNotFound — "+
+			"the reader is still answering from a startup snapshot", err)
 	}
 }

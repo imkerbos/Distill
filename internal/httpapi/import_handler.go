@@ -20,9 +20,31 @@ type importPayload struct {
 	GitCommitSHA string `json:"gitCommitSha"`
 }
 
+// registeredCluster 解析路径里的集群，未注册时写好响应并返回 false。
+//
+// 三个导入端点都必须先过这一关，不能只靠 policy_import 的外键：外键只
+// 证明 cluster 表里有那一行，而下线是软删除，行还在（spec §4.5）。少了
+// 这一关，往一个已下线的集群里导入会成功，并留下一条时间戳晚于下线操作
+// 的审计记录 —— 那是「注册表只是摆设」这个失败最坏的形态。
+func registeredCluster(w http.ResponseWriter, r *http.Request, d Deps) bool {
+	_, found, err := d.Registry.Cluster(r.Context(), chi.URLParam(r, "clusterID"))
+	if err != nil {
+		writeRegistryError(w, r, d, err)
+		return false
+	}
+	if !found {
+		response.WriteBusiness(w, response.CodeNotFound)
+		return false
+	}
+	return true
+}
+
 // handleListImports 返回一个集群下的导入清单。
 func handleListImports(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if !registeredCluster(w, r, d) {
+			return
+		}
 		list, err := d.Registry.PolicyImports(r.Context(), chi.URLParam(r, "clusterID"))
 		if err != nil {
 			writeRegistryError(w, r, d, err)
@@ -38,6 +60,9 @@ func handleListImports(d Deps) http.HandlerFunc {
 // handleCreateImport 解析、校验并记录一条导入。
 func handleCreateImport(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if !registeredCluster(w, r, d) {
+			return
+		}
 		var p importPayload
 		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 			// 请求体不是合法 JSON 是协议层问题，与 handleCreateSession 对
@@ -81,6 +106,9 @@ func handleCreateImport(d Deps) http.HandlerFunc {
 // handleDeleteImport 删除一条导入。
 func handleDeleteImport(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if !registeredCluster(w, r, d) {
+			return
+		}
 		clusterID := chi.URLParam(r, "clusterID")
 		importID := chi.URLParam(r, "importID")
 		if err := d.Registry.SoftDeletePolicyImport(

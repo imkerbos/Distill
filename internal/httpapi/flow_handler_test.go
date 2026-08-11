@@ -28,7 +28,7 @@ type flowListEnvelope struct {
 // fixtureDataWindow 给出覆盖 fixture 全量数据的时间窗。
 // fixtureReader 返回接口类型，而数据窗口只存在于 fixture 实现上。
 func fixtureDataWindow() store.TimeWindow {
-	return store.NewFixtureReader(fixture.Load(), fixtureClusters()).DataWindow()
+	return store.NewFixtureReader(fixture.Load(), fixtureSource()).DataWindow()
 }
 
 func decodeFlowList(t *testing.T, body []byte) flowListEnvelope {

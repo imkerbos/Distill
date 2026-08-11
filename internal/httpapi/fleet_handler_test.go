@@ -16,10 +16,6 @@ import (
 // brokenReader 让每个查询都失败，用来锁住内部错误的处理方式。
 type brokenReader struct{}
 
-func (brokenReader) Clusters(context.Context) ([]store.ClusterSummary, error) {
-	return nil, errors.New("bigquery: connection refused at 10.0.0.5:9050")
-}
-
 func (brokenReader) Topology(context.Context, string, store.TopologyLevel) (store.Topology, error) {
 	return store.Topology{}, errors.New("bigquery: connection refused at 10.0.0.5:9050")
 }

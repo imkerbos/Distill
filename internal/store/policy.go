@@ -42,7 +42,7 @@ type PolicyPreview struct {
 
 // PolicyPreview 生成候选策略并回放预测。集群或命名空间不存在时返回错误。
 func (r *FixtureReader) PolicyPreview(
-	_ context.Context, clusterID, namespace string, window TimeWindow,
+	ctx context.Context, clusterID, namespace string, window TimeWindow,
 ) (PolicyPreview, error) {
 	if !window.Valid() {
 		return PolicyPreview{}, ErrWindowRequired
@@ -51,7 +51,10 @@ func (r *FixtureReader) PolicyPreview(
 	if !ok {
 		return PolicyPreview{}, fmt.Errorf("%w: %s", ErrClusterNotFound, clusterID)
 	}
-	reg, ok := r.registeredCluster(clusterID)
+	reg, ok, err := r.registeredCluster(ctx, clusterID)
+	if err != nil {
+		return PolicyPreview{}, err
+	}
 	if !ok {
 		return PolicyPreview{}, fmt.Errorf("%w: %s", ErrClusterNotFound, clusterID)
 	}

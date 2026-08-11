@@ -128,7 +128,8 @@ func (s *Store) CreateCluster(ctx context.Context, actor registry.Actor, c regis
 				c.ID, c.DisplayName, c.PodCIDR, c.NodeCIDR, c.CCNPPresent,
 				string(c.State), now, now,
 			); err != nil {
-				return fmt.Errorf("insert cluster: %w", err)
+				return writeFailure("insert cluster",
+					fmt.Sprintf("集群 ID %q 已被注册，请换一个或先下线原集群", c.ID), "", err)
 			}
 			return insertChildren(ctx, tx, c)
 		})
@@ -224,7 +225,8 @@ func insertChildren(ctx context.Context, tx *sql.Tx, c registry.Cluster) error {
 			`INSERT INTO cluster_apiserver (cluster_id, host, cidr, port) VALUES (?, ?, ?, ?)`,
 			c.ID, a.Host, a.CIDR, a.Port,
 		); err != nil {
-			return fmt.Errorf("insert apiserver: %w", err)
+			return writeFailure("insert apiserver",
+				fmt.Sprintf("apiserver host %q 在本集群下重复", a.Host), "", err)
 		}
 	}
 	for _, cidr := range c.HealthCheckSources {
@@ -232,7 +234,8 @@ func insertChildren(ctx context.Context, tx *sql.Tx, c registry.Cluster) error {
 			`INSERT INTO cluster_health_check_source (cluster_id, cidr) VALUES (?, ?)`,
 			c.ID, cidr,
 		); err != nil {
-			return fmt.Errorf("insert health check source: %w", err)
+			return writeFailure("insert health check source",
+				fmt.Sprintf("健康检查网段 %q 在本集群下重复", cidr), "", err)
 		}
 	}
 	if c.Git != nil {

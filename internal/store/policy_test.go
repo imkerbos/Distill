@@ -14,7 +14,7 @@ import (
 )
 
 func reader() *store.FixtureReader {
-	return store.NewFixtureReader(fixture.Load(), fixtureClusters())
+	return store.NewFixtureReader(fixture.Load(), fixtureSource())
 }
 
 func fullWindow(r *store.FixtureReader) store.TimeWindow { return r.DataWindow() }

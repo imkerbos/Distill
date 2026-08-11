@@ -39,7 +39,7 @@ func ParseImport(yamlText string) (ParsedPolicy, error) {
 		return ParsedPolicy{}, wrapInvalid("YAML 解析失败：请检查缩进与字段类型", err)
 	}
 	if typeMeta.Kind != "NetworkPolicy" {
-		return ParsedPolicy{}, invalidf("kind is %q, want NetworkPolicy", typeMeta.Kind)
+		return ParsedPolicy{}, invalidf("kind 是 %q，本平台只接受 NetworkPolicy", typeMeta.Kind)
 	}
 
 	var p networkingv1.NetworkPolicy
@@ -48,10 +48,10 @@ func ParseImport(yamlText string) (ParsedPolicy, error) {
 		return ParsedPolicy{}, wrapInvalid("YAML 解析失败：请检查缩进与字段类型", err)
 	}
 	if p.Namespace == "" {
-		return ParsedPolicy{}, invalid("metadata.namespace is required")
+		return ParsedPolicy{}, invalid("metadata.namespace 不能为空")
 	}
 	if p.Name == "" {
-		return ParsedPolicy{}, invalid("metadata.name is required")
+		return ParsedPolicy{}, invalid("metadata.name 不能为空")
 	}
 	if err := checkIPBlocks(p); err != nil {
 		return ParsedPolicy{}, err
@@ -73,11 +73,11 @@ func checkIPBlocks(p networkingv1.NetworkPolicy) error {
 			return nil
 		}
 		if _, err := netip.ParsePrefix(b.CIDR); err != nil {
-			return invalidf("ipBlock cidr %q is not a valid CIDR", b.CIDR)
+			return invalidf("ipBlock cidr %q 不是合法网段", b.CIDR)
 		}
 		for _, e := range b.Except {
 			if _, err := netip.ParsePrefix(e); err != nil {
-				return invalidf("ipBlock except %q is not a valid CIDR", e)
+				return invalidf("ipBlock except %q 不是合法网段", e)
 			}
 		}
 		return nil
