@@ -29,7 +29,20 @@ const testPassword = "distill-demo"
 // 测试要一个全失败的 Reader，但登录与依赖装配这段逻辑三处都一样，
 // 分成几个签名不同的构造器只会让它们慢慢长歪。reader 可以为 nil，
 // 用于不触达数据层的测试。
+//
+// Registry 固定传一个空的 memRegistry：绝大多数用例只关心 Fleet/Flow
+// 数据层，不需要注册任何集群。需要注册数据的测试改用
+// newTestRouterWithRegistry。
 func newTestRouter(t *testing.T, reader store.Reader) (http.Handler, *auth.SessionStore, *http.Cookie) {
+	t.Helper()
+	return newTestRouterWithRegistry(t, reader, newMemRegistry())
+}
+
+// newTestRouterWithRegistry 是 newTestRouter 的变体，额外接受一个
+// registry.Store 实现，供注册与导入相关的 handler 测试使用。
+func newTestRouterWithRegistry(
+	t *testing.T, reader store.Reader, reg registry.Store,
+) (http.Handler, *auth.SessionStore, *http.Cookie) {
 	t.Helper()
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(testPassword), bcrypt.MinCost)
@@ -55,6 +68,7 @@ func newTestRouter(t *testing.T, reader store.Reader) (http.Handler, *auth.Sessi
 		Verifier: auth.NewVerifier([]config.User{{Username: "demo", PasswordHash: string(hash)}}),
 		Logger:   logger,
 		Reader:   reader,
+		Registry: reg,
 		// 流量查询的时间窗是必填的；测试装配方与 cmd 一样注入覆盖
 		// 全量数据的窗口，使不关心时间维的用例无须逐个传 from/to。
 		DefaultWindow: window,

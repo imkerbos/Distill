@@ -10,18 +10,6 @@ import (
 	"github.com/imkerbos/Distill/internal/store"
 )
 
-// handleListClusters 返回全部集群概览。
-func handleListClusters(d Deps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		got, err := d.Reader.Clusters(r.Context())
-		if err != nil {
-			writeReaderError(w, r, d, err)
-			return
-		}
-		response.WriteOK(w, got)
-	}
-}
-
 // handleTopology 返回指定集群的通信拓扑。
 func handleTopology(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

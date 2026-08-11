@@ -7,6 +7,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/imkerbos/Distill/internal/auth"
+	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/response"
 	"github.com/imkerbos/Distill/internal/store"
 )
@@ -24,6 +25,8 @@ type Deps struct {
 	Logger *slog.Logger
 	// Reader 提供 Fleet 数据查询。
 	Reader store.Reader
+	// Registry 提供集群注册与策略导入的持久化。
+	Registry registry.Store
 	// DefaultWindow 是流量查询未指定 from/to 时使用的时间窗。
 	//
 	// 由装配方注入而非在此取默认值：合适的默认窗口取决于部署形态。
@@ -57,7 +60,13 @@ func NewRouter(d Deps) http.Handler {
 			protected.Use(RequireSession(d.Sessions))
 			protected.Delete("/sessions/current", handleDeleteSession(d))
 			protected.Get("/sessions/current", handleCurrentSession())
-			protected.Get("/clusters", handleListClusters(d))
+			protected.Get("/clusters", handleListClustersFromRegistry(d))
+			protected.Post("/clusters", handleCreateCluster(d))
+			protected.Patch("/clusters/{clusterID}", handleUpdateCluster(d))
+			protected.Delete("/clusters/{clusterID}", handleDeleteCluster(d))
+			protected.Get("/clusters/{clusterID}/policy-imports", handleListImports(d))
+			protected.Post("/clusters/{clusterID}/policy-imports", handleCreateImport(d))
+			protected.Delete("/clusters/{clusterID}/policy-imports/{importID}", handleDeleteImport(d))
 			protected.Get("/clusters/{clusterID}/topology", handleTopology(d))
 			protected.Get("/clusters/{clusterID}/quality", handleQuality(d))
 			protected.Get("/clusters/{clusterID}/security", handleSecurity(d))

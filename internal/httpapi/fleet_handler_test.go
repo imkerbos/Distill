@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/store"
 )
 
@@ -45,15 +46,18 @@ func (brokenReader) PolicyPreview(context.Context, string, string, store.TimeWin
 
 // panicReader 在查询时 panic，用来验证路由本身确实装了 Recoverer——
 // 单独测中间件只能证明它管用，证明不了它被挂上去了。
+//
+// panic 挂在 Topology 而不是 Clusters：GET /api/v1/clusters 这个 task
+// 起改成从 Registry 读，不再经过 Reader，Topology 仍然是纯 Reader 端点。
 type panicReader struct{ brokenReader }
 
-func (panicReader) Clusters(context.Context) ([]store.ClusterSummary, error) {
+func (panicReader) Topology(context.Context, string, store.TopologyLevel) (store.Topology, error) {
 	panic("reader exploded at 10.0.0.5:9050")
 }
 
 func TestRouterRecoversPanics(t *testing.T) {
 	h, _, cookie := newTestRouter(t, panicReader{})
-	rec := authedGet(t, h, cookie, "/api/v1/clusters")
+	rec := authedGet(t, h, cookie, "/api/v1/clusters/prod-asia-1/topology")
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500", rec.Code)
@@ -78,16 +82,22 @@ func authedGet(t *testing.T, h http.Handler, cookie *http.Cookie, path string) *
 	return rec
 }
 
+// GET /api/v1/clusters 读注册表而非 Reader（本 task 之前的行为），
+// 所以要装配一个装了集群的 memRegistry，而不是只给 fixtureReader。
 func TestClustersEndpoint(t *testing.T) {
-	h, _, cookie := newTestRouter(t, fixtureReader())
+	reg := newMemRegistry()
+	for _, c := range fixtureClusters() {
+		reg.clusters[c.ID] = c
+	}
+	h, _, cookie := newTestRouterWithRegistry(t, fixtureReader(), reg)
 	rec := authedGet(t, h, cookie, "/api/v1/clusters")
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 	var env struct {
-		Code int                    `json:"code"`
-		Data []store.ClusterSummary `json:"data"`
+		Code int                `json:"code"`
+		Data []registry.Cluster `json:"data"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -170,8 +180,15 @@ func TestQualityEndpoint(t *testing.T) {
 // 内部故障必须计入服务错误率，所以走真实的 500 —— 但错误细节只进日志。
 // 把 "connection refused at 10.0.0.5:9050" 这类信息回给调用方，
 // 等于顺着 API 把内部拓扑交出去。
+//
+// GET /clusters 这个 task 起改成读 Registry 而非 Reader，所以这里同时
+// 装一个会失败的 memRegistry，用同一段敏感文本覆盖两条读路径 ——
+// writeReaderError 与 writeRegistryError 对内部故障的处理是同一个判据，
+// 分开测只会让两边各自的覆盖都显得不完整。
 func TestReaderFailureIsInternalErrorAndLeaksNothing(t *testing.T) {
-	h, _, cookie := newTestRouter(t, brokenReader{})
+	failingRegistry := newMemRegistry()
+	failingRegistry.failWith = errors.New("bigquery: connection refused at 10.0.0.5:9050")
+	h, _, cookie := newTestRouterWithRegistry(t, brokenReader{}, failingRegistry)
 
 	// 流量两条也要覆盖：它们走同一个 writeReaderError，
 	// 只测 fleet 三条等于默认另外两条不会退化。
