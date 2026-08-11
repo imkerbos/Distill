@@ -9,6 +9,73 @@ import (
 // ErrInvalid 表示输入不合法。
 var ErrInvalid = errors.New("invalid registry input")
 
+// InvalidError 是本平台自己构造的校验错误。
+//
+// Detail 一定是我们写的文案 —— 回传通道只读它，永不读 Error()。
+// 分成两个东西而不是复用 Error()：Error() 会因为 %w 包装把第三方库的
+// 文本一并带上（YAML/JSON 解析失败时尤其如此，那种错误文本里常常
+// 直接带着 Go 结构体类型名），而「这是不是校验错误」与「哪一段文字
+// 可以回传给调用方」是两个不同的问题，用同一个 errors.Is(err, ErrInvalid)
+// 兼顾会让下一条包了第三方错误的校验路径悄悄泄露，且 review 看不出来。
+// 要泄露第三方文本，必须有人主动把它写进 Detail —— 那在 review 里是
+// 看得见的一行，不是一次隐式的字符串拼接。
+type InvalidError struct {
+	// Detail 是可以回传给调用方的文案，只能是本平台自己写的文字。
+	Detail string
+	// Cause 是底层原因（可能来自第三方库），只进日志，永不回传。
+	Cause error
+}
+
+// Error 实现 error。Cause 存在时一并纳入，供日志与 %v 使用 ——
+// 这条路径不面向调用方，只面向排障的人。
+func (e *InvalidError) Error() string {
+	if e.Cause != nil {
+		return fmt.Sprintf("%s: %s: %v", ErrInvalid, e.Detail, e.Cause)
+	}
+	return fmt.Sprintf("%s: %s", ErrInvalid, e.Detail)
+}
+
+// Unwrap 暴露 Cause，让 errors.As 仍能取到底层的第三方错误类型 ——
+// 这是给日志与调试用的，不是给回传通道用的。
+func (e *InvalidError) Unwrap() error {
+	return e.Cause
+}
+
+// Is 让 errors.Is(err, ErrInvalid) 对 *InvalidError 恒真。
+//
+// 不依赖 Unwrap 链去够到 ErrInvalid：Cause 是第三方错误，链上根本
+// 没有 ErrInvalid 这个哨兵，必须显式声明「我就是一条校验错误」。
+func (e *InvalidError) Is(target error) bool {
+	return target == ErrInvalid
+}
+
+// invalid 构造一条不带底层原因的校验错误：文案完全是我们自己写的。
+func invalid(detail string) *InvalidError {
+	return &InvalidError{Detail: detail}
+}
+
+// invalidf 是 invalid 的 Sprintf 版本。
+func invalidf(format string, args ...any) *InvalidError {
+	return &InvalidError{Detail: fmt.Sprintf(format, args...)}
+}
+
+// wrapInvalid 包一条底层原因：detail 是我们自己写的、可以回传给调用方的
+// 文案，cause 是触发校验失败的原始错误（常常来自第三方库），只进日志。
+func wrapInvalid(detail string, cause error) *InvalidError {
+	return &InvalidError{Detail: detail, Cause: cause}
+}
+
+// NewInvalidError 构造一条校验错误，供 internal/registry 之外、但同样在
+// 校验用户输入的调用方使用（目前是 internal/mysqlregistry 对导入
+// role/source 的校验）。
+//
+// 校验错误只有这一条构造路径：不让每个包各自拼一个
+// fmt.Errorf("%w: ...", registry.ErrInvalid, ...)，否则「哪段文字可以
+// 回传」这条规则只在 internal/registry 内部成立，出了这个包就失效。
+func NewInvalidError(detail string) error {
+	return invalid(detail)
+}
+
 // ValidateCluster 校验一个集群注册请求。
 //
 // 网段在入库前校验而非推导时才发现：一个写错的网段会让 Baseline 生成
@@ -16,13 +83,13 @@ var ErrInvalid = errors.New("invalid registry input")
 // 静默中断才暴露，那时恰好看不到数据。
 func ValidateCluster(c Cluster) error {
 	if c.ID == "" {
-		return fmt.Errorf("%w: cluster id is required", ErrInvalid)
+		return invalid("cluster id is required")
 	}
 	if c.DisplayName == "" {
-		return fmt.Errorf("%w: display name is required", ErrInvalid)
+		return invalid("display name is required")
 	}
 	if !c.State.Valid() {
-		return fmt.Errorf("%w: unregistered onboard state %q", ErrInvalid, c.State)
+		return invalidf("unregistered onboard state %q", c.State)
 	}
 	if err := checkCIDR("podCIDR", c.PodCIDR); err != nil {
 		return err
@@ -32,10 +99,10 @@ func ValidateCluster(c Cluster) error {
 	}
 	for i, a := range c.APIServers {
 		if a.Host == "" {
-			return fmt.Errorf("%w: apiserver[%d] host is required", ErrInvalid, i)
+			return invalidf("apiserver[%d] host is required", i)
 		}
 		if a.Port <= 0 || a.Port > 65535 {
-			return fmt.Errorf("%w: apiserver[%d] port %d out of range", ErrInvalid, i, a.Port)
+			return invalidf("apiserver[%d] port %d out of range", i, a.Port)
 		}
 		if err := checkCIDR(fmt.Sprintf("apiserver[%d] cidr", i), a.CIDR); err != nil {
 			return err
@@ -58,8 +125,7 @@ func validateGit(g *GitBinding) error {
 		return nil
 	}
 	if g.RepoURL == "" || g.Branch == "" || g.PolicyPath == "" {
-		return fmt.Errorf(
-			"%w: git binding needs repoUrl, branch and policyPath together", ErrInvalid)
+		return invalid("git binding needs repoUrl, branch and policyPath together")
 	}
 	return nil
 }
@@ -70,10 +136,10 @@ func validateGit(g *GitBinding) error {
 // 只报「非法」会让操作者逐个试。
 func checkCIDR(field, value string) error {
 	if value == "" {
-		return fmt.Errorf("%w: %s is required", ErrInvalid, field)
+		return invalidf("%s is required", field)
 	}
 	if _, err := netip.ParsePrefix(value); err != nil {
-		return fmt.Errorf("%w: %s %q is not a valid CIDR", ErrInvalid, field, value)
+		return invalidf("%s %q is not a valid CIDR", field, value)
 	}
 	return nil
 }

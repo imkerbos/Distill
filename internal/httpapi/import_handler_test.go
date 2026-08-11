@@ -70,6 +70,43 @@ spec:
 	}
 }
 
+// podSelector 是字符串而不是对象，这份 YAML 结构合法但类型不对：
+// sigs.k8s.io/yaml 底层走 encoding/json，产出的错误文本里直接带着
+// Go 结构体类型名 —— "json: cannot unmarshal string into Go struct
+// field NetworkPolicySpec.spec.podSelector of type v1.LabelSelector"。
+// 这条错误确实是 registry.ErrInvalid 家族（errors.Is 会为真），但
+// err.Error() 里的这段文字是 sigs.k8s.io/yaml 写的，不是我们写的 ——
+// 回传字面值就是把内部实现类型交给了调用方。writeRegistryError 必须
+// 只回传 InvalidError.Detail，不能回传 err.Error()。
+func TestImportRejectsTypeMismatchWithoutLeakingGoTypeNames(t *testing.T) {
+	h, _, cookie := newTestRouterWithRegistry(t, fixtureReader(), newMemRegistry())
+	rec := authedPostJSON(t, h, cookie, "/api/v1/clusters/prod-asia-1/policy-imports",
+		map[string]any{"role": "BASELINE_CURRENT", "source": "PASTE", "yaml": `
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: x
+  namespace: y
+spec:
+  podSelector: "not-an-object"
+`})
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 — a malformed YAML value is a business failure", rec.Code)
+	}
+	if got := bodyOf(t, rec)["code"]; got != float64(20001) {
+		t.Errorf("code = %v, want 20001", got)
+	}
+	msg, _ := bodyOf(t, rec)["msg"].(string)
+	if msg == "" {
+		t.Fatal("msg is empty; the caller needs something actionable")
+	}
+	for _, leaked := range []string{"LabelSelector", "NetworkPolicySpec", "json:", "yaml:"} {
+		if strings.Contains(msg, leaked) {
+			t.Errorf("msg = %q, leaked internal type/library text %q", msg, leaked)
+		}
+	}
+}
+
 // 请求体不是合法 JSON 是协议层问题，走真实的 400 —— 与 cluster_handler.go
 // 的畸形请求体处理一致。此前这条路径没有测试覆盖。
 func TestImportRejectsMalformedJSON(t *testing.T) {

@@ -44,10 +44,14 @@ func (s *Store) CreatePolicyImport(
 	ctx context.Context, actor registry.Actor, p registry.PolicyImport,
 ) error {
 	if !p.Role.Valid() {
-		return fmt.Errorf("%w: unregistered import role %q", registry.ErrInvalid, p.Role)
+		// 这两条文案是我们自己写的，用 registry.NewInvalidError 走统一的
+		// 校验错误构造路径 —— 不在这里另拼一个 fmt.Errorf(ErrInvalid...)，
+		// 否则「哪段文字可以回传给调用方」这条规则只在 internal/registry
+		// 内部成立，出了这个包就悄悄失效。
+		return registry.NewInvalidError(fmt.Sprintf("unregistered import role %q", p.Role))
 	}
 	if !p.Source.Valid() {
-		return fmt.Errorf("%w: unregistered import source %q", registry.ErrInvalid, p.Source)
+		return registry.NewInvalidError(fmt.Sprintf("unregistered import source %q", p.Source))
 	}
 	target := fmt.Sprintf("policy_import/%s/%s", p.ClusterID, p.ImportID)
 	return s.mutate(ctx, actor, p.ClusterID, "CREATE_POLICY_IMPORT", target, nil, p,

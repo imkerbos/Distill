@@ -154,19 +154,27 @@ func actorOf(r *http.Request) registry.Actor {
 // 输入不合法与目标不存在都是业务失败，用 code + HTTP 200；
 // 其余按内部错误处理，真实原因只进日志。判据是「该不该计入服务错误率」。
 //
-// ErrInvalid 分支把 err.Error() 原样回传，NotFound 与 default 分支不回传
-// 任何错误文本 —— 这不是同一条规则的例外，是两类文本本来就不同：
-// ValidateCluster/ParseImport 产出的校验信息是本平台自己写的、说的是
-// 调用方输入里哪一项不对（比如「podCIDR "10.20.0/14" 不是合法网段」），
-// 不泄露任何内部拓扑；default 分支兜住的是数据库、网络这类别人给的错误，
-// 那些文本可能带着主机、端口，只能进日志。「msg 永不回传内部错误细节」
-// 约束的是后者，不是前者。
+// InvalidError 分支只回传 ie.Detail，绝不回传 err.Error()：Detail 是
+// registry 自己写的文案（比如「podCIDR "10.20.0/14" 不是合法网段」），
+// 但 err.Error() 可能因为 %v 拼进了 Cause —— 而 Cause 在 ParseImport
+// 的 YAML 解析失败路径上就是 sigs.k8s.io/yaml / encoding/json 的原始
+// 报错，文本里直接带 Go 结构体类型名（NetworkPolicySpec、LabelSelector
+// 之类），回传等于把内部实现细节交给调用方。「这是不是校验错误」与
+// 「哪段文字可以回传」由 errors.As 到具体类型来回答，不能靠
+// errors.Is(err, registry.ErrInvalid) 这一个谓词兼顾两件事。
+//
+// default 分支兜住的是数据库、网络这类别人给的错误，只能进日志。
+// 「msg 永不回传内部错误细节」约束的是这一支，不是 InvalidError 那一支。
 func writeRegistryError(w http.ResponseWriter, r *http.Request, d Deps, err error) {
+	var ie *registry.InvalidError
 	switch {
-	case errors.Is(err, registry.ErrInvalid):
+	case errors.As(err, &ie):
+		// err 本身（含 Cause）进日志，Warn 而非 Error：这是调用方的输入
+		// 问题，不是服务故障，但运维事后排查「用户昨天为什么提交失败」
+		// 时需要在日志里找到完整原因，不能指望对方还留着截图。
 		d.Logger.Warn("registry validation rejected",
 			"err", err, "request_id", RequestIDFrom(r.Context()))
-		response.WriteInvalid(w, err.Error())
+		response.WriteInvalid(w, ie.Detail)
 	case errors.Is(err, registry.ErrNotFound):
 		response.WriteBusiness(w, response.CodeNotFound)
 	default:

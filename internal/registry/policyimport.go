@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"net/netip"
 
 	networkingv1 "k8s.io/api/networking/v1"
@@ -33,22 +32,26 @@ func ParseImport(yamlText string) (ParsedPolicy, error) {
 		Kind       string `json:"kind"`
 	}
 	if err := yaml.Unmarshal([]byte(yamlText), &typeMeta); err != nil {
-		return ParsedPolicy{}, fmt.Errorf("%w: cannot parse YAML: %w", ErrInvalid, err)
+		// err 来自 sigs.k8s.io/yaml，文本里可能直接带 Go 结构体类型名
+		// （比如 "json: cannot unmarshal string into Go struct field..."）。
+		// Detail 是我们自己写的、操作者能照着做的话；err 只进 Cause，见
+		// writeInvalid 一侧的处理。
+		return ParsedPolicy{}, wrapInvalid("YAML 解析失败：请检查缩进与字段类型", err)
 	}
 	if typeMeta.Kind != "NetworkPolicy" {
-		return ParsedPolicy{}, fmt.Errorf(
-			"%w: kind is %q, want NetworkPolicy", ErrInvalid, typeMeta.Kind)
+		return ParsedPolicy{}, invalidf("kind is %q, want NetworkPolicy", typeMeta.Kind)
 	}
 
 	var p networkingv1.NetworkPolicy
 	if err := yaml.Unmarshal([]byte(yamlText), &p); err != nil {
-		return ParsedPolicy{}, fmt.Errorf("%w: cannot parse NetworkPolicy: %w", ErrInvalid, err)
+		// 同上：这里的 err 同样可能带着 NetworkPolicySpec 之类的类型名。
+		return ParsedPolicy{}, wrapInvalid("YAML 解析失败：请检查缩进与字段类型", err)
 	}
 	if p.Namespace == "" {
-		return ParsedPolicy{}, fmt.Errorf("%w: metadata.namespace is required", ErrInvalid)
+		return ParsedPolicy{}, invalid("metadata.namespace is required")
 	}
 	if p.Name == "" {
-		return ParsedPolicy{}, fmt.Errorf("%w: metadata.name is required", ErrInvalid)
+		return ParsedPolicy{}, invalid("metadata.name is required")
 	}
 	if err := checkIPBlocks(p); err != nil {
 		return ParsedPolicy{}, err
@@ -70,11 +73,11 @@ func checkIPBlocks(p networkingv1.NetworkPolicy) error {
 			return nil
 		}
 		if _, err := netip.ParsePrefix(b.CIDR); err != nil {
-			return fmt.Errorf("%w: ipBlock cidr %q is not a valid CIDR", ErrInvalid, b.CIDR)
+			return invalidf("ipBlock cidr %q is not a valid CIDR", b.CIDR)
 		}
 		for _, e := range b.Except {
 			if _, err := netip.ParsePrefix(e); err != nil {
-				return fmt.Errorf("%w: ipBlock except %q is not a valid CIDR", ErrInvalid, e)
+				return invalidf("ipBlock except %q is not a valid CIDR", e)
 			}
 		}
 		return nil
@@ -103,7 +106,7 @@ func checkIPBlocks(p networkingv1.NetworkPolicy) error {
 func specHash(p networkingv1.NetworkPolicy) (string, error) {
 	b, err := json.Marshal(p.Spec)
 	if err != nil {
-		return "", fmt.Errorf("%w: cannot hash spec: %w", ErrInvalid, err)
+		return "", wrapInvalid("无法计算策略哈希：spec 内容异常", err)
 	}
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:]), nil

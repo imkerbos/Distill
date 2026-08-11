@@ -32,9 +32,12 @@ func WriteBusiness(w http.ResponseWriter, code Code) {
 
 // WriteInvalid 写出一个带校验详情的业务级失败。
 //
-// detail 只接受**本平台自己构造的**校验错误文案（registry.ErrInvalid 一族），
-// 永不接受来自驱动、网络或第三方库的错误对象。判据是「这段文字是我们写的，
-// 还是别人给的」—— 别人给的一律不回传。
+// detail 只接受**本平台自己构造的**校验错误文案 —— 调用方应当从
+// registry.InvalidError.Detail 取值，永不传 err.Error()：后者可能因为
+// 错误包装带上第三方库（YAML/JSON 解析器等）的原始报错文本。这条边界
+// 由类型强制，不是靠约定：InvalidError 把「可以回传的文案」（Detail）
+// 与「只进日志的原因」（Cause）分成两个字段，要泄露第三方文本必须有人
+// 主动把它写进 Detail，那在 review 里是看得见的一行。
 //
 // 与 WriteBusiness 分开而不是给它加参数：调用点必须显式选择「我要回传详情」，
 // 否则某天有人把一个 driver error 顺手塞进去，而 code review 看不出区别。
