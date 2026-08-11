@@ -54,7 +54,7 @@ func TestTimeWindowContainsIsHalfOpen(t *testing.T) {
 // require_partition_filter = true —— 一个没带时间条件却照样返回结果的查询，
 // 接上真实存储时会变成一次全表扫描，而账单要到月底才可见。
 func TestFlowsRejectsMissingWindow(t *testing.T) {
-	r := store.NewFixtureReader(fixture.Load())
+	r := store.NewFixtureReader(fixture.Load(), fixtureClusters())
 
 	_, err := r.Flows(context.Background(), store.FlowFilter{})
 	if err == nil {
@@ -67,7 +67,7 @@ func TestFlowsRejectsMissingWindow(t *testing.T) {
 
 func TestFlowsFiltersByWindow(t *testing.T) {
 	f := fixture.Load()
-	r := store.NewFixtureReader(f)
+	r := store.NewFixtureReader(f, fixtureClusters())
 	full := r.DataWindow()
 
 	all, err := r.Flows(context.Background(), store.FlowFilter{Window: full})
@@ -97,7 +97,7 @@ func TestFlowsFiltersByWindow(t *testing.T) {
 // 窗口必须回显。一个按时间筛过的列表若不告知筛的是哪段，界面无法把它
 // 与全量列表区分开 —— 与 §17.3 "截断必可见" 是同一条要求。
 func TestFlowsEchoesEffectiveWindow(t *testing.T) {
-	r := store.NewFixtureReader(fixture.Load())
+	r := store.NewFixtureReader(fixture.Load(), fixtureClusters())
 	w := store.TimeWindow{
 		From: r.DataWindow().From,
 		To:   r.DataWindow().From.Add(time.Minute),
@@ -116,7 +116,7 @@ func TestFlowsEchoesEffectiveWindow(t *testing.T) {
 // 会在没人改代码的情况下漏掉边界上的 flow。
 func TestDataWindowCoversAllFlows(t *testing.T) {
 	f := fixture.Load()
-	w := store.NewFixtureReader(f).DataWindow()
+	w := store.NewFixtureReader(f, fixtureClusters()).DataWindow()
 
 	for _, fl := range f.Flows {
 		if !w.Contains(fl.Flow.Timestamp) {

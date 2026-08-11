@@ -16,6 +16,7 @@ import (
 	"github.com/imkerbos/Distill/internal/fixture"
 	"github.com/imkerbos/Distill/internal/httpapi"
 	applog "github.com/imkerbos/Distill/internal/log"
+	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/store"
 )
 
@@ -69,9 +70,31 @@ func newTestRouter(t *testing.T, reader store.Reader) (http.Handler, *auth.Sessi
 	return h, sessions, cookies[0]
 }
 
+// fixtureClusters 镜像 internal/fixture/asset.go 里两个集群的注册信息。
+// 值必须与那里的 Registry/APIServers 逐字一致，否则测试读到的网段会
+// 与 fixture 兜底值不一致。
+func fixtureClusters() []registry.Cluster {
+	return []registry.Cluster{
+		{
+			ID: "prod-asia-1", DisplayName: "Asia Prod",
+			PodCIDR: "10.4.0.0/14", NodeCIDR: "10.128.0.0/20",
+			State:              registry.StateReady,
+			APIServers:         []registry.APIServer{{Host: "10.9.0.2", CIDR: "10.9.0.0/28", Port: 443}},
+			HealthCheckSources: []string{"35.191.0.0/16", "130.211.0.0/22"},
+		},
+		{
+			ID: "prod-eu-1", DisplayName: "EU Prod",
+			PodCIDR: "10.4.0.0/14", NodeCIDR: "10.132.0.0/20",
+			State:              registry.StateReady,
+			APIServers:         []registry.APIServer{{Host: "10.13.0.2", CIDR: "10.13.0.0/28", Port: 443}},
+			HealthCheckSources: []string{"35.191.0.0/16", "130.211.0.0/22"},
+		},
+	}
+}
+
 // fixtureReader 是走真实合成数据的 Reader，供需要真实响应内容的测试使用。
 func fixtureReader() store.Reader {
-	return store.NewFixtureReader(fixture.Load())
+	return store.NewFixtureReader(fixture.Load(), fixtureClusters())
 }
 
 func postJSON(t *testing.T, h http.Handler, path string, body any) *httptest.ResponseRecorder {

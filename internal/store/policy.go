@@ -51,9 +51,20 @@ func (r *FixtureReader) PolicyPreview(
 	if !ok {
 		return PolicyPreview{}, fmt.Errorf("%w: %s", ErrClusterNotFound, clusterID)
 	}
+	reg, ok := r.registeredCluster(clusterID)
+	if !ok {
+		return PolicyPreview{}, fmt.Errorf("%w: %s", ErrClusterNotFound, clusterID)
+	}
 	if namespace != "" && !hasNamespace(c.Namespaces, namespace) {
 		return PolicyPreview{}, fmt.Errorf("%w: %s/%s", ErrNamespaceNotFound, clusterID, namespace)
 	}
+
+	// 集群元数据来自注册信息，其余快照仍来自 fixture：Services、
+	// Endpoints、Gateways、ScrapeTargets、NodeAgents 属于采集层的职责，
+	// 不在本轮迁移范围内。
+	assets := c.Assets
+	assets.Registry = reg.ToSnapshot()
+	assets.APIServers = reg.APIServerSnapshots()
 
 	obs := make([]policygen.Observation, 0, len(r.fleet.Flows))
 	for _, f := range r.fleet.Flows {
@@ -73,7 +84,7 @@ func (r *FixtureReader) PolicyPreview(
 	// 同时错，且都朝着让人放心的方向（spec §5）。
 	gen := policygen.Generate(policygen.Input{
 		ClusterID: clusterID,
-		Assets:    c.Assets, Namespaces: c.Namespaces,
+		Assets:    assets, Namespaces: c.Namespaces,
 		// Pods 必须传入：候选策略按 workload 花名册生成而非按流量生成，
 		// 缺了它，流量全 DEGRADED（mesh 内）或全 UNKNOWN（策略写坏）的
 		// workload 会从候选集里悄悄消失，连带绕过它们的强制 Baseline 注入。

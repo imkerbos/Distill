@@ -132,7 +132,9 @@ func TestDatasetContainsCrossClusterFlows(t *testing.T) {
 // 到那时这道守卫验的就不再是产品实际跑的东西了。
 func TestDatasetProducesAllDeliberateGaps(t *testing.T) {
 	f := fixture.Load()
-	r := store.NewFixtureReader(f)
+	// 这条断言只看求值结果，不看某个集群是否已注册，因此不需要传注册
+	// 信息：nil 就够了，Flows 在没有 Cluster 筛选时不会去查注册表。
+	r := store.NewFixtureReader(f, nil)
 	page, err := r.Flows(context.Background(),
 		store.FlowFilter{Limit: len(f.Flows), Window: r.DataWindow()})
 	if err != nil {

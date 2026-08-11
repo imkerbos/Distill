@@ -18,6 +18,7 @@ import (
 	"github.com/imkerbos/Distill/internal/fixture"
 	"github.com/imkerbos/Distill/internal/httpapi"
 	applog "github.com/imkerbos/Distill/internal/log"
+	"github.com/imkerbos/Distill/internal/mysqlregistry"
 	"github.com/imkerbos/Distill/internal/response"
 	"github.com/imkerbos/Distill/internal/store"
 )
@@ -46,7 +47,30 @@ func run(configPath string) error {
 	}
 	logger.Info("starting", "version", buildinfo.Version(), "addr", cfg.Server.Addr)
 
-	reader := store.NewFixtureReader(fixture.Load())
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	db, err := mysqlregistry.Open(cfg.Database)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+
+	// 迁移在启动时执行：schema 落后于代码的进程不该接受请求，
+	// 而在启动时失败比在第一个请求时失败更容易定位。
+	if err := mysqlregistry.Migrate(cfg.Database, "migrations"); err != nil {
+		return err
+	}
+
+	reg := mysqlregistry.New(db)
+	// 集群列表在启动时读取一次。后台新增集群后需要重启才生效 ——
+	// 本轮如此，因为 FixtureReader 持有的是快照而非查询接口。
+	// 接真实存储时 reader 直接查库，这个限制随之消失。
+	clusters, err := reg.Clusters(ctx)
+	if err != nil {
+		return err
+	}
+	reader := store.NewFixtureReader(fixture.Load(), clusters)
 
 	r := chi.NewRouter()
 	r.Mount("/healthz", newHealthHandler())
@@ -67,9 +91,6 @@ func run(configPath string) error {
 		ReadTimeout:  cfg.Server.ReadTimeout,
 		WriteTimeout: cfg.Server.WriteTimeout,
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	errCh := make(chan error, 1)
 	go func() {

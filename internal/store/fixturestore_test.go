@@ -8,11 +8,34 @@ import (
 	"testing"
 
 	"github.com/imkerbos/Distill/internal/fixture"
+	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/store"
 )
 
+// fixtureClusters 镜像 internal/fixture/asset.go 里两个集群的注册信息。
+// 值必须与那里的 Registry/APIServers 逐字一致，否则既有用例会在
+// "fixture 的兜底值"与"注册信息"之间读到不同的网段。
+func fixtureClusters() []registry.Cluster {
+	return []registry.Cluster{
+		{
+			ID: "prod-asia-1", DisplayName: "Asia Prod",
+			PodCIDR: "10.4.0.0/14", NodeCIDR: "10.128.0.0/20",
+			State:              registry.StateReady,
+			APIServers:         []registry.APIServer{{Host: "10.9.0.2", CIDR: "10.9.0.0/28", Port: 443}},
+			HealthCheckSources: []string{"35.191.0.0/16", "130.211.0.0/22"},
+		},
+		{
+			ID: "prod-eu-1", DisplayName: "EU Prod",
+			PodCIDR: "10.4.0.0/14", NodeCIDR: "10.132.0.0/20",
+			State:              registry.StateReady,
+			APIServers:         []registry.APIServer{{Host: "10.13.0.2", CIDR: "10.13.0.0/28", Port: 443}},
+			HealthCheckSources: []string{"35.191.0.0/16", "130.211.0.0/22"},
+		},
+	}
+}
+
 func newReader() *store.FixtureReader {
-	return store.NewFixtureReader(fixture.Load())
+	return store.NewFixtureReader(fixture.Load(), fixtureClusters())
 }
 
 // allTime 是覆盖整个 fixture 数据集的时间窗。Flows 的时间窗是必填的
@@ -424,5 +447,49 @@ func TestCrossClusterFlowsAppearForBothClusters(t *testing.T) {
 		if cross == 0 {
 			t.Errorf("%s: no cross-cluster rows in its own flow list", cluster)
 		}
+	}
+}
+
+// 集群元数据来自注册信息而非 fixture 硬编码：Baseline 的推导依据
+// 因此可以在后台修改，而不必改代码重新编译。
+func TestReaderUsesRegisteredCIDRs(t *testing.T) {
+	clusters := []registry.Cluster{{
+		ID: "prod-asia-1", DisplayName: "Asia", PodCIDR: "10.4.0.0/14",
+		NodeCIDR: "10.200.0.0/20", State: registry.StateReady,
+		APIServers:         []registry.APIServer{{Host: "10.9.0.2", CIDR: "10.9.0.0/28", Port: 443}},
+		HealthCheckSources: []string{"35.191.0.0/16"},
+	}}
+	r := store.NewFixtureReader(fixture.Load(), clusters)
+
+	pv, err := r.PolicyPreview(context.Background(), "prod-asia-1", "", r.DataWindow())
+	if err != nil {
+		t.Fatalf("PolicyPreview() error = %v", err)
+	}
+	found := false
+	for _, p := range pv.Candidates {
+		for _, rule := range p.Rules {
+			for _, peer := range rule.Peers {
+				if peer == "10.200.0.0/20" {
+					found = true
+				}
+			}
+		}
+	}
+	if !found {
+		t.Error("no rule uses the registered node CIDR 10.200.0.0/20; " +
+			"the reader is still reading the hardcoded fixture value")
+	}
+}
+
+// 未注册的集群即便 fixture 里有数据也不可见：注册表是集群是否
+// 被平台管理的唯一判据。
+func TestReaderHidesUnregisteredClusters(t *testing.T) {
+	r := store.NewFixtureReader(fixture.Load(), nil)
+	list, err := r.Clusters(context.Background())
+	if err != nil {
+		t.Fatalf("Clusters() error = %v", err)
+	}
+	if len(list) != 0 {
+		t.Errorf("Clusters() = %d entries with an empty registry, want 0", len(list))
 	}
 }

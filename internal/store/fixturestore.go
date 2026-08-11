@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 
 	"github.com/imkerbos/Distill/internal/fixture"
+	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/replay"
 )
 
@@ -48,10 +49,17 @@ var ErrNamespaceNotFound = errors.New("namespace not found")
 type FixtureReader struct {
 	fleet      fixture.Fleet
 	evaluators map[string]*replay.Evaluator
+	// registered 是已注册集群，按 ID 索引。
+	//
+	// 集群元数据（网段、apiserver、健康检查网段）来自注册信息而非
+	// fixture：这些值是 Baseline 的推导依据，必须能在后台修改，
+	// 而不是改一次网段就要改代码重新编译。
+	registered map[string]registry.Cluster
 }
 
-// NewFixtureReader 用合成数据构造查询器。
-func NewFixtureReader(f fixture.Fleet) *FixtureReader {
+// NewFixtureReader 组合两个数据源：集群元数据来自注册信息，
+// 流量与 Pod 快照来自 fixture。接真实存储时替换的正是后一半。
+func NewFixtureReader(f fixture.Fleet, clusters []registry.Cluster) *FixtureReader {
 	evals := make(map[string]*replay.Evaluator, len(f.Clusters))
 	for _, c := range f.Clusters {
 		var opts []replay.Option
@@ -60,7 +68,19 @@ func NewFixtureReader(f fixture.Fleet) *FixtureReader {
 		}
 		evals[c.ID] = replay.NewEvaluator(c.ID, c.Policies, c.Namespaces, opts...)
 	}
-	return &FixtureReader{fleet: f, evaluators: evals}
+	idx := make(map[string]registry.Cluster, len(clusters))
+	for _, c := range clusters {
+		idx[c.ID] = c
+	}
+	return &FixtureReader{fleet: f, evaluators: evals, registered: idx}
+}
+
+// registeredCluster 返回已注册集群，并校验它对 fixture 集群 c 是否可见。
+// 未注册即视为不存在：注册表是集群是否被平台管理的唯一判据，
+// fixture 里有数据不代表这个集群该出现在任何查询结果里。
+func (r *FixtureReader) registeredCluster(clusterID string) (registry.Cluster, bool) {
+	reg, ok := r.registered[clusterID]
+	return reg, ok
 }
 
 // owningCluster 返回负责对该 flow 求值的集群：优先取目的端集群，目的端
@@ -143,10 +163,14 @@ func safeRate(numerator, denominator int) float64 {
 	return float64(numerator) / float64(denominator)
 }
 
-// Clusters 返回全部集群概览。
+// Clusters 返回全部集群概览。未注册的集群即便 fixture 里有数据也不出现：
+// 注册表是集群是否被平台管理的唯一判据。
 func (r *FixtureReader) Clusters(_ context.Context) ([]ClusterSummary, error) {
 	out := make([]ClusterSummary, 0, len(r.fleet.Clusters))
 	for _, c := range r.fleet.Clusters {
+		if _, ok := r.registeredCluster(c.ID); !ok {
+			continue
+		}
 		var flowCount int
 		for _, f := range r.fleet.Flows {
 			if owningCluster(f.Flow) == c.ID {
@@ -528,6 +552,9 @@ func (r *FixtureReader) Topology(_ context.Context, clusterID string, level Topo
 	if !ok {
 		return Topology{}, fmt.Errorf("%w: %s", ErrClusterNotFound, clusterID)
 	}
+	if _, ok := r.registeredCluster(clusterID); !ok {
+		return Topology{}, fmt.Errorf("%w: %s", ErrClusterNotFound, clusterID)
+	}
 
 	nodes := topologyNodes(c)
 	if level == LevelWorkload {
@@ -587,6 +614,9 @@ func (r *FixtureReader) Flows(_ context.Context, filter FlowFilter) (FlowPage, e
 			// 与 Topology、Quality 一致地把"集群不存在"报成错误：同一个
 			// 条件在一个接口上返回空列表、在另一个接口上返回 20002，
 			// 会让前端把打错的集群名读成"这个集群没有流量"。
+			return FlowPage{}, fmt.Errorf("%w: %s", ErrClusterNotFound, filter.Cluster)
+		}
+		if _, ok := r.registeredCluster(filter.Cluster); !ok {
 			return FlowPage{}, fmt.Errorf("%w: %s", ErrClusterNotFound, filter.Cluster)
 		}
 	}
@@ -676,6 +706,9 @@ func podCoveredByPolicy(pod replay.PodRef, policies []networkingv1.NetworkPolicy
 func (r *FixtureReader) Quality(_ context.Context, clusterID string) (Quality, error) {
 	c, ok := r.fleet.Cluster(clusterID)
 	if !ok {
+		return Quality{}, fmt.Errorf("%w: %s", ErrClusterNotFound, clusterID)
+	}
+	if _, ok := r.registeredCluster(clusterID); !ok {
 		return Quality{}, fmt.Errorf("%w: %s", ErrClusterNotFound, clusterID)
 	}
 
