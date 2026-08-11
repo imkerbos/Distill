@@ -39,6 +39,10 @@ func (brokenReader) Security(context.Context, string, store.TimeWindow) (store.S
 	return store.SecurityReport{}, errors.New("bigquery: connection refused at 10.0.0.5:9050")
 }
 
+func (brokenReader) PolicyPreview(context.Context, string, string, store.TimeWindow) (store.PolicyPreview, error) {
+	return store.PolicyPreview{}, errors.New("bigquery: connection refused at 10.0.0.5:9050")
+}
+
 // panicReader 在查询时 panic，用来验证路由本身确实装了 Recoverer——
 // 单独测中间件只能证明它管用，证明不了它被挂上去了。
 type panicReader struct{ brokenReader }
