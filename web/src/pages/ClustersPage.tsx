@@ -130,9 +130,16 @@ function ClusterListSection({ clusters, error, loading, onChanged }: {
 /* 2. 注册新集群                                                           */
 /* ---------------------------------------------------------------------- */
 
-/** apiserver 表单行的本地形态：port 保持字符串，交给用户在提交前编辑；提交时才转数字。 */
+/**
+ * apiserver 表单行的本地形态：port 保持字符串，交给用户在提交前编辑；提交时才转数字。
+ * 三个字段的初始值都是空串（port 不预填 "443"，只作为 placeholder 提示）——
+ * 让"这一行完全没被碰过"在数据层面等价于"三个字段都是空串"，提交时才能
+ * 用同一条"全空则忽略、有一项非空则三项必填"的规则处理，不用另开一条
+ * "port 的默认值不算真的填了"的特例。
+ */
 interface ApiServerRow { host: string; cidr: string; port: string }
-const emptyApiServerRow = (): ApiServerRow => ({ host: '', cidr: '', port: '443' })
+const emptyApiServerRow = (): ApiServerRow => ({ host: '', cidr: '', port: '' })
+const REQUIRED_APISERVER_FIELDS: readonly ['host', 'cidr', 'port'] = ['host', 'cidr', 'port']
 
 /**
  * Git 绑定四个字段在表单里的合法组合只有两种：全空，或 repoUrl/branch/
@@ -184,9 +191,32 @@ function RegisterSection({ onCreated }: { onCreated: () => void }) {
       return
     }
 
-    const apiServers: APIServer[] = apiServerRows
-      .filter((r) => r.host.trim() !== '')
-      .map((r) => ({ host: r.host.trim(), cidr: r.cidr.trim(), port: Number(r.port) || 0 }))
+    // 每一行独立按"全空则忽略、有一项非空则三项必填"判断——与 Git 绑定
+    // 同一条纪律，且不能只查 host：只查 host 会把"填了 cidr/port 但漏了
+    // host"的行放过去，静默丢弃已经打进去的字符，跟这一轮要修的
+    // credentialRef 缺口是同一个洞。行号用界面上看到的序号（从 1 开始，
+    // 过滤前的下标），不用提交前过滤之后的下标——否则一旦前面有整行
+    // 空白被跳过，报错里的行号就和操作者盯着的表单对不上。
+    const apiServers: APIServer[] = []
+    const apiServerErrors: string[] = []
+    apiServerRows.forEach((r, idx) => {
+      const anyFilled = REQUIRED_APISERVER_FIELDS.some((k) => r[k].trim() !== '')
+      if (!anyFilled) return
+      const missing = REQUIRED_APISERVER_FIELDS.filter((k) => r[k].trim() === '')
+      if (missing.length > 0) {
+        apiServerErrors.push(`apiserver 第 ${idx + 1} 行缺少：${missing.join('、')}`)
+        return
+      }
+      apiServers.push({ host: r.host.trim(), cidr: r.cidr.trim(), port: Number(r.port) || 0 })
+    })
+    if (apiServerErrors.length > 0) {
+      setError(
+        `${apiServerErrors.join('；')}。每一行 host / cidr / port 要么三项都填，要么整行留空`
+        + `（留空的行会被忽略，不会提交），否则已填的值不会被保存。`,
+      )
+      return
+    }
+
     const healthCheckSources = healthChecks
       .split('\n')
       .map((s) => s.trim())
@@ -243,7 +273,8 @@ function RegisterSection({ onCreated }: { onCreated: () => void }) {
 
           <SubHeading>
             apiserver（可选，可添加多个 —— HA 控制面通常不止一个端点，
-            漏填一个就是漏了一条 baseline 放行规则，后果是生产阻断而不是注册报错）
+            漏填一个就是漏了一条 baseline 放行规则，后果是生产阻断而不是注册报错。
+            每一行要么整行留空（会被忽略），要么 host / cidr / port 三项都填）
           </SubHeading>
           {apiServerRows.map((row, i) => (
             <div key={i} style={{
@@ -257,7 +288,10 @@ function RegisterSection({ onCreated }: { onCreated: () => void }) {
                 <TextField label="cidr" value={row.cidr} onChange={(v) => updateApiServerRow(i, { cidr: v })} mono />
               </div>
               <div style={{ width: 110 }}>
-                <TextField label="port" value={row.port} onChange={(v) => updateApiServerRow(i, { port: v })} mono />
+                <TextField
+                  label="port" value={row.port} onChange={(v) => updateApiServerRow(i, { port: v })}
+                  mono placeholder="443"
+                />
               </div>
               <button
                 type="button"
@@ -537,12 +571,13 @@ const fieldLabelStyle: CSSProperties = {
   display: 'block', marginBottom: 4, fontSize: 'var(--text-xs)', color: 'var(--text-muted)',
 }
 
-function TextField({ label, value, onChange, required, mono }: {
+function TextField({ label, value, onChange, required, mono, placeholder }: {
   label: string
   value: string
   onChange: (v: string) => void
   required?: boolean
   mono?: boolean
+  placeholder?: string
 }) {
   return (
     <label style={{ display: 'block' }}>
@@ -552,6 +587,7 @@ function TextField({ label, value, onChange, required, mono }: {
         value={value}
         onChange={(e) => onChange(e.target.value)}
         required={required}
+        placeholder={placeholder}
         style={{ width: '100%', fontFamily: mono ? 'var(--mono)' : undefined }}
       />
     </label>
