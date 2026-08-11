@@ -84,6 +84,7 @@ function ClusterListSection({ clusters, error, loading, onChanged }: {
               <th>显示名</th>
               <th>Pod 网段</th>
               <th>Node 网段</th>
+              <th>apiserver</th>
               <th>接入状态</th>
               <th>Git 绑定</th>
               <th>操作</th>
@@ -96,6 +97,7 @@ function ClusterListSection({ clusters, error, loading, onChanged }: {
                 <td>{c.displayName}</td>
                 <td className="mono">{c.podCidr}</td>
                 <td className="mono">{c.nodeCidr}</td>
+                <td><ApiServerList servers={c.apiServers} /></td>
                 <td><Chip strong={c.state === 'READY'}>{ONBOARD_STATE_LABEL[c.state]}</Chip></td>
                 <td>
                   {c.git
@@ -128,14 +130,25 @@ function ClusterListSection({ clusters, error, loading, onChanged }: {
 /* 2. 注册新集群                                                           */
 /* ---------------------------------------------------------------------- */
 
+/** apiserver 表单行的本地形态：port 保持字符串，交给用户在提交前编辑；提交时才转数字。 */
+interface ApiServerRow { host: string; cidr: string; port: string }
+const emptyApiServerRow = (): ApiServerRow => ({ host: '', cidr: '', port: '443' })
+
+/**
+ * Git 绑定四个字段在表单里的合法组合只有两种：全空，或 repoUrl/branch/
+ * policyPath 三项全填（credentialRef 可选，但只要它非空就已经表达了
+ * "这是一处真实绑定"的意图，此时同样要求三项必填齐全）——否则
+ * credentialRef 会在三项检查之外被静默丢弃，成为唯一录入了值却从不
+ * 出现在提交请求里的字段。
+ */
+const REQUIRED_GIT_FIELDS: readonly ['repoUrl', 'branch', 'policyPath'] = ['repoUrl', 'branch', 'policyPath']
+
 function RegisterSection({ onCreated }: { onCreated: () => void }) {
   const [id, setId] = useState('')
   const [displayName, setDisplayName] = useState('')
   const [podCidr, setPodCidr] = useState('')
   const [nodeCidr, setNodeCidr] = useState('')
-  const [apiHost, setApiHost] = useState('')
-  const [apiCidr, setApiCidr] = useState('')
-  const [apiPort, setApiPort] = useState('443')
+  const [apiServerRows, setApiServerRows] = useState<ApiServerRow[]>([emptyApiServerRow()])
   const [healthChecks, setHealthChecks] = useState('')
   const [repoUrl, setRepoUrl] = useState('')
   const [branch, setBranch] = useState('')
@@ -144,20 +157,36 @@ function RegisterSection({ onCreated }: { onCreated: () => void }) {
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
+  function updateApiServerRow(i: number, patch: Partial<ApiServerRow>) {
+    setApiServerRows((rows) => rows.map((r, idx) => (idx === i ? { ...r, ...patch } : r)))
+  }
+  function addApiServerRow() {
+    setApiServerRows((rows) => [...rows, emptyApiServerRow()])
+  }
+  function removeApiServerRow(i: number) {
+    setApiServerRows((rows) => (rows.length <= 1 ? rows : rows.filter((_, idx) => idx !== i)))
+  }
+
   async function submit(e: FormEvent) {
     e.preventDefault()
     setError('')
 
-    const gitFields = [repoUrl, branch, policyPath]
-    const gitFilled = gitFields.filter((v) => v.trim() !== '').length
-    if (gitFilled > 0 && gitFilled < gitFields.length) {
-      setError('Git 绑定的仓库地址、分支、策略路径三项要么都填，要么都不填。')
+    const gitValues: Record<'repoUrl' | 'branch' | 'policyPath' | 'credentialRef', string> = {
+      repoUrl, branch, policyPath, credentialRef,
+    }
+    const anyGitFilled = Object.values(gitValues).some((v) => v.trim() !== '')
+    const missingGit = REQUIRED_GIT_FIELDS.filter((k) => gitValues[k].trim() === '')
+    if (anyGitFilled && missingGit.length > 0) {
+      setError(
+        `Git 绑定缺少：${missingGit.join('、')}。repoUrl / branch / policyPath 三项在你填写了 `
+        + `Git 绑定的任意一项（含 credentialRef）时都是必需的，否则已填的值不会被保存。`,
+      )
       return
     }
 
-    const apiServers: APIServer[] = apiHost.trim()
-      ? [{ host: apiHost.trim(), cidr: apiCidr.trim(), port: Number(apiPort) || 0 }]
-      : []
+    const apiServers: APIServer[] = apiServerRows
+      .filter((r) => r.host.trim() !== '')
+      .map((r) => ({ host: r.host.trim(), cidr: r.cidr.trim(), port: Number(r.port) || 0 }))
     const healthCheckSources = healthChecks
       .split('\n')
       .map((s) => s.trim())
@@ -172,7 +201,7 @@ function RegisterSection({ onCreated }: { onCreated: () => void }) {
         nodeCidr: nodeCidr.trim(),
         apiServers,
         healthCheckSources,
-        ...(gitFilled === gitFields.length
+        ...(anyGitFilled
           ? {
             git: {
               repoUrl: repoUrl.trim(),
@@ -185,7 +214,7 @@ function RegisterSection({ onCreated }: { onCreated: () => void }) {
           : {}),
       })
       setId(''); setDisplayName(''); setPodCidr(''); setNodeCidr('')
-      setApiHost(''); setApiCidr(''); setApiPort('443'); setHealthChecks('')
+      setApiServerRows([emptyApiServerRow()]); setHealthChecks('')
       setRepoUrl(''); setBranch(''); setPolicyPath(''); setCredentialRef('')
       onCreated()
     } catch (err) {
@@ -212,24 +241,57 @@ function RegisterSection({ onCreated }: { onCreated: () => void }) {
             <TextField label="Node CIDR" value={nodeCidr} onChange={setNodeCidr} required mono />
           </FormGrid>
 
-          <SubHeading>apiserver（可选）</SubHeading>
-          <FormGrid>
-            <TextField label="host" value={apiHost} onChange={setApiHost} mono />
-            <TextField label="cidr" value={apiCidr} onChange={setApiCidr} mono />
-            <TextField label="port" value={apiPort} onChange={setApiPort} mono />
-          </FormGrid>
+          <SubHeading>
+            apiserver（可选，可添加多个 —— HA 控制面通常不止一个端点，
+            漏填一个就是漏了一条 baseline 放行规则，后果是生产阻断而不是注册报错）
+          </SubHeading>
+          {apiServerRows.map((row, i) => (
+            <div key={i} style={{
+              display: 'flex', gap: 'var(--space-3)', alignItems: 'flex-end',
+              marginBottom: 'var(--space-2)',
+            }}>
+              <div style={{ flex: 1 }}>
+                <TextField label="host" value={row.host} onChange={(v) => updateApiServerRow(i, { host: v })} mono />
+              </div>
+              <div style={{ flex: 1 }}>
+                <TextField label="cidr" value={row.cidr} onChange={(v) => updateApiServerRow(i, { cidr: v })} mono />
+              </div>
+              <div style={{ width: 110 }}>
+                <TextField label="port" value={row.port} onChange={(v) => updateApiServerRow(i, { port: v })} mono />
+              </div>
+              <button
+                type="button"
+                onClick={() => removeApiServerRow(i)}
+                disabled={apiServerRows.length <= 1}
+                style={{
+                  ...secondaryButtonStyle,
+                  opacity: apiServerRows.length <= 1 ? 0.5 : 1,
+                  cursor: apiServerRows.length <= 1 ? 'default' : 'pointer',
+                }}
+              >
+                删除
+              </button>
+            </div>
+          ))}
+          <button type="button" onClick={addApiServerRow} style={secondaryButtonStyle}>
+            + 添加 apiserver
+          </button>
 
-          <SubHeading>健康检查网段（可选，每行一个 CIDR）</SubHeading>
-          <textarea
-            className="ctl"
-            value={healthChecks}
-            onChange={(e) => setHealthChecks(e.target.value)}
-            rows={3}
-            style={textareaStyle}
-          />
+          <div style={{ marginTop: 'var(--space-4)' }}>
+            <SubHeading>健康检查网段（可选，每行一个 CIDR）</SubHeading>
+            <textarea
+              className="ctl"
+              value={healthChecks}
+              onChange={(e) => setHealthChecks(e.target.value)}
+              rows={3}
+              style={textareaStyle}
+            />
+          </div>
 
           <div style={{ marginTop: 'var(--space-3)' }}>
-            <SubHeading>Git 绑定（可选，三项要么都填要么都不填）</SubHeading>
+            <SubHeading>
+              Git 绑定（可选；一旦填写任意一项——含 credentialRef——repoUrl / branch / policyPath 三项均为必填）
+            </SubHeading>
             <FormGrid>
               <TextField label="repoUrl" value={repoUrl} onChange={setRepoUrl} mono />
               <TextField label="branch" value={branch} onChange={setBranch} mono />
@@ -422,6 +484,25 @@ function GitVerifiedMark({ item }: { item: PolicyImportItem }) {
   )
 }
 
+/**
+ * apiserver 列表：渲染全部条目而不是只取第一个。HA 控制面通常有多个
+ * apiserver 端点，只展示一个会让运维误以为集群"已完整登记"，而平台
+ * 实际只认识其中一个——baseline 推导依赖这份清单的完整性，漏一条
+ * 后果是漏一条放行规则，事后表现为生产阻断而不是注册时的报错。
+ */
+function ApiServerList({ servers }: { servers?: APIServer[] | null }) {
+  if (!servers || servers.length === 0) {
+    return <span style={{ color: 'var(--text-muted)' }}>未配置</span>
+  }
+  return (
+    <span className="mono" style={{
+      display: 'flex', flexDirection: 'column', gap: 2, fontSize: 'var(--text-xs)',
+    }}>
+      {servers.map((s, i) => <span key={`${i}-${s.host}`}>{s.host}:{s.port}（{s.cidr}）</span>)}
+    </span>
+  )
+}
+
 /* ---------------------------------------------------------------------- */
 /* 共享小件                                                                 */
 /* ---------------------------------------------------------------------- */
@@ -498,4 +579,10 @@ const buttonStyle: CSSProperties = {
   padding: '6px 14px', fontSize: 'var(--text-sm)', fontWeight: 500,
   color: 'var(--text-on-dark)', background: 'var(--accent)',
   border: 'none', borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+}
+
+const secondaryButtonStyle: CSSProperties = {
+  padding: '6px 12px', fontSize: 'var(--text-sm)', fontWeight: 500,
+  color: 'var(--text)', background: 'var(--surface)',
+  border: '1px solid var(--border-strong)', borderRadius: 'var(--radius-sm)', cursor: 'pointer',
 }

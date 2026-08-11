@@ -10,14 +10,6 @@ export interface Envelope<T> {
 
 export interface Identity { username: string }
 
-export interface ClusterSummary {
-  id: string
-  namespaceCount: number
-  podCount: number
-  flowCount: number
-  ccnpPresent: boolean
-}
-
 export interface TopologyNode {
   id: string
   cluster: string
@@ -315,8 +307,8 @@ export interface GitBinding {
 }
 
 /**
- * 已注册集群。取代旧的 ClusterSummary（namespaceCount/podCount/flowCount
- * 三个字段已不存在）—— GET /api/v1/clusters 现在直接返回 registry.Cluster。
+ * 已注册集群。GET /api/v1/clusters 现在直接返回 registry.Cluster——
+ * 旧形状（namespaceCount/podCount/flowCount）已整体不存在，不保留两套类型。
  * apiServers/healthCheckSources 为空时后端落库为 null，因此这两项与
  * git 均标为可选，不能假设它们总是数组/对象。
  */
