@@ -1,8 +1,10 @@
 package httpapi_test
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -59,6 +61,27 @@ spec:
 	}
 	if got := bodyOf(t, rec)["code"]; got != float64(20001) {
 		t.Errorf("code = %v, want 20001", got)
+	}
+	// msg 必须点名是 ipBlock 出的问题：这段文案来自 registry.ParseImport
+	// 自己的校验逻辑，不是第三方错误文本，回传它不构成内部信息泄露，
+	// 而不点名的话使用者只知道"导入失败"，找不到是哪一行 YAML 写错了。
+	if msg, _ := bodyOf(t, rec)["msg"].(string); !strings.Contains(msg, "ipBlock") {
+		t.Errorf("msg = %q, want it to name ipBlock", msg)
+	}
+}
+
+// 请求体不是合法 JSON 是协议层问题，走真实的 400 —— 与 cluster_handler.go
+// 的畸形请求体处理一致。此前这条路径没有测试覆盖。
+func TestImportRejectsMalformedJSON(t *testing.T) {
+	h, _, cookie := newTestRouterWithRegistry(t, fixtureReader(), newMemRegistry())
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/clusters/prod-asia-1/policy-imports",
+		bytes.NewReader([]byte("{not json")))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 — an unparseable body is a protocol-level failure", rec.Code)
 	}
 }
 

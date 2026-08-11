@@ -30,6 +30,22 @@ func WriteBusiness(w http.ResponseWriter, code Code) {
 	write(w, http.StatusOK, Envelope{Code: code, Msg: code.Message(), Data: nil})
 }
 
+// WriteInvalid 写出一个带校验详情的业务级失败。
+//
+// detail 只接受**本平台自己构造的**校验错误文案（registry.ErrInvalid 一族），
+// 永不接受来自驱动、网络或第三方库的错误对象。判据是「这段文字是我们写的，
+// 还是别人给的」—— 别人给的一律不回传。
+//
+// 与 WriteBusiness 分开而不是给它加参数：调用点必须显式选择「我要回传详情」，
+// 否则某天有人把一个 driver error 顺手塞进去，而 code review 看不出区别。
+func WriteInvalid(w http.ResponseWriter, detail string) {
+	msg := detail
+	if msg == "" {
+		msg = CodeInvalidParam.Message()
+	}
+	write(w, http.StatusOK, Envelope{Code: CodeInvalidParam, Msg: msg, Data: nil})
+}
+
 // WriteSystem 写出一个系统性失败，保留真实的 HTTP 状态码。
 //
 // 协议层与系统层的失败必须能被网关、负载均衡与 APM 统计到；

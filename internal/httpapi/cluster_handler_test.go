@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/imkerbos/Distill/internal/registry"
+	"github.com/imkerbos/Distill/internal/response"
 )
 
 // memRegistry 是内存版 registry.Store，用于 handler 测试。
@@ -162,6 +163,33 @@ func TestCreateClusterRequiresSession(t *testing.T) {
 	}
 }
 
+// 请求体不是合法 JSON 是协议层问题，不是业务失败 —— 与 handleCreateSession
+// 对畸形登录请求的处理保持一致（见 session_handler.go），必须是真实的 400，
+// 不是 200 + code。这条路径此前没有测试锁住，是审阅时点出的相邻缺口。
+func TestCreateClusterRejectsMalformedJSON(t *testing.T) {
+	h, _, cookie := newTestRouterWithRegistry(t, fixtureReader(), newMemRegistry())
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/clusters", bytes.NewReader([]byte("{not json")))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 — an unparseable body is a protocol-level failure", rec.Code)
+	}
+}
+
+func TestUpdateClusterRejectsMalformedJSON(t *testing.T) {
+	h, _, cookie := newTestRouterWithRegistry(t, fixtureReader(), newMemRegistry())
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/clusters/c1", bytes.NewReader([]byte("{not json")))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 — an unparseable body is a protocol-level failure", rec.Code)
+	}
+}
+
 func TestCreateClusterRoundTrips(t *testing.T) {
 	reg := newMemRegistry()
 	h, _, cookie := newTestRouterWithRegistry(t, fixtureReader(), reg)
@@ -196,6 +224,12 @@ func TestCreateClusterRejectsMalformedCIDR(t *testing.T) {
 	}
 	if got := bodyOf(t, rec)["code"]; got != float64(20001) {
 		t.Errorf("code = %v, want 20001", got)
+	}
+	// msg 必须点名是哪一类网段错了：一个集群有四类网段，只回一句
+	// 「参数不合法」会让操作者逐个试。这段文案是 registry.ValidateCluster
+	// 自己写的，不是驱动或第三方库的错误文本，回传它不泄露任何内部拓扑。
+	if msg, _ := bodyOf(t, rec)["msg"].(string); !strings.Contains(msg, "podCIDR") {
+		t.Errorf("msg = %q, want it to name podCIDR", msg)
 	}
 }
 
@@ -295,6 +329,13 @@ func TestCreateClusterFailurePropagatesRegistryInternalError(t *testing.T) {
 	}
 	if got := bodyOf(t, rec)["code"]; got != float64(50001) {
 		t.Errorf("code = %v, want 50001", got)
+	}
+	// 与 ErrInvalid 分支的对照组：这条错误不是 registry 自己写的校验文案，
+	// 是驱动的原始报错，所以 msg 必须是固定文案，一个字都不能带出去 ——
+	// WriteInvalid 只喂给「我们自己写的」错误，这里走的是 default 分支，
+	// 还是 response.WriteSystem，行为不该受这次改动影响。
+	if got := bodyOf(t, rec)["msg"]; got != response.CodeInternal.Message() {
+		t.Errorf("msg = %q, want the fixed internal-error message %q", got, response.CodeInternal.Message())
 	}
 	for _, secret := range []string{"mysql", "10.0.0.5", "3306"} {
 		if strings.Contains(rec.Body.String(), secret) {

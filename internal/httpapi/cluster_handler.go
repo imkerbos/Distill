@@ -153,10 +153,20 @@ func actorOf(r *http.Request) registry.Actor {
 //
 // 输入不合法与目标不存在都是业务失败，用 code + HTTP 200；
 // 其余按内部错误处理，真实原因只进日志。判据是「该不该计入服务错误率」。
+//
+// ErrInvalid 分支把 err.Error() 原样回传，NotFound 与 default 分支不回传
+// 任何错误文本 —— 这不是同一条规则的例外，是两类文本本来就不同：
+// ValidateCluster/ParseImport 产出的校验信息是本平台自己写的、说的是
+// 调用方输入里哪一项不对（比如「podCIDR "10.20.0/14" 不是合法网段」），
+// 不泄露任何内部拓扑；default 分支兜住的是数据库、网络这类别人给的错误，
+// 那些文本可能带着主机、端口，只能进日志。「msg 永不回传内部错误细节」
+// 约束的是后者，不是前者。
 func writeRegistryError(w http.ResponseWriter, r *http.Request, d Deps, err error) {
 	switch {
 	case errors.Is(err, registry.ErrInvalid):
-		response.WriteBusiness(w, response.CodeInvalidParam)
+		d.Logger.Warn("registry validation rejected",
+			"err", err, "request_id", RequestIDFrom(r.Context()))
+		response.WriteInvalid(w, err.Error())
 	case errors.Is(err, registry.ErrNotFound):
 		response.WriteBusiness(w, response.CodeNotFound)
 	default:
