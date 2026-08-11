@@ -21,26 +21,26 @@ import (
 // （handler、测试、前端契约）无需改动。
 type (
 	// RiskCategory 是高风险端口的风险来源。
-	RiskCategory = risk.RiskCategory
+	RiskCategory = risk.Category
 	// RiskPosition 是风险连接所处的位置。
-	RiskPosition = risk.RiskPosition
+	RiskPosition = risk.Position
 	// RiskPort 是风险端口清单中的一项。
-	RiskPort = risk.RiskPort
+	RiskPort = risk.Port
 )
 
 const (
 	// RiskAdminPlaintext 是明文管理端口。
-	RiskAdminPlaintext = risk.RiskAdminPlaintext
+	RiskAdminPlaintext = risk.AdminPlaintext
 	// RiskDatabase 是数据库直连端口。
-	RiskDatabase = risk.RiskDatabase
+	RiskDatabase = risk.Database
 	// RiskFileShare 是文件共享端口。
-	RiskFileShare = risk.RiskFileShare
+	RiskFileShare = risk.FileShare
 	// PositionEgressInternet 是出公网。
-	PositionEgressInternet = risk.PositionEgressInternet
+	PositionEgressInternet = risk.EgressInternet
 	// PositionCrossNamespace 是跨 namespace。
-	PositionCrossNamespace = risk.PositionCrossNamespace
+	PositionCrossNamespace = risk.CrossNamespace
 	// PositionSameNamespace 是同 namespace 内。
-	PositionSameNamespace = risk.PositionSameNamespace
+	PositionSameNamespace = risk.SameNamespace
 )
 
 // RiskPortCatalog 返回判定所用的完整端口清单，按端口号升序。

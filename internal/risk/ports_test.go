@@ -9,16 +9,16 @@ import (
 // 提取前后行为必须逐项相同：这次改动的唯一目的是解开依赖环，
 // 任何清单内容的变化都是回归，而不是重构。
 func TestCatalogIsExactlyTheKnownNineEntries(t *testing.T) {
-	want := []risk.RiskPort{
-		{Port: 22, Name: "SSH", Category: risk.RiskAdminPlaintext},
-		{Port: 23, Name: "Telnet", Category: risk.RiskAdminPlaintext},
-		{Port: 445, Name: "SMB", Category: risk.RiskFileShare},
-		{Port: 3306, Name: "MySQL", Category: risk.RiskDatabase},
-		{Port: 3389, Name: "RDP", Category: risk.RiskAdminPlaintext},
-		{Port: 5432, Name: "PostgreSQL", Category: risk.RiskDatabase},
-		{Port: 6379, Name: "Redis", Category: risk.RiskDatabase},
-		{Port: 9200, Name: "Elasticsearch", Category: risk.RiskDatabase},
-		{Port: 27017, Name: "MongoDB", Category: risk.RiskDatabase},
+	want := []risk.Port{
+		{Port: 22, Name: "SSH", Category: risk.AdminPlaintext},
+		{Port: 23, Name: "Telnet", Category: risk.AdminPlaintext},
+		{Port: 445, Name: "SMB", Category: risk.FileShare},
+		{Port: 3306, Name: "MySQL", Category: risk.Database},
+		{Port: 3389, Name: "RDP", Category: risk.AdminPlaintext},
+		{Port: 5432, Name: "PostgreSQL", Category: risk.Database},
+		{Port: 6379, Name: "Redis", Category: risk.Database},
+		{Port: 9200, Name: "Elasticsearch", Category: risk.Database},
+		{Port: 27017, Name: "MongoDB", Category: risk.Database},
 	}
 	got := risk.Catalog()
 	if len(got) != len(want) {
@@ -46,7 +46,7 @@ func TestLookupReturnsCategory(t *testing.T) {
 	if !ok {
 		t.Fatal("Lookup(3306) not found, want found")
 	}
-	if rp.Category != risk.RiskDatabase || rp.Name != "MySQL" {
+	if rp.Category != risk.Database || rp.Name != "MySQL" {
 		t.Errorf("Lookup(3306) = %+v, want MySQL/DATABASE", rp)
 	}
 }
