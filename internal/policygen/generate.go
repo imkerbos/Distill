@@ -27,6 +27,12 @@ type Input struct {
 	Assets snapshot.Assets
 	// Namespaces 是该集群的命名空间快照。
 	Namespaces []replay.NamespaceRef
+	// Pods 是该集群的 Pod 快照，候选策略的生成单位来自它而非流量。
+	//
+	// 按流量生成会让 mesh 内（流量全 DEGRADED）与被写坏策略挡住（流量全 UNKNOWN）
+	// 的 workload 悄悄从候选集里消失，连带绕过 Baseline 的无条件注入 ——
+	// 一个不存在的策略不会缺任何东西，缺失也就报不出来。
+	Pods []replay.PodRef
 	// Observations 是带判定结果的观测流量。
 	Observations []Observation
 }
@@ -71,18 +77,47 @@ func Generate(in Input) Result {
 		bad = append(bad, gaps...)
 	}
 
+	// 候选策略的生成单位是 Pod 名册，不是流量：只按 counts 里出现过的
+	// workload 生成，会让 mesh 内（流量全 DEGRADED）与被写坏策略挡住
+	// （流量全 UNKNOWN）的 workload 连同它们的强制 Baseline 一起从候选集
+	// 里消失——这两类恰恰是最需要被看见的："平台学不出它的流量"，不是
+	// "它没有流量"。
+	//
+	// 排除条件与 subjectOf 对齐：hostNetwork Pod 选不中，没有 app 标签的
+	// Pod 无法用 podSelector 表达，两者都不能进名册，否则会生成一条谁都
+	// 匹配不到、或者选中了不该选对象的幽灵策略。
+	workloads := map[subject]bool{}
+	for _, p := range in.Pods {
+		if p.ClusterID != in.ClusterID {
+			continue
+		}
+		if in.Namespace != "" && p.Namespace != in.Namespace {
+			continue
+		}
+		if replay.IsUnmanaged(p) {
+			continue
+		}
+		wl := p.Labels[workloadLabel]
+		if wl == "" {
+			continue
+		}
+		workloads[subject{namespace: p.Namespace, workload: wl}] = true
+	}
+
 	byWorkload := map[subject][]Rule{}
 	for k, n := range counts {
-		byWorkload[subject{namespace: k.SubjectNS, workload: k.Subject}] = append(
-			byWorkload[subject{namespace: k.SubjectNS, workload: k.Subject}],
-			learnedRule(k, n),
-		)
+		s := subject{namespace: k.SubjectNS, workload: k.Subject}
+		// 名册之外仍学到规则理论上不会发生——subjectOf 已经把 hostNetwork
+		// 与无标签 Pod 挡在外面——但稳妥起见仍然按学习结果建一条策略，
+		// 而不是静默丢弃这批规则。
+		workloads[s] = true
+		byWorkload[s] = append(byWorkload[s], learnedRule(k, n))
 	}
 
 	// Baseline 无条件追加，永不参与去重、永不被学习结果覆盖（spec §7.1）。
 	// 即使某个 namespace 一条学习规则都没有，只要它有 workload 就得有 Baseline。
 	nsWithWorkload := map[string]bool{}
-	for s := range byWorkload {
+	for s := range workloads {
 		nsWithWorkload[s.namespace] = true
 	}
 	baselineByNS := map[string][]Rule{}
@@ -94,8 +129,8 @@ func Generate(in Input) Result {
 	}
 
 	res := Result{Ungeneratable: dedupeGaps(bad)}
-	for s, learned := range byWorkload {
-		rules := append([]Rule{}, learned...)
+	for s := range workloads {
+		rules := append([]Rule{}, byWorkload[s]...)
 		rules = append(rules, baselineByNS[s.namespace]...)
 		sortRules(rules)
 		res.Policies = append(res.Policies, CandidatePolicy{
@@ -186,10 +221,14 @@ func baselineRule(br baseline.Rule) Rule {
 	}
 }
 
-// sortRules 给规则定序：Baseline 在前，其后按方向、证据、端口。
+// sortRules 给规则定序：Baseline 在前，其后按方向、证据、端口、协议、对端。
 //
-// 确定排序不是美观问题：同一份输入两次生成必须逐字节相同，
-// 否则产物 diff 全是噪声，review 随之失效。
+// 确定排序不是美观问题：同一份输入两次生成必须逐字节相同，否则产物
+// diff 全是噪声，review 随之失效。比较键必须覆盖两条规则之间可能不同
+// 的每一个字段——聚合键（aggKey）本身就是 map 键，两条不同的学习规则
+// 保证在 Direction/Evidence/Port/Protocol/Peer 中至少有一处不同；若比较
+// 到端口就停手，这些规则会在同一端口打平，排序结果退化成 map 遍历顺序，
+// 也就是随机顺序。
 func sortRules(rules []Rule) {
 	sort.SliceStable(rules, func(i, j int) bool {
 		a, b := rules[i], rules[j]
@@ -202,7 +241,21 @@ func sortRules(rules []Rule) {
 		if a.Evidence != b.Evidence {
 			return a.Evidence < b.Evidence
 		}
-		return rulePort(a) < rulePort(b)
+		if pa, pb := rulePort(a), rulePort(b); pa != pb {
+			return pa < pb
+		}
+		if pa, pb := ruleProtocol(a), ruleProtocol(b); pa != pb {
+			return pa < pb
+		}
+		nsA, wlA, cidrA := rulePeer(a)
+		nsB, wlB, cidrB := rulePeer(b)
+		if nsA != nsB {
+			return nsA < nsB
+		}
+		if wlA != wlB {
+			return wlA < wlB
+		}
+		return cidrA < cidrB
 	})
 }
 
@@ -223,6 +276,47 @@ func rulePort(r Rule) int32 {
 		return 0
 	}
 	return ports[0].Port.IntVal
+}
+
+// ruleProtocol 取规则的第一个协议，供排序使用；无端口时返回空串。
+func ruleProtocol(r Rule) string {
+	var ports []networkingv1.NetworkPolicyPort
+	switch {
+	case r.Ingress != nil:
+		ports = r.Ingress.Ports
+	case r.Egress != nil:
+		ports = r.Egress.Ports
+	}
+	if len(ports) == 0 || ports[0].Protocol == nil {
+		return ""
+	}
+	return string(*ports[0].Protocol)
+}
+
+// rulePeer 取规则的第一个对端，供排序使用。namespace 与 workload 来自
+// selector 组合，cidr 来自 ipBlock；两种表达互斥，用不到的一律留空。
+func rulePeer(r Rule) (ns, workload, cidr string) {
+	var peers []networkingv1.NetworkPolicyPeer
+	switch {
+	case r.Ingress != nil:
+		peers = r.Ingress.From
+	case r.Egress != nil:
+		peers = r.Egress.To
+	}
+	if len(peers) == 0 {
+		return "", "", ""
+	}
+	p := peers[0]
+	if p.IPBlock != nil {
+		return "", "", p.IPBlock.CIDR
+	}
+	if p.NamespaceSelector != nil {
+		ns = p.NamespaceSelector.MatchLabels[nsNameLabel]
+	}
+	if p.PodSelector != nil {
+		workload = p.PodSelector.MatchLabels[workloadLabel]
+	}
+	return ns, workload, ""
 }
 
 // dedupeGaps 按 (flowID, reason) 去重并定序。
