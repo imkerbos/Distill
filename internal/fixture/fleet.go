@@ -283,6 +283,20 @@ func hostNetworkPod(pods []replay.PodRef) replay.PodRef {
 	panic("fixture: no hostNetwork pod found")
 }
 
+// unlabelledPod 返回 pods 中第一个没有 app 标签的 Pod。
+//
+// 与 hostNetworkPod 同样的用意：按属性显式查找而非依赖切片下标，
+// 避免未来往这个 namespace 插入新 Pod 时，NO_WORKLOAD_LABEL 场景
+// 因为下标偏移而静默失效。
+func unlabelledPod(pods []replay.PodRef) replay.PodRef {
+	for _, p := range pods {
+		if p.Labels["app"] == "" {
+			return p
+		}
+	}
+	panic("fixture: no unlabelled pod found")
+}
+
 // unresolvedEndpoint 构造一个"声称属于某集群、但身份没能还原"的端点，
 // 模拟采集管线丢事件：flow 记录了源 IP 与它所在的集群，唯独没能把 IP
 // 对应回具体 Pod。求值引擎必须把这种情况判成 SNAPSHOT_MISSING，
@@ -362,6 +376,19 @@ func buildFlows(asia, eu Cluster) []Flow {
 		src := legacySources[i%len(legacySources)]
 		dst := legacy[i%len(legacy)]
 		b.add(podEndpoint(src), podEndpoint(dst), replay.ProtocolTCP, 8080)
+	}
+
+	// legacy-unlabelled -> gateway：无 app 标签的 Pod 做主体，产出
+	// NO_WORKLOAD_LABEL。目的地必须换成 legacy 以外的 namespace ——
+	// broken-ipblock 只挂在 legacy 的 Ingress 方向，任何打进 legacy 的
+	// 流量都会先被判成整体 POLICY_MALFORMED（UNKNOWN），无标签 Pod
+	// 自身的表达失败反而验证不到。换成出向、目的地是没有入向策略的
+	// gateway，这条流量才会以 TRUSTED ALLOW 结论走到分类逻辑，让
+	// classify 因为源 Pod 缺 app 标签报出 NO_WORKLOAD_LABEL。
+	unlabelled := unlabelledPod(legacy)
+	for i := 0; i < 3; i++ {
+		dst := gateway[i%len(gateway)]
+		b.add(podEndpoint(unlabelled), podEndpoint(dst), replay.ProtocolTCP, 8080)
 	}
 
 	// batch -> payment：batch 没有任何 NetworkPolicy 选中它，出向不受限；
