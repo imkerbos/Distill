@@ -1,6 +1,7 @@
 import type {
-  ClusterSummary, Decision, Envelope, FlowFilter, FlowPage,
-  Identity, PolicyPreview, Quality, SecurityReport, Topology, TopologyLevel,
+  Decision, Envelope, FlowFilter, FlowPage,
+  Identity, ImportRole, ImportSource, PolicyImportItem, PolicyPreview,
+  Quality, RegisteredCluster, SecurityReport, Topology, TopologyLevel,
 } from './types'
 
 /** ApiError 同时携带 HTTP 状态与业务码，调用方两者都可能需要判断。 */
@@ -76,7 +77,41 @@ export const api = {
 
   me: () => request<Identity>('/api/v1/sessions/current'),
 
-  clusters: () => request<ClusterSummary[]>('/api/v1/clusters'),
+  clusters: () => request<RegisteredCluster[]>('/api/v1/clusters'),
+
+  createCluster: (body: Partial<RegisteredCluster>) =>
+    request<{ id: string }>('/api/v1/clusters', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  updateCluster: (cluster: string, body: Partial<RegisteredCluster>) =>
+    request<{ id: string }>(`/api/v1/clusters/${encodeURIComponent(cluster)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+
+  deleteCluster: (cluster: string) =>
+    request<{ id: string }>(`/api/v1/clusters/${encodeURIComponent(cluster)}`, {
+      method: 'DELETE',
+    }),
+
+  policyImports: (cluster: string) =>
+    request<PolicyImportItem[]>(
+      `/api/v1/clusters/${encodeURIComponent(cluster)}/policy-imports`,
+    ),
+
+  createImport: (cluster: string, body: { role: ImportRole; source: ImportSource; yaml: string }) =>
+    request<{ importId: string }>(
+      `/api/v1/clusters/${encodeURIComponent(cluster)}/policy-imports`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+
+  deleteImport: (cluster: string, importID: string) =>
+    request<{ importId: string }>(
+      `/api/v1/clusters/${encodeURIComponent(cluster)}/policy-imports/${encodeURIComponent(importID)}`,
+      { method: 'DELETE' },
+    ),
 
   topology: (cluster: string, level: TopologyLevel = 'namespace') =>
     request<Topology>(

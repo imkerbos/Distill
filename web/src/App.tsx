@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import AppShell from './components/AppShell'
 import { SessionProvider, useSession } from './auth/SessionContext'
+import ClustersPage from './pages/ClustersPage'
 import FlowsPage from './pages/FlowsPage'
 import LoginPage from './pages/LoginPage'
 import PolicyPage from './pages/PolicyPage'
@@ -25,6 +26,7 @@ function Protected() {
         <Route path="/quality" element={<QualityPage cluster={cluster} />} />
         <Route path="/security" element={<SecurityPage cluster={cluster} />} />
         <Route path="/policy" element={<PolicyPage cluster={cluster} />} />
+        <Route path="/clusters" element={<ClustersPage />} />
         <Route path="*" element={<Navigate to="/topology" replace />} />
       </Routes>
     </AppShell>

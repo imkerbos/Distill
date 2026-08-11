@@ -8,7 +8,7 @@ import {
 } from '../api/types'
 import { useResource } from '../api/useResource'
 import { CrossClusterMark, UnmanagedMark, VerdictBadge } from '../components/Verdict'
-import { Card, Chip, EmptyState, PageHeader, Section, StatTile, TableCard } from '../components/ui'
+import { Card, Chip, EmptyState, Notice, PageHeader, Section, StatTile, TableCard } from '../components/ui'
 
 /**
  * 不可生成原因的中文标签。只在本页使用，未像 unknownReason / RiskCategory
@@ -23,7 +23,17 @@ const UNGENERATABLE_REASON_LABEL: Record<UngeneratableReason, string> = {
 }
 
 export default function PolicyPage({ cluster }: { cluster: string }) {
+  // 集群的接入状态决定这一整屏该展示什么，而不是"候选策略查询是否
+  // 返回了行"——REGISTERED 意味着平台还没采集到任何流量，此时候选
+  // 策略永远是空的，但那是"还没有数据"而不是"查过、确实没有"，两者
+  // 在界面上必须可区分（同 EmptyState 的纪律），因此整页替换而不是
+  // 让下面的表格自己空着。
+  const { data: clusters } = useResource('registered-clusters', () => api.clusters())
+  const current = clusters?.find((c) => c.id === cluster)
+
   const { data: pv, error, loading } = useResource(cluster, () => api.policyPreview(cluster))
+
+  if (current?.state === 'REGISTERED') return <NoTrafficNotice />
 
   if (error) return <p style={{ color: 'var(--verdict-deny)' }}>{error}</p>
   if (loading || !pv) return <p style={{ color: 'var(--text-muted)' }}>加载中…</p>
@@ -40,6 +50,40 @@ export default function PolicyPage({ cluster }: { cluster: string }) {
       <PendingSection candidates={pv.candidates} />
       <MissingBaselineSection missing={pv.missingBaselines} baselineKinds={pv.baselineKinds} />
       <UngeneratableSection items={pv.ungeneratable} />
+    </div>
+  )
+}
+
+/**
+ * REGISTERED 集群的整页替换态：一个空表格与"我们还没有数据"是两个
+ * 不同的断言，这个平台在别处（缺失 baseline 清单、不可生成清单）已经
+ * 把这条纪律当作硬约束，这里同样适用——不展示任何空表格。
+ */
+function NoTrafficNotice() {
+  return (
+    <div>
+      <PageHeader
+        title="候选策略"
+        description="dry-run 预测置顶：先看这条推荐会拦掉多少条当前正在工作的连接，再看策略本身长什么样。顺序即优先级。"
+      />
+
+      <Notice>尚未采集到流量，无法产出候选策略。</Notice>
+
+      <Card style={{ padding: 'var(--space-4)', marginBottom: 'var(--space-4)' }}>
+        <p style={{ margin: '0 0 var(--space-2)', fontSize: 'var(--text-sm)' }}>
+          候选规则来自对观测流量的学习。当前该集群只登记了元数据，还差：
+        </p>
+        <ul style={{ margin: 0, paddingLeft: '1.2em', fontSize: 'var(--text-sm)' }}>
+          <li>流量日志尚未开启</li>
+          <li>采集器尚未部署</li>
+        </ul>
+      </Card>
+
+      <Card style={{ padding: 'var(--space-4)' }}>
+        <p style={{ margin: 0, fontSize: 'var(--text-sm)' }}>
+          已可用的部分：五类必备 Baseline 的推导依据来自资产快照，不依赖流量。
+        </p>
+      </Card>
     </div>
   )
 }
