@@ -151,14 +151,26 @@ func (s *Store) UpdateCluster(ctx context.Context, actor registry.Actor, c regis
 	}
 	return s.mutate(ctx, actor, c.ID, "UPDATE_CLUSTER", "cluster/"+c.ID, before, c,
 		func(tx *sql.Tx) error {
-			if _, err := tx.ExecContext(ctx,
+			res, err := tx.ExecContext(ctx,
 				`UPDATE cluster SET display_name = ?, pod_cidr = ?, node_cidr = ?,
 				        ccnp_present = ?, onboard_state = ?, updated_at = ?
 				  WHERE cluster_id = ? AND deleted_at IS NULL`,
 				c.DisplayName, c.PodCIDR, c.NodeCIDR, c.CCNPPresent,
 				string(c.State), s.now(), c.ID,
-			); err != nil {
+			)
+			if err != nil {
 				return fmt.Errorf("update cluster: %w", err)
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return fmt.Errorf("rows affected: %w", err)
+			}
+			if n == 0 {
+				// 事务外的存在性检查挡不住并发删除：只有事务内的行数
+				// 能证明这次写真的落在了一行上。返回 ErrNotFound 会让
+				// mutate 连审计一起回滚 —— 否则审计里会留下一条描述
+				// 从未发生过的操作的记录。
+				return fmt.Errorf("%w: cluster %s", ErrNotFound, c.ID)
 			}
 			for _, stmt := range []string{
 				`DELETE FROM cluster_apiserver WHERE cluster_id = ?`,
@@ -184,12 +196,22 @@ func (s *Store) SoftDeleteCluster(ctx context.Context, actor registry.Actor, id 
 	}
 	return s.mutate(ctx, actor, id, "DELETE_CLUSTER", "cluster/"+id, before, nil,
 		func(tx *sql.Tx) error {
-			if _, err := tx.ExecContext(ctx,
+			res, err := tx.ExecContext(ctx,
 				`UPDATE cluster SET deleted_at = ?, updated_at = ?
 				  WHERE cluster_id = ? AND deleted_at IS NULL`,
 				s.now(), s.now(), id,
-			); err != nil {
+			)
+			if err != nil {
 				return fmt.Errorf("soft delete cluster: %w", err)
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return fmt.Errorf("rows affected: %w", err)
+			}
+			if n == 0 {
+				// 同上：并发删除会让这条 UPDATE 匹配不到行，
+				// 事务外的存在性检查看不到这一刻的状态。
+				return fmt.Errorf("%w: cluster %s", ErrNotFound, id)
 			}
 			return nil
 		})
