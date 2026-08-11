@@ -35,6 +35,25 @@ func TestAllKindsRegistersExactlyFive(t *testing.T) {
 	}
 }
 
+// 长度对比抓不住"漏登记"：如果新增的 Kind 常量既没写进 allKinds，
+// 也没写进这里的 want，两处同时少一个，长度依然相等，测试照样通过。
+// 这里改为对每一个已声明的常量显式调用 Valid()——新增常量时按惯例
+// 把它加进下面的列表，若同时忘了登记进 allKinds，这里就会失败，
+// 而不是被"长度凑巧相等"悄悄放过。
+func TestEveryDeclaredKindIsValid(t *testing.T) {
+	for _, k := range []baseline.Kind{
+		baseline.KindDNS,
+		baseline.KindLBHealth,
+		baseline.KindMetrics,
+		baseline.KindControlPlane,
+		baseline.KindNodeAgent,
+	} {
+		if !k.Valid() {
+			t.Errorf("declared kind %q is not registered in allKinds", k)
+		}
+	}
+}
+
 func TestUnregisteredKindIsInvalid(t *testing.T) {
 	if baseline.Kind("SOMETHING_ELSE").Valid() {
 		t.Error("unregistered kind reported valid")

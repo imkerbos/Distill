@@ -33,3 +33,39 @@ func TestUngeneratableReasonEnumIsClosed(t *testing.T) {
 		}
 	}
 }
+
+// 长度对比抓不住"漏登记"：新增常量若既没写进 allEvidenceClasses，
+// 也没写进这里的显式列表，长度依然相等，测试照样通过。这里对每一个
+// 已声明的常量显式调用 Valid()——新增常量按惯例加进下面的列表，
+// 若同时忘了登记进 allEvidenceClasses，这里就会失败。
+func TestEveryDeclaredEvidenceClassIsValid(t *testing.T) {
+	for _, e := range []policygen.EvidenceClass{
+		policygen.EvidenceTrustedAllow,
+		policygen.EvidenceTrustedDeny,
+		policygen.EvidenceInternetEgress,
+		policygen.EvidenceCrossCluster,
+	} {
+		if !e.Valid() {
+			t.Errorf("declared evidence class %q is not registered in allEvidenceClasses", e)
+		}
+	}
+	// 空值是合法的第五种取值，代表 Baseline 规则不带证据，单独断言。
+	if !policygen.EvidenceClass("").Valid() {
+		t.Error("empty evidence class must be valid; it marks a Baseline rule")
+	}
+}
+
+// 同上，针对 UngeneratableReason：新增常量按惯例加进下面的列表，
+// 若同时忘了登记进 allUngeneratableReasons，这里就会失败。
+func TestEveryDeclaredUngeneratableReasonIsValid(t *testing.T) {
+	for _, r := range []policygen.UngeneratableReason{
+		policygen.ReasonNoWorkloadLabel,
+		policygen.ReasonIdentityUnknown,
+		policygen.ReasonDegradedEvidence,
+		policygen.ReasonUnmanagedEndpoint,
+	} {
+		if !r.Valid() {
+			t.Errorf("declared reason %q is not registered in allUngeneratableReasons", r)
+		}
+	}
+}

@@ -113,13 +113,19 @@ func Generate(in Input) Result {
 
 	// Baseline 无条件追加，永不参与去重、永不被学习结果覆盖（spec §7.1）。
 	// 即使某个 namespace 一条学习规则都没有，只要它有 workload 就得有 Baseline。
+	//
+	// 每个 namespace 只 Derive 一次：它是纯函数，算两遍不会算出不同结果，
+	// 但两个调用点各自维护一份会互相漂移——比如一处加了过滤条件、另一处
+	// 忘了同步。规则与 Missing() 从同一个 Set 取，保证两者恒指同一份推导。
 	nsWithWorkload := map[string]bool{}
 	for s := range workloads {
 		nsWithWorkload[s.namespace] = true
 	}
 	baselineByNS := map[string][]Rule{}
+	baselineSetByNS := map[string]baseline.Set{}
 	for ns := range nsWithWorkload {
 		set := baseline.Derive(in.Assets, ns)
+		baselineSetByNS[ns] = set
 		for _, br := range set.Rules {
 			baselineByNS[ns] = append(baselineByNS[ns], baselineRule(br))
 		}
@@ -143,7 +149,7 @@ func Generate(in Input) Result {
 	})
 
 	for ns := range nsWithWorkload {
-		if missing := baseline.Derive(in.Assets, ns).Missing(); len(missing) > 0 {
+		if missing := baselineSetByNS[ns].Missing(); len(missing) > 0 {
 			res.MissingBaselines = append(res.MissingBaselines,
 				MissingBaseline{Namespace: ns, Kinds: missing})
 		}

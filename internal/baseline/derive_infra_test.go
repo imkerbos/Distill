@@ -160,3 +160,13 @@ func TestDeriveNodeAgentSkipsWhenNodeCIDRUnregistered(t *testing.T) {
 		t.Errorf("deriveNodeAgent returned %d rules without a node CIDR, want 0", len(rules))
 	}
 }
+
+// 没有登记健康检查源网段就没有可放行的对端：凭空造一个会造出
+// 硬编码网段常量表，正是本包 doc 开头明确禁止的那种"祖传配置"。
+func TestDeriveLBHealthSkipsWhenHealthCheckSourcesUnregistered(t *testing.T) {
+	a := infraAssets()
+	a.Registry.HealthCheckSources = nil
+	if rules := deriveLBHealth(a); len(rules) != 0 {
+		t.Errorf("deriveLBHealth returned %d rules without registered health-check sources, want 0", len(rules))
+	}
+}

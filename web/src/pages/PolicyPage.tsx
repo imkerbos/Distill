@@ -287,7 +287,7 @@ function RuleTargets({ values }: { values: string[] }) {
     <span className="mono" style={{
       display: 'flex', flexDirection: 'column', gap: 2, fontSize: 'var(--text-sm)',
     }}>
-      {values.map((v) => <span key={v}>{v}</span>)}
+      {values.map((v, i) => <span key={`${i}-${v}`}>{v}</span>)}
     </span>
   )
 }
