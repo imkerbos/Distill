@@ -113,6 +113,33 @@ func TestPolicyPreviewUnknownClusterIsBusinessFailure(t *testing.T) {
 	}
 }
 
+// 不存在的 namespace 与不存在的集群同码。
+//
+// 这里若放行成一份 code=0 的空报告，界面会显示「没有会被这条推荐拦断的
+// 连接」「没有 namespace 缺失 baseline」—— 一次拼写错误得到一份体检报告。
+func TestPolicyPreviewUnknownNamespaceIsBusinessFailure(t *testing.T) {
+	h, _, cookie := newTestRouter(t, fixtureReader())
+	rec := authedGet(t, h, cookie, previewPath+"?namespace=no-such-ns")
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 — a missing resource is not a server fault", rec.Code)
+	}
+	body := bodyOf(t, rec)
+	if got := body["code"]; got != float64(20002) {
+		t.Errorf("code = %v, want 20002 (body = %v)", got, body)
+	}
+}
+
+// 存在的 namespace 必须照常返回，否则上面那条断言用一个恒错的实现也能通过。
+func TestPolicyPreviewKnownNamespaceSucceeds(t *testing.T) {
+	h, _, cookie := newTestRouter(t, fixtureReader())
+	rec := authedGet(t, h, cookie, previewPath+"?namespace=payment")
+
+	if got := bodyOf(t, rec)["code"]; got != float64(0) {
+		t.Errorf("code = %v, want 0 for an existing namespace", got)
+	}
+}
+
 // 内部错误只回固定文案，真实原因带 request_id 进日志。
 func TestPolicyPreviewHidesInternalError(t *testing.T) {
 	h, _, cookie := newTestRouter(t, brokenReader{})

@@ -2,9 +2,12 @@ package store_test
 
 import (
 	"context"
+	"errors"
+	"reflect"
 	"testing"
 	"time"
 
+	"github.com/imkerbos/Distill/internal/baseline"
 	"github.com/imkerbos/Distill/internal/fixture"
 	"github.com/imkerbos/Distill/internal/predict"
 	"github.com/imkerbos/Distill/internal/store"
@@ -28,6 +31,109 @@ func TestPolicyPreviewRejectsUnknownCluster(t *testing.T) {
 	_, err := r.PolicyPreview(context.Background(), "nope", "", fullWindow(r))
 	if err == nil {
 		t.Fatal("PolicyPreview on an unknown cluster succeeded, want ErrClusterNotFound")
+	}
+}
+
+// 不存在的 namespace 必须报错，不能返回一份空的绿色报告。
+//
+// 空结果在界面上与"这个 namespace 一切正常"完全一样：候选策略 0 条、
+// 缺失 Baseline 0 项、会被拦断的连接 0 条。一次拼写错误就此伪装成体检报告。
+func TestPolicyPreviewRejectsUnknownNamespace(t *testing.T) {
+	r := reader()
+	pv, err := r.PolicyPreview(context.Background(), "prod-asia-1", "no-such-ns", fullWindow(r))
+	if !errors.Is(err, store.ErrNamespaceNotFound) {
+		t.Fatalf("error = %v, want ErrNamespaceNotFound", err)
+	}
+	if len(pv.Candidates) != 0 || pv.Prediction.TotalEvaluated != 0 {
+		t.Errorf("preview = %+v, want the zero value alongside the error", pv)
+	}
+}
+
+// namespace 过滤只裁剪展示，预测必须逐项相同。
+//
+// 过滤掉候选策略却保留全量流量，会让目的地在其他 namespace 的流量
+// 因为没有对应策略而落到 ALLOW：WOULD_OPEN 凭空出现、WOULD_BREAK
+// 同时被低估，两个方向同时错，且都朝着让人放心的方向。
+func TestPolicyPreviewPredictionIgnoresNamespaceFilter(t *testing.T) {
+	r := reader()
+	all, err := r.PolicyPreview(context.Background(), "prod-asia-1", "", fullWindow(r))
+	if err != nil {
+		t.Fatalf("PolicyPreview() error = %v", err)
+	}
+	one, err := r.PolicyPreview(context.Background(), "prod-asia-1", "payment", fullWindow(r))
+	if err != nil {
+		t.Fatalf("PolicyPreview(payment) error = %v", err)
+	}
+	for _, k := range predict.AllChangeKinds() {
+		if all.Prediction.Counts[k] != one.Prediction.Counts[k] {
+			t.Errorf("%s: unfiltered = %d, namespace-filtered = %d; "+
+				"the namespace filter must not change the prediction",
+				k, all.Prediction.Counts[k], one.Prediction.Counts[k])
+		}
+	}
+	if all.Prediction.TotalEvaluated != one.Prediction.TotalEvaluated {
+		t.Errorf("TotalEvaluated %d vs %d", all.Prediction.TotalEvaluated, one.Prediction.TotalEvaluated)
+	}
+}
+
+// 缺失清单的内容必须逐项断言，不能只断言"非空"。
+//
+// 只断言长度非零的话，一条选不中任何 Pod 的 METRICS_SCRAPE 规则会把
+// 该 namespace 从缺失清单里去掉，而测试照样通过 —— 这份清单是
+// 进入 Enforcing 的前置校验，报错报漏都是放行一次不该放行的上线。
+func TestPolicyPreviewMissingBaselinesContent(t *testing.T) {
+	// asia: 只有 gateway 有暴露面，只有 payment 与 gateway 是抓取目标。
+	// eu: 没有任何 Gateway，因此每个 namespace 都缺 LB；只有 payment 被抓取。
+	want := map[string]map[string][]baseline.Kind{
+		"prod-asia-1": {
+			"batch":       {baseline.KindLBHealth, baseline.KindMetrics},
+			"checkout":    {baseline.KindLBHealth, baseline.KindMetrics},
+			"kube-system": {baseline.KindLBHealth, baseline.KindMetrics},
+			"legacy":      {baseline.KindLBHealth, baseline.KindMetrics},
+			"payment":     {baseline.KindLBHealth},
+		},
+		"prod-eu-1": {
+			"kube-system": {baseline.KindLBHealth, baseline.KindMetrics},
+			"partner":     {baseline.KindLBHealth, baseline.KindMetrics},
+			"payment":     {baseline.KindLBHealth},
+		},
+	}
+	r := reader()
+	for cluster, expect := range want {
+		pv, err := r.PolicyPreview(context.Background(), cluster, "", fullWindow(r))
+		if err != nil {
+			t.Fatalf("%s: PolicyPreview() error = %v", cluster, err)
+		}
+		got := map[string][]baseline.Kind{}
+		for _, m := range pv.MissingBaselines {
+			got[m.Namespace] = m.Kinds
+		}
+		if !reflect.DeepEqual(got, expect) {
+			t.Errorf("%s: MissingBaselines = %v, want %v", cluster, got, expect)
+		}
+	}
+}
+
+// 缺失清单同样只按 namespace 裁剪展示，内容不随筛选改变。
+func TestPolicyPreviewMissingBaselinesFilteredForDisplayOnly(t *testing.T) {
+	r := reader()
+	all, _ := r.PolicyPreview(context.Background(), "prod-asia-1", "", fullWindow(r))
+	one, err := r.PolicyPreview(context.Background(), "prod-asia-1", "batch", fullWindow(r))
+	if err != nil {
+		t.Fatalf("PolicyPreview(batch) error = %v", err)
+	}
+	if len(one.MissingBaselines) != 1 || one.MissingBaselines[0].Namespace != "batch" {
+		t.Fatalf("MissingBaselines = %+v, want only batch", one.MissingBaselines)
+	}
+	for _, m := range all.MissingBaselines {
+		if m.Namespace != "batch" {
+			continue
+		}
+		if !reflect.DeepEqual(m.Kinds, one.MissingBaselines[0].Kinds) {
+			t.Errorf("batch kinds = %v under the filter, %v without it; "+
+				"the filter must not change what a namespace is missing",
+				one.MissingBaselines[0].Kinds, m.Kinds)
+		}
 	}
 }
 

@@ -23,9 +23,9 @@ const (
 	//
 	// 敌方面扩大。候选策略不该无意放开东西。
 	ChangeWouldOpen ChangeKind = "WOULD_OPEN"
-	// ChangeUnchanged 表示判定一致。
+	// ChangeUnchanged 表示两侧判定一致，且都不是 UNKNOWN。
 	ChangeUnchanged ChangeKind = "UNCHANGED"
-	// ChangeUnknown 表示候选策略下判不出。
+	// ChangeUnknown 表示当前判定或候选策略判定中任一侧判不出。
 	ChangeUnknown ChangeKind = "UNKNOWN"
 )
 
@@ -65,7 +65,7 @@ type ChangedFlow struct {
 	Current string `json:"current"`
 	// Predicted 是候选策略下的判定。
 	Predicted string `json:"predicted"`
-	// UnknownReason 在 Predicted 为 UNKNOWN 时说明原因。
+	// UnknownReason 在任一侧判定为 UNKNOWN 时说明原因，取该侧的原因。
 	UnknownReason string `json:"unknownReason"`
 	// Confidence 是预测结论的可信度。
 	Confidence string `json:"confidence"`
@@ -91,6 +91,12 @@ type Report struct {
 	// 必须与结论分列：90% DEGRADED 的预测不应与 90% TRUSTED 同等对待。
 	TrustedCount  int `json:"trustedCount"`
 	DegradedCount int `json:"degradedCount"`
+	// UnratedCount 是可信度取值不在枚举内的连接数，正常恒为 0。
+	//
+	// 单列而非并进 TrustedCount：三者之和必须等于 TotalEvaluated，
+	// 若把枚举外取值折进 TRUSTED，回放层新增一档可信度时这里会静默地
+	// 把它报成"可信"，而分布看上去仍然自洽。
+	UnratedCount int `json:"unratedCount"`
 	// CrossClusterCount 是跨集群连接数，已知敞口规模。
 	CrossClusterCount int `json:"crossClusterCount"`
 	// UnmanagedCount 是不受 NetworkPolicy 管控的连接数。
@@ -136,14 +142,19 @@ func Run(in Input) Report {
 	for _, o := range in.Observations {
 		predicted := ev.Evaluate(o.Flow)
 		kind := classifyChange(o.Decision.Verdict, predicted.Verdict)
+		reason := unknownReasonOf(o.Decision, predicted)
 
 		rep.Counts[kind]++
 		rep.TotalEvaluated++
 		switch predicted.Confidence {
+		case replay.ConfidenceTrusted:
+			rep.TrustedCount++
 		case replay.ConfidenceDegraded:
 			rep.DegradedCount++
 		default:
-			rep.TrustedCount++
+			// 枚举外的取值单独计数，不并进 TRUSTED：把一个说不清可信度的
+			// 结论算成可信，是往让人放心的方向报数，正是本平台不许犯的错。
+			rep.UnratedCount++
 		}
 		if predicted.CrossCluster {
 			rep.CrossClusterCount++
@@ -152,7 +163,7 @@ func Run(in Input) Report {
 			rep.UnmanagedCount++
 		}
 		if kind == ChangeUnknown {
-			rep.UnknownComposition[string(predicted.UnknownReason)]++
+			rep.UnknownComposition[string(reason)]++
 		}
 
 		rep.Changes[kind] = append(rep.Changes[kind], ChangedFlow{
@@ -163,7 +174,7 @@ func Run(in Input) Report {
 			Port:          o.Flow.Port,
 			Current:       string(o.Decision.Verdict),
 			Predicted:     string(predicted.Verdict),
-			UnknownReason: string(predicted.UnknownReason),
+			UnknownReason: string(reason),
 			Confidence:    string(predicted.Confidence),
 			CrossCluster:  predicted.CrossCluster,
 			Unmanaged:     predicted.Reason.Unmanaged,
@@ -174,10 +185,17 @@ func Run(in Input) Report {
 
 // classifyChange 判定一条流量的变化类型。
 //
-// UNKNOWN 优先于其余三类：候选策略下判不出结论时，说它"没变"是在
-// 用一个不存在的确定性掩盖数据缺口。
+// 两侧的 UNKNOWN 都优先于其余三类（spec §5）：任一侧判不出结论时，
+// 说它"没变"是在用一个不存在的确定性掩盖数据缺口。
+//
+// current 一侧尤其不能漏：current=UNKNOWN + predicted=DENY 落进
+// UNCHANGED，界面上会以「判定结论保持一致」呈现 —— 那等于宣称我们
+// 知道这条连接原本是通的，而事实是我们从来就没判出来过。
 func classifyChange(current, predicted replay.Verdict) ChangeKind {
 	if predicted == replay.VerdictUnknown {
+		return ChangeUnknown
+	}
+	if current == replay.VerdictUnknown {
 		return ChangeUnknown
 	}
 	switch {
@@ -188,6 +206,22 @@ func classifyChange(current, predicted replay.Verdict) ChangeKind {
 	default:
 		return ChangeUnchanged
 	}
+}
+
+// unknownReasonOf 取把这条流量推进 UNKNOWN 的那一侧的原因。
+//
+// 两侧的缺口成因不同，要修的子系统也不同：predicted 侧的 UNKNOWN 来自
+// 候选策略回放，current 侧的来自当前判定。一律记 predicted 侧会让
+// current 侧的缺口挂到一个与它无关的成因上（多数时候是空字符串），
+// 构成表既指不回源头，也不再等于 UNKNOWN 总数。
+func unknownReasonOf(current, predicted replay.Decision) replay.UnknownReason {
+	if predicted.Verdict == replay.VerdictUnknown {
+		return predicted.UnknownReason
+	}
+	if current.Verdict == replay.VerdictUnknown {
+		return current.UnknownReason
+	}
+	return ""
 }
 
 // label 渲染端点展示名，未注入渲染函数时回落到 IP。

@@ -252,6 +252,12 @@ func buildEU() Cluster {
 		{ClusterID: clusterID, Namespace: "kube-system", Name: "kube-dns-2", IP: "10.4.2.2",
 			Labels:     map[string]string{"k8s-app": "kube-dns"},
 			NamedPorts: []replay.NamedPort{{Name: "dns", Port: 53, Protocol: replay.ProtocolUDP}}},
+		// 抓取端必须真的存在：euAssets 登记了一条 ScrapeTarget，抓取端是
+		// kube-system 的 app=metrics-agent。没有这个 Pod，METRICS_SCRAPE
+		// 会推导出一条选不中任何东西的 ingress 规则，且齐备性校验报"已具备"
+		// —— 一条永不匹配的规则比缺失更危险，因为它让缺口消失在报告里。
+		{ClusterID: clusterID, Namespace: "kube-system", Name: "metrics-agent-1", IP: "10.4.2.3",
+			Labels: map[string]string{"app": "metrics-agent"}},
 	}
 
 	return Cluster{ID: clusterID, Namespaces: namespaces, Pods: pods, Assets: euAssets()}

@@ -243,6 +243,10 @@ export interface CandidateRule {
   enabled: boolean
   direction: 'INGRESS' | 'EGRESS'
   flowCount: number
+  /** 对端：selector 对端为 namespace/workload，ipBlock 对端为 CIDR。 */
+  peers: string[]
+  /** 端口，形如 TCP/8080。 */
+  ports: string[]
 }
 
 export interface CandidatePolicy {
@@ -284,6 +288,8 @@ export interface PredictionReport {
   unknownComposition: Record<string, number>
   trustedCount: number
   degradedCount: number
+  /** 可信度取值不在枚举内的条数，正常恒为 0；三者之和等于 totalEvaluated。 */
+  unratedCount: number
   crossClusterCount: number
   unmanagedCount: number
   totalEvaluated: number

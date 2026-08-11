@@ -14,10 +14,16 @@ type Set struct {
 
 // Derive 推导指定 (cluster, namespace) 的全部 Baseline。
 //
-// DNS 与 control plane 与 namespace 无关，每个 namespace 都需要；
-// LB 健康检查、metrics 抓取、节点级 agent 取决于该 namespace 是否
-// 真的有对应的暴露面、抓取关系与 agent —— 没有就不生成，由 Missing
-// 如实报出，而不是补一条占位规则让齐备性校验通过。
+// 三类是集群级的，对该集群每个 namespace 都成立：DNS、control plane、
+// 节点级 agent。节点级 agent 归在这里是因为它采集整个集群的 Pod ——
+// 集群里有 agent，每个 namespace 就都要放行它的入向（spec §3）。
+//
+// 另外两类按 namespace 推导：LB 健康检查取决于该 namespace 有没有暴露面，
+// metrics 抓取取决于它是不是抓取目标。没有就不生成，由 Missing 如实报出，
+// 而不是补一条占位规则让齐备性校验通过。
+//
+// 因此 Missing() 对 NODE_AGENT 的判据也是集群级的：没有登记任何 NodeAgent、
+// 或 Registry.NodeCIDR 为空时才算缺失，与 namespace 无关。
 func Derive(a snapshot.Assets, namespace string) Set {
 	set := Set{Cluster: a.ClusterID, Namespace: namespace}
 	set.Rules = append(set.Rules, deriveDNS(a)...)

@@ -56,6 +56,8 @@ type ruleContent struct {
 	Enabled     bool
 	Direction   replay.Direction
 	FlowCount   int
+	Peers       []string
+	Ports       []string
 	Ingress     *networkingv1.NetworkPolicyIngressRule
 	Egress      *networkingv1.NetworkPolicyEgressRule
 }
@@ -72,6 +74,7 @@ func policyContent(t *testing.T, p policygen.CandidatePolicy) string {
 			Origin: r.Origin, Evidence: r.Evidence, Baseline: r.Baseline,
 			Derivations: r.Derivations, Risk: r.Risk, Enabled: r.Enabled,
 			Direction: r.Direction, FlowCount: r.FlowCount,
+			Peers: r.Peers, Ports: r.Ports,
 			Ingress: r.Ingress, Egress: r.Egress,
 		}
 	}
@@ -383,6 +386,78 @@ func TestUnmanagedAndLabelLessWorkloadsGetNoPolicy(t *testing.T) {
 		}
 		if p.Workload == "" {
 			t.Errorf("empty workload got a candidate policy: %+v", p)
+		}
+	}
+}
+
+// 每条规则都必须带对端与端口的展示视图。
+//
+// 原始 networkingv1 字段带 json:"-" 不出 API，界面只能看到这两个字段。
+// 它们缺失时，页面上的一条规则就只剩「LEARNED · EGRESS」——读的人分不出
+// payment:8080 与 0.0.0.0/0:443，而这是两件性质完全不同的事。
+func TestEveryRuleCarriesPeersAndPorts(t *testing.T) {
+	res := policygen.Generate(observe(t, "prod-asia-1"))
+	if len(res.Policies) == 0 {
+		t.Fatal("no candidate policies generated")
+	}
+	for _, p := range res.Policies {
+		for _, r := range p.Rules {
+			if len(r.Peers) == 0 {
+				t.Errorf("%s/%s: %s rule has no rendered peer", p.Namespace, p.Workload, r.Direction)
+			}
+			if len(r.Ports) == 0 {
+				t.Errorf("%s/%s: %s rule has no rendered port", p.Namespace, p.Workload, r.Direction)
+			}
+			for _, port := range r.Ports {
+				if !strings.Contains(port, "/") {
+					t.Errorf("%s/%s: port %q is not rendered as PROTOCOL/PORT",
+						p.Namespace, p.Workload, port)
+				}
+			}
+		}
+	}
+}
+
+// 展示视图必须与它渲染的规则体一致：selector 对端渲染成 namespace/workload，
+// ipBlock 对端渲染成 CIDR 原文。渲染错了比不渲染更糟——它看起来是事实。
+func TestPeersAndPortsMatchTheRuleBody(t *testing.T) {
+	res := policygen.Generate(observe(t, "prod-asia-1"))
+	checked := map[string]bool{}
+	for _, p := range res.Policies {
+		for _, r := range p.Rules {
+			var peers []networkingv1.NetworkPolicyPeer
+			switch {
+			case r.Ingress != nil:
+				peers = r.Ingress.From
+			case r.Egress != nil:
+				peers = r.Egress.To
+			}
+			if len(peers) != len(r.Peers) {
+				t.Fatalf("%s/%s: %d rendered peers for %d actual peers",
+					p.Namespace, p.Workload, len(r.Peers), len(peers))
+			}
+			for i, peer := range peers {
+				switch {
+				case peer.IPBlock != nil:
+					checked["cidr"] = true
+					if !strings.HasPrefix(r.Peers[i], peer.IPBlock.CIDR) {
+						t.Errorf("%s/%s: peer %q does not carry CIDR %q",
+							p.Namespace, p.Workload, r.Peers[i], peer.IPBlock.CIDR)
+					}
+				case peer.PodSelector != nil:
+					checked["selector"] = true
+					if !strings.Contains(r.Peers[i], "/") {
+						t.Errorf("%s/%s: selector peer %q is not rendered as namespace/workload",
+							p.Namespace, p.Workload, r.Peers[i])
+					}
+				}
+			}
+		}
+	}
+	// 两种对端形态都要真的走到，否则这条断言只覆盖了碰巧存在的那一种。
+	for _, form := range []string{"cidr", "selector"} {
+		if !checked[form] {
+			t.Errorf("no %s peer exercised; the fixture no longer covers this shape", form)
 		}
 	}
 }

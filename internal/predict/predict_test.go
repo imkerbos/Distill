@@ -115,6 +115,83 @@ func TestUnchangedIsCounted(t *testing.T) {
 	}
 }
 
+// current 侧判不出的流量绝不能落进 UNCHANGED。
+//
+// current=UNKNOWN + predicted=DENY 归入 UNCHANGED，界面会以
+// 「判定结论保持一致」呈现，等于宣称我们知道这条连接原本是通的。
+// 构成必须记 current 侧的原因：predicted 侧根本没有原因可记。
+func TestCurrentUnknownIsNotCountedAsUnchanged(t *testing.T) {
+	f := flow(pod("gateway", "gateway-1", "gateway"), pod("payment", "payment-1", "api"), 8080)
+	rep := predict.Run(predict.Input{
+		ClusterID:  "c1",
+		Policies:   []networkingv1.NetworkPolicy{denyAllFor("payment")},
+		Namespaces: nss(),
+		Observations: []policygen.Observation{{
+			FlowID: "f1", Flow: f,
+			Decision: replay.Decision{
+				Verdict:       replay.VerdictUnknown,
+				UnknownReason: replay.ReasonPolicyMalformed,
+				Confidence:    replay.ConfidenceTrusted,
+			},
+		}},
+	})
+	if got := rep.Counts[predict.ChangeUnchanged]; got != 0 {
+		t.Errorf("UNCHANGED = %d, want 0; an indeterminate current verdict is not agreement", got)
+	}
+	if got := rep.Counts[predict.ChangeUnknown]; got != 1 {
+		t.Fatalf("UNKNOWN = %d, want 1 (counts = %+v)", got, rep.Counts)
+	}
+	if got := rep.UnknownComposition[string(replay.ReasonPolicyMalformed)]; got != 1 {
+		t.Errorf("composition[POLICY_MALFORMED] = %d, want 1; composition = %+v",
+			got, rep.UnknownComposition)
+	}
+	items := rep.Changes[predict.ChangeUnknown]
+	if len(items) != 1 || items[0].UnknownReason != string(replay.ReasonPolicyMalformed) {
+		t.Errorf("changes = %+v, want the row to carry the current-side reason", items)
+	}
+}
+
+// 两条 UNKNOWN 入口混在一起时，构成之和仍必须等于 UNKNOWN 总数，
+// 且各自记到自己那一侧的原因上 —— 否则缺口追不回源头。
+func TestUnknownCompositionSplitsBothEntryPaths(t *testing.T) {
+	byCurrent := flow(pod("gateway", "gateway-1", "gateway"), pod("payment", "payment-1", "api"), 8080)
+	byPredicted := flow(pod("gateway", "gateway-1", "gateway"), nil, 8080)
+	byPredicted.Dest = replay.Endpoint{ClusterID: "c1", IP: "10.4.9.9"} // 本集群内、身份未还原
+
+	rep := predict.Run(predict.Input{
+		ClusterID:  "c1",
+		Policies:   []networkingv1.NetworkPolicy{denyAllFor("payment")},
+		Namespaces: nss(),
+		Observations: []policygen.Observation{
+			{FlowID: "f1", Flow: byCurrent, Decision: replay.Decision{
+				Verdict:       replay.VerdictUnknown,
+				UnknownReason: replay.ReasonPolicyMalformed,
+				Confidence:    replay.ConfidenceTrusted,
+			}},
+			{FlowID: "f2", Flow: byPredicted, Decision: replay.Decision{
+				Verdict: replay.VerdictAllow, Confidence: replay.ConfidenceTrusted,
+			}},
+		},
+	})
+	if got := rep.Counts[predict.ChangeUnknown]; got != 2 {
+		t.Fatalf("UNKNOWN = %d, want 2 (counts = %+v)", got, rep.Counts)
+	}
+	if got := rep.UnknownComposition[string(replay.ReasonPolicyMalformed)]; got != 1 {
+		t.Errorf("current-side reason counted %d times, want 1", got)
+	}
+	if got := rep.UnknownComposition[string(replay.ReasonSnapshotMissing)]; got != 1 {
+		t.Errorf("predicted-side reason counted %d times, want 1; composition = %+v",
+			got, rep.UnknownComposition)
+	}
+	total := 0
+	for _, n := range rep.UnknownComposition {
+		total += n
+	}
+	if total != rep.Counts[predict.ChangeUnknown] {
+		t.Errorf("composition sums to %d but UNKNOWN count is %d", total, rep.Counts[predict.ChangeUnknown])
+	}
+}
+
 // UNKNOWN 必须按原因分组给出绝对数，不能只给一个比例。
 func TestUnknownCompositionIsReported(t *testing.T) {
 	f := flow(pod("gateway", "gateway-1", "gateway"), nil, 8080)
@@ -162,6 +239,30 @@ func TestConfidenceDistributionIsReported(t *testing.T) {
 	}
 	if rep.TotalEvaluated != 1 {
 		t.Errorf("TotalEvaluated = %d, want 1", rep.TotalEvaluated)
+	}
+}
+
+// 可信度三档之和必须等于评估总数。
+//
+// 从前的 default 分支把任何未识别取值都算成 TRUSTED，和恰好对得上，
+// 分布看起来自洽 —— 那正是最难发现的一类错报。
+func TestConfidenceTallySumsToTotal(t *testing.T) {
+	f := flow(pod("gateway", "gateway-1", "gateway"), pod("payment", "payment-1", "api"), 8080)
+	rep := predict.Run(predict.Input{
+		ClusterID:  "c1",
+		Policies:   []networkingv1.NetworkPolicy{denyAllFor("payment")},
+		Namespaces: nss(),
+		Observations: []policygen.Observation{{
+			FlowID: "f1", Flow: f,
+			Decision: replay.Decision{Verdict: replay.VerdictAllow, Confidence: replay.ConfidenceTrusted},
+		}},
+	})
+	if sum := rep.TrustedCount + rep.DegradedCount + rep.UnratedCount; sum != rep.TotalEvaluated {
+		t.Errorf("trusted+degraded+unrated = %d, TotalEvaluated = %d", sum, rep.TotalEvaluated)
+	}
+	if rep.UnratedCount != 0 {
+		t.Errorf("UnratedCount = %d, want 0; the evaluator only emits registered confidences",
+			rep.UnratedCount)
 	}
 }
 

@@ -21,8 +21,6 @@ const nsNameLabel = "kubernetes.io/metadata.name"
 type Input struct {
 	// ClusterID 是生成策略的目标集群。
 	ClusterID string
-	// Namespace 限定只生成该 namespace 的策略；为空表示全集群。
-	Namespace string
 	// Assets 是该集群的资产快照，Baseline 推导的依据。
 	Assets snapshot.Assets
 	// Namespaces 是该集群的命名空间快照。
@@ -59,6 +57,11 @@ type MissingBaseline struct {
 }
 
 // Generate 从流量证据与快照生成候选策略集。纯函数。
+//
+// 生成范围恒为整个集群，不接受 namespace 过滤：dry-run 预测必须跑在
+// 完整策略集上，一份被裁剪过的策略集配全量流量会让目的地在其他
+// namespace 的流量落到 ALLOW，凭空造出敞口告警（spec §5）。按 namespace
+// 看只是展示需求，由消费方裁剪产物完成。
 func Generate(in Input) Result {
 	counts := map[aggKey]int{}
 	var bad []UngeneratableItem
@@ -66,9 +69,6 @@ func Generate(in Input) Result {
 	for _, o := range in.Observations {
 		items, gaps := classify(o, in.ClusterID)
 		for _, it := range items {
-			if in.Namespace != "" && it.key.SubjectNS != in.Namespace {
-				continue
-			}
 			counts[it.key]++
 		}
 		// 不可生成项按 flow 收集，不受 namespace 过滤影响：一条表达不了的
@@ -89,9 +89,6 @@ func Generate(in Input) Result {
 	workloads := map[subject]bool{}
 	for _, p := range in.Pods {
 		if p.ClusterID != in.ClusterID {
-			continue
-		}
-		if in.Namespace != "" && p.Namespace != in.Namespace {
 			continue
 		}
 		if replay.IsUnmanaged(p) {
@@ -189,6 +186,7 @@ func learnedRule(k aggKey, flowCount int) Rule {
 			From: []networkingv1.NetworkPolicyPeer{peer}, Ports: ports,
 		}
 	}
+	r.describe()
 	return r
 }
 
@@ -214,11 +212,13 @@ func peerSpec(k aggKey) networkingv1.NetworkPolicyPeer {
 // Baseline 恒为 Enabled：它们是必备项，不是建议项。
 func baselineRule(br baseline.Rule) Rule {
 	kind := br.Kind
-	return Rule{
+	r := Rule{
 		Origin: OriginBaseline, Baseline: &kind, Derivations: br.Derivations,
 		Direction: br.Direction, Enabled: true,
 		Ingress: br.Ingress, Egress: br.Egress,
 	}
+	r.describe()
+	return r
 }
 
 // sortRules 给规则定序：Baseline 在前，其后按方向、证据、端口、协议、对端。

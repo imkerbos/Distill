@@ -151,7 +151,19 @@ type Rule struct {
 	Direction replay.Direction `json:"direction"`
 	// FlowCount 是支撑该规则的观测流量条数；Baseline 为 0。
 	FlowCount int `json:"flowCount"`
+	// Peers 是对端的展示视图：selector 对端为 namespace/workload，
+	// ipBlock 对端为 CIDR。
+	//
+	// 与 Ports 一同随规则返回，而不是让消费方去解析 networkingv1 结构：
+	// 只报"某 workload 有 4 条启用规则"而不报放行了谁的哪个端口，
+	// 读的人无法把 payment:8080 与 0.0.0.0/0:443 区分开。
+	Peers []string `json:"peers"`
+	// Ports 是端口的展示视图，形如 TCP/8080。
+	Ports []string `json:"ports"`
 	// Ingress 在 Direction 为 INGRESS 时非空。
+	//
+	// 不出 API：k8s 结构体一旦进了响应体，界面就得自己解释 selector
+	// 语义，而它与后端迟早各解释一套。对外只给上面两个渲染好的视图。
 	Ingress *networkingv1.NetworkPolicyIngressRule `json:"-"`
 	// Egress 在 Direction 为 EGRESS 时非空。
 	Egress *networkingv1.NetworkPolicyEgressRule `json:"-"`

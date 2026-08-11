@@ -5,6 +5,7 @@ import (
 
 	"github.com/imkerbos/Distill/internal/baseline"
 	"github.com/imkerbos/Distill/internal/fixture"
+	"github.com/imkerbos/Distill/internal/snapshot"
 )
 
 // asia 的 gateway namespace 对外暴露，五类应当齐备。
@@ -55,6 +56,63 @@ func TestDeriveAlwaysIncludesDNSAndControlPlane(t *testing.T) {
 			t.Errorf("%s: control-plane baseline absent", ns)
 		}
 	}
+}
+
+// NODE_AGENT 是集群级的：集群里登记了 agent，每个 namespace 都该有这条规则。
+func TestNodeAgentIsClusterWide(t *testing.T) {
+	for _, c := range fixture.Load().Clusters {
+		for _, ns := range c.Namespaces {
+			kinds := map[baseline.Kind]bool{}
+			for _, k := range baseline.Derive(c.Assets, ns.Name).Kinds() {
+				kinds[k] = true
+			}
+			if !kinds[baseline.KindNodeAgent] {
+				t.Errorf("%s/%s: NODE_AGENT absent; node agents collect from the whole cluster",
+					c.ID, ns.Name)
+			}
+		}
+	}
+}
+
+// 没有登记任何 NodeAgent 时必须报缺失。
+//
+// fixture 两个集群都登记了 agent，这条分支在任何 fixture 数据上都走不到 ——
+// 一项永远走不到的校验在测试里等于不存在（spec §3）。因此这里手造快照。
+func TestNodeAgentMissingWhenNoneRegistered(t *testing.T) {
+	a := snapshot.Assets{
+		ClusterID: "c-no-agent",
+		Registry:  snapshot.ClusterRegistry{ClusterID: "c-no-agent", NodeCIDR: "10.128.0.0/20"},
+	}
+	if !containsKind(baseline.Derive(a, "payment").Missing(), baseline.KindNodeAgent) {
+		t.Error("Missing() omits NODE_AGENT although no NodeAgent is registered")
+	}
+}
+
+// 登记了 agent 但没有 node CIDR 时同样必须报缺失。
+//
+// 缺 CIDR 只能靠硬编码常量表补齐，而常量表不会随网段变更更新
+// （spec §7.2）；宁可报缺失，也不能编一个网段出来。
+func TestNodeAgentMissingWhenNodeCIDREmpty(t *testing.T) {
+	a := snapshot.Assets{
+		ClusterID: "c-no-cidr",
+		NodeAgents: []snapshot.NodeAgent{{
+			ClusterID: "c-no-cidr", Namespace: "kube-system", App: "log-agent",
+			HostNetwork: true, TargetPort: 9100,
+		}},
+		Registry: snapshot.ClusterRegistry{ClusterID: "c-no-cidr"},
+	}
+	if !containsKind(baseline.Derive(a, "payment").Missing(), baseline.KindNodeAgent) {
+		t.Error("Missing() omits NODE_AGENT although Registry.NodeCIDR is empty")
+	}
+}
+
+func containsKind(kinds []baseline.Kind, want baseline.Kind) bool {
+	for _, k := range kinds {
+		if k == want {
+			return true
+		}
+	}
+	return false
 }
 
 // 每条规则都必须带推导依据，一条都不能漏。

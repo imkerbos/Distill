@@ -7,6 +7,7 @@ import (
 	"github.com/imkerbos/Distill/internal/baseline"
 	"github.com/imkerbos/Distill/internal/policygen"
 	"github.com/imkerbos/Distill/internal/predict"
+	"github.com/imkerbos/Distill/internal/replay"
 )
 
 // PolicyPreview 是一次候选策略预览的完整产物。
@@ -39,7 +40,7 @@ type PolicyPreview struct {
 	Kinds []baseline.Kind `json:"baselineKinds"`
 }
 
-// PolicyPreview 生成候选策略并回放预测。集群不存在时返回错误。
+// PolicyPreview 生成候选策略并回放预测。集群或命名空间不存在时返回错误。
 func (r *FixtureReader) PolicyPreview(
 	_ context.Context, clusterID, namespace string, window TimeWindow,
 ) (PolicyPreview, error) {
@@ -49,6 +50,9 @@ func (r *FixtureReader) PolicyPreview(
 	c, ok := r.fleet.Cluster(clusterID)
 	if !ok {
 		return PolicyPreview{}, fmt.Errorf("%w: %s", ErrClusterNotFound, clusterID)
+	}
+	if namespace != "" && !hasNamespace(c.Namespaces, namespace) {
+		return PolicyPreview{}, fmt.Errorf("%w: %s/%s", ErrNamespaceNotFound, clusterID, namespace)
 	}
 
 	obs := make([]policygen.Observation, 0, len(r.fleet.Flows))
@@ -61,9 +65,15 @@ func (r *FixtureReader) PolicyPreview(
 		})
 	}
 
+	// 生成与预测一律跑整个集群，namespace 只在下面裁剪展示范围。
+	//
+	// 若把 namespace 传进生成器，预测就会拿到全量流量配一份被裁剪过的
+	// 策略集：目的地在其他 namespace 的流量因为对应策略被滤掉而落到
+	// ALLOW，凭空造出 WOULD_OPEN，同时 WOULD_BREAK 被低估 —— 两个方向
+	// 同时错，且都朝着让人放心的方向（spec §5）。
 	gen := policygen.Generate(policygen.Input{
-		ClusterID: clusterID, Namespace: namespace,
-		Assets: c.Assets, Namespaces: c.Namespaces,
+		ClusterID: clusterID,
+		Assets:    c.Assets, Namespaces: c.Namespaces,
 		// Pods 必须传入：候选策略按 workload 花名册生成而非按流量生成，
 		// 缺了它，流量全 DEGRADED（mesh 内）或全 UNKNOWN（策略写坏）的
 		// workload 会从候选集里悄悄消失，连带绕过它们的强制 Baseline 注入。
@@ -83,10 +93,51 @@ func (r *FixtureReader) PolicyPreview(
 
 	return PolicyPreview{
 		Cluster: clusterID, Namespace: namespace, Window: window,
-		Candidates:       gen.Policies,
-		MissingBaselines: gen.MissingBaselines,
+		Candidates:       filterCandidates(gen.Policies, namespace),
+		MissingBaselines: filterMissing(gen.MissingBaselines, namespace),
 		Ungeneratable:    gen.Ungeneratable,
 		Prediction:       report,
 		Kinds:            baseline.AllKinds(),
 	}, nil
+}
+
+// hasNamespace 判断命名空间是否存在于该集群的快照里。
+func hasNamespace(nss []replay.NamespaceRef, name string) bool {
+	for _, ns := range nss {
+		if ns.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// filterCandidates 按 namespace 裁剪候选策略的展示范围；空表示全集群。
+func filterCandidates(in []policygen.CandidatePolicy, namespace string) []policygen.CandidatePolicy {
+	if namespace == "" {
+		return in
+	}
+	out := make([]policygen.CandidatePolicy, 0, len(in))
+	for _, p := range in {
+		if p.Namespace == namespace {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// filterMissing 按 namespace 裁剪缺失清单的展示范围；空表示全集群。
+//
+// 与候选策略一样只裁展示：缺失是按整个集群算出来的，筛选视图不该改变
+// 某个 namespace 到底缺不缺什么。
+func filterMissing(in []policygen.MissingBaseline, namespace string) []policygen.MissingBaseline {
+	if namespace == "" {
+		return in
+	}
+	out := make([]policygen.MissingBaseline, 0, len(in))
+	for _, m := range in {
+		if m.Namespace == namespace {
+			out = append(out, m)
+		}
+	}
+	return out
 }

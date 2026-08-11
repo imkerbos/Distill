@@ -68,10 +68,13 @@ function DryRunSection({ prediction }: { prediction: PredictionReport }) {
           label="WOULD_OPEN · 敞口扩大" value={String(c.WOULD_OPEN)}
           tone="unknown" note="当前拒绝、新策略会放行 —— 不是好消息"
         />
-        <StatTile label="UNCHANGED · 无变化" value={String(c.UNCHANGED)} note="判定结论保持一致" />
+        <StatTile
+          label="UNCHANGED · 无变化" value={String(c.UNCHANGED)}
+          note="两侧都判得出、且结论一致"
+        />
         <StatTile
           label="UNKNOWN · 无法判定" value={String(c.UNKNOWN)}
-          tone="unknown" note="新策略下给不出结论"
+          tone="unknown" note="当前判定或新策略判定有一侧给不出结论"
         />
       </div>
 
@@ -127,6 +130,13 @@ function DryRunSection({ prediction }: { prediction: PredictionReport }) {
       }}>
         <StatTile label="可信判定" value={String(prediction.trustedCount)} />
         <StatTile label="可信度降级" value={String(prediction.degradedCount)} tone="degraded" />
+        {/* 恒为 0 也要显示：三档之和等于"共评估"是这一行可以自检的地方，
+            少一档就只能选择相信它。非 0 意味着后端出现了枚举外的可信度取值。 */}
+        <StatTile
+          label="可信度未登记" value={String(prediction.unratedCount)}
+          tone={prediction.unratedCount > 0 ? 'unknown' : undefined}
+          note="枚举外取值，正常为 0"
+        />
         <StatTile label="跨集群" value={String(prediction.crossClusterCount)} note="当前版本不做管控" />
         <StatTile label="不受管控" value={String(prediction.unmanagedCount)} note="hostNetwork，策略管不到" />
         <StatTile label="共评估" value={String(prediction.totalEvaluated)} />
@@ -241,6 +251,8 @@ function RuleTable({ rules }: { rules: CandidateRule[] }) {
           <th>来源</th>
           <th>依据</th>
           <th>方向</th>
+          <th>对端</th>
+          <th>端口</th>
           <th className="num">流量条数</th>
         </tr>
       </thead>
@@ -250,11 +262,33 @@ function RuleTable({ rules }: { rules: CandidateRule[] }) {
             <td><OriginBadge origin={r.origin} /></td>
             <td><RuleBasis rule={r} /></td>
             <td><Chip>{r.direction}</Chip></td>
+            <td><RuleTargets values={r.peers} /></td>
+            <td><RuleTargets values={r.ports} /></td>
             <td className="num">{r.flowCount}</td>
           </tr>
         ))}
       </tbody>
     </TableCard>
+  )
+}
+
+/**
+ * 规则的对端与端口。
+ *
+ * 没有这两列，一条规则在页面上只剩「LEARNED · EGRESS」——读的人分不出
+ * payment:8080 与 0.0.0.0/0:443，而后者是一次出公网敞口。因此即使值为空
+ * 也要显式写出「未限定」，而不是留一个空单元格：空单元格会被读成"没这项"。
+ */
+function RuleTargets({ values }: { values: string[] }) {
+  if (!values || values.length === 0) {
+    return <span style={{ color: 'var(--text-muted)' }}>未限定</span>
+  }
+  return (
+    <span className="mono" style={{
+      display: 'flex', flexDirection: 'column', gap: 2, fontSize: 'var(--text-sm)',
+    }}>
+      {values.map((v) => <span key={v}>{v}</span>)}
+    </span>
   )
 }
 
@@ -329,6 +363,9 @@ function PendingSection({ candidates }: { candidates: CandidatePolicy[] }) {
               <th>依据</th>
               <th>风险</th>
               <th>方向</th>
+              {/* 待确认规则尤其需要对端与端口：一条 SSH 规则的要害不是"它是 SSH"，
+                  而是"它通向 203.0.113.10/32 还是通向整个公网"。 */}
+              <th>对端 · 端口</th>
               <th className="num">流量条数</th>
             </tr>
           </thead>
@@ -349,6 +386,10 @@ function PendingSection({ candidates }: { candidates: CandidatePolicy[] }) {
                   )}
                 </td>
                 <td><Chip>{r.direction}</Chip></td>
+                <td>
+                  <RuleTargets values={r.peers} />
+                  <RuleTargets values={r.ports} />
+                </td>
                 <td className="num">{r.flowCount}</td>
               </tr>
             ))}

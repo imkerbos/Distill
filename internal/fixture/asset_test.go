@@ -84,3 +84,41 @@ func TestKubeDNSSelectorMatchesRealPods(t *testing.T) {
 		}
 	}
 }
+
+// 抓取端 Pod 必须真实存在，理由与 kube-dns 后端完全相同。
+//
+// METRICS_SCRAPE 的 peer 是 namespaceSelector + podSelector(ScraperLabels)。
+// 抓取端 Pod 不存在时，推导照样成功、规则照样启用、Missing() 照样报"不缺"，
+// 但这条 ingress 选中的是空集。这类"看起来正确、实际从不匹配"的规则不会
+// 报错，只会在监控静默中断时才被发现 —— 那时恰好看不到数据。
+func TestScrapeTargetScraperLabelsMatchRealPods(t *testing.T) {
+	for _, c := range fixture.Load().Clusters {
+		for _, st := range c.Assets.ScrapeTargets {
+			if len(st.ScraperLabels) == 0 {
+				t.Errorf("%s: ScrapeTarget for %s has empty ScraperLabels", c.ID, st.TargetNamespace)
+				continue
+			}
+			matched := 0
+			for _, p := range c.Pods {
+				if p.Namespace != st.ScraperNamespace {
+					continue
+				}
+				all := true
+				for k, v := range st.ScraperLabels {
+					if p.Labels[k] != v {
+						all = false
+						break
+					}
+				}
+				if all {
+					matched++
+				}
+			}
+			if matched == 0 {
+				t.Errorf("%s: scraper selector %v in namespace %q matches no Pod; "+
+					"the METRICS_SCRAPE rule for %q would select nothing",
+					c.ID, st.ScraperLabels, st.ScraperNamespace, st.TargetNamespace)
+			}
+		}
+	}
+}
