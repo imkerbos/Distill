@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"github.com/imkerbos/Distill/internal/replay"
+	"github.com/imkerbos/Distill/internal/snapshot"
 )
 
 // baseTime 是数据集的基准时刻。固定值保证每次加载完全一致。
@@ -40,6 +41,8 @@ type Cluster struct {
 	Policies []networkingv1.NetworkPolicy
 	// CCNPPresent 表示该集群存在 Cilium 策略，判定需降级。
 	CCNPPresent bool
+	// Assets 是该集群的资产快照，Baseline 推导的依据来源。
+	Assets snapshot.Assets
 }
 
 // Fleet 是全部合成数据。
@@ -159,6 +162,16 @@ func buildAsia() Cluster {
 		IP: ip(17), Labels: map[string]string{"env": "prod"},
 	})
 
+	// kube-dns 的后端。DNS Baseline 的 peer 是这两个 Pod，不是 ClusterIP ——
+	// NetworkPolicy 选不中 ClusterIP。没有它们，生成的 DNS 规则指向空集。
+	for i := 1; i <= 2; i++ {
+		pods = append(pods, replay.PodRef{
+			ClusterID: clusterID, Namespace: "kube-system", Name: fmt.Sprintf("kube-dns-%d", i),
+			IP: ip(17 + i), Labels: map[string]string{"k8s-app": "kube-dns"},
+			NamedPorts: []replay.NamedPort{{Name: "dns", Port: 53, Protocol: replay.ProtocolUDP}},
+		})
+	}
+
 	emptySelector := metav1.LabelSelector{}
 	apiSelector := metav1.LabelSelector{MatchLabels: map[string]string{"app": "api"}}
 	tcpProto := corev1.ProtocolTCP
@@ -209,7 +222,7 @@ func buildAsia() Cluster {
 		},
 	}
 
-	return Cluster{ID: clusterID, Namespaces: namespaces, Pods: pods, Policies: policies}
+	return Cluster{ID: clusterID, Namespaces: namespaces, Pods: pods, Policies: policies, Assets: asiaAssets()}
 }
 
 // buildEU 构造 prod-eu-1 集群：payment 与 asia 同名但是独立对象，partner
@@ -221,6 +234,9 @@ func buildEU() Cluster {
 	namespaces := []replay.NamespaceRef{
 		{ClusterID: clusterID, Name: "payment", Labels: map[string]string{"env": "prod"}},
 		{ClusterID: clusterID, Name: "partner", Labels: map[string]string{"env": "prod"}},
+		// eu 也必须有 kube-dns：DNS Baseline 是每个集群每个 namespace 都要的，
+		// 只在一个集群里造数据会让「另一个集群缺 DNS」这种假象被当成真结论。
+		{ClusterID: clusterID, Name: "kube-system", Labels: map[string]string{"env": "prod"}},
 	}
 
 	// payment 的 IP 故意与 asia 的 gateway Pod 重叠（10.4.0.1 / .2）：
@@ -230,9 +246,15 @@ func buildEU() Cluster {
 		{ClusterID: clusterID, Namespace: "payment", Name: "payment-2", IP: "10.4.0.2", Labels: map[string]string{"app": "api"}},
 		{ClusterID: clusterID, Namespace: "partner", Name: "partner-1", IP: "10.4.1.1", Labels: map[string]string{"app": "partner"}},
 		{ClusterID: clusterID, Namespace: "partner", Name: "partner-2", IP: "10.4.1.2", Labels: map[string]string{"app": "partner"}},
+		{ClusterID: clusterID, Namespace: "kube-system", Name: "kube-dns-1", IP: "10.4.2.1",
+			Labels:     map[string]string{"k8s-app": "kube-dns"},
+			NamedPorts: []replay.NamedPort{{Name: "dns", Port: 53, Protocol: replay.ProtocolUDP}}},
+		{ClusterID: clusterID, Namespace: "kube-system", Name: "kube-dns-2", IP: "10.4.2.2",
+			Labels:     map[string]string{"k8s-app": "kube-dns"},
+			NamedPorts: []replay.NamedPort{{Name: "dns", Port: 53, Protocol: replay.ProtocolUDP}}},
 	}
 
-	return Cluster{ID: clusterID, Namespaces: namespaces, Pods: pods}
+	return Cluster{ID: clusterID, Namespaces: namespaces, Pods: pods, Assets: euAssets()}
 }
 
 // podEndpoint 把一个已还原身份的 Pod 转成流量端点。取 p 的副本取址，
