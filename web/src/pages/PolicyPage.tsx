@@ -1,15 +1,16 @@
 import { useState, type CSSProperties, type ReactNode } from 'react'
 import { api, ApiError } from '../api/client'
 import {
-  RISK_CATEGORY_LABEL, UNKNOWN_REASON_LABEL,
-  type CandidatePolicy, type CandidateRule, type ChangedFlow, type Confidence,
-  type Kind, type MissingBaseline, type OverrideDecision, type PredictionReport,
+  RISK_CATEGORY_LABEL,
+  type CandidatePolicy, type CandidateRule, type ExcludedWorkload,
+  type Kind, type MissingBaseline, type OverrideDecision,
   type RuleOrigin, type RuleOverride, type StaleOverride,
-  type UngeneratableItem, type UngeneratableReason, type Verdict,
+  type UngeneratableItem, type UngeneratableReason, type WorkloadExclusionReason,
 } from '../api/types'
 import { useResource } from '../api/useResource'
-import { CrossClusterMark, UnmanagedMark, VerdictBadge } from '../components/Verdict'
-import { Card, Chip, EmptyState, Notice, PageHeader, Section, StatTile, TableCard } from '../components/ui'
+import { DryRunDetail } from './DryRunDetail'
+import { dryRunView, type DryRunView } from './dryRunView'
+import { Card, Chip, EmptyState, Notice, PageHeader, ScrollTableCard, Section, StickyHead, StatTile, TableCard } from '../components/ui'
 
 /**
  * 不可生成原因的中文标签。只在本页使用，未像 unknownReason / RiskCategory
@@ -21,6 +22,20 @@ const UNGENERATABLE_REASON_LABEL: Record<UngeneratableReason, string> = {
   IDENTITY_UNKNOWN: '端点身份无法确定',
   DEGRADED_EVIDENCE: '证据被降级，不可作为策略推荐依据',
   UNMANAGED_ENDPOINT: '对端不受 NetworkPolicy 管控',
+  LABEL_KEY_CONFLICT: '同名 workload 挂在优先级更低的标签键上，候选策略的 podSelector 选不中它',
+}
+
+/**
+ * 工作负载被排除在花名册之外的原因的中文标签。
+ *
+ * 键类型是封闭枚举而不是 string：后端新增一个排除原因却忘了在这里补一
+ * 条文案，`tsc` 会直接报错，而不是让界面渲染出一个空白的原因列——一个
+ * 空白的原因等于告诉运维「它没被覆盖，但我不告诉你为什么」。
+ */
+const WORKLOAD_EXCLUSION_REASON_LABEL: Record<WorkloadExclusionReason, string> = {
+  UNMANAGED_ENDPOINT: 'Pod 使用 hostNetwork，NetworkPolicy 本身管不到它',
+  NO_WORKLOAD_LABEL: '缺少可识别的 workload 标签，podSelector 无法表达这个 Pod',
+  LABEL_KEY_CONFLICT: '同名 workload 另有优先级更高的归属标签键，赢家的 podSelector 选不中这个 Pod',
 }
 
 export default function PolicyPage({ cluster }: { cluster: string }) {
@@ -62,15 +77,18 @@ export default function PolicyPage({ cluster }: { cluster: string }) {
         description="dry-run 预测置顶：先看这条推荐会拦掉多少条当前正在工作的连接，再看策略本身长什么样。顺序即优先级。"
       />
 
+      {/* 两套预测在整个前端只在这一处同时出现：dryRunView 收下它们，
+          往下传的是一个已经选定的视图。哪一套该被强调、哪一套该出现在
+          明细里，从这一行之后就不再是一个可以答错的问题。 */}
       <DryRunSection
-        prediction={pv.prediction}
-        overridden={pv.overridden.prediction}
+        view={dryRunView(pv.prediction, pv.overridden.prediction, overrides.length)}
         overrideCount={overrides.length}
       />
       <CandidateSection candidates={pv.candidates} overrides={overrides} cluster={cluster} onChanged={onChanged} />
       <PendingSection candidates={pv.candidates} overrides={overrides} cluster={cluster} onChanged={onChanged} />
       <StaleOverridesSection staleOverrides={pv.staleOverrides} />
       <MissingBaselineSection missing={pv.missingBaselines} baselineKinds={pv.baselineKinds} />
+      <ExcludedWorkloadSection items={pv.excludedWorkloads ?? []} />
       <UngeneratableSection items={pv.ungeneratable} />
     </div>
   )
@@ -121,14 +139,16 @@ function NoTrafficNotice() {
  * Apply 对空覆盖列表是恒等变换——此时只显示一组数：否则每个集群第一次
  * 打开都要看一堆 `→ 0`，噪声掩盖了真正有覆盖时该看的差值。
  */
-function DryRunSection({ prediction, overridden, overrideCount }: {
-  prediction: PredictionReport
-  overridden: PredictionReport
+function DryRunSection({ view, overrideCount }: {
+  view: DryRunView
   overrideCount: number
 }) {
-  const c = prediction.counts
-  const o = overridden.counts
-  const showDelta = overrideCount > 0
+  // 这个组件拿不到两套预测，只拿得到 dryRunView 选定后的视图：tile 的
+  // 两端与明细区因此不可能来自不同的预测。C1 那条缺陷（清单列 81 行、
+  // 正上方的 tile 写着 78）在这里不是"被测试盯着"，是写不出来。
+  const c = view.baseline
+  const o = view.emphasized
+  const showDelta = view.showDelta
 
   const breakDelta = o.WOULD_BREAK - c.WOULD_BREAK
   const openDelta = o.WOULD_OPEN - c.WOULD_OPEN
@@ -176,69 +196,15 @@ function DryRunSection({ prediction, overridden, overrideCount }: {
         />
       </div>
 
-      <ChangeDetailTable
-        title="会被拦断的连接" rows={prediction.changes.WOULD_BREAK}
-        emptyMessage="没有会被这条推荐拦断的连接。"
-        emptyDetail="基于当前候选策略对观测流量重放计算得出，不是未检测。"
-      />
-
-      <div style={{ marginTop: 'var(--space-4)' }}>
-        <ChangeDetailTable
-          title="敞口会被扩大的连接" rows={prediction.changes.WOULD_OPEN}
-          emptyMessage="没有会被这条推荐放宽为放行的连接。"
-          emptyDetail="基于当前候选策略对观测流量重放计算得出，不是未检测；WOULD_OPEN 为 0 是一个真实的 0。"
-        />
-      </div>
-
-      <div style={{ marginTop: 'var(--space-4)' }}>
-        <div style={{
-          display: 'flex', alignItems: 'baseline', justifyContent: 'space-between',
-          marginBottom: 'var(--space-2)', flexWrap: 'wrap', gap: 'var(--space-2)',
+      {showDelta && (
+        <p style={{
+          margin: '0 0 var(--space-2)', fontSize: 'var(--text-xs)', color: 'var(--text-muted)',
         }}>
-          <strong style={{ fontSize: 'var(--text-sm)' }}>UNKNOWN 的构成</strong>
-          <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
-            只报一个总数无法说明该去修哪个子系统，下面是这 {c.UNKNOWN} 条的具体成因。
-          </span>
-        </div>
-        {Object.keys(prediction.unknownComposition).length === 0 ? (
-          <EmptyState message="没有无法判定的变化。" detail="全部变化都得到了明确结论；这不代表结论都可信，可信度见下方降级计数。" />
-        ) : (
-          <TableCard>
-            <thead>
-              <tr><th>成因</th><th>枚举值</th><th className="num">条数</th></tr>
-            </thead>
-            <tbody>
-              {Object.entries(prediction.unknownComposition)
-                .sort((a, b) => b[1] - a[1])
-                .map(([reason, count]) => (
-                  <tr key={reason}>
-                    <td>{UNKNOWN_REASON_LABEL[reason] ?? reason}</td>
-                    <td className="mono">{reason}</td>
-                    <td className="num" style={{ fontWeight: 600 }}>{count}</td>
-                  </tr>
-                ))}
-            </tbody>
-          </TableCard>
-        )}
-      </div>
+          {view.detail.basis}
+        </p>
+      )}
 
-      <div style={{
-        display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
-        gap: 'var(--space-3)', marginTop: 'var(--space-4)',
-      }}>
-        <StatTile label="可信判定" value={String(prediction.trustedCount)} />
-        <StatTile label="可信度降级" value={String(prediction.degradedCount)} tone="degraded" />
-        {/* 恒为 0 也要显示：三档之和等于"共评估"是这一行可以自检的地方，
-            少一档就只能选择相信它。非 0 意味着后端出现了枚举外的可信度取值。 */}
-        <StatTile
-          label="可信度未登记" value={String(prediction.unratedCount)}
-          tone={prediction.unratedCount > 0 ? 'unknown' : undefined}
-          note="枚举外取值，正常为 0"
-        />
-        <StatTile label="跨集群" value={String(prediction.crossClusterCount)} note="当前版本不做管控" />
-        <StatTile label="不受管控" value={String(prediction.unmanagedCount)} note="hostNetwork，策略管不到" />
-        <StatTile label="共评估" value={String(prediction.totalEvaluated)} />
-      </div>
+      <DryRunDetail view={view.detail} />
     </Section>
   )
 }
@@ -321,62 +287,6 @@ function DryRunMetric({
         </div>
       )}
     </Card>
-  )
-}
-
-function ChangeDetailTable({ title, rows, emptyMessage, emptyDetail }: {
-  title: string
-  rows: ChangedFlow[]
-  emptyMessage: string
-  emptyDetail: string
-}) {
-  return (
-    <div>
-      <div style={{
-        display: 'flex', alignItems: 'baseline', justifyContent: 'space-between',
-        marginBottom: 'var(--space-2)',
-      }}>
-        <strong style={{ fontSize: 'var(--text-sm)' }}>{title}</strong>
-        <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>{rows.length} 条</span>
-      </div>
-      {rows.length === 0 ? (
-        <EmptyState message={emptyMessage} detail={emptyDetail} />
-      ) : (
-        <ScrollTableCard maxHeight={420}>
-          <thead style={STICKY_HEAD}>
-            <tr>
-              <th>源 → 目的</th>
-              <th>协议/端口</th>
-              <th>判定变化</th>
-              <th>标记</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((f) => (
-              <tr key={f.flowId}>
-                <td className="mono" style={{ fontSize: 'var(--text-sm)' }}>
-                  {f.sourceLabel} → {f.destLabel}
-                </td>
-                <td className="num">{f.protocol}:{f.port}</td>
-                <td>
-                  <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <VerdictBadge verdict={f.current as Verdict} />
-                    <span style={{ color: 'var(--text-muted)' }}>→</span>
-                    <VerdictBadge verdict={f.predicted as Verdict} confidence={f.confidence as Confidence} />
-                  </span>
-                </td>
-                <td>
-                  <span style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                    {f.crossCluster && <CrossClusterMark />}
-                    {f.unmanaged && <UnmanagedMark />}
-                  </span>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </ScrollTableCard>
-      )}
-    </div>
   )
 }
 
@@ -794,7 +704,7 @@ function PendingSection({ candidates, overrides, cluster, onChanged }: {
         <EmptyState message="没有待确认的规则。" detail="全部候选规则都满足自动启用条件，也没有人工禁用过任何默认启用的规则。" />
       ) : (
         <ScrollTableCard maxHeight={560}>
-          <thead style={STICKY_HEAD}>
+          <StickyHead>
             <tr>
               <th>namespace/workload</th>
               <th>依据</th>
@@ -807,7 +717,7 @@ function PendingSection({ candidates, overrides, cluster, onChanged }: {
               <th>镜像对</th>
               <th>人工决定</th>
             </tr>
-          </thead>
+          </StickyHead>
           <tbody>
             {pending.map(({ namespace, workload, rule: r, originallyEnabled, override }) => {
               const mirror = findMirroredCounterpart(candidates, namespace, workload, r)
@@ -887,14 +797,14 @@ function StaleOverridesSection({ staleOverrides }: { staleOverrides: StaleOverri
       meta={`${staleOverrides.length} 条`}
     >
       <ScrollTableCard maxHeight={480}>
-        <thead style={STICKY_HEAD}>
+        <StickyHead>
           <tr>
             <th>namespace/workload</th>
             <th>当初确认</th>
             <th>现在这个位置</th>
             <th>失效原因</th>
           </tr>
-        </thead>
+        </StickyHead>
         <tbody>
           {staleOverrides.map((s) => (
             <tr key={`${s.override.namespace}/${s.override.workload}/${s.override.fingerprint}`}>
@@ -972,7 +882,90 @@ function MissingBaselineSection({ missing, baselineKinds }: {
 }
 
 /* ---------------------------------------------------------------------- */
-/* 7. 不可生成清单                                                         */
+/* 7. 未进入候选集的工作负载                                                */
+/* ---------------------------------------------------------------------- */
+
+/**
+ * 从未进入候选策略花名册的 Pod。
+ *
+ * 与「不可生成清单」是两码事，因此单列一节：后者说的是"这条流量表达不成
+ * 规则"，这一节说的是更前一步的缺口——这些 Pod 根本没进名册，因此不会作为
+ * 主体出现在任何一条判定里，连"不可生成"都报不出它们。不展示它，页面就在
+ * 用「候选策略 7 组、不可生成 97 条」这种读起来像是全都盘过一遍的口径，
+ * 掩盖掉一批一条策略都没有的 Pod。
+ */
+function ExcludedWorkloadSection({ items }: { items: ExcludedWorkload[] }) {
+  const groups = new Map<WorkloadExclusionReason, ExcludedWorkload[]>()
+  for (const it of items) {
+    const g = groups.get(it.reason) ?? []
+    g.push(it)
+    groups.set(it.reason, g)
+  }
+
+  return (
+    <Section
+      title="未被任何候选策略覆盖的工作负载"
+      description="这些 Pod 从未进入候选策略的花名册，因此没有任何一条生成出来的策略覆盖它们——不是「规则偏少」，是一条都没有。原因是封闭枚举。与「不可生成清单」同理，它们不受 namespace 筛选影响：一个没进名册的 Pod 在哪个视图下都同样缺失。"
+      meta={`${items.length} 个 Pod`}
+    >
+      {items.length === 0 ? (
+        <EmptyState
+          message="没有被排除在外的工作负载。"
+          detail="本集群的每个 Pod 都进入了候选策略花名册。这不代表它们的每条流量都能表达成规则——那部分见下方「不可生成清单」。"
+        />
+      ) : (
+        [...groups.entries()].map(([reason, rows]) => (
+          <div key={reason} style={{ marginBottom: 'var(--space-4)' }}>
+            <div style={{
+              display: 'flex', alignItems: 'baseline', gap: 'var(--space-2)',
+              marginBottom: 'var(--space-2)', flexWrap: 'wrap',
+            }}>
+              <strong style={{ fontSize: 'var(--text-sm)' }}>
+                {WORKLOAD_EXCLUSION_REASON_LABEL[reason]}
+              </strong>
+              <span className="mono" style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+                {reason}
+              </span>
+              <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>· {rows.length} 个</span>
+            </div>
+            <ScrollTableCard maxHeight={320}>
+              <StickyHead>
+                {/* 标签必须列出来：这一节最常见的处置方式是"标签键写错了"或
+                    "用了平台还不认识的键"，而这两件事只看 namespace/pod 看不出来。 */}
+                <tr><th>namespace</th><th>pod</th><th>标签</th></tr>
+              </StickyHead>
+              <tbody>
+                {rows.map((w) => (
+                  <tr key={`${w.namespace}/${w.pod}`}>
+                    <td className="mono">{w.namespace}</td>
+                    <td className="mono">{w.pod}</td>
+                    <td><PodLabels labels={w.labels} /></td>
+                  </tr>
+                ))}
+              </tbody>
+            </ScrollTableCard>
+          </div>
+        ))
+      )}
+    </Section>
+  )
+}
+
+/** Pod 标签。空标签集显式写出来，理由同 RuleTargets 的「未限定」：空单元格会被读成"没这项"。 */
+function PodLabels({ labels }: { labels: Record<string, string> }) {
+  const entries = Object.entries(labels)
+  if (entries.length === 0) {
+    return <span style={{ color: 'var(--text-muted)' }}>无标签</span>
+  }
+  return (
+    <span style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+      {entries.map(([k, v]) => <Chip key={k}>{k}={v}</Chip>)}
+    </span>
+  )
+}
+
+/* ---------------------------------------------------------------------- */
+/* 8. 不可生成清单                                                         */
 /* ---------------------------------------------------------------------- */
 
 function UngeneratableSection({ items }: { items: UngeneratableItem[] }) {
@@ -1007,9 +1000,9 @@ function UngeneratableSection({ items }: { items: UngeneratableItem[] }) {
               <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>· {rows.length} 条</span>
             </div>
             <ScrollTableCard maxHeight={320}>
-              <thead style={STICKY_HEAD}>
+              <StickyHead>
                 <tr><th>flowId</th><th>detail</th></tr>
-              </thead>
+              </StickyHead>
               <tbody>
                 {rows.map((it) => (
                   <tr key={it.flowId}>
@@ -1030,8 +1023,6 @@ function UngeneratableSection({ items }: { items: UngeneratableItem[] }) {
 /* 共享小件                                                                 */
 /* ---------------------------------------------------------------------- */
 
-const STICKY_HEAD = { position: 'sticky' as const, top: 0, background: 'var(--surface)' }
-
 /** 与 ClustersPage 的 formatTime 同一形状，本页独立维护一份（同一处约定，非共享导出）。 */
 function formatTime(iso: string): string {
   return new Date(iso).toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC')
@@ -1049,17 +1040,3 @@ const secondarySmallButtonStyle: CSSProperties = {
   border: '1px solid var(--border-strong)', borderRadius: 'var(--radius-sm)', cursor: 'pointer',
 }
 
-/**
- * 带纵向滚动的表格容器。
- *
- * 后端刻意不分页、不截断（每类变化都带完整连接清单），把全部行铺开会
- * 让页面高达数万像素；这里用固定高度 + 内部滚动承接，而不是截断数据——
- * 总数与每一行都必须可达，只是不必同时进入视口。
- */
-function ScrollTableCard({ children, maxHeight = 420 }: { children: ReactNode; maxHeight?: number }) {
-  return (
-    <Card style={{ overflow: 'auto', maxHeight }}>
-      <table className="dt">{children}</table>
-    </Card>
-  )
-}

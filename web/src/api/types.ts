@@ -213,6 +213,7 @@ export type Kind =
 /** 一条流量无法生成候选规则的封闭原因枚举。 */
 export type UngeneratableReason =
   | 'NO_WORKLOAD_LABEL' | 'IDENTITY_UNKNOWN' | 'DEGRADED_EVIDENCE' | 'UNMANAGED_ENDPOINT'
+  | 'LABEL_KEY_CONFLICT'
 
 /** dry-run 预测的四类变化，WOULD_OPEN 不是"通过"而是敞口扩大。 */
 export type ChangeKind = 'WOULD_BREAK' | 'WOULD_OPEN' | 'UNCHANGED' | 'UNKNOWN'
@@ -299,6 +300,25 @@ export interface UngeneratableItem {
   flowId: string
   reason: UngeneratableReason
   detail: string
+}
+
+/**
+ * 一个 Pod 未进入候选策略花名册的封闭原因枚举。
+ *
+ * 与 UngeneratableReason 分列，不合并：后者说的是"某条流量表达不成规则"，
+ * 这一套说的是更早一步的缺口——这个 Pod 从未进入名册，因此不会作为主体
+ * 出现在任何一条流量判定里，UngeneratableReason 报不出它。
+ */
+export type WorkloadExclusionReason =
+  | 'UNMANAGED_ENDPOINT' | 'NO_WORKLOAD_LABEL' | 'LABEL_KEY_CONFLICT'
+
+/** 一个从未进入候选策略花名册的 Pod：它没有任何候选策略覆盖。 */
+export interface ExcludedWorkload {
+  namespace: string
+  pod: string
+  /** 该 Pod 的原始标签，供排查是否只是标签键拼错或用了平台还未识别的键。 */
+  labels: Record<string, string>
+  reason: WorkloadExclusionReason
 }
 
 export interface ChangedFlow {
@@ -405,6 +425,13 @@ export interface PolicyPreview {
   candidates: CandidatePolicy[]
   missingBaselines: MissingBaseline[]
   ungeneratable: UngeneratableItem[]
+  /**
+   * 从未进入候选策略花名册的 Pod。
+   *
+   * 类型带 `| null`，理由同 overrides：后端用 `var excluded []ExcludedWorkload`
+   * 收集，零条时是 nil 切片，`encoding/json` 序列化成 `null` 而不是 `[]`。
+   */
+  excludedWorkloads: ExcludedWorkload[] | null
   prediction: PredictionReport
   /** 全量 baseline 类型清单，用于把 missingBaselines 的"没缺"与"没查"区分开。 */
   baselineKinds: Kind[]
