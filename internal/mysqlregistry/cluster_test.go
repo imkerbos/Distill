@@ -26,7 +26,7 @@ func newTestStore(t *testing.T) (*mysqlregistry.Store, *sql.DB) {
 	}
 	// 每个测试从干净状态开始。删除顺序与外键依赖相反。
 	for _, tbl := range []string{
-		"audit_log", "policy_import", "cluster_git_binding",
+		"audit_log", "rule_override", "policy_import", "cluster_git_binding",
 		"cluster_health_check_source", "cluster_apiserver", "cluster",
 	} {
 		//nolint:gosec // G202: tbl comes from the fixed literal slice above, not external input

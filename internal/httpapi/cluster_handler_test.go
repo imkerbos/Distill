@@ -20,15 +20,17 @@ import (
 // 不连数据库：handler 要验证的是参数解析、错误码映射与响应形状，
 // 而事务与外键行为在 internal/mysqlregistry 的集成测试里验证。
 type memRegistry struct {
-	clusters map[string]registry.Cluster
-	imports  map[string][]registry.PolicyImport
-	failWith error
+	clusters  map[string]registry.Cluster
+	imports   map[string][]registry.PolicyImport
+	overrides map[string][]registry.RuleOverride
+	failWith  error
 }
 
 func newMemRegistry() *memRegistry {
 	return &memRegistry{
-		clusters: map[string]registry.Cluster{},
-		imports:  map[string][]registry.PolicyImport{},
+		clusters:  map[string]registry.Cluster{},
+		imports:   map[string][]registry.PolicyImport{},
+		overrides: map[string][]registry.RuleOverride{},
 	}
 }
 
@@ -119,6 +121,51 @@ func (m *memRegistry) SoftDeletePolicyImport(_ context.Context, _ registry.Actor
 	}
 	m.imports[clusterID] = kept
 	return nil
+}
+
+func (m *memRegistry) RuleOverrides(_ context.Context, clusterID string) ([]registry.RuleOverride, error) {
+	if m.failWith != nil {
+		return nil, m.failWith
+	}
+	return m.overrides[clusterID], nil
+}
+
+// CreateRuleOverride 与 mysqlregistry 一样覆盖旧值而非报冲突：这个替身若
+// 让重复决定并存，handler 测试就验证不出「重复决定该覆盖」这条约束。
+func (m *memRegistry) CreateRuleOverride(_ context.Context, _ registry.Actor, o registry.RuleOverride) error {
+	if m.failWith != nil {
+		return m.failWith
+	}
+	if err := registry.ValidateOverride(o); err != nil {
+		return err
+	}
+	list := m.overrides[o.ClusterID]
+	for i, existing := range list {
+		if existing.Namespace == o.Namespace && existing.Workload == o.Workload &&
+			existing.Fingerprint == o.Fingerprint {
+			list[i] = o
+			return nil
+		}
+	}
+	m.overrides[o.ClusterID] = append(list, o)
+	return nil
+}
+
+func (m *memRegistry) SoftDeleteRuleOverride(
+	_ context.Context, _ registry.Actor, clusterID, namespace, workload, fingerprint string,
+) error {
+	if m.failWith != nil {
+		return m.failWith
+	}
+	list := m.overrides[clusterID]
+	for i, existing := range list {
+		if existing.Namespace == namespace && existing.Workload == workload &&
+			existing.Fingerprint == fingerprint {
+			m.overrides[clusterID] = append(list[:i], list[i+1:]...)
+			return nil
+		}
+	}
+	return registry.ErrNotFound
 }
 
 // authedPostJSON 与 session_handler_test.go 的 postJSON 同形，多带一个
