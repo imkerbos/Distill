@@ -88,6 +88,52 @@ func TestValidateClusterAcceptsCompleteGitBinding(t *testing.T) {
 	}
 }
 
+// validClusterWithGit 是一个完整的、已通过校验的 Git 绑定，供只需要
+// 改动绑定里单个字段的用例复用。
+func validClusterWithGit() registry.Cluster {
+	c := validCluster()
+	c.Git = &registry.GitBinding{ //nolint:gosec // G101 false positive: CredentialRef holds a Secret Manager name, not a credential.
+		RepoURL:       "https://gitlab.example.com/net/policies.git",
+		Branch:        "main",
+		PolicyPath:    "clusters/prod-asia-1",
+		CredentialRef: "prod-asia-1-git",
+	}
+	return c
+}
+
+// verifyResult 是封闭枚举：一个未登记的取值不能悄悄存进去，否则前端
+// 文案映射与统计口径都对不上号。
+func TestValidateClusterRejectsUnknownVerifyResult(t *testing.T) {
+	c := validClusterWithGit()
+	c.Git.VerifyResult = "PROBABLY_FINE"
+	if err := registry.ValidateCluster(c); !errors.Is(err, registry.ErrInvalid) {
+		t.Fatalf("ValidateCluster() = %v, want ErrInvalid", err)
+	}
+}
+
+// credentialRef 复用 secrets.ValidateRef 而不是另写一份字符集校验，
+// 这条用例锁住这个复用关系：路径穿越式的引用必须在这里就被拦下。
+func TestValidateClusterRejectsMalformedCredentialRef(t *testing.T) {
+	c := validClusterWithGit()
+	c.Git.CredentialRef = "../escape"
+	err := registry.ValidateCluster(c)
+	if !errors.Is(err, registry.ErrInvalid) {
+		t.Fatalf("ValidateCluster() = %v, want ErrInvalid", err)
+	}
+	if !strings.Contains(err.Error(), "credentialRef") {
+		t.Errorf("error %q does not name the offending field", err)
+	}
+}
+
+// credentialRef 可以为空：绑定可以先记下来，凭据稍后再配。
+func TestValidateClusterAllowsEmptyCredentialRef(t *testing.T) {
+	c := validClusterWithGit()
+	c.Git.CredentialRef = ""
+	if err := registry.ValidateCluster(c); err != nil {
+		t.Fatalf("ValidateCluster() = %v, want nil", err)
+	}
+}
+
 func validImport() registry.PolicyImport {
 	return registry.PolicyImport{
 		ClusterID: "prod-asia-1", ImportID: "imp-1", Plane: "networkpolicy",

@@ -409,7 +409,7 @@ func TestUpdateClusterBindsAndClearsGit(t *testing.T) {
 	// Manager 里的引用（见 registry.GitBinding.CredentialRef），但写成
 	// 内联字面量会被 gosec G101 读成硬编码凭据 —— 与其压掉那条告警，
 	// 不如让代码形状本身与"这不是一个秘密"这句话一致。
-	bindingRef := "sm://distill/policies-writer"
+	bindingRef := "distill-policies-writer"
 	full := map[string]any{
 		"displayName": "C1", "podCidr": "10.4.0.0/14", "nodeCidr": "10.128.0.0/20",
 		"apiServers":         []map[string]any{{"host": "10.9.0.2", "cidr": "10.9.0.0/28", "port": 443}},
@@ -482,7 +482,7 @@ func TestUpdateClusterIgnoresCallerSuppliedDriftBaseline(t *testing.T) {
 	}
 	h, _, cookie := newTestRouterWithRegistry(t, fixtureReader(), reg)
 
-	bindingRef := "sm://distill/policies-writer"
+	bindingRef := "distill-policies-writer"
 	body := func(branch, policyPath string) map[string]any {
 		return map[string]any{
 			"displayName": "C1", "podCidr": "10.4.0.0/14", "nodeCidr": "10.128.0.0/20",
@@ -639,7 +639,7 @@ func TestDeleteClusterRoundTrips(t *testing.T) {
 // 提成常量而不是写在两处字面量里：除了让期望值与请求体共用同一个值，
 // 也避免 gosec G101 把「字段名带 credential」的字面量当成硬编码凭据 ——
 // 这里存的是引用，不是凭据，而消掉误报比挂一条 //nolint 更诚实。
-const gitBindingRef = "sm://distill/git"
+const gitBindingRef = "distill-git"
 
 // 请求体 → 领域对象的整体比对：逐字段挑着断言挡不住漏映射。
 //

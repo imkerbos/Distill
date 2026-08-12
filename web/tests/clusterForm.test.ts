@@ -10,7 +10,7 @@ const binding: GitBinding = {
   repoUrl: 'https://gitlab.example.com/net/policies.git',
   branch: 'main',
   policyPath: 'clusters/prod-asia-1',
-  credentialRef: 'sm://git-token',
+  credentialRef: 'git-token',
   lastWrittenCommit: '0123456789abcdef0123456789abcdef01234567',
 }
 
@@ -100,7 +100,7 @@ test('勾选解除后提交 null，且文案点名当前绑定的去向', () => 
  */
 test('只填 credentialRef 也要求 repoUrl / branch / policyPath', () => {
   const values = blankFormValues()
-  values.git.credentialRef = 'sm://git-token'
+  values.git.credentialRef = 'git-token'
 
   const built = buildClusterWrite(values, null)
   assert.equal(built.ok, false)
@@ -133,7 +133,7 @@ test('提交体不含 lastWrittenCommit：漂移基准不由客户端提供', ()
   assert.equal(Object.hasOwn(built.body.git as object, 'lastWrittenCommit'), false,
     '客户端一旦能带上这个字段，伪造的基准就有了入口')
   // 其余四项照常提交：credentialRef 是操作者填写的引用，本就该由调用方给。
-  assert.equal(built.body.git?.credentialRef, 'sm://git-token')
+  assert.equal(built.body.git?.credentialRef, 'git-token')
   assert.equal(built.body.git?.policyPath, 'clusters/prod-asia-1/net')
 })
 

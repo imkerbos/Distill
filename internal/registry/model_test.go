@@ -71,6 +71,44 @@ func TestImportSourceEnumIsClosed(t *testing.T) {
 	}
 }
 
+// VerifyResult 的字面值必须钉死：它们既是 verify_result 列的取值，
+// 也是前端文案映射的键。改一个字母不会有编译错误，症状是界面上
+// 校验结论显示空白，或统计口径悄悄漏计一类结果。
+func TestVerifyResultLiteralsArePinned(t *testing.T) {
+	for got, want := range map[registry.VerifyResult]string{
+		registry.VerifyNotVerified:          "NOT_VERIFIED",
+		registry.VerifyOK:                   "OK",
+		registry.VerifyCredentialUnresolved: "CREDENTIAL_UNRESOLVED",
+		registry.VerifyAuthFailed:           "AUTH_FAILED",
+		registry.VerifyRepoUnreachable:      "REPO_UNREACHABLE",
+		registry.VerifyBranchMissing:        "BRANCH_MISSING",
+		registry.VerifyPathMissing:          "PATH_MISSING",
+	} {
+		if string(got) != want {
+			t.Errorf("VerifyResult literal = %q, want %q", got, want)
+		}
+	}
+}
+
+// 七个登记过的取值必须全部 Valid()，一个随手编的取值必须不是。
+// 这条锁住 Valid() 的显式 switch 与常量列表保持同步 —— 加一个常量却
+// 忘了把它加进 switch，这条测试会先红。
+func TestVerifyResultEnumIsClosed(t *testing.T) {
+	known := []registry.VerifyResult{
+		registry.VerifyNotVerified, registry.VerifyOK, registry.VerifyCredentialUnresolved,
+		registry.VerifyAuthFailed, registry.VerifyRepoUnreachable,
+		registry.VerifyBranchMissing, registry.VerifyPathMissing,
+	}
+	for _, v := range known {
+		if !v.Valid() {
+			t.Errorf("registered verify result %q reported invalid", v)
+		}
+	}
+	if registry.VerifyResult("PROBABLY_FINE").Valid() {
+		t.Error("unregistered verify result reported valid")
+	}
+}
+
 // ToSnapshot 是 registry 与既有 Baseline 推导之间的唯一桥梁。
 // 字段漏映射不会有编译错误，只会让某类 Baseline 悄悄推导不出来。
 //

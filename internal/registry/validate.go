@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+
+	"github.com/imkerbos/Distill/internal/secrets"
 )
 
 // ErrInvalid 表示输入不合法。
@@ -175,6 +177,23 @@ func validateGit(g *GitBinding) error {
 	}
 	if g.RepoURL == "" || g.Branch == "" || g.PolicyPath == "" {
 		return invalid("Git 绑定的 repoUrl、branch、policyPath 三项必须同时填写")
+	}
+	// credentialRef 可以为空：绑定可以先记下来，凭据稍后再配。非空时
+	// 复用 secrets.ValidateRef，不另写一份字符集校验 —— 两份安全相关的
+	// 字符类定义迟早会走样。
+	if g.CredentialRef != "" {
+		if err := secrets.ValidateRef(g.CredentialRef); err != nil {
+			return wrapInvalid(fmt.Sprintf("credentialRef %q 不是合法的凭据引用", g.CredentialRef), err)
+		}
+	}
+	// 空值按 NOT_VERIFIED 处理：绑定刚创建、还没跑过校验时，
+	// VerifyResult 字段就是零值，这不该被当成非法输入。
+	vr := g.VerifyResult
+	if vr == "" {
+		vr = VerifyNotVerified
+	}
+	if !vr.Valid() {
+		return invalidf("verifyResult %q 不在已登记的取值范围内", g.VerifyResult)
 	}
 	return nil
 }
