@@ -35,6 +35,10 @@ func (s *stubGitVerifier) Verify(_ context.Context, b registry.GitBinding) regis
 }
 
 // boundCluster 是一个带 Git 绑定的集群，供重校验用例复用。
+//
+// VerifyResult 写成 NOT_VERIFIED 而不是留零值：库里的每一行都带着一个
+// 已登记的取值（BindGitRepo 会把空值落成 NOT_VERIFIED），一个空串的
+// fixture 描述的是一种存不进库的状态。
 func boundCluster() registry.Cluster {
 	return registry.Cluster{
 		ID: "c1", DisplayName: "C1", PodCIDR: "10.4.0.0/14",
@@ -42,6 +46,7 @@ func boundCluster() registry.Cluster {
 		Git: &registry.GitBinding{
 			RepoURL: "ssh://git@gitlab.example.com/net/policies.git", Branch: "main",
 			PolicyPath: "clusters/c1", CredentialRef: gitBindingRef,
+			VerifyResult: registry.VerifyNotVerified,
 		},
 	}
 }
@@ -117,8 +122,14 @@ func TestVerifyGitBindingStoresAndReturnsTheVerdict(t *testing.T) {
 // 未配置校验器时结论是 NOT_VERIFIED，绝不是 OK：没做过的检查不是通过了
 // 的检查。这条守的是「缺省即安全」的方向 —— 一个把 nil 当成"没什么可
 // 担心的"的实现，会让整个未配置 secrets 的部署显示成全绿。
+//
+// 一次没有发生的校验也不该留下任何写入：SetGitVerifyResult 只接受一个
+// 具体的时刻，落库就等于宣称某时某刻校验过一次，并留下一条描述空白事件
+// 的 VERIFY_GIT_BINDING 审计行。trace 为空是这句话唯一能被断言的形态。
 func TestVerifyGitBindingWithoutAVerifierIsNotVerified(t *testing.T) {
+	var trace []string
 	reg := newMemRegistry()
+	reg.trace = &trace
 	reg.clusters["c1"] = boundCluster()
 	h, _, cookie := newTestRouterWithRegistry(t, fixtureReader(), reg)
 
@@ -132,6 +143,9 @@ func TestVerifyGitBindingWithoutAVerifierIsNotVerified(t *testing.T) {
 	}
 	if got := reg.clusters["c1"].Git.VerifyResult; got != registry.VerifyNotVerified {
 		t.Errorf("stored verifyResult = %q, want NOT_VERIFIED", got)
+	}
+	if len(trace) != 0 {
+		t.Errorf("store writes = %v, want none — nothing was verified, so there is nothing to record", trace)
 	}
 }
 
@@ -234,6 +248,25 @@ func TestVerifyGitBindingNeverPutsFreeTextOnTheWire(t *testing.T) {
 	}
 }
 
+// 实现返回未登记取值时同样不落库：那次调用没有产出一个可信的结论，
+// 而 SetGitVerifyResult 记不了「校验过但结论作废」这件事 —— 它只接受一个
+// 具体的时刻。硬写进去，库里与审计里都会多出一次没有发生过的校验。
+func TestVerifyGitBindingRecordsNothingForAnUnregisteredVerdict(t *testing.T) {
+	var trace []string
+	reg := newMemRegistry()
+	reg.trace = &trace
+	reg.clusters["c1"] = boundCluster()
+	stub := &stubGitVerifier{result: registry.VerifyResult("LOOKS_FINE"), trace: &trace}
+	h, _, cookie := newTestRouterWithGitVerifier(t, fixtureReader(), reg, stub)
+
+	if rec := authedPostNoBody(t, h, cookie, verifyPath); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if len(trace) != 1 || trace[0] != "verify" {
+		t.Errorf("call sequence = %v, want [verify] only — an unusable verdict is not worth recording", trace)
+	}
+}
+
 // 校验必须发生在落库之前。
 //
 // 它是一次带秒级超时的出站请求：握着数据库事务等它回来，会把一次网络
@@ -252,8 +285,8 @@ func TestVerifyGitBindingRunsBeforeTheStoreWrite(t *testing.T) {
 	if rec := authedPostNoBody(t, h, cookie, verifyPath); rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
 	}
-	if len(trace) != 2 || trace[0] != "verify" || trace[1] != "update" {
-		t.Errorf("call order = %v, want [verify update]", trace)
+	if len(trace) != 2 || trace[0] != "verify" || trace[1] != "set-verdict" {
+		t.Errorf("call order = %v, want [verify set-verdict]", trace)
 	}
 }
 
@@ -262,26 +295,29 @@ func TestSavingABindingVerifiesBeforeTheStoreWrite(t *testing.T) {
 	var trace []string
 	reg := newMemRegistry()
 	reg.trace = &trace
-	reg.clusters["c1"] = boundCluster()
+	reg.clusters["c1"] = unboundCluster()
 	stub := &stubGitVerifier{result: registry.VerifyOK, trace: &trace}
 	h, _, cookie := newTestRouterWithGitVerifier(t, fixtureReader(), reg, stub)
 
-	rec := authedPutJSON(t, h, cookie, "/api/v1/clusters/c1", fullClusterBody(nil))
+	rec := authedPutJSON(t, h, cookie, bindingPath, bindingBody(nil))
 	if got := bodyOf(t, rec)["code"]; got != float64(0) {
 		t.Fatalf("code = %v, want 0 (body %s)", got, rec.Body.String())
 	}
-	if len(trace) != 2 || trace[0] != "verify" || trace[1] != "update" {
-		t.Errorf("call order = %v, want [verify update]", trace)
+	if len(trace) != 2 || trace[0] != "verify" || trace[1] != "bind" {
+		t.Errorf("call order = %v, want [verify bind]", trace)
 	}
 }
 
 // 库里存着一条今天已经不合法的绑定时，重校验说出真实原因，不发出站。
 //
 // 现实来源：repoUrl 的 SSH 形态校验是后加的，此前存下的 https:// 绑定
-// 还躺在库里。对这种记录做一次出站是纯粹的浪费——结论回写要经过
-// UpdateCluster，而那一步的 ValidateCluster 会拒掉整行，操作者最终什么
-// 结论也拿不到，却先等了一个超时。让他直接看到「repoUrl 不是 SSH 形态」，
-// 才是能据以行动的那句话。
+// 还躺在库里。对这种记录做一次出站得到的不是「校验没通过」，而是一句
+// 假的结论 —— 认证方法与传输对不上，一次拨号都不会发生，失败却会被报成
+// 「仓库不可达」（spec §2.2）。把这个结论存进库、显示给操作者，比让他
+// 直接看到「repoUrl 不是 SSH 形态」要糟得多：后者是他能据以行动的那句话。
+//
+// 校验的是**绑定**，不是整个集群：集群其余字段不合法不该挡住这条路径
+// （见 TestVerifySucceedsWhileTheClusterItselfWouldFailValidation）。
 func TestVerifyGitBindingRefusesAStoredBindingItCanNoLongerAccept(t *testing.T) {
 	reg := newMemRegistry()
 	c := boundCluster()

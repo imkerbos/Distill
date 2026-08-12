@@ -74,6 +74,14 @@ func NewRouter(d Deps) http.Handler {
 			// 判定都用错了网段分类，且没有任何报错。
 			protected.Put("/clusters/{clusterID}", handleUpdateCluster(d))
 			protected.Delete("/clusters/{clusterID}", handleDeleteCluster(d))
+			// 绑定是有自己生命周期的资源，因此有自己的地址与动词
+			// （design doc 2026-08-13 §5）。PUT 而非 PATCH，理由与集群
+			// 那条一样：四个字段是绑定的全部可写内容，这里写整行。
+			protected.Put("/clusters/{clusterID}/git-binding", handleBindGitRepo(d))
+			// DELETE 而非「四个字段全空的一次 PUT」：解绑是一个明确的动作，
+			// 靠一个约定俗成的空值形状表达它，任何一次误发的空请求体都会
+			// 变成一次无声的解绑。
+			protected.Delete("/clusters/{clusterID}/git-binding", handleUnbindGitRepo(d))
 			// POST 而非 GET：这次调用会真的发起一次出站认证连接，并写下
 			// 新的结论与一条审计行 —— 不是一次读取，不该被浏览器、代理
 			// 或前端的重试逻辑当成可以随手重放的东西。

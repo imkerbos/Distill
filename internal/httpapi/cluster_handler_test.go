@@ -34,6 +34,13 @@ type memRegistry struct {
 	// trace 记录写方法的调用序列，与 stubGitVerifier 共用一份切片。
 	// 只有验证「校验发生在落库之前」的用例会用到它，其余用例留 nil。
 	trace *[]string
+	// lastCluster 是最近一次集群写入**拿到的原始参数**。
+	//
+	// 与 clusters 里存下的那份分开是必要的，不是方便：这个替身跟真实实现
+	// 一样会丢弃 c.Git（绑定不走集群写路径），于是「handler 有没有把一个
+	// 绑定交出来」在落库结果上根本看不见 —— 一条只看 clusters 的断言，
+	// 无论 clusterPayload 还带不带 git 都会通过。
+	lastCluster registry.Cluster
 }
 
 // writeErr 返回本次写调用该失败的错误，两个字段都没设时为 nil。
@@ -78,30 +85,112 @@ func (m *memRegistry) Cluster(_ context.Context, id string) (registry.Cluster, b
 	return c, ok, nil
 }
 
+// CreateCluster 与 mysqlregistry 一样**忽略 c.Git**：绑定有自己的写入路径
+// （BindGitRepo）与自己的审计行。一个会顺手把集群对象上的绑定落下来的替身，
+// 会让「集群写路径悄悄改了绑定」这类 bug 在 handler 测试里全绿通过。
 func (m *memRegistry) CreateCluster(_ context.Context, _ registry.Actor, c registry.Cluster) error {
 	m.record("create")
+	m.lastCluster = c
 	if err := m.writeErr(); err != nil {
 		return err
 	}
 	if err := registry.ValidateCluster(c); err != nil {
 		return err
 	}
+	c.Git = nil
 	m.clusters[c.ID] = c
 	return nil
 }
 
+// UpdateCluster 同样不碰绑定：真实实现的 UPDATE 语句里根本没有
+// cluster_git_binding 这张表，改一次网段不会顺手解绑。
 func (m *memRegistry) UpdateCluster(_ context.Context, _ registry.Actor, c registry.Cluster) error {
 	m.record("update")
+	m.lastCluster = c
 	if err := m.writeErr(); err != nil {
 		return err
 	}
-	if _, ok := m.clusters[c.ID]; !ok {
+	existing, ok := m.clusters[c.ID]
+	if !ok {
 		return registry.ErrNotFound
 	}
 	if err := registry.ValidateCluster(c); err != nil {
 		return err
 	}
+	c.Git = existing.Git
 	m.clusters[c.ID] = c
+	return nil
+}
+
+// BindGitRepo 写入或替换绑定。
+//
+// 与 mysqlregistry.BindGitRepo 一样先过 ValidateGitBinding、且**不**校验
+// 集群其余字段：这次拆分买到的正是这一条，替身若在这里顺手跑一遍
+// ValidateCluster，「绑定的合法性与集群其余字段无关」就没有东西守得住了。
+func (m *memRegistry) BindGitRepo(
+	_ context.Context, _ registry.Actor, clusterID string, b registry.GitBinding,
+) error {
+	m.record("bind")
+	if err := m.writeErr(); err != nil {
+		return err
+	}
+	if err := registry.ValidateGitBinding(b); err != nil {
+		return err
+	}
+	c, ok := m.clusters[clusterID]
+	if !ok {
+		return registry.ErrNotFound
+	}
+	// 空值按 NOT_VERIFIED 落库，与真实实现一致：空串不是登记过的枚举值。
+	if b.VerifyResult == "" {
+		b.VerifyResult = registry.VerifyNotVerified
+	}
+	c.Git = &b
+	m.clusters[clusterID] = c
+	return nil
+}
+
+// UnbindGitRepo 解除绑定。集群不存在与未绑定同样返回 ErrNotFound ——
+// 两者从调用方视角都是「要解绑的那个东西不在」。
+func (m *memRegistry) UnbindGitRepo(_ context.Context, _ registry.Actor, clusterID string) error {
+	m.record("unbind")
+	if err := m.writeErr(); err != nil {
+		return err
+	}
+	c, ok := m.clusters[clusterID]
+	if !ok || c.Git == nil {
+		return registry.ErrNotFound
+	}
+	c.Git = nil
+	m.clusters[clusterID] = c
+	return nil
+}
+
+// SetGitVerifyResult 只写结论与时间。
+//
+// 只动这两个字段而不是整体替换绑定：真实实现的 UPDATE 只有 verify_result
+// 与 verified_at 两列，一个顺手重写整行的替身会让「跑一次校验改写了仓库
+// 地址」这种事在测试里看不出来。
+func (m *memRegistry) SetGitVerifyResult(
+	_ context.Context, _ registry.Actor, clusterID string,
+	result registry.VerifyResult, at time.Time,
+) error {
+	m.record("set-verdict")
+	if err := m.writeErr(); err != nil {
+		return err
+	}
+	if !result.Valid() {
+		return registry.NewInvalidError("verifyResult 不在已登记的取值范围内")
+	}
+	c, ok := m.clusters[clusterID]
+	if !ok || c.Git == nil {
+		return registry.ErrNotFound
+	}
+	g := *c.Git
+	g.VerifyResult = result
+	g.VerifiedAt = &at
+	c.Git = &g
+	m.clusters[clusterID] = c
 	return nil
 }
 
@@ -385,8 +474,8 @@ func TestUpdateClusterRejectsPatchVerb(t *testing.T) {
 	}
 }
 
-// 整体替换必须表现得像整体替换：只带 git 的请求体不会被合并进现有行，
-// 它是一个缺了 podCIDR/nodeCIDR 的完整集群，因此被校验拒绝。
+// 整体替换必须表现得像整体替换：只带 displayName 的请求体不会被合并进
+// 现有行，它是一个缺了 podCIDR/nodeCIDR 的完整集群，因此被校验拒绝。
 //
 // 这条测试守的是「不要好心补全」：一旦有人在 handler 里用库里的值填上
 // 请求体没给的字段，这个请求就会成功 —— 而成功的代价是调用方从此无法
@@ -400,337 +489,73 @@ func TestUpdateClusterIsReplacementNotMerge(t *testing.T) {
 	h, _, cookie := newTestRouterWithRegistry(t, fixtureReader(), reg)
 
 	rec := authedPutJSON(t, h, cookie, "/api/v1/clusters/c1", map[string]any{
-		"git": map[string]any{
-			"repoUrl": "ssh://git@gitlab.example.com/net/policies.git",
-			"branch":  "main", "policyPath": "clusters/c1",
-		},
+		"displayName": "C1 renamed",
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 — a bad body is a business failure", rec.Code)
 	}
 	if got := bodyOf(t, rec)["code"]; got != float64(20001) {
-		t.Fatalf("code = %v, want 20001 — a git-only body is not a complete cluster", got)
+		t.Fatalf("code = %v, want 20001 — a name-only body is not a complete cluster", got)
 	}
 	// 被拒绝的请求不得留下任何痕迹：一次半成功的替换比一次失败更难排查。
 	if got := reg.clusters["c1"].PodCIDR; got != "10.4.0.0/14" {
 		t.Errorf("podCIDR = %q, want it untouched by a rejected update", got)
 	}
-	if reg.clusters["c1"].Git != nil {
-		t.Error("git binding was stored by a rejected update")
-	}
 }
 
-// Git 绑定既要能补上，也要能解除 —— 后者用显式的 "git": null 表达。
+// fullClusterBody 是一个完整的集群 PUT 请求体。
 //
-// 没有这条，「解除绑定」在协议层就只能靠"字段不出现"，而那与"这次不谈
-// 这件事"长得一模一样；界面上任何一个把绑定清空的操作都将无法兑现。
-func TestUpdateClusterBindsAndClearsGit(t *testing.T) {
-	reg := newMemRegistry()
-	reg.clusters["c1"] = registry.Cluster{
-		ID: "c1", DisplayName: "C1", PodCIDR: "10.4.0.0/14",
-		NodeCIDR: "10.128.0.0/20", State: registry.StateReady,
-	}
-	h, _, cookie := newTestRouterWithRegistry(t, fixtureReader(), reg)
-
-	// 引用值走变量而不是字面量：凭据本身永不入库，这里传的只是 Secret
-	// Manager 里的引用（见 registry.GitBinding.CredentialRef），但写成
-	// 内联字面量会被 gosec G101 读成硬编码凭据 —— 与其压掉那条告警，
-	// 不如让代码形状本身与"这不是一个秘密"这句话一致。
-	bindingRef := "distill-policies-writer"
-	full := map[string]any{
+// extra 里的键会并进顶层对象，用于往请求体里塞那些**不该被采纳**的字段 ——
+// 请求体必须能表达它们，测试才证明得了它们被忽略。
+func fullClusterBody(extra map[string]any) map[string]any {
+	body := map[string]any{
 		"displayName": "C1", "podCidr": "10.4.0.0/14", "nodeCidr": "10.128.0.0/20",
 		"apiServers":         []map[string]any{{"host": "10.9.0.2", "cidr": "10.9.0.0/28", "port": 443}},
 		"healthCheckSources": []string{"35.191.0.0/16"},
-		"git": map[string]any{
-			"repoUrl": "ssh://git@gitlab.example.com/net/policies.git",
-			"branch":  "main", "policyPath": "clusters/c1", "credentialRef": bindingRef,
-		},
 	}
-	rec := authedPutJSON(t, h, cookie, "/api/v1/clusters/c1", full)
-	if got := bodyOf(t, rec)["code"]; got != float64(0) {
-		t.Fatalf("code = %v, want 0 (body %s)", got, rec.Body.String())
+	for k, v := range extra {
+		body[k] = v
 	}
-	bound := reg.clusters["c1"]
-	if bound.Git == nil || bound.Git.PolicyPath != "clusters/c1" {
-		t.Fatalf("git = %+v, want the binding from the request", bound.Git)
-	}
-	if bound.Git.CredentialRef != bindingRef {
-		t.Errorf("credentialRef = %q, want %q — the reference must survive the write",
-			bound.Git.CredentialRef, bindingRef)
-	}
-	// 同一次请求里的其余字段也必须落库：整体替换下它们与 git 同等重要，
-	// 而 apiServers 漏掉一条就是漏掉一条 control-plane 放行规则。
-	if len(bound.APIServers) != 1 || bound.APIServers[0].Port != 443 {
-		t.Errorf("apiServers = %+v, want the endpoint from the request", bound.APIServers)
-	}
-	if !reflect.DeepEqual(bound.HealthCheckSources, []string{"35.191.0.0/16"}) {
-		t.Errorf("healthCheckSources = %v, want the list from the request", bound.HealthCheckSources)
-	}
-
-	cleared := map[string]any{
-		"displayName": "C1", "podCidr": "10.4.0.0/14", "nodeCidr": "10.128.0.0/20",
-		"git": nil,
-	}
-	rec = authedPutJSON(t, h, cookie, "/api/v1/clusters/c1", cleared)
-	if got := bodyOf(t, rec)["code"]; got != float64(0) {
-		t.Fatalf("code = %v, want 0 (body %s)", got, rec.Body.String())
-	}
-	if reg.clusters["c1"].Git != nil {
-		t.Errorf("git = %+v, want nil — an explicit null must remove the binding",
-			reg.clusters["c1"].Git)
-	}
-	if reg.clusters["c1"].State != registry.StateReady {
-		t.Errorf("state = %q, want READY to survive a binding removal", reg.clusters["c1"].State)
-	}
+	return body
 }
 
-// 漂移基准不接受调用方赋值。
+// 集群写入永不发出站：绑定已经不在这条路径上了，一次 SSH 握手在这里
+// 既没有请求体上的目标，也会在远端日志里留下一条没人能解释的连接。
 //
-// lastWrittenCommit 是平台对「我最近一次往这个仓库写了什么」的断言，
-// 漂移检测拿它与 Git 现状比对。一个能被请求体设置的基准可以被调用方
-// 调成与仓库现状一致 —— 于是平台会带着信心报告「无漂移」，而这句话
-// 再也无法被证伪，比根本没有基准更糟。
+// 两个动词都打：create 与 update 是两处独立的调用点，只测一个的话，
+// 另一处留着 verifyOnSave 也不会有测试变红。
+func TestClusterWritesNeverReachOut(t *testing.T) {
+	for _, method := range []string{http.MethodPost, http.MethodPut} {
+		t.Run(method, func(t *testing.T) {
+			reg := newMemRegistry()
+			reg.clusters["c1"] = boundCluster()
+			stub := &stubGitVerifier{result: registry.VerifyOK}
+			h, _, cookie := newTestRouterWithGitVerifier(t, fixtureReader(), reg, stub)
+
+			body := fullClusterBody(nil)
+			if method == http.MethodPost {
+				body["id"] = "new-4"
+				if got := bodyOf(t, authedPostJSON(t, h, cookie, "/api/v1/clusters", body))["code"]; got != float64(0) {
+					t.Fatalf("code = %v, want 0", got)
+				}
+			} else if got := bodyOf(t, authedPutJSON(t, h, cookie, "/api/v1/clusters/c1", body))["code"]; got != float64(0) {
+				t.Fatalf("code = %v, want 0", got)
+			}
+			if stub.calls != 0 {
+				t.Errorf("verifier calls = %d, want 0 — a cluster write has no binding to verify", stub.calls)
+			}
+		})
+	}
+}
+
+// 改集群不得动绑定。
 //
-// 用一个**伪造的、与库里不同的** SHA 测，而不是空值：空值下「收下再
-// 忽略」与「为空时兜底」两种实现都会通过，什么也证明不了。这与 state
-// 那条测试是同一个理由（见 TestCreateClusterIgnoresCallerSuppliedState）。
-func TestUpdateClusterIgnoresCallerSuppliedDriftBaseline(t *testing.T) {
-	const storedSHA = "0123456789abcdef0123456789abcdef01234567"
-	const forgedSHA = "fedcba9876543210fedcba9876543210fedcba98"
-
+// 绑定有自己的生命周期与自己的审计行；一次改网段顺手把绑定清掉，是
+// 绑定还嵌在集群写模型里时才会发生的事，而它不会报错 —— 表现只是
+// 某个集群某天起不再下发策略。
+func TestUpdateClusterLeavesTheBindingAlone(t *testing.T) {
 	reg := newMemRegistry()
-	reg.clusters["c1"] = registry.Cluster{
-		ID: "c1", DisplayName: "C1", PodCIDR: "10.4.0.0/14",
-		NodeCIDR: "10.128.0.0/20", State: registry.StateReady,
-		Git: &registry.GitBinding{
-			RepoURL: "ssh://git@gitlab.example.com/net/policies.git", Branch: "main",
-			PolicyPath: "clusters/c1", LastWrittenCommit: storedSHA,
-		},
-	}
-	h, _, cookie := newTestRouterWithRegistry(t, fixtureReader(), reg)
-
-	bindingRef := "distill-policies-writer"
-	body := func(branch, policyPath string) map[string]any {
-		return map[string]any{
-			"displayName": "C1", "podCidr": "10.4.0.0/14", "nodeCidr": "10.128.0.0/20",
-			"git": map[string]any{
-				"repoUrl": "ssh://git@gitlab.example.com/net/policies.git", "branch": branch,
-				"policyPath": policyPath, "credentialRef": bindingRef,
-				"lastWrittenCommit": forgedSHA,
-			},
-		}
-	}
-
-	// 同一仓库同一分支：基准沿用库里的值，请求体里那个伪造的 SHA 无效。
-	rec := authedPutJSON(t, h, cookie, "/api/v1/clusters/c1", body("main", "clusters/c1/net"))
-	if got := bodyOf(t, rec)["code"]; got != float64(0) {
-		t.Fatalf("code = %v, want 0 (body %s)", got, rec.Body.String())
-	}
-	got := reg.clusters["c1"].Git
-	if got == nil || got.LastWrittenCommit != storedSHA {
-		t.Fatalf("lastWrittenCommit = %+v, want %q — a forged baseline must not be honoured",
-			got, storedSHA)
-	}
-	// 对照组：credentialRef 是操作者填写的 Secret Manager 引用，不是平台
-	// 对外部世界的断言，本就该由调用方提供 —— 它必须照常落库，否则这条
-	// 防线就从「拦住伪造的断言」变成了「整块 git 都不听调用方的」。
-	if got.CredentialRef != bindingRef {
-		t.Errorf("credentialRef = %q, want %q — it is caller-supplied by design",
-			got.CredentialRef, bindingRef)
-	}
-	if got.PolicyPath != "clusters/c1/net" {
-		t.Errorf("policyPath = %q, want the value from the request", got.PolicyPath)
-	}
-
-	// 改指向另一个分支：旧 SHA 与新目标无关，必须归零 —— 同样不采用
-	// 请求体里那个伪造的值。
-	rec = authedPutJSON(t, h, cookie, "/api/v1/clusters/c1", body("release", "clusters/c1"))
-	if code := bodyOf(t, rec)["code"]; code != float64(0) {
-		t.Fatalf("code = %v, want 0 (body %s)", code, rec.Body.String())
-	}
-	if got = reg.clusters["c1"].Git; got == nil || got.LastWrittenCommit != "" {
-		t.Errorf("lastWrittenCommit = %+v, want empty after the binding was repointed", got)
-	}
-}
-
-// 创建时漂移基准同样为空：平台还没往那个仓库写过任何东西，一个非空的
-// 基准是一句凭空的声明。
-func TestCreateClusterIgnoresCallerSuppliedDriftBaseline(t *testing.T) {
-	reg := newMemRegistry()
-	h, _, cookie := newTestRouterWithRegistry(t, fixtureReader(), reg)
-
-	rec := authedPostJSON(t, h, cookie, "/api/v1/clusters", map[string]any{
-		"id": "new-2", "displayName": "New", "podCidr": "10.20.0.0/14",
-		"nodeCidr": "10.140.0.0/20",
-		"git": map[string]any{
-			"repoUrl": "ssh://git@gitlab.example.com/net/policies.git", "branch": "main",
-			"policyPath":        "clusters/new-2",
-			"lastWrittenCommit": "fedcba9876543210fedcba9876543210fedcba98",
-		},
-	})
-	if got := bodyOf(t, rec)["code"]; got != float64(0) {
-		t.Fatalf("code = %v, want 0 (body %s)", got, rec.Body.String())
-	}
-	stored := reg.clusters["new-2"].Git
-	if stored == nil || stored.LastWrittenCommit != "" {
-		t.Errorf("lastWrittenCommit = %+v, want empty — the platform has written nothing yet", stored)
-	}
-}
-
-// fullClusterBody 是一个完整的集群 PUT 请求体，带 Git 绑定。
-//
-// extraGit 里的键会并进 git 对象，用于往请求体里塞那些**不该被采纳**的
-// 字段 —— 请求体必须能表达它们，测试才证明得了它们被忽略。
-func fullClusterBody(extraGit map[string]any) map[string]any {
-	git := map[string]any{
-		"repoUrl": "ssh://git@gitlab.example.com/net/policies.git", "branch": "main",
-		"policyPath": "clusters/c1", "credentialRef": gitBindingRef,
-	}
-	for k, v := range extraGit {
-		git[k] = v
-	}
-	return map[string]any{
-		"displayName": "C1", "podCidr": "10.4.0.0/14", "nodeCidr": "10.128.0.0/20",
-		"apiServers":         []map[string]any{{"host": "10.9.0.2", "cidr": "10.9.0.0/28", "port": 443}},
-		"healthCheckSources": []string{"35.191.0.0/16"},
-		"git":                git,
-	}
-}
-
-// 校验结论不接受调用方赋值 —— 与 lastWrittenCommit 同一处置。
-//
-// 一个能被请求体设成 OK 的结论，就是一句无法被证伪的「这个绑定可以
-// 下发」：平台会带着信心把策略写向一个它其实连不上的仓库。
-//
-// 库里先放一个陈旧的 OK，请求体里再塞一个伪造的 OK 与时间戳，而校验器
-// 返回 AUTH_FAILED。三个方向一起守：收下请求体里的值会红，沿用库里的
-// 旧结论也会红。
-func TestUpdateClusterIgnoresCallerSuppliedVerifyResult(t *testing.T) {
-	stale := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
-	reg := newMemRegistry()
-	reg.clusters["c1"] = registry.Cluster{
-		ID: "c1", DisplayName: "C1", PodCIDR: "10.4.0.0/14",
-		NodeCIDR: "10.128.0.0/20", State: registry.StateReady,
-		Git: &registry.GitBinding{
-			RepoURL: "ssh://git@gitlab.example.com/net/policies.git", Branch: "main",
-			PolicyPath: "clusters/c1", CredentialRef: gitBindingRef,
-			VerifyResult: registry.VerifyOK, VerifiedAt: &stale,
-		},
-	}
-	stub := &stubGitVerifier{result: registry.VerifyAuthFailed}
-	h, _, cookie := newTestRouterWithGitVerifier(t, fixtureReader(), reg, stub)
-
-	rec := authedPutJSON(t, h, cookie, "/api/v1/clusters/c1", fullClusterBody(map[string]any{
-		"verifyResult": string(registry.VerifyOK),
-		"verifiedAt":   "2031-01-01T00:00:00Z",
-	}))
-	if got := bodyOf(t, rec)["code"]; got != float64(0) {
-		t.Fatalf("code = %v, want 0 (body %s)", got, rec.Body.String())
-	}
-
-	stored := reg.clusters["c1"].Git
-	if stored == nil || stored.VerifyResult != registry.VerifyAuthFailed {
-		t.Fatalf("stored verifyResult = %+v, want AUTH_FAILED — the verifier's verdict, not the caller's", stored)
-	}
-	if stored.VerifiedAt == nil || !stored.VerifiedAt.After(stale) {
-		t.Errorf("stored verifiedAt = %v, want the time of this check, not the stale one", stored.VerifiedAt)
-	}
-	if stub.calls != 1 {
-		t.Errorf("verifier calls = %d, want exactly 1 — a stored verdict nobody derived is a claim, not a fact", stub.calls)
-	}
-}
-
-// 校验失败不阻止保存。
-//
-// 一次网络抖动不该让操作者无法记录一个正确的绑定：存下来和可信是两件事。
-// 断言三样东西同时成立 —— 保存成功、绑定字段完整、结论是那个失败值。
-// 少了最后一条，「保存成功」就变成了「未经校验的数据看上去可以下发」。
-func TestSavingABindingSucceedsEvenWhenVerificationFails(t *testing.T) {
-	reg := newMemRegistry()
-	reg.clusters["c1"] = registry.Cluster{
-		ID: "c1", DisplayName: "C1", PodCIDR: "10.4.0.0/14",
-		NodeCIDR: "10.128.0.0/20", State: registry.StateReady,
-	}
-	stub := &stubGitVerifier{result: registry.VerifyRepoUnreachable}
-	h, _, cookie := newTestRouterWithGitVerifier(t, fixtureReader(), reg, stub)
-
-	rec := authedPutJSON(t, h, cookie, "/api/v1/clusters/c1", fullClusterBody(nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
-	}
-	if got := bodyOf(t, rec)["code"]; got != float64(0) {
-		t.Fatalf("code = %v, want 0 — a failed check must not reject a correct binding", got)
-	}
-
-	stored := reg.clusters["c1"].Git
-	if stored == nil {
-		t.Fatal("binding was not stored")
-	}
-	want := registry.GitBinding{
-		RepoURL: "ssh://git@gitlab.example.com/net/policies.git", Branch: "main",
-		PolicyPath: "clusters/c1", CredentialRef: gitBindingRef,
-		VerifyResult: registry.VerifyRepoUnreachable, VerifiedAt: stored.VerifiedAt,
-	}
-	if *stored != want {
-		t.Errorf("stored binding = %+v, want %+v", *stored, want)
-	}
-	if stored.VerifiedAt == nil {
-		t.Error("stored verifiedAt is nil — a check did happen, it just did not pass")
-	}
-}
-
-// 创建路径同样校验：绑定往往在注册时就填好了，一个只在修改时校验的
-// 实现会让这条最常见的路径永远停在 NOT_VERIFIED。
-func TestCreateClusterVerifiesTheBinding(t *testing.T) {
-	reg := newMemRegistry()
-	stub := &stubGitVerifier{result: registry.VerifyBranchMissing}
-	h, _, cookie := newTestRouterWithGitVerifier(t, fixtureReader(), reg, stub)
-
-	body := fullClusterBody(nil)
-	body["id"] = "new-3"
-	rec := authedPostJSON(t, h, cookie, "/api/v1/clusters", body)
-	if got := bodyOf(t, rec)["code"]; got != float64(0) {
-		t.Fatalf("code = %v, want 0 (body %s)", got, rec.Body.String())
-	}
-	if stub.calls != 1 {
-		t.Fatalf("verifier calls = %d, want exactly 1", stub.calls)
-	}
-	if got := reg.clusters["new-3"].Git; got == nil || got.VerifyResult != registry.VerifyBranchMissing {
-		t.Errorf("stored verifyResult = %+v, want BRANCH_MISSING", got)
-	}
-}
-
-// 没有绑定就不该有出站：一次凭空的 SSH 握手既没有目标，也会在远端日志里
-// 留下一条没人能解释的连接。
-func TestSavingWithoutABindingDoesNotVerify(t *testing.T) {
-	reg := newMemRegistry()
-	reg.clusters["c1"] = registry.Cluster{
-		ID: "c1", DisplayName: "C1", PodCIDR: "10.4.0.0/14",
-		NodeCIDR: "10.128.0.0/20", State: registry.StateReady,
-	}
-	stub := &stubGitVerifier{result: registry.VerifyOK}
-	h, _, cookie := newTestRouterWithGitVerifier(t, fixtureReader(), reg, stub)
-
-	body := fullClusterBody(nil)
-	body["git"] = nil
-	if rec := authedPutJSON(t, h, cookie, "/api/v1/clusters/c1", body); bodyOf(t, rec)["code"] != float64(0) {
-		t.Fatalf("code = %v, want 0 (body %s)", bodyOf(t, rec)["code"], rec.Body.String())
-	}
-	if stub.calls != 0 {
-		t.Errorf("verifier calls = %d, want 0 when the request carries no binding", stub.calls)
-	}
-}
-
-// 未配置校验器的部署：保存下来的结论是 NOT_VERIFIED，不是 OK。
-//
-// 这条与重校验端点那条是同一个方向上的两处调用点 —— 守则正确不等于
-// 调用点仍然在调它，两处都要有人守。
-func TestSavingABindingWithoutAVerifierRecordsNotVerified(t *testing.T) {
-	reg := newMemRegistry()
-	reg.clusters["c1"] = registry.Cluster{
-		ID: "c1", DisplayName: "C1", PodCIDR: "10.4.0.0/14",
-		NodeCIDR: "10.128.0.0/20", State: registry.StateReady,
-	}
+	reg.clusters["c1"] = boundCluster()
 	h, _, cookie := newTestRouterWithRegistry(t, fixtureReader(), reg)
 
 	rec := authedPutJSON(t, h, cookie, "/api/v1/clusters/c1", fullClusterBody(nil))
@@ -738,11 +563,8 @@ func TestSavingABindingWithoutAVerifierRecordsNotVerified(t *testing.T) {
 		t.Fatalf("code = %v, want 0 (body %s)", got, rec.Body.String())
 	}
 	stored := reg.clusters["c1"].Git
-	if stored == nil || stored.VerifyResult != registry.VerifyNotVerified {
-		t.Fatalf("stored verifyResult = %+v, want NOT_VERIFIED — an absent check is not a passed check", stored)
-	}
-	if stored.VerifiedAt != nil {
-		t.Errorf("stored verifiedAt = %v, want nil — no check happened", stored.VerifiedAt)
+	if stored == nil || *stored != *boundCluster().Git {
+		t.Errorf("git = %+v, want the binding untouched by a cluster update", stored)
 	}
 }
 
@@ -839,8 +661,8 @@ const gitBindingRef = "distill-git"
 
 // 请求体 → 领域对象的整体比对：逐字段挑着断言挡不住漏映射。
 //
-// 审阅时的实证是 —— 把 toCluster 里 APIServers / HealthCheckSources / Git
-// 三行赋值删掉，./internal/httpapi 全绿。而这三项正是 control-plane 与
+// 审阅时的实证是 —— 把 toCluster 里 APIServers / HealthCheckSources
+// 两行赋值删掉，./internal/httpapi 全绿。而这两项正是 control-plane 与
 // 健康检查两类 Baseline 的推导依据，漏掉的后果是少一条放行规则，
 // 表现为生产阻断而不是注册时的报错。
 //
@@ -861,14 +683,6 @@ func TestCreateClusterCarriesEveryFieldIntoTheDomainObject(t *testing.T) {
 			{"host": "10.9.0.3", "cidr": "10.9.0.0/28", "port": 443},
 		},
 		"healthCheckSources": []string{"35.191.0.0/16", "130.211.0.0/22"},
-		"git": map[string]any{
-			"repoUrl": "ssh://git@gitlab.example.com/net/policies.git", "branch": "main",
-			"policyPath": "clusters/rt-1", "credentialRef": gitBindingRef,
-			// 与上面的 state 同一个手法：漂移基准也是服务端决定的，请求体
-			// 里给一个具体的 SHA，期望值里写空 —— 创建时平台还没往那个
-			// 仓库写过任何东西，一个非空的基准是一句凭空的声明。
-			"lastWrittenCommit": "0123456789abcdef0123456789abcdef01234567",
-		},
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
@@ -883,15 +697,6 @@ func TestCreateClusterCarriesEveryFieldIntoTheDomainObject(t *testing.T) {
 			{Host: "10.9.0.3", CIDR: "10.9.0.0/28", Port: 443},
 		},
 		HealthCheckSources: []string{"35.191.0.0/16", "130.211.0.0/22"},
-		Git: &registry.GitBinding{
-			RepoURL: "ssh://git@gitlab.example.com/net/policies.git", Branch: "main",
-			PolicyPath: "clusters/rt-1", CredentialRef: gitBindingRef,
-			LastWrittenCommit: "",
-			// 这套装配没有校验器（未配置 secrets），结论只能是 NOT_VERIFIED。
-			// 写死在期望值里，是为了让"nil 校验器悄悄变成 OK"这种改动在这条
-			// 整体比对上也会红一次。
-			VerifyResult: registry.VerifyNotVerified,
-		},
 	}
 	got, ok := reg.clusters["rt-1"]
 	if !ok {
@@ -899,87 +704,5 @@ func TestCreateClusterCarriesEveryFieldIntoTheDomainObject(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("stored cluster =\n%+v\nwant\n%+v", got, want)
-	}
-	if got.Git == nil || *got.Git != *want.Git {
-		t.Errorf("git binding = %+v, want %+v", got.Git, want.Git)
-	}
-}
-
-// 非 SSH 的 repoUrl 在保存这一步就被拒绝，且**不发出站**。
-//
-// 两半都要断言，缺一半都不成立：
-//   - 拒绝：一个 https:// 绑定存下来之后没有任何一次校验能通过它，
-//     它只会稳定地产出一句「仓库不可达」—— 关于一次从未发生的网络请求
-//     的结论（spec §2.2）。
-//   - 不发出站：校验早于校验（verifyOnSave 在写库之前），如果不先跑一遍
-//     领域校验，操作者要先等满一个出站超时，才等到一句和超时无关的报错。
-//     这一半同时守住 M5 那条「注定被拒的请求体不该产生 SSH 握手」。
-//
-// 回传文案必须点名 SSH：只说「地址不合法」会让操作者以为自己打错了字。
-func TestSavingANonSSHRepoURLIsRejectedWithoutReachingOut(t *testing.T) {
-	for _, method := range []string{http.MethodPost, http.MethodPut} {
-		t.Run(method, func(t *testing.T) {
-			reg := newMemRegistry()
-			reg.clusters["c1"] = registry.Cluster{
-				ID: "c1", DisplayName: "C1", PodCIDR: "10.4.0.0/14",
-				NodeCIDR: "10.128.0.0/20", State: registry.StateReady,
-			}
-			stub := &stubGitVerifier{result: registry.VerifyOK}
-			h, _, cookie := newTestRouterWithGitVerifier(t, fixtureReader(), reg, stub)
-
-			body := fullClusterBody(map[string]any{
-				"repoUrl": "https://gitlab.example.com/net/policies.git",
-			})
-			var rec *httptest.ResponseRecorder
-			if method == http.MethodPost {
-				body["id"] = "new-9"
-				rec = authedPostJSON(t, h, cookie, "/api/v1/clusters", body)
-			} else {
-				rec = authedPutJSON(t, h, cookie, "/api/v1/clusters/c1", body)
-			}
-
-			got := bodyOf(t, rec)
-			if got["code"] != float64(20001) {
-				t.Fatalf("code = %v, want 20001 — an https repoUrl is a configuration error, not a verdict", got["code"])
-			}
-			if msg, _ := got["msg"].(string); !strings.Contains(msg, "SSH") {
-				t.Errorf("msg = %q, want it to name SSH as the real reason", msg)
-			}
-			if stub.calls != 0 {
-				t.Errorf("verifier calls = %d, want 0 — a body that cannot be saved must not cost an outbound handshake", stub.calls)
-			}
-			if reg.clusters["new-9"].ID != "" {
-				t.Error("a rejected create still stored a cluster")
-			}
-			if reg.clusters["c1"].Git != nil {
-				t.Error("a rejected update still stored a binding")
-			}
-		})
-	}
-}
-
-// 请求体本身不合法时同样不发出站 —— 与 repoUrl 无关的字段也算。
-//
-// 单独一条 https 用例证明不了「先校验后出站」这条时序：它可以被一个
-// 「只在 repoUrl 上特判」的实现通过。换一个毫不相干的非法字段再测一次，
-// 才能说明拦住出站的是整条领域校验，不是某一个字段的特例。
-func TestSavingAnInvalidBodyDoesNotCostAnOutboundHandshake(t *testing.T) {
-	reg := newMemRegistry()
-	reg.clusters["c1"] = registry.Cluster{
-		ID: "c1", DisplayName: "C1", PodCIDR: "10.4.0.0/14",
-		NodeCIDR: "10.128.0.0/20", State: registry.StateReady,
-	}
-	stub := &stubGitVerifier{result: registry.VerifyOK}
-	h, _, cookie := newTestRouterWithGitVerifier(t, fixtureReader(), reg, stub)
-
-	body := fullClusterBody(nil)
-	body["podCidr"] = "10.20.0/14"
-	rec := authedPutJSON(t, h, cookie, "/api/v1/clusters/c1", body)
-
-	if got := bodyOf(t, rec)["code"]; got != float64(20001) {
-		t.Fatalf("code = %v, want 20001 for a malformed podCidr", got)
-	}
-	if stub.calls != 0 {
-		t.Errorf("verifier calls = %d, want 0 — validation must run before the outbound call", stub.calls)
 	}
 }

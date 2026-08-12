@@ -63,36 +63,6 @@ func verifyBinding(ctx context.Context, d Deps, b registry.GitBinding) (registry
 	return result, &now
 }
 
-// applyVerdict 把一次校验的结论写进绑定。
-//
-// 结论与时间一律取本次校验的产物，不从库里的现值继承：上一次结论描述的
-// 是上一次那个绑定，而这次保存可能换了仓库、分支或引用。沿用它等于用
-// 一个针对别的目标得出的判断，去声明当前这个目标可信。
-func applyVerdict(b *registry.GitBinding, result registry.VerifyResult, at *time.Time) {
-	if b == nil {
-		return
-	}
-	b.VerifyResult = result
-	b.VerifiedAt = at
-}
-
-// verifyOnSave 在落库之前校验一次绑定，并把结论写进 b。
-//
-// **校验失败不阻止保存。** 它没有返回值，调用点也就没有"校验没过就不写了"
-// 这个分支可写：一次网络抖动不该让操作者无法记录一个正确的绑定。存下来和
-// 可信是两件事 —— 合并它们，要么是拒绝正确的数据，要么是让未经校验的数据
-// 看上去可以下发（spec §3.2，与 verdict / confidence 分离同一条原则）。
-//
-// 调用点必须在事务之外，即在 Registry 的写方法之前：这里会做一次带秒级
-// 超时的出站请求。b 为 nil（本次保存不带绑定）时什么也不做，不发出站。
-func verifyOnSave(r *http.Request, d Deps, b *registry.GitBinding) {
-	if b == nil {
-		return
-	}
-	result, at := verifyBinding(r.Context(), d, *b)
-	applyVerdict(b, result, at)
-}
-
 // handleVerifyGitBinding 对一个集群的 Git 绑定重新做一次只读校验。
 //
 // 手动重校验存在的理由是凭据轮换与权限修复之后需要一个新鲜的结论
@@ -102,7 +72,11 @@ func verifyOnSave(r *http.Request, d Deps, b *registry.GitBinding) {
 // 校验发生在事务之外：它是一次带秒级超时的出站请求，握着数据库事务等它
 // 回来，会把一次网络抖动放大成一次锁竞争故障。这里的形态本身保证了这
 // 一点 —— registry.Store 不暴露事务句柄，落库是校验结束后一次独立的
-// UpdateCluster，审计行由它在同事务里写下。
+// SetGitVerifyResult，审计行由它在同事务里写下。
+//
+// 落库走 SetGitVerifyResult 而不是 UpdateCluster：跑一次校验不是一次配置
+// 变更，它没有理由改写仓库地址，更没有理由重写集群行
+// （design doc 2026-08-13 §1）。
 func handleVerifyGitBinding(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "clusterID")
@@ -119,21 +93,29 @@ func handleVerifyGitBinding(d Deps) http.HandlerFunc {
 			return
 		}
 		// 库里的记录未必还满足今天的校验规则（比如收紧 repoUrl 之前存下的
-		// https:// 绑定）。这种记录走完出站也白走：结论回写要经过
-		// UpdateCluster，而那里的 ValidateCluster 会拒掉整行。先在这里判一次，
-		// 操作者拿到的是「repoUrl 不是 SSH 形态」这个真实原因，而不是一个
-		// 花掉一次握手才得到、随后又存不下去的结论。
-		if !validatedBeforeVerifying(w, r, d, c) {
+		// https:// 绑定）。对这种记录做一次出站得到的不是「校验没通过」，
+		// 而是一句假的结论：认证方法与传输对不上，一次拨号都不会发生，失败
+		// 却会被报成「仓库不可达」（spec §2.2）。让操作者直接看到「repoUrl
+		// 不是 SSH 形态」，才是他能据以行动的那句话。
+		//
+		// 校验的是**绑定**，不是整个集群：集群其余字段是否合法与这条路径
+		// 无关，这正是把绑定拆成独立资源买到的东西（design doc §6）。
+		if err := registry.ValidateGitBinding(*c.Git); err != nil {
+			writeRegistryError(w, r, d, err)
 			return
 		}
 
 		result, at := verifyBinding(r.Context(), d, *c.Git)
-		applyVerdict(c.Git, result, at)
-
-		if err := d.Registry.UpdateCluster(r.Context(), actorOf(r), c); err != nil {
-			writeRegistryError(w, r, d, err)
-			return
+		// at 为 nil 表示这次根本没有发生校验（未配置校验器，或实现返回了
+		// 一个未登记的取值）。此时不落库：SetGitVerifyResult 只接受一个具体
+		// 的时刻，写进去就等于宣称某时某刻校验过一次，而那件事没有发生 ——
+		// 顺带还会留下一条描述空白事件的 VERIFY_GIT_BINDING 审计行。
+		if at != nil {
+			if err := d.Registry.SetGitVerifyResult(r.Context(), actorOf(r), id, result, *at); err != nil {
+				writeRegistryError(w, r, d, err)
+				return
+			}
 		}
-		response.WriteOK(w, verifyStatus{VerifyResult: c.Git.VerifyResult, VerifiedAt: c.Git.VerifiedAt})
+		response.WriteOK(w, verifyStatus{VerifyResult: result, VerifiedAt: at})
 	}
 }
