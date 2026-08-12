@@ -196,7 +196,6 @@ func TestSecretsAndGitVerifySectionsRoundTrip(t *testing.T) {
 secrets:
   project: distill-prod
   prefix: distill-git-
-  dir: /run/secrets/distill
 gitverify:
   timeout: 7s
   host_keys: "`+sampleHostKey+`"
@@ -208,14 +207,69 @@ gitverify:
 	if cfg.Secrets.Project != "distill-prod" || cfg.Secrets.Prefix != "distill-git-" {
 		t.Errorf("Secrets = %+v, want the values from the file", cfg.Secrets)
 	}
-	if cfg.Secrets.Dir != "/run/secrets/distill" {
-		t.Errorf("Secrets.Dir = %q, want /run/secrets/distill", cfg.Secrets.Dir)
-	}
 	if cfg.GitVerify.Timeout != 7*time.Second {
 		t.Errorf("GitVerify.Timeout = %v, want 7s", cfg.GitVerify.Timeout)
 	}
 	if cfg.GitVerify.HostKeys != sampleHostKey {
 		t.Errorf("GitVerify.HostKeys = %q, want the known_hosts line from the file", cfg.GitVerify.HostKeys)
+	}
+}
+
+func TestSecretsDirRoundTrips(t *testing.T) {
+	p := verificationYAML(t, `
+secrets:
+  dir: /run/secrets/distill
+gitverify:
+  host_keys: "`+sampleHostKey+`"
+`)
+	cfg, err := config.Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Secrets.Dir != "/run/secrets/distill" {
+		t.Errorf("Secrets.Dir = %q, want /run/secrets/distill", cfg.Secrets.Dir)
+	}
+}
+
+// 后端由配置字段选出来，两种形态各自映射到一个取值。
+//
+// 这一层是「配置说了什么」；「据此构造什么」在 cmd/distill-api 那边，
+// 两边各有断言，谁被改坏了都说得出是哪一边。
+func TestSecretsBackendFollowsTheConfiguredFields(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  config.SecretsConfig
+		want config.SecretsBackend
+	}{
+		{"dir", config.SecretsConfig{Dir: "/run/secrets/distill"}, config.SecretsBackendDir},
+		{"secret manager", config.SecretsConfig{Project: "distill-prod", Prefix: "distill-git-"}, config.SecretsBackendSecretManager},
+		{"none", config.SecretsConfig{}, config.SecretsBackendNone},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.Backend(); got != tt.want {
+				t.Errorf("Backend() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// dir 与 project/prefix 同时出现必须拒绝。
+//
+// 无论按哪一边解释，都有一半配置是死的，而写下它的人不会知道是哪一半。
+// 最坏的一种落法是生产进程从本地目录读私钥 —— 那不是一次会被发现的
+// 误配，而是一个正常起来、正常校验、只是身份来源错了的进程。
+func TestSecretsWithBothBackendsIsRejected(t *testing.T) {
+	p := verificationYAML(t, `
+secrets:
+  project: distill-prod
+  prefix: distill-git-
+  dir: /run/secrets/distill
+gitverify:
+  host_keys: "`+sampleHostKey+`"
+`)
+	if _, err := config.Load(p); err == nil {
+		t.Fatal("Load() = nil error, want an error when both secrets backends are configured")
 	}
 }
 
@@ -250,17 +304,25 @@ secrets:
 	}
 }
 
-// 只写 project/prefix 而没有 dir：今天仓库里只有目录解析器一种实现，
-// 这份配置装配出来的是一个没有解析器的校验器，也就是没有校验。
-func TestSecretsWithoutDirIsRejected(t *testing.T) {
-	p := verificationYAML(t, `
-secrets:
-  project: distill-prod
-gitverify:
+// Secret Manager 后端缺 prefix 或缺 project 都必须拒绝。
+//
+// 空 prefix 一样能拼出合法资源路径，所以它不会在运行时报错 —— 它只是把
+// 围栏从「项目里的这批 secret」放大成「项目里的任意 secret」，而那正是
+// spec §2.1 用前缀换来的东西。缺失只能在启动时拦。
+func TestSecretManagerBackendNeedsBothProjectAndPrefix(t *testing.T) {
+	tests := map[string]string{
+		"missing prefix":  "  project: distill-prod\n",
+		"missing project": "  prefix: distill-git-\n",
+	}
+	for name, secretsBlock := range tests {
+		t.Run(name, func(t *testing.T) {
+			p := verificationYAML(t, "secrets:\n"+secretsBlock+`gitverify:
   host_keys: "`+sampleHostKey+`"
 `)
-	if _, err := config.Load(p); err == nil {
-		t.Fatal("Load() = nil error, want an error when the configured secrets backend has no implementation")
+			if _, err := config.Load(p); err == nil {
+				t.Fatal("Load() = nil error, want an error for an incomplete Secret Manager backend")
+			}
+		})
 	}
 }
 

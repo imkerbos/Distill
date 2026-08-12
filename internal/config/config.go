@@ -81,8 +81,8 @@ type DatabaseConfig struct {
 type SecretsConfig struct {
 	// Project 是 Secret Manager 所在的项目。
 	//
-	// 与 Prefix 一起供将来的 Secret Manager 解析器使用；今天仓库里只有
-	// 目录解析器一种实现，所以配了本段就必须配 Dir（见 validate）。
+	// 与 Prefix 一起选中 Secret Manager 解析器（生产形态）。不配置服务
+	// 账号密钥文件路径：身份走 Workload Identity，见 v4 spec §9.8。
 	Project string `koanf:"project"`
 	// Prefix 是短名拼进资源路径前的固定前缀。
 	//
@@ -128,6 +128,35 @@ type Config struct {
 // enabled 表示这一段配置有内容，即操作者打算让平台解析凭据。
 func (s SecretsConfig) enabled() bool {
 	return s.Project != "" || s.Prefix != "" || s.Dir != ""
+}
+
+// SecretsBackend 是凭据解析后端的封闭取值。
+type SecretsBackend string
+
+const (
+	// SecretsBackendNone 表示不解析凭据，因而也不做 Git 绑定校验。
+	SecretsBackendNone SecretsBackend = ""
+	// SecretsBackendDir 是本地开发用的目录解析器。
+	SecretsBackendDir SecretsBackend = "dir"
+	// SecretsBackendSecretManager 是生产用的 Secret Manager 解析器。
+	SecretsBackendSecretManager SecretsBackend = "secretmanager"
+)
+
+// Backend 返回本段配置选中的解析后端。
+//
+// 后端由「配了哪些字段」决定，而不是再加一个 backend 开关：多一个开关就
+// 多一种「开关写着 secretmanager、dir 也还留在文件里」的形态，而那种形态
+// 最坏的落法是生产进程从本地目录读私钥。validateSecrets 保证 dir 与
+// project/prefix 不会同时出现，所以这里的判断是完备的，不存在优先级。
+func (s SecretsConfig) Backend() SecretsBackend {
+	switch {
+	case s.Dir != "":
+		return SecretsBackendDir
+	case s.Project != "" || s.Prefix != "":
+		return SecretsBackendSecretManager
+	default:
+		return SecretsBackendNone
+	}
 }
 
 // Load 从 YAML 文件读取配置，并允许环境变量覆盖。
@@ -227,22 +256,41 @@ func (c *Config) validate() error {
 //
 //   - 配了 secrets 就必须配 host keys：gitverify.New 没有 host key 直接
 //     构造失败，且不存在"未配置就不校验"的回退分支。
-//   - 配了 secrets 就必须配 dir：今天仓库里只有目录解析器一种实现，
-//     只写 project/prefix 会得到一个没有解析器的校验器，也就是没有校验。
+//   - 后端必须选得出来且只选中一个，见 validateSecrets。
 //   - 超时必须为正：非正值会被 gitverify.New 拒绝，那是启动失败，
 //     但报错点应该在配置这一层，说得出是哪个字段。
 func (c *Config) validateVerification() error {
 	if !c.Secrets.enabled() {
 		return nil
 	}
-	if c.Secrets.Dir == "" {
-		return fmt.Errorf("%w: secrets.dir is required — the Secret Manager backend is not implemented yet", ErrInvalidConfig)
+	if err := validateSecrets(c.Secrets); err != nil {
+		return err
 	}
 	if c.GitVerify.HostKeys == "" {
 		return fmt.Errorf("%w: gitverify.host_keys is required when secrets is configured", ErrInvalidConfig)
 	}
 	if c.GitVerify.Timeout <= 0 {
 		return fmt.Errorf("%w: gitverify.timeout must be positive", ErrInvalidConfig)
+	}
+	return nil
+}
+
+// validateSecrets 检查这一段恰好选中一个解析后端。
+//
+// 两条约束的方向是同一个：不让一份配置同时是两种意思。
+//
+//   - dir 与 project/prefix 互斥。同时出现时无论按哪一边解释都有一半配置
+//     是死的，而写下它的人不会知道是哪一半 —— 最坏的一种落法是生产进程
+//     去读本地目录里的私钥。这里不定优先级，直接拒。
+//   - Secret Manager 后端要求 project 与 prefix 都在。空 prefix 一样能拼出
+//     合法路径，但围栏就只剩项目一层，任何短名都能指向项目里的任意
+//     secret，这与 spec §2.1 的意图相反。
+func validateSecrets(s SecretsConfig) error {
+	if s.Dir != "" && (s.Project != "" || s.Prefix != "") {
+		return fmt.Errorf("%w: secrets.dir cannot be combined with secrets.project/secrets.prefix — configure exactly one backend", ErrInvalidConfig)
+	}
+	if s.Backend() == SecretsBackendSecretManager && (s.Project == "" || s.Prefix == "") {
+		return fmt.Errorf("%w: secrets.project and secrets.prefix are both required for the Secret Manager backend", ErrInvalidConfig)
 	}
 	return nil
 }
