@@ -7,8 +7,9 @@ import {
 } from '../api/types'
 import { useResource } from '../api/useResource'
 import {
-  blankFormValues, buildClusterWrite, emptyApiServerRow, formValuesOf, resolveGitBinding,
-  type ApiServerRow, type ClusterFormValues,
+  blankFormValues, buildClusterWrite, describeVerifyStatus, emptyApiServerRow, formatUtcTime,
+  formValuesOf, resolveGitBinding,
+  type ApiServerRow, type ClusterFormValues, type VerifyStatusView, type VerifyTone,
 } from './clusterForm'
 import { Card, Chip, EmptyState, Field, PageHeader, Section, Select, TableCard } from '../components/ui'
 
@@ -72,7 +73,7 @@ function ClusterListSection({ clusters, error, loading, onChanged }: {
   return (
     <Section
       title="已注册集群"
-      description="Git 绑定为空时显式写「未绑定」——空单元格会被读成「加载中」或「未知」，两者都不是这里想表达的事实。「编辑」在行内展开，用于补上或改动登记信息（含 Git 绑定）；保存是整体替换，表单已按现值预填。"
+      description="Git 绑定为空时显式写「未绑定」——空单元格会被读成「加载中」或「未知」，两者都不是这里想表达的事实；同一条理由，没校验过的绑定写「未校验」而不是留白。校验只做只读查询：它能确认仓库可达、认证通过、分支与路径存在，但它从不向仓库提交任何内容，因此证明不了平台能往那个路径提交——那要等真正提交一次才知道。「编辑」在行内展开，用于补上或改动登记信息（含 Git 绑定）；保存是整体替换，表单已按现值预填。"
       meta={clusters ? `${clusters.length} 个` : undefined}
     >
       {error ? (
@@ -110,11 +111,7 @@ function ClusterListSection({ clusters, error, loading, onChanged }: {
                   <td><Chip strong={c.state === 'READY'}>{ONBOARD_STATE_LABEL[c.state]}</Chip></td>
                   <td>
                     {c.git
-                      ? (
-                        <span className="mono" style={{ fontSize: 'var(--text-sm)' }}>
-                          {c.git.repoUrl}@{c.git.branch}
-                        </span>
-                      )
+                      ? <GitBindingCell clusterId={c.id} git={c.git} onChanged={onChanged} />
                       : <span style={{ color: 'var(--text-muted)' }}>未绑定</span>}
                   </td>
                   <td>
@@ -157,6 +154,103 @@ function ClusterListSection({ clusters, error, loading, onChanged }: {
         </TableCard>
       )}
     </Section>
+  )
+}
+
+/**
+ * Git 绑定这一格：仓库指向、校验结论、校验时刻、重新校验。
+ *
+ * 四样东西挤在同一格而不是拆成四列，是因为它们说的是同一件事的四个侧面
+ * ——一个「只读校验通过」脱离了它指向的仓库和它发生的时刻就没有意义。
+ *
+ * 结论与时刻一律显示，不做「没问题就不说话」的省略：一格空白在这张表里
+ * 会被读成「没什么要报告的」，而「从未校验过」与「校验通过」是相反的两
+ * 件事实（同本节 description 里「未绑定」的理由）。
+ */
+function GitBindingCell({ clusterId, git, onChanged }: {
+  clusterId: string
+  git: GitBinding
+  onChanged: () => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const view = describeVerifyStatus(git)
+
+  async function reverify() {
+    setBusy(true)
+    try {
+      await api.verifyGitBinding(clusterId)
+      // 响应里的结论不就地贴进这一行：服务端是唯一真相源，重新拉一次
+      // 列表（同本页 refreshKey 的纪律）。就地拼接会让这一行显示出一份
+      // 由前端合成、没人能核对的状态。
+      onChanged()
+    } catch (err) {
+      // 未绑定的集群这个端点回 404，但这一格只在已绑定时渲染，所以真正
+      // 会撞上的是校验本身出错。原样展示后端的 msg，不收窄成一句「失败」。
+      window.alert(err instanceof ApiError ? err.msg : '重新校验失败，请稍后重试')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div style={{
+      display: 'flex', flexDirection: 'column', alignItems: 'flex-start',
+      gap: 'var(--space-1)', maxWidth: 340,
+    }}>
+      <span className="mono" style={{ fontSize: 'var(--text-sm)' }}>
+        {git.repoUrl}@{git.branch}
+      </span>
+      <VerifyBadge view={view} />
+      <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+        {view.checkedAt}
+      </span>
+      <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)' }}>
+        {view.detail}
+      </span>
+      <button
+        type="button"
+        onClick={reverify}
+        disabled={busy}
+        style={{ ...secondaryButtonStyle, marginTop: 'var(--space-1)' }}
+      >
+        {busy ? '校验中…' : '重新校验（只读）'}
+      </button>
+    </div>
+  )
+}
+
+/**
+ * 校验结论的样式：三种语气三种画法。
+ *
+ * 借用判定语义色（本该只归 VerdictBadge）是有意为之，与同文件里
+ * GitVerifiedMark 同一条理由：这里陈述的正是「这个绑定可不可信」，是
+ * 判断结论而不是元信息。未校验用描边而非灰化——灰掉等于把「没查过」
+ * 弱化成一句次要提示，而它恰恰是这一格里最需要被看见的事实。
+ */
+const VERIFY_TONE_STYLE: Record<VerifyTone, CSSProperties> = {
+  ok: {
+    color: 'var(--verdict-allow)', background: 'var(--verdict-allow-bg)',
+    border: '1px solid var(--verdict-allow)',
+  },
+  bad: {
+    color: 'var(--verdict-deny)', background: 'var(--verdict-deny-bg)',
+    border: '1px solid var(--verdict-deny)',
+  },
+  unverified: {
+    color: 'var(--verdict-unknown)', background: 'transparent',
+    border: 'var(--degraded-stroke-width) solid var(--verdict-unknown)',
+  },
+}
+
+function VerifyBadge({ view }: { view: VerifyStatusView }) {
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', padding: '2px 8px',
+      fontSize: 'var(--text-xs)', fontWeight: 500, borderRadius: 999,
+      ...VERIFY_TONE_STYLE[view.tone],
+    }}>
+      {view.label}
+    </span>
   )
 }
 
@@ -620,7 +714,7 @@ function ImportSection({ clusters, refreshKey, onChanged }: {
                 <td><Chip>{IMPORT_ROLE_LABEL[it.role] ?? it.role}</Chip></td>
                 <td><Chip>{IMPORT_SOURCE_LABEL[it.source] ?? it.source}</Chip></td>
                 <td>{it.importedBy}</td>
-                <td className="mono" style={{ fontSize: 'var(--text-xs)' }}>{formatTime(it.importedAt)}</td>
+                <td className="mono" style={{ fontSize: 'var(--text-xs)' }}>{formatUtcTime(it.importedAt)}</td>
                 <td><GitVerifiedMark item={it} /></td>
                 <td>
                   <button onClick={() => remove(it.importId)} style={buttonStyle}>删除</button>
@@ -678,10 +772,6 @@ function ApiServerList({ servers }: { servers?: APIServer[] | null }) {
 /* ---------------------------------------------------------------------- */
 /* 共享小件                                                                 */
 /* ---------------------------------------------------------------------- */
-
-function formatTime(iso: string): string {
-  return new Date(iso).toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC')
-}
 
 function FormGrid({ children }: { children: ReactNode }) {
   return (

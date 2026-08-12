@@ -360,12 +360,46 @@ export interface APIServer {
   port: number
 }
 
+/**
+ * Git 绑定只读校验的结论。封闭枚举，与后端 registry.VerifyResult 逐值对齐。
+ *
+ * 类型是联合而不是 string：这份取值表在界面上要一一对应到文案，用 string
+ * 就等于允许后端某天多一个取值而界面照旧渲染出一个空格。校验结论是
+ * 「这个绑定可不可信」的判断，空格会被读成「没问题」。
+ */
+export type VerifyResult =
+  | 'NOT_VERIFIED' | 'OK' | 'CREDENTIAL_UNRESOLVED' | 'AUTH_FAILED'
+  | 'REPO_UNREACHABLE' | 'BRANCH_MISSING' | 'PATH_MISSING'
+
 export interface GitBinding {
   repoUrl: string
   branch: string
   policyPath: string
   credentialRef: string
   lastWrittenCommit: string
+  /** 最近一次只读校验的结论。 */
+  verifyResult: VerifyResult
+  /**
+   * 最近一次校验发生的时间。
+   *
+   * 后端带 omitempty，从未校验过时这个键根本不出现——因此是可选而不是
+   * 恒存在的 null。它是历史事实，不是当前状态：一个三天前的 OK 说的是
+   * 三天前那一刻，不能拿来声明此刻的绑定可信（design doc §3.4）。
+   */
+  verifiedAt?: string | null
+}
+
+/**
+ * POST /clusters/{id}/git-binding/verify 的响应。
+ *
+ * 后端只回结论，不回整个集群（见 httpapi 的 verifyStatus）——调用方已经
+ * 有仓库地址与引用了。本页拿到它之后仍然重新拉一次集群列表：服务端是
+ * 唯一真相源，就地把这两个字段贴进本地行会让界面出现一份没人能核对的
+ * 拼接状态。
+ */
+export interface VerifyStatus {
+  verifyResult: VerifyResult
+  verifiedAt?: string | null
 }
 
 /**
@@ -413,14 +447,21 @@ export interface ClusterWrite {
 }
 
 /**
- * 写入体里的 Git 绑定：没有 lastWrittenCommit。
+ * 写入体里的 Git 绑定：没有 lastWrittenCommit，也没有校验结论。
  *
- * 那个字段是平台对"我最近一次往这个仓库写了什么"的断言，漂移检测拿它
- * 与 Git 现状比对。它由服务端从库里的现值推导，请求体带上去也不会被
- * 采纳（见 internal/httpapi 的 gitPayload）——所以这里根本不给它位置：
- * 一个永远不会被采纳的字段留在类型里，只会让下一个调用方以为它有用。
+ * lastWrittenCommit 是平台对"我最近一次往这个仓库写了什么"的断言，漂移
+ * 检测拿它与 Git 现状比对。它由服务端从库里的现值推导，请求体带上去也
+ * 不会被采纳（见 internal/httpapi 的 gitPayload）——所以这里根本不给它
+ * 位置：一个永远不会被采纳的字段留在类型里，只会让下一个调用方以为
+ * 它有用。
+ *
+ * verifyResult / verifiedAt 出于同一条理由被排除，且理由更硬：它们是
+ * 平台对绑定可信度的判断，由服务端在保存时自己校验后写入。一个能由
+ * 调用方提交的结论可以被填成 OK，于是"已校验通过"这句话再也无法被
+ * 证伪——这正是 verdict 与 confidence 必须分列的同一条纪律。
  */
-export type GitBindingWrite = Omit<GitBinding, 'lastWrittenCommit'>
+export type GitBindingWrite =
+  Omit<GitBinding, 'lastWrittenCommit' | 'verifyResult' | 'verifiedAt'>
 
 export interface PolicyImportItem {
   clusterId: string

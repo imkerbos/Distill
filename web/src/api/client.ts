@@ -1,7 +1,7 @@
 import type {
   ClusterWrite, Decision, Envelope, FlowFilter, FlowPage,
   Identity, ImportRole, ImportSource, OverrideDecision, PolicyImportItem, PolicyPreview,
-  Quality, RegisteredCluster, SecurityReport, Topology, TopologyLevel,
+  Quality, RegisteredCluster, SecurityReport, Topology, TopologyLevel, VerifyStatus,
 } from './types'
 
 /** ApiError 同时携带 HTTP 状态与业务码，调用方两者都可能需要判断。 */
@@ -99,6 +99,16 @@ export const api = {
     request<{ id: string }>(`/api/v1/clusters/${encodeURIComponent(cluster)}`, {
       method: 'DELETE',
     }),
+
+  // 手动重校验。没有请求体：要校验的是库里那个绑定，不是调用方随手给的
+  // 一份——能由请求体指定校验目标，就等于允许拿一个能通过的仓库地址去
+  // 换取另一个绑定的 OK。存在的理由是凭据轮换与权限修复之后需要一个新鲜
+  // 结论（design doc §3.3）；平台不做后台定时校验。
+  verifyGitBinding: (cluster: string) =>
+    request<VerifyStatus>(
+      `/api/v1/clusters/${encodeURIComponent(cluster)}/git-binding/verify`,
+      { method: 'POST' },
+    ),
 
   policyImports: (cluster: string) =>
     request<PolicyImportItem[]>(
