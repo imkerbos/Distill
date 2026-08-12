@@ -42,4 +42,14 @@ type Store interface {
 	CreatePolicyImport(ctx context.Context, actor Actor, p PolicyImport) error
 	// SoftDeletePolicyImport 删除一条导入，同事务写审计。
 	SoftDeletePolicyImport(ctx context.Context, actor Actor, clusterID, importID string) error
+
+	// RuleOverrides 返回一个集群下未删除的人工决定。
+	RuleOverrides(ctx context.Context, clusterID string) ([]RuleOverride, error)
+	// CreateRuleOverride 记录一条人工决定，同事务写审计。
+	//
+	// 同一条规则重复决定时覆盖旧值：人改主意是正常的，而两条互相矛盾
+	// 的决定并存会让「这条规则到底开不开」没有答案。旧值进审计。
+	CreateRuleOverride(ctx context.Context, actor Actor, o RuleOverride) error
+	// SoftDeleteRuleOverride 撤销一条人工决定，同事务写审计。
+	SoftDeleteRuleOverride(ctx context.Context, actor Actor, clusterID, namespace, workload, fingerprint string) error
 }
