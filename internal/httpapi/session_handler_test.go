@@ -45,6 +45,32 @@ func newTestRouterWithRegistry(
 ) (http.Handler, *auth.SessionStore, *http.Cookie) {
 	t.Helper()
 
+	// reader 允许为 nil（见上），因此默认窗口只在拿到 fixture 实现时取。
+	// 走类型断言而非扩展 store.Reader：数据窗口是 fixture 特有的概念，
+	// 真实存储没有"全部数据的时间范围"这回事。
+	var window store.TimeWindow
+	if fr, ok := reader.(*store.FixtureReader); ok {
+		window = fr.DataWindow()
+	}
+	return newTestRouterWithWindow(t, reader, reg, window)
+}
+
+// newTestRouterWithWindow 是 newTestRouterWithRegistry 的底层版本，
+// 额外接受一个显式的 DefaultWindow，而不是自动取 fixture 的全量窗口。
+//
+// 绝大多数用例要的正是"全量窗口兜底"，交给 newTestRouterWithRegistry
+// 自动推导即可。只有验证"默认窗口比调用方显式传入的窗口更窄"这类场景
+// （override_handler_test.go 里对 rule-overrides 请求体 from/to 的穿透
+// 测试）才需要手动指定一个比全量更窄的默认窗口——fixture 数据集里，
+// 任何自定义窗口的候选集在数学上都是全量窗口候选集的子集（BASELINE
+// 规则与窗口无关，LEARNED 规则的存在性只会随窗口扩大而增多、不会减少），
+// 所以默认窗口取全量时，永远构造不出"只在自定义窗口里存在、默认窗口里
+// 没有"的指纹，那条测试就验证不了任何东西。
+func newTestRouterWithWindow(
+	t *testing.T, reader store.Reader, reg registry.Store, window store.TimeWindow,
+) (http.Handler, *auth.SessionStore, *http.Cookie) {
+	t.Helper()
+
 	hash, err := bcrypt.GenerateFromPassword([]byte(testPassword), bcrypt.MinCost)
 	if err != nil {
 		t.Fatalf("hash: %v", err)
@@ -53,14 +79,6 @@ func newTestRouterWithRegistry(
 	logger, err := applog.New("ERROR", io.Discard)
 	if err != nil {
 		t.Fatalf("logger: %v", err)
-	}
-
-	// reader 允许为 nil（见上），因此默认窗口只在拿到 fixture 实现时取。
-	// 走类型断言而非扩展 store.Reader：数据窗口是 fixture 特有的概念，
-	// 真实存储没有"全部数据的时间范围"这回事。
-	var window store.TimeWindow
-	if fr, ok := reader.(*store.FixtureReader); ok {
-		window = fr.DataWindow()
 	}
 
 	h := httpapi.NewRouter(httpapi.Deps{

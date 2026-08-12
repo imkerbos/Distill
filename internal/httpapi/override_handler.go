@@ -14,12 +14,20 @@ import (
 )
 
 // overridePayload 是人工决定的请求体。
+//
+// From/To 是可选的：调用方在预览页看到的候选集若不是用默认窗口生成的
+// （比如自己传了 ?from=&to= 查了一段自定义时间），提交覆盖时必须带上
+// 同一个窗口，否则服务端会拿默认窗口重新生成候选集去核验指纹——两个
+// 窗口内容不一样，一条明明画在屏幕上的规则会被拒绝，而拒绝给出的理由
+// 是"页面可能已过期"，那不是真正的原因，会把人指向错误的排查方向。
 type overridePayload struct {
 	Namespace   string `json:"namespace"`
 	Workload    string `json:"workload"`
 	Fingerprint string `json:"fingerprint"`
 	Decision    string `json:"decision"`
 	Reason      string `json:"reason"`
+	From        string `json:"from"`
+	To          string `json:"to"`
 }
 
 // baselineNotDisablableMsg 是禁用一条 BASELINE 规则被拒绝时的用户可见文案。
@@ -65,12 +73,22 @@ func handleCreateOverride(d Deps) http.HandlerFunc {
 			writeRegistryError(w, r, d, err)
 			return
 		}
+		// 窗口决定"当前候选集"是哪一份：两者都不填才退回默认窗口——
+		// 这是最常见的路径，必须继续可用。只填一个是半成品，与
+		// parseWindow 在 /flows、/policy-preview 上的既有判据一致，
+		// 当成调用方的输入错误，不当默认值处理。
+		window, ok := parseWindow(
+			map[string][]string{"from": {p.From}, "to": {p.To}}, d.DefaultWindow)
+		if !ok {
+			response.WriteBusiness(w, response.CodeInvalidParam)
+			return
+		}
 		// 指纹必须先在当前候选集里核验，才能落库：过期页面提交的覆盖
 		// 若不做这一步，不会报错，只会永远待在预览页的「已失效」那
 		// 一节，而它从来就没生效过。
 		if err := d.Reader.EnsureRuleExists(
 			r.Context(), clusterID, o.Namespace, o.Workload, o.Fingerprint,
-			o.Decision, d.DefaultWindow,
+			o.Decision, window,
 		); err != nil {
 			if errors.Is(err, policygen.ErrBaselineNotDisablable) {
 				response.WriteInvalid(w, baselineNotDisablableMsg)
