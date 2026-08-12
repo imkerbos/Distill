@@ -1,0 +1,78 @@
+# egress 专项：目的端完全没有 ingress 策略，唯一能拒绝连接的只可能是
+# 源端的 egress 策略。这是本矩阵里 "anyDropped 覆盖 majority vote"
+# 那条规则的直接来源——一条被 egress 拦下的连接，目的侧永远不会有对应
+# 的 DROPPED（甚至根本没有）flow，只有源侧会报。
+apiVersion: v1
+kind: Namespace
+metadata: {name: probe-open, labels: {env: dev}}
+---
+apiVersion: v1
+kind: Namespace
+metadata: {name: client-egress, labels: {env: dev, role: prober}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: multi, namespace: probe-open}
+data:
+  default.conf: |
+    server { listen 8080; location / { return 200 "ok\n"; } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: srv, namespace: probe-open}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: srv}}
+  template:
+    metadata: {labels: {app: srv}}
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.29-alpine
+          ports: [{name: http, containerPort: 8080, protocol: TCP}]
+          volumeMounts: [{name: c, mountPath: /etc/nginx/conf.d}]
+      volumes: [{name: c, configMap: {name: multi}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: srv, namespace: probe-open}
+spec: {selector: {app: srv}, ports: [{port: 8080, targetPort: 8080}]}
+---
+# eprober 对两个目的地各发一路流量：probe-named（egress 策略允许）
+# 和 probe-open（egress 策略不允许，且 probe-open 自己也没有 ingress
+# 策略）。两条连接的目的端一个有策略一个没有，但结论都必须由源端的
+# egress 策略决定——这是要测的东西，不是目的端配了什么。
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: eprober, namespace: client-egress}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: eprober}}
+  template:
+    metadata: {labels: {app: eprober}}
+    spec:
+      containers:
+        - name: c
+          image: busybox:1.37
+          command:
+            - sh
+            - -c
+            - |
+              while true; do
+                wget -q -T2 -O- http://srv.probe-named.svc:8080/ >/dev/null 2>&1
+                wget -q -T2 -O- http://srv.probe-open.svc:8080/  >/dev/null 2>&1
+                sleep 2
+              done
+---
+# probe-open 没有任何 ingress 策略 —— 所以去它的连接被拒，只可能是 egress 拒的
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: egress-only-named, namespace: client-egress}
+spec:
+  podSelector: {matchLabels: {app: eprober}}
+  policyTypes: [Egress]
+  egress:
+    - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: probe-named}}}]
+      ports: [{protocol: TCP, port: 8080}]
+    - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}}]
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
