@@ -192,13 +192,13 @@ func postJSONNoAuth(t *testing.T, h http.Handler, path string, body any) *httpte
 	return postJSON(t, h, path, body)
 }
 
-func authedPatchJSON(t *testing.T, h http.Handler, cookie *http.Cookie, path string, body any) *httptest.ResponseRecorder {
+func authedPutJSON(t *testing.T, h http.Handler, cookie *http.Cookie, path string, body any) *httptest.ResponseRecorder {
 	t.Helper()
 	raw, err := json.Marshal(body)
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := httptest.NewRequest(http.MethodPatch, path, bytes.NewReader(raw))
+	req := httptest.NewRequest(http.MethodPut, path, bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
 	req.AddCookie(cookie)
 	rec := httptest.NewRecorder()
@@ -233,7 +233,7 @@ func TestCreateClusterRejectsMalformedJSON(t *testing.T) {
 
 func TestUpdateClusterRejectsMalformedJSON(t *testing.T) {
 	h, _, cookie := newTestRouterWithRegistry(t, fixtureReader(), newMemRegistry())
-	req := httptest.NewRequest(http.MethodPatch, "/api/v1/clusters/c1", bytes.NewReader([]byte("{not json")))
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/clusters/c1", bytes.NewReader([]byte("{not json")))
 	req.Header.Set("Content-Type", "application/json")
 	req.AddCookie(cookie)
 	rec := httptest.NewRecorder()
@@ -309,7 +309,7 @@ func TestCreateClusterIgnoresCallerSuppliedState(t *testing.T) {
 	}
 }
 
-// PATCH 必须保留库里已有的接入状态：既不能被请求体里任意的 state 值
+// 更新必须保留库里已有的接入状态：既不能被请求体里任意的 state 值
 // 改写，也不该在修改网段这类操作时被悄悄打回 REGISTERED。
 func TestUpdateClusterPreservesExistingState(t *testing.T) {
 	reg := newMemRegistry()
@@ -319,7 +319,7 @@ func TestUpdateClusterPreservesExistingState(t *testing.T) {
 	}
 	h, _, cookie := newTestRouterWithRegistry(t, fixtureReader(), reg)
 
-	rec := authedPatchJSON(t, h, cookie, "/api/v1/clusters/c1", map[string]any{
+	rec := authedPutJSON(t, h, cookie, "/api/v1/clusters/c1", map[string]any{
 		"displayName": "C1 renamed", "podCidr": "10.4.0.0/14",
 		"nodeCidr": "10.128.0.0/20", "state": "REGISTERED",
 	})
@@ -334,9 +334,225 @@ func TestUpdateClusterPreservesExistingState(t *testing.T) {
 	}
 }
 
+// 端点是整体替换，动词必须说的是同一件事。PATCH 在 HTTP 里承诺的是
+// 「只改我给的字段」，而这个 handler 写整行 —— 留着这条路由，第一个
+// 按 PATCH 语义只发 {"git":{...}} 的调用方就会把 podCIDR 清成空串。
+// 它不该被友好地接受，也不该被静默改写，而该在路由层就不存在。
+func TestUpdateClusterRejectsPatchVerb(t *testing.T) {
+	reg := newMemRegistry()
+	reg.clusters["c1"] = registry.Cluster{
+		ID: "c1", DisplayName: "C1", PodCIDR: "10.4.0.0/14",
+		NodeCIDR: "10.128.0.0/20", State: registry.StateReady,
+	}
+	h, _, cookie := newTestRouterWithRegistry(t, fixtureReader(), reg)
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/clusters/c1",
+		bytes.NewReader([]byte(`{"displayName":"C1"}`)))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("status = %d, want 405 — PATCH must not name a full-replacement endpoint", rec.Code)
+	}
+}
+
+// 整体替换必须表现得像整体替换：只带 git 的请求体不会被合并进现有行，
+// 它是一个缺了 podCIDR/nodeCIDR 的完整集群，因此被校验拒绝。
+//
+// 这条测试守的是「不要好心补全」：一旦有人在 handler 里用库里的值填上
+// 请求体没给的字段，这个请求就会成功 —— 而成功的代价是调用方从此无法
+// 表达「把这一项清空」，且 PUT 的语义与实现再次分家。
+func TestUpdateClusterIsReplacementNotMerge(t *testing.T) {
+	reg := newMemRegistry()
+	reg.clusters["c1"] = registry.Cluster{
+		ID: "c1", DisplayName: "C1", PodCIDR: "10.4.0.0/14",
+		NodeCIDR: "10.128.0.0/20", State: registry.StateReady,
+	}
+	h, _, cookie := newTestRouterWithRegistry(t, fixtureReader(), reg)
+
+	rec := authedPutJSON(t, h, cookie, "/api/v1/clusters/c1", map[string]any{
+		"git": map[string]any{
+			"repoUrl": "https://gitlab.example.com/net/policies.git",
+			"branch":  "main", "policyPath": "clusters/c1",
+		},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 — a bad body is a business failure", rec.Code)
+	}
+	if got := bodyOf(t, rec)["code"]; got != float64(20001) {
+		t.Fatalf("code = %v, want 20001 — a git-only body is not a complete cluster", got)
+	}
+	// 被拒绝的请求不得留下任何痕迹：一次半成功的替换比一次失败更难排查。
+	if got := reg.clusters["c1"].PodCIDR; got != "10.4.0.0/14" {
+		t.Errorf("podCIDR = %q, want it untouched by a rejected update", got)
+	}
+	if reg.clusters["c1"].Git != nil {
+		t.Error("git binding was stored by a rejected update")
+	}
+}
+
+// Git 绑定既要能补上，也要能解除 —— 后者用显式的 "git": null 表达。
+//
+// 没有这条，「解除绑定」在协议层就只能靠"字段不出现"，而那与"这次不谈
+// 这件事"长得一模一样；界面上任何一个把绑定清空的操作都将无法兑现。
+func TestUpdateClusterBindsAndClearsGit(t *testing.T) {
+	reg := newMemRegistry()
+	reg.clusters["c1"] = registry.Cluster{
+		ID: "c1", DisplayName: "C1", PodCIDR: "10.4.0.0/14",
+		NodeCIDR: "10.128.0.0/20", State: registry.StateReady,
+	}
+	h, _, cookie := newTestRouterWithRegistry(t, fixtureReader(), reg)
+
+	// 引用值走变量而不是字面量：凭据本身永不入库，这里传的只是 Secret
+	// Manager 里的引用（见 registry.GitBinding.CredentialRef），但写成
+	// 内联字面量会被 gosec G101 读成硬编码凭据 —— 与其压掉那条告警，
+	// 不如让代码形状本身与"这不是一个秘密"这句话一致。
+	bindingRef := "sm://distill/policies-writer"
+	full := map[string]any{
+		"displayName": "C1", "podCidr": "10.4.0.0/14", "nodeCidr": "10.128.0.0/20",
+		"apiServers":         []map[string]any{{"host": "10.9.0.2", "cidr": "10.9.0.0/28", "port": 443}},
+		"healthCheckSources": []string{"35.191.0.0/16"},
+		"git": map[string]any{
+			"repoUrl": "https://gitlab.example.com/net/policies.git",
+			"branch":  "main", "policyPath": "clusters/c1", "credentialRef": bindingRef,
+		},
+	}
+	rec := authedPutJSON(t, h, cookie, "/api/v1/clusters/c1", full)
+	if got := bodyOf(t, rec)["code"]; got != float64(0) {
+		t.Fatalf("code = %v, want 0 (body %s)", got, rec.Body.String())
+	}
+	bound := reg.clusters["c1"]
+	if bound.Git == nil || bound.Git.PolicyPath != "clusters/c1" {
+		t.Fatalf("git = %+v, want the binding from the request", bound.Git)
+	}
+	if bound.Git.CredentialRef != bindingRef {
+		t.Errorf("credentialRef = %q, want %q — the reference must survive the write",
+			bound.Git.CredentialRef, bindingRef)
+	}
+	// 同一次请求里的其余字段也必须落库：整体替换下它们与 git 同等重要，
+	// 而 apiServers 漏掉一条就是漏掉一条 control-plane 放行规则。
+	if len(bound.APIServers) != 1 || bound.APIServers[0].Port != 443 {
+		t.Errorf("apiServers = %+v, want the endpoint from the request", bound.APIServers)
+	}
+	if !reflect.DeepEqual(bound.HealthCheckSources, []string{"35.191.0.0/16"}) {
+		t.Errorf("healthCheckSources = %v, want the list from the request", bound.HealthCheckSources)
+	}
+
+	cleared := map[string]any{
+		"displayName": "C1", "podCidr": "10.4.0.0/14", "nodeCidr": "10.128.0.0/20",
+		"git": nil,
+	}
+	rec = authedPutJSON(t, h, cookie, "/api/v1/clusters/c1", cleared)
+	if got := bodyOf(t, rec)["code"]; got != float64(0) {
+		t.Fatalf("code = %v, want 0 (body %s)", got, rec.Body.String())
+	}
+	if reg.clusters["c1"].Git != nil {
+		t.Errorf("git = %+v, want nil — an explicit null must remove the binding",
+			reg.clusters["c1"].Git)
+	}
+	if reg.clusters["c1"].State != registry.StateReady {
+		t.Errorf("state = %q, want READY to survive a binding removal", reg.clusters["c1"].State)
+	}
+}
+
+// 漂移基准不接受调用方赋值。
+//
+// lastWrittenCommit 是平台对「我最近一次往这个仓库写了什么」的断言，
+// 漂移检测拿它与 Git 现状比对。一个能被请求体设置的基准可以被调用方
+// 调成与仓库现状一致 —— 于是平台会带着信心报告「无漂移」，而这句话
+// 再也无法被证伪，比根本没有基准更糟。
+//
+// 用一个**伪造的、与库里不同的** SHA 测，而不是空值：空值下「收下再
+// 忽略」与「为空时兜底」两种实现都会通过，什么也证明不了。这与 state
+// 那条测试是同一个理由（见 TestCreateClusterIgnoresCallerSuppliedState）。
+func TestUpdateClusterIgnoresCallerSuppliedDriftBaseline(t *testing.T) {
+	const storedSHA = "0123456789abcdef0123456789abcdef01234567"
+	const forgedSHA = "fedcba9876543210fedcba9876543210fedcba98"
+
+	reg := newMemRegistry()
+	reg.clusters["c1"] = registry.Cluster{
+		ID: "c1", DisplayName: "C1", PodCIDR: "10.4.0.0/14",
+		NodeCIDR: "10.128.0.0/20", State: registry.StateReady,
+		Git: &registry.GitBinding{
+			RepoURL: "https://gitlab.example.com/net/policies.git", Branch: "main",
+			PolicyPath: "clusters/c1", LastWrittenCommit: storedSHA,
+		},
+	}
+	h, _, cookie := newTestRouterWithRegistry(t, fixtureReader(), reg)
+
+	bindingRef := "sm://distill/policies-writer"
+	body := func(branch, policyPath string) map[string]any {
+		return map[string]any{
+			"displayName": "C1", "podCidr": "10.4.0.0/14", "nodeCidr": "10.128.0.0/20",
+			"git": map[string]any{
+				"repoUrl": "https://gitlab.example.com/net/policies.git", "branch": branch,
+				"policyPath": policyPath, "credentialRef": bindingRef,
+				"lastWrittenCommit": forgedSHA,
+			},
+		}
+	}
+
+	// 同一仓库同一分支：基准沿用库里的值，请求体里那个伪造的 SHA 无效。
+	rec := authedPutJSON(t, h, cookie, "/api/v1/clusters/c1", body("main", "clusters/c1/net"))
+	if got := bodyOf(t, rec)["code"]; got != float64(0) {
+		t.Fatalf("code = %v, want 0 (body %s)", got, rec.Body.String())
+	}
+	got := reg.clusters["c1"].Git
+	if got == nil || got.LastWrittenCommit != storedSHA {
+		t.Fatalf("lastWrittenCommit = %+v, want %q — a forged baseline must not be honoured",
+			got, storedSHA)
+	}
+	// 对照组：credentialRef 是操作者填写的 Secret Manager 引用，不是平台
+	// 对外部世界的断言，本就该由调用方提供 —— 它必须照常落库，否则这条
+	// 防线就从「拦住伪造的断言」变成了「整块 git 都不听调用方的」。
+	if got.CredentialRef != bindingRef {
+		t.Errorf("credentialRef = %q, want %q — it is caller-supplied by design",
+			got.CredentialRef, bindingRef)
+	}
+	if got.PolicyPath != "clusters/c1/net" {
+		t.Errorf("policyPath = %q, want the value from the request", got.PolicyPath)
+	}
+
+	// 改指向另一个分支：旧 SHA 与新目标无关，必须归零 —— 同样不采用
+	// 请求体里那个伪造的值。
+	rec = authedPutJSON(t, h, cookie, "/api/v1/clusters/c1", body("release", "clusters/c1"))
+	if code := bodyOf(t, rec)["code"]; code != float64(0) {
+		t.Fatalf("code = %v, want 0 (body %s)", code, rec.Body.String())
+	}
+	if got = reg.clusters["c1"].Git; got == nil || got.LastWrittenCommit != "" {
+		t.Errorf("lastWrittenCommit = %+v, want empty after the binding was repointed", got)
+	}
+}
+
+// 创建时漂移基准同样为空：平台还没往那个仓库写过任何东西，一个非空的
+// 基准是一句凭空的声明。
+func TestCreateClusterIgnoresCallerSuppliedDriftBaseline(t *testing.T) {
+	reg := newMemRegistry()
+	h, _, cookie := newTestRouterWithRegistry(t, fixtureReader(), reg)
+
+	rec := authedPostJSON(t, h, cookie, "/api/v1/clusters", map[string]any{
+		"id": "new-2", "displayName": "New", "podCidr": "10.20.0.0/14",
+		"nodeCidr": "10.140.0.0/20",
+		"git": map[string]any{
+			"repoUrl": "https://gitlab.example.com/net/policies.git", "branch": "main",
+			"policyPath":        "clusters/new-2",
+			"lastWrittenCommit": "fedcba9876543210fedcba9876543210fedcba98",
+		},
+	})
+	if got := bodyOf(t, rec)["code"]; got != float64(0) {
+		t.Fatalf("code = %v, want 0 (body %s)", got, rec.Body.String())
+	}
+	stored := reg.clusters["new-2"].Git
+	if stored == nil || stored.LastWrittenCommit != "" {
+		t.Errorf("lastWrittenCommit = %+v, want empty — the platform has written nothing yet", stored)
+	}
+}
+
 func TestUpdateClusterUnknownIsBusinessNotFound(t *testing.T) {
 	h, _, cookie := newTestRouterWithRegistry(t, fixtureReader(), newMemRegistry())
-	rec := authedPatchJSON(t, h, cookie, "/api/v1/clusters/no-such", map[string]any{
+	rec := authedPutJSON(t, h, cookie, "/api/v1/clusters/no-such", map[string]any{
 		"displayName": "X", "podCidr": "10.4.0.0/14", "nodeCidr": "10.128.0.0/20",
 	})
 	if rec.Code != http.StatusOK {
@@ -452,6 +668,9 @@ func TestCreateClusterCarriesEveryFieldIntoTheDomainObject(t *testing.T) {
 		"git": map[string]any{
 			"repoUrl": "https://gitlab.example.com/net/policies.git", "branch": "main",
 			"policyPath": "clusters/rt-1", "credentialRef": gitBindingRef,
+			// 与上面的 state 同一个手法：漂移基准也是服务端决定的，请求体
+			// 里给一个具体的 SHA，期望值里写空 —— 创建时平台还没往那个
+			// 仓库写过任何东西，一个非空的基准是一句凭空的声明。
 			"lastWrittenCommit": "0123456789abcdef0123456789abcdef01234567",
 		},
 	})
@@ -471,7 +690,7 @@ func TestCreateClusterCarriesEveryFieldIntoTheDomainObject(t *testing.T) {
 		Git: &registry.GitBinding{
 			RepoURL: "https://gitlab.example.com/net/policies.git", Branch: "main",
 			PolicyPath: "clusters/rt-1", CredentialRef: gitBindingRef,
-			LastWrittenCommit: "0123456789abcdef0123456789abcdef01234567",
+			LastWrittenCommit: "",
 		},
 	}
 	got, ok := reg.clusters["rt-1"]

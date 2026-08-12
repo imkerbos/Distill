@@ -24,7 +24,40 @@ type clusterPayload struct {
 	State              string               `json:"state"`
 	APIServers         []registry.APIServer `json:"apiServers"`
 	HealthCheckSources []string             `json:"healthCheckSources"`
-	Git                *registry.GitBinding `json:"git"`
+	Git                *gitPayload          `json:"git"`
+}
+
+// gitPayload 是 Git 绑定的请求体形状。
+//
+// 刻意**不含** lastWrittenCommit，而不是收下再忽略：策略存在 Git 里的
+// 理由是双重审计 —— Git 保存记录，这个字段是平台对那份记录的声明，
+// 漂移检测拿两者比对。允许调用方设置它，等于允许调用方让平台的说法与
+// 仓库现状对上：基准从此无法被证伪，而平台会带着信心报告「无漂移」，
+// 比根本没有基准更糟。
+//
+// 一个永远不会被采纳的字段留在请求形状里，只会让下一个调用方以为它有用；
+// 它的值由 handleUpdateCluster 从库里的现值推导（见 carryDriftBaseline）。
+//
+// credentialRef 不在此列：它是 Secret Manager 里的引用，是操作者填写的
+// 配置，不是平台对外部世界的断言 —— 由调用方提供正是它的设计意图。
+type gitPayload struct {
+	RepoURL       string `json:"repoUrl"`
+	Branch        string `json:"branch"`
+	PolicyPath    string `json:"policyPath"`
+	CredentialRef string `json:"credentialRef"`
+}
+
+// toBinding 把 Git 请求体转成领域对象，LastWrittenCommit 一律留空。
+func (g *gitPayload) toBinding() *registry.GitBinding {
+	if g == nil {
+		return nil
+	}
+	return &registry.GitBinding{
+		RepoURL:       g.RepoURL,
+		Branch:        g.Branch,
+		PolicyPath:    g.PolicyPath,
+		CredentialRef: g.CredentialRef,
+	}
 }
 
 // toCluster 把请求体转成领域对象。
@@ -33,6 +66,9 @@ type clusterPayload struct {
 // 只做「为空时兜底」是不够的 —— 那样一次显式的 {"state":"READY"} 仍会被接受，
 // 等于允许把「还没有数据」标成「可以出推荐了」。创建一律从 REGISTERED 起步，
 // 修改时保留库里已有的状态（见 handleUpdateCluster）。
+//
+// 漂移基准 lastWrittenCommit 同理：创建一律为空（平台还没往那个仓库写过
+// 任何东西），修改时从库里的现值推导。
 func (p clusterPayload) toCluster() registry.Cluster {
 	return registry.Cluster{
 		State:              registry.StateRegistered,
@@ -43,7 +79,22 @@ func (p clusterPayload) toCluster() registry.Cluster {
 		CCNPPresent:        p.CCNPPresent,
 		APIServers:         p.APIServers,
 		HealthCheckSources: p.HealthCheckSources,
-		Git:                p.Git,
+		Git:                p.Git.toBinding(),
+	}
+}
+
+// carryDriftBaseline 用库里的现值填回漂移基准。
+//
+// 绑定仍指向同一仓库同一分支时沿用：那个 commit 仍然描述平台最近一次
+// 往这个目标写了什么。改指向或解除绑定时归零 —— 旧 SHA 指向的历史与新
+// 目标无关，留着它会让漂移检测拿一个不相干的 commit 当基准，得出的
+// 「有漂移／无漂移」两种结论都不成立。
+func carryDriftBaseline(next, existing *registry.GitBinding) {
+	if next == nil || existing == nil {
+		return
+	}
+	if next.RepoURL == existing.RepoURL && next.Branch == existing.Branch {
+		next.LastWrittenCommit = existing.LastWrittenCommit
 	}
 }
 
@@ -92,7 +143,13 @@ func handleCreateCluster(d Deps) http.HandlerFunc {
 	}
 }
 
-// handleUpdateCluster 修改集群。
+// handleUpdateCluster 整体替换一个集群的登记信息。
+//
+// 语义是替换而非合并：请求体没给的字段会被写成空值，因此它挂在 PUT 上。
+// 这不是遗憾的实现细节 —— podCIDR/nodeCIDR 是求值层做网段分类的依据，
+// 一个「只发改动字段」的调用把它们清空，不会报错，只会让此后每一次
+// 判定都用错的网段回答。要合并语义就得在这里显式实现并测试，在此之前
+// 动词必须诚实。
 func handleUpdateCluster(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		p, ok := decodeClusterPayload(w, r)
@@ -113,6 +170,9 @@ func handleUpdateCluster(d Deps) http.HandlerFunc {
 			return
 		}
 		c.State = existing.State
+		// 同一条纪律的第二处应用：漂移基准是平台自己的断言，只能从库里
+		// 已有的值推导，不能由请求体携带。
+		carryDriftBaseline(c.Git, existing.Git)
 		if err := d.Registry.UpdateCluster(r.Context(), actorOf(r), c); err != nil {
 			writeRegistryError(w, r, d, err)
 			return

@@ -62,7 +62,11 @@ func NewRouter(d Deps) http.Handler {
 			protected.Get("/sessions/current", handleCurrentSession())
 			protected.Get("/clusters", handleListClustersFromRegistry(d))
 			protected.Post("/clusters", handleCreateCluster(d))
-			protected.Patch("/clusters/{clusterID}", handleUpdateCluster(d))
+			// PUT 而非 PATCH：handleUpdateCluster 写整行，请求体没给的字段
+			// 会被写成空值。挂成 PATCH 是在邀请调用方只发一个字段，然后
+			// 把 podCIDR 清空 —— 那不是一次失败的请求，而是此后每一次
+			// 判定都用错了网段分类，且没有任何报错。
+			protected.Put("/clusters/{clusterID}", handleUpdateCluster(d))
 			protected.Delete("/clusters/{clusterID}", handleDeleteCluster(d))
 			protected.Get("/clusters/{clusterID}/policy-imports", handleListImports(d))
 			protected.Post("/clusters/{clusterID}/policy-imports", handleCreateImport(d))
