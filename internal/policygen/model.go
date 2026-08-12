@@ -120,6 +120,64 @@ type UngeneratableItem struct {
 	Detail string `json:"detail"`
 }
 
+// WorkloadExclusionReason 是 workload 未进入候选策略花名册的原因。封闭枚举。
+//
+// 与 UngeneratableReason 分开建一套：后者报的是"某条流量表达不了"，
+// 前者报的是更早一步的缺口——这个 workload 从未进入名册，因此根本
+// 不会出现在任何一条流量的判定里，UngeneratableReason 那条报不出来。
+type WorkloadExclusionReason string
+
+const (
+	// ExclusionHostNetwork 表示 Pod 使用 hostNetwork，不受 NetworkPolicy 管控。
+	ExclusionHostNetwork WorkloadExclusionReason = "UNMANAGED_ENDPOINT"
+	// ExclusionNoWorkloadLabel 表示 Pod 不带任何可识别的 workload 标签
+	// （见 workloadLabelKeys），podSelector 无法表达。
+	ExclusionNoWorkloadLabel WorkloadExclusionReason = "NO_WORKLOAD_LABEL"
+)
+
+// allWorkloadExclusionReasons 是枚举的唯一登记处。
+var allWorkloadExclusionReasons = []WorkloadExclusionReason{
+	ExclusionHostNetwork, ExclusionNoWorkloadLabel,
+}
+
+// AllWorkloadExclusionReasons 返回全部已登记的排除原因。
+func AllWorkloadExclusionReasons() []WorkloadExclusionReason {
+	out := make([]WorkloadExclusionReason, len(allWorkloadExclusionReasons))
+	copy(out, allWorkloadExclusionReasons)
+	return out
+}
+
+// Valid 判断该原因是否已登记。
+func (r WorkloadExclusionReason) Valid() bool {
+	for _, known := range allWorkloadExclusionReasons {
+		if r == known {
+			return true
+		}
+	}
+	return false
+}
+
+// ExcludedWorkload 是一个从未进入候选策略花名册的 Pod。
+//
+// 候选策略按 Pod 名册生成（见 Input.Pods 的注释）；hostNetwork 与无
+// workload 标签的 Pod 在名册构建时就被挡在外面。这两类 Pod 因此永远
+// 不会作为主体出现在任何一条流量判定里，只报 Ungeneratable 会把它们
+// 的存在完全抹掉——"候选策略 4 条，不可生成 0 条"读起来像是覆盖完整，
+// 实际上集群里另外 12 个 Pod 根本没进入候选集。
+type ExcludedWorkload struct {
+	// Namespace 是 Pod 所在命名空间。
+	Namespace string `json:"namespace"`
+	// Pod 是 Pod 名称。按 Pod 而非按聚合的 workload 计数展示：同一
+	// namespace 可能有多个不同原因或不同标签取值的问题 Pod，只报统计
+	// 数字找不到该去改哪一个。
+	Pod string `json:"pod"`
+	// Labels 是该 Pod 的原始标签，供排查是否只是标签键拼错或用了
+	// 平台还未识别的键。
+	Labels map[string]string `json:"labels"`
+	// Reason 是排除原因，取值为封闭枚举。
+	Reason WorkloadExclusionReason `json:"reason"`
+}
+
 // Observation 是一条带判定结果的观测流量。
 type Observation struct {
 	// FlowID 是流量标识。
@@ -189,8 +247,15 @@ type CandidatePolicy struct {
 	Cluster string `json:"cluster"`
 	// Namespace 是所属命名空间。
 	Namespace string `json:"namespace"`
-	// Workload 是主体 workload，即 podSelector 的 app 标签值。
+	// Workload 是主体 workload，即 podSelector 的标签值。
 	Workload string `json:"workload"`
+	// WorkloadLabelKey 是 Workload 命中的标签键，见 workloadLabelKeys。
+	//
+	// 与 Workload 分开存放而不是拼进去：真实集群里 app.kubernetes.io/name、
+	// app、k8s-app、component 并存，podSelector 必须用实际命中的键构造——
+	// coredns 用 k8s-app 归属，生成的 selector 就必须是 {k8s-app: kube-dns}，
+	// 拼成 {app: kube-dns} 是一条集群里没有任何 Pod 会命中的幽灵策略。
+	WorkloadLabelKey string `json:"workloadLabelKey"`
 	// Rules 是规则列表，确定排序。
 	Rules []Rule `json:"rules"`
 }

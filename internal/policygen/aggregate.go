@@ -2,16 +2,44 @@ package policygen
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/imkerbos/Distill/internal/replay"
 )
 
-// workloadLabel 是 workload 归属所用的标签键。
+// workloadLabelKeys 是 workload 归属所用的标签键，按优先级排列。
 //
-// 固定用 app 而非按 Pod 名截断前缀：真实集群里 Pod 名后缀是 ReplicaSet
-// 哈希，截断规则会把不同 workload 归成同一个，而且不报错 —— 一个能查出
-// 结果、看起来正确、实际错误的归并，比一个明确的 UNKNOWN 危险得多。
-const workloadLabel = "app"
+// 固定用一组约定标签键而非按 Pod 名截断前缀：真实集群里 Pod 名后缀是
+// ReplicaSet 哈希，截断规则会把不同 workload 归成同一个，而且不报错 ——
+// 一个能查出结果、看起来正确、实际错误的归并，比一个明确的 UNKNOWN
+// 危险得多。
+//
+// 真实集群不会都用 app：kind 集群上 coredns / kube-proxy 用 k8s-app，
+// 控制面组件用 component。只认 app 会让这些确实存在的 workload 从
+// 名册里静默消失。顺序即优先级，不接受配置——这条归属规则关系到
+// selector 语义，配置化会让同一个平台对同一个 Pod 在不同时间给出
+// 不同的 podSelector。
+var workloadLabelKeys = []string{
+	"app.kubernetes.io/name", // Kubernetes 官方推荐标签，优先级最高
+	"app",                    // 事实标准，历史遗留集群的主流写法
+	"k8s-app",                // 集群内置组件（coredns、kube-proxy 等）
+	"component",              // 控制面组件（kube-apiserver、etcd 等）
+}
+
+// resolveWorkloadLabel 按优先级从 Pod 标签里选出 workload 归属键与取值。
+//
+// 返回具体命中的键而非固定假设 app：podSelector 必须用实际命中的键
+// 构造，否则一条用 k8s-app 归属出来的 coredns 策略会被拼成
+// {app: kube-dns} —— 集群里没有任何 Pod 会命中这个 selector，是一条
+// 看起来存在、实际选不中任何对象的幽灵策略。
+func resolveWorkloadLabel(labels map[string]string) (key, value string, ok bool) {
+	for _, k := range workloadLabelKeys {
+		if v := labels[k]; v != "" {
+			return k, v, true
+		}
+	}
+	return "", "", false
+}
 
 // aggKey 是规则的聚合键。
 //
@@ -19,10 +47,12 @@ const workloadLabel = "app"
 // 否则预测清单对不上实际流量。
 type aggKey struct {
 	Cluster       string
-	Subject       string // 主体 workload，即 podSelector 的 app 值
+	Subject       string // 主体 workload 取值，即 podSelector 的标签值
+	SubjectKey    string // 主体 workload 命中的标签键，见 workloadLabelKeys
 	SubjectNS     string
 	PeerNamespace string
 	PeerWorkload  string
+	PeerKey       string // 对端 workload 命中的标签键；PeerCIDR 非空时无意义
 	PeerCIDR      string // 对端不可用 selector 表达时使用
 	Direction     replay.Direction
 	Protocol      replay.Protocol
@@ -64,11 +94,11 @@ func classify(o Observation, clusterID string) ([]keyed, []UngeneratableItem) {
 
 	// 源侧：主体是源 Pod，方向为 egress。
 	if sub, ok, item := subjectOf(o, o.Flow.Source, clusterID); ok {
-		peerNS, peerWL, peerCIDR, expressible, peerItem := peerOf(o, o.Flow.Dest, clusterID)
+		peerNS, peerWL, peerKey, peerCIDR, expressible, peerItem := peerOf(o, o.Flow.Dest, clusterID)
 		if expressible {
 			items = append(items, keyed{key: aggKey{
-				Cluster: clusterID, Subject: sub.workload, SubjectNS: sub.namespace,
-				PeerNamespace: peerNS, PeerWorkload: peerWL, PeerCIDR: peerCIDR,
+				Cluster: clusterID, Subject: sub.workload, SubjectKey: sub.labelKey, SubjectNS: sub.namespace,
+				PeerNamespace: peerNS, PeerWorkload: peerWL, PeerKey: peerKey, PeerCIDR: peerCIDR,
 				Direction: replay.DirectionEgress,
 				Protocol:  o.Flow.Protocol, Port: o.Flow.Port, Evidence: evidence,
 			}, flowID: o.FlowID})
@@ -81,11 +111,11 @@ func classify(o Observation, clusterID string) ([]keyed, []UngeneratableItem) {
 
 	// 目的侧：主体是目的 Pod，方向为 ingress。
 	if sub, ok, item := subjectOf(o, o.Flow.Dest, clusterID); ok {
-		peerNS, peerWL, peerCIDR, expressible, peerItem := peerOf(o, o.Flow.Source, clusterID)
+		peerNS, peerWL, peerKey, peerCIDR, expressible, peerItem := peerOf(o, o.Flow.Source, clusterID)
 		if expressible {
 			items = append(items, keyed{key: aggKey{
-				Cluster: clusterID, Subject: sub.workload, SubjectNS: sub.namespace,
-				PeerNamespace: peerNS, PeerWorkload: peerWL, PeerCIDR: peerCIDR,
+				Cluster: clusterID, Subject: sub.workload, SubjectKey: sub.labelKey, SubjectNS: sub.namespace,
+				PeerNamespace: peerNS, PeerWorkload: peerWL, PeerKey: peerKey, PeerCIDR: peerCIDR,
 				Direction: replay.DirectionIngress,
 				Protocol:  o.Flow.Protocol, Port: o.Flow.Port, Evidence: evidence,
 			}, flowID: o.FlowID})
@@ -103,6 +133,7 @@ func classify(o Observation, clusterID string) ([]keyed, []UngeneratableItem) {
 type subject struct {
 	namespace string
 	workload  string
+	labelKey  string // 命中的标签键，podSelector 据此构造，见 workloadLabelKeys
 }
 
 // subjectOf 判断该端点能否作为本集群策略的主体。
@@ -120,52 +151,53 @@ func subjectOf(o Observation, ep replay.Endpoint, clusterID string) (subject, bo
 				ep.Pod.Namespace, ep.Pod.Name),
 		}
 	}
-	wl := ep.Pod.Labels[workloadLabel]
-	if wl == "" {
+	key, wl, ok := resolveWorkloadLabel(ep.Pod.Labels)
+	if !ok {
 		return subject{}, false, &UngeneratableItem{
 			FlowID: o.FlowID, Reason: ReasonNoWorkloadLabel,
-			Detail: fmt.Sprintf("%s/%s 没有 %s 标签，podSelector 无法表达",
-				ep.Pod.Namespace, ep.Pod.Name, workloadLabel),
+			Detail: fmt.Sprintf("%s/%s 没有可识别的 workload 标签（%s），podSelector 无法表达",
+				ep.Pod.Namespace, ep.Pod.Name, strings.Join(workloadLabelKeys, "/")),
 		}
 	}
-	return subject{namespace: ep.Pod.Namespace, workload: wl}, true, nil
+	return subject{namespace: ep.Pod.Namespace, workload: wl, labelKey: key}, true, nil
 }
 
 // peerOf 把对端表达成 selector 或 ipBlock。
 //
-// 第四个返回值为 false 表示对端无法表达，该方向不生成规则；第五个返回值
-// 非 nil 时是这次表达失败该报的缺口。
+// 第五个返回值为 false 表示对端无法表达，该方向不生成规则；第六个返回值
+// 非 nil 时是这次表达失败该报的缺口。第三个返回值是对端命中的标签键，
+// selector 对端才有意义，ipBlock 对端恒为空。
 func peerOf(o Observation, ep replay.Endpoint, clusterID string) (
-	ns, workload, cidr string, ok bool, unexpressible *UngeneratableItem,
+	ns, workload, labelKey, cidr string, ok bool, unexpressible *UngeneratableItem,
 ) {
 	// 本集群内、有身份：只能用 selector，不能退到 IP。
 	if ep.Pod != nil && ep.Pod.ClusterID == clusterID {
 		// hostNetwork 判断先于标签判断：hostNetwork Pod 用宿主机网络
 		// namespace，流量以节点 IP 出现，podSelector 天生选不中它 ——
-		// 即便它带 app 标签，生成的规则也是一条谁都匹配不到的幽灵规则，
-		// 却会被分类成 TRUSTED_ALLOW、被 Task 6 标 Enabled=true，看着
-		// 正常实则空转。与 Task 4 node-agent Baseline 必须用节点网段而
-		// 非 podSelector 是同一个约束，只是这里是对端侧。
+		// 即便它带 workload 标签，生成的规则也是一条谁都匹配不到的幽灵
+		// 规则，却会被分类成 TRUSTED_ALLOW、被 Task 6 标 Enabled=true，
+		// 看着正常实则空转。与 Task 4 node-agent Baseline 必须用节点网段
+		// 而非 podSelector 是同一个约束，只是这里是对端侧。
 		if replay.IsUnmanaged(*ep.Pod) {
-			return "", "", "", false, &UngeneratableItem{
+			return "", "", "", "", false, &UngeneratableItem{
 				FlowID: o.FlowID, Reason: ReasonUnmanagedEndpoint,
 				Detail: fmt.Sprintf("对端 %s/%s 使用 hostNetwork，不受 NetworkPolicy 管控",
 					ep.Pod.Namespace, ep.Pod.Name),
 			}
 		}
-		if wl := ep.Pod.Labels[workloadLabel]; wl != "" {
-			return ep.Pod.Namespace, wl, "", true, nil
+		if key, wl, hit := resolveWorkloadLabel(ep.Pod.Labels); hit {
+			return ep.Pod.Namespace, wl, key, "", true, nil
 		}
-		// 集群内对端已知身份、受管控、但没有 app 标签：不能退化成 /32
-		// ipBlock —— Pod 重建后 IP 会被别的 workload 复用，那时这条规则
-		// 会静默放行错的对象。它命中的证据类型多半是 TRUSTED_ALLOW，会
-		// 被 Task 6 标 Enabled=true，直接进入默认推荐策略集，是本平台
-		// 要防的那种"看起来正确、实际错误"的规则。宁可报 NO_WORKLOAD_LABEL
-		// 缺口。
-		return "", "", "", false, &UngeneratableItem{
+		// 集群内对端已知身份、受管控、但没有可识别的 workload 标签：不能
+		// 退化成 /32 ipBlock —— Pod 重建后 IP 会被别的 workload 复用，
+		// 那时这条规则会静默放行错的对象。它命中的证据类型多半是
+		// TRUSTED_ALLOW，会被 Task 6 标 Enabled=true，直接进入默认推荐
+		// 策略集，是本平台要防的那种"看起来正确、实际错误"的规则。宁可
+		// 报 NO_WORKLOAD_LABEL 缺口。
+		return "", "", "", "", false, &UngeneratableItem{
 			FlowID: o.FlowID, Reason: ReasonNoWorkloadLabel,
-			Detail: fmt.Sprintf("对端 %s/%s 没有 %s 标签，podSelector 无法表达",
-				ep.Pod.Namespace, ep.Pod.Name, workloadLabel),
+			Detail: fmt.Sprintf("对端 %s/%s 没有可识别的 workload 标签（%s），podSelector 无法表达",
+				ep.Pod.Namespace, ep.Pod.Name, strings.Join(workloadLabelKeys, "/")),
 		}
 	}
 	// 集群外（互联网、其他集群）只能用 ipBlock。/32 而非对端网段：平台
@@ -174,9 +206,9 @@ func peerOf(o Observation, ep replay.Endpoint, clusterID string) (
 	// CROSS_CLUSTER）在 Task 6 里默认 Enabled=false，不会因 IP 复用而
 	// 静默放行，因此 /32 在这里是安全的。
 	if ep.IP == "" {
-		return "", "", "", false, nil
+		return "", "", "", "", false, nil
 	}
-	return "", "", ep.IP + "/32", true, nil
+	return "", "", "", ep.IP + "/32", true, nil
 }
 
 // evidenceFor 判定一条流量的证据类型。

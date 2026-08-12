@@ -33,6 +33,11 @@ type PolicyPreview struct {
 	MissingBaselines []policygen.MissingBaseline `json:"missingBaselines"`
 	// Ungeneratable 是无法表达为规则的流量。
 	Ungeneratable []policygen.UngeneratableItem `json:"ungeneratable"`
+	// ExcludedWorkloads 是从未进入候选策略花名册的 Pod（hostNetwork、
+	// 无可识别 workload 标签），与 Ungeneratable 同理不受 namespace
+	// 过滤影响：一个从未进入名册的 Pod 在哪个 namespace 视图下都同样
+	// 缺失，按视图裁剪会让这个缺口随筛选条件时隐时现。
+	ExcludedWorkloads []policygen.ExcludedWorkload `json:"excludedWorkloads"`
 	// Prediction 是 dry-run 预测结果。
 	Prediction predict.Report `json:"prediction"`
 	// Kinds 是必备 Baseline 的全集，随报告返回。
@@ -174,13 +179,14 @@ func (r *FixtureReader) PolicyPreview(
 
 	return PolicyPreview{
 		Cluster: clusterID, Namespace: namespace, Window: window,
-		Candidates:       filterCandidates(gen.Policies, namespace),
-		MissingBaselines: filterMissing(gen.MissingBaselines, namespace),
-		Ungeneratable:    gen.Ungeneratable,
-		Prediction:       report,
-		Kinds:            baseline.AllKinds(),
-		Overrides:        stored,
-		StaleOverrides:   stale,
+		Candidates:        filterCandidates(gen.Policies, namespace),
+		MissingBaselines:  filterMissing(gen.MissingBaselines, namespace),
+		Ungeneratable:     gen.Ungeneratable,
+		ExcludedWorkloads: gen.ExcludedWorkloads,
+		Prediction:        report,
+		Kinds:             baseline.AllKinds(),
+		Overrides:         stored,
+		StaleOverrides:    stale,
 		Overridden: OverriddenView{
 			Candidates: filterCandidates(overridden.Policies, namespace),
 			Prediction: overriddenReport,

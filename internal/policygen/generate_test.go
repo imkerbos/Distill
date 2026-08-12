@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	networkingv1 "k8s.io/api/networking/v1"
 
@@ -262,9 +263,15 @@ func TestEnabledPoliciesExcludeDisabledRules(t *testing.T) {
 			t.Errorf("%s/%s: policyTypes = %v, want both Ingress and Egress",
 				p.Namespace, p.Name, p.Spec.PolicyTypes)
 		}
-		workload := p.Spec.PodSelector.MatchLabels["app"]
+		// 不假定固定的 app 键：真实集群里 workload 归属键因 Pod 而异
+		// （coredns 用 k8s-app 等），生成的 podSelector 恒为单键
+		// matchLabels，直接取这唯一的值。
+		var workload string
+		for _, v := range p.Spec.PodSelector.MatchLabels {
+			workload = v
+		}
 		if workload == "" {
-			t.Errorf("%s/%s: podSelector has no app label", p.Namespace, p.Name)
+			t.Errorf("%s/%s: podSelector has no workload label", p.Namespace, p.Name)
 			continue
 		}
 
@@ -415,6 +422,94 @@ func TestEveryRuleCarriesPeersAndPorts(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// 真实集群不会都用 app 标签：coredns / kube-proxy 用 k8s-app。一条从
+// k8s-app 归属出来的候选策略，podSelector 必须真的用 k8s-app 构造，
+// 否则生成的是一条集群里没有任何 Pod 会命中的幽灵 selector
+// （{app: kube-dns} 而不是 {k8s-app: kube-dns}）。
+func TestK8sAppLabelledPodProducesMatchingPodSelector(t *testing.T) {
+	coredns := replay.PodRef{
+		ClusterID: "c1", Namespace: "kube-system", Name: "coredns-1", IP: "10.0.0.2",
+		Labels: map[string]string{"k8s-app": "kube-dns"},
+	}
+	client := replay.PodRef{
+		ClusterID: "c1", Namespace: "default", Name: "client-1", IP: "10.0.0.1",
+		Labels: map[string]string{"app": "client"},
+	}
+	flow := replay.Flow{
+		Source:    replay.Endpoint{IP: client.IP, ClusterID: client.ClusterID, Pod: &client},
+		Dest:      replay.Endpoint{IP: coredns.IP, ClusterID: coredns.ClusterID, Pod: &coredns},
+		Protocol:  replay.ProtocolUDP,
+		Port:      53,
+		Timestamp: time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC),
+	}
+	res := policygen.Generate(policygen.Input{
+		ClusterID: "c1",
+		Pods:      []replay.PodRef{coredns, client},
+		Observations: []policygen.Observation{{
+			FlowID: "f1", Flow: flow,
+			Decision: replay.Decision{Verdict: replay.VerdictAllow, Confidence: replay.ConfidenceTrusted},
+		}},
+	})
+
+	var found *policygen.CandidatePolicy
+	for i := range res.Policies {
+		if res.Policies[i].Namespace == "kube-system" && res.Policies[i].Workload == "kube-dns" {
+			found = &res.Policies[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("no candidate policy generated for the k8s-app-labelled coredns Pod")
+	}
+	if found.WorkloadLabelKey != "k8s-app" {
+		t.Errorf("WorkloadLabelKey = %q, want k8s-app", found.WorkloadLabelKey)
+	}
+
+	var np *networkingv1.NetworkPolicy
+	for _, p := range res.EnabledPolicies() {
+		if p.Namespace == "kube-system" && p.Spec.PodSelector.MatchLabels["k8s-app"] == "kube-dns" {
+			pCopy := p
+			np = &pCopy
+		}
+	}
+	if np == nil {
+		t.Fatal("EnabledPolicies() has no policy with podSelector {k8s-app: kube-dns}")
+	}
+	if _, wrongKey := np.Spec.PodSelector.MatchLabels["app"]; wrongKey {
+		t.Errorf("podSelector = %v, must not use the app key for a k8s-app-labelled workload",
+			np.Spec.PodSelector.MatchLabels)
+	}
+}
+
+// hostNetwork 与无 workload 标签的 Pod 从未进入候选策略花名册，因此
+// 永远不会作为主体出现在任何一条流量判定里——Ungeneratable 报不出这个
+// 缺口。ExcludedWorkloads 必须点名这两类 Pod，各自带上正确的原因。
+func TestFixtureExcludedWorkloadsNameHostNetworkAndUnlabelledPods(t *testing.T) {
+	res := policygen.Generate(observe(t, "prod-asia-1"))
+
+	var gotHostNetwork, gotNoLabel *policygen.ExcludedWorkload
+	for i := range res.ExcludedWorkloads {
+		w := &res.ExcludedWorkloads[i]
+		if w.Namespace == "kube-system" && w.Pod == "kube-proxy-1" {
+			gotHostNetwork = w
+		}
+		if w.Namespace == "legacy" && w.Pod == "legacy-unlabelled" {
+			gotNoLabel = w
+		}
+	}
+	if gotHostNetwork == nil {
+		t.Fatal("kube-system/kube-proxy-1 not present in ExcludedWorkloads")
+	}
+	if gotHostNetwork.Reason != policygen.ExclusionHostNetwork {
+		t.Errorf("kube-proxy-1 reason = %q, want %q", gotHostNetwork.Reason, policygen.ExclusionHostNetwork)
+	}
+	if gotNoLabel == nil {
+		t.Fatal("legacy/legacy-unlabelled not present in ExcludedWorkloads")
+	}
+	if gotNoLabel.Reason != policygen.ExclusionNoWorkloadLabel {
+		t.Errorf("legacy-unlabelled reason = %q, want %q", gotNoLabel.Reason, policygen.ExclusionNoWorkloadLabel)
 	}
 }
 

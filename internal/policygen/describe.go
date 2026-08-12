@@ -85,22 +85,33 @@ func describePeer(p networkingv1.NetworkPolicyPeer) string {
 		return p.IPBlock.CIDR
 	}
 	ns := describeSelector(p.NamespaceSelector, nsNameLabel)
-	pod := describeSelector(p.PodSelector, workloadLabel)
+	pod := describeSelector(p.PodSelector, workloadLabelKeys...)
 	return ns + "/" + pod
 }
 
 // describeSelector 渲染一个 label selector。
 //
-// 命中约定标签（namespace 的名称标签、Pod 的 app 标签）时只显示取值，
-// 那是绝大多数规则的形态；其余情况把 matchLabels 按键排序后原样列出，
-// 不做简化 —— 一个被简化掉的标签会让两条选中范围不同的规则看起来一样。
-func describeSelector(sel *metav1.LabelSelector, shorthand string) string {
+// 命中约定标签（namespace 的名称标签，或 Pod 的 workloadLabelKeys 之一）
+// 时只显示取值，那是绝大多数规则的形态；其余情况把 matchLabels 按键
+// 排序后原样列出，不做简化 —— 一个被简化掉的标签会让两条选中范围不同
+// 的规则看起来一样。
+//
+// shorthand 接受多个候选键而非单个：真实集群的 workload 归属键不止
+// app 一种，podSelector 的单键 matchLabels 命中 k8s-app 或 component
+// 时同样该显示成简写，而不是退化成 k8s-app=kube-dns 这种更啰嗦、
+// 与其余规则形态不一致的写法。
+func describeSelector(sel *metav1.LabelSelector, shorthand ...string) string {
 	if sel == nil || (len(sel.MatchLabels) == 0 && len(sel.MatchExpressions) == 0) {
 		return anySelector
 	}
-	if v, ok := sel.MatchLabels[shorthand]; ok && len(sel.MatchLabels) == 1 &&
-		len(sel.MatchExpressions) == 0 {
-		return v
+	if len(sel.MatchLabels) == 1 && len(sel.MatchExpressions) == 0 {
+		for k, v := range sel.MatchLabels {
+			for _, sh := range shorthand {
+				if k == sh {
+					return v
+				}
+			}
+		}
 	}
 	parts := make([]string, 0, len(sel.MatchLabels))
 	for k, v := range sel.MatchLabels {

@@ -234,8 +234,9 @@ func ruleEnabled(res policygen.Result, ns, wl, fp string) bool {
 // 测的就不是「Apply 有没有改」，而是「json:"-" 的字段是否存在」。
 func deepCopyResult(r policygen.Result) policygen.Result {
 	out := policygen.Result{
-		Policies:      make([]policygen.CandidatePolicy, len(r.Policies)),
-		Ungeneratable: cloneUngeneratable(r.Ungeneratable),
+		Policies:          make([]policygen.CandidatePolicy, len(r.Policies)),
+		Ungeneratable:     cloneUngeneratable(r.Ungeneratable),
+		ExcludedWorkloads: cloneExcludedWorkloads(r.ExcludedWorkloads),
 	}
 	if r.MissingBaselines != nil {
 		out.MissingBaselines = make([]policygen.MissingBaseline, len(r.MissingBaselines))
@@ -252,7 +253,7 @@ func deepCopyResult(r policygen.Result) policygen.Result {
 		}
 		out.Policies[i] = policygen.CandidatePolicy{
 			Cluster: p.Cluster, Namespace: p.Namespace,
-			Workload: p.Workload, Rules: rules,
+			Workload: p.Workload, WorkloadLabelKey: p.WorkloadLabelKey, Rules: rules,
 		}
 	}
 	return out
@@ -322,6 +323,21 @@ func cloneUngeneratable(items []policygen.UngeneratableItem) []policygen.Ungener
 		return nil
 	}
 	out := make([]policygen.UngeneratableItem, len(items))
+	copy(out, items)
+	return out
+}
+
+// cloneExcludedWorkloads 拷贝一个排除清单切片，nil 与「非 nil 但空」保持原样。
+//
+// 元素内的 Labels 是 map，copy(out, items) 只拷贝切片头，Labels 字段
+// 本身仍与源共享同一份底层 map。这里够用：Apply 从不修改
+// ExcludedWorkloads，TestApplyDoesNotMutateInput 只需要判定字段有没有
+// 被整个换掉，不需要 Labels 的内容也独立一份。
+func cloneExcludedWorkloads(items []policygen.ExcludedWorkload) []policygen.ExcludedWorkload {
+	if items == nil {
+		return nil
+	}
+	out := make([]policygen.ExcludedWorkload, len(items))
 	copy(out, items)
 	return out
 }

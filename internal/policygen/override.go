@@ -89,9 +89,10 @@ const (
 // 「平台推荐了什么」这个问题失去答案。
 func Apply(base Result, overrides []Override) (Result, []StaleOverride) {
 	out := Result{
-		Policies:         make([]CandidatePolicy, len(base.Policies)),
-		MissingBaselines: base.MissingBaselines,
-		Ungeneratable:    base.Ungeneratable,
+		Policies:          make([]CandidatePolicy, len(base.Policies)),
+		MissingBaselines:  base.MissingBaselines,
+		Ungeneratable:     base.Ungeneratable,
+		ExcludedWorkloads: base.ExcludedWorkloads,
 	}
 	// 深拷贝规则切片：Result 里的 Policies 与 Rules 都是切片，
 	// 直接复用底层数组会让对 out 的写入穿透回 base。
@@ -100,7 +101,7 @@ func Apply(base Result, overrides []Override) (Result, []StaleOverride) {
 		copy(rules, p.Rules)
 		out.Policies[i] = CandidatePolicy{
 			Cluster: p.Cluster, Namespace: p.Namespace,
-			Workload: p.Workload, Rules: rules,
+			Workload: p.Workload, WorkloadLabelKey: p.WorkloadLabelKey, Rules: rules,
 		}
 	}
 
