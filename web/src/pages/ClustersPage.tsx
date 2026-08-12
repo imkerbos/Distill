@@ -7,8 +7,9 @@ import {
 } from '../api/types'
 import { useResource } from '../api/useResource'
 import {
-  blankFormValues, buildClusterWrite, emptyApiServerRow, formValuesOf, resolveGitBinding,
-  type ApiServerRow, type ClusterFormValues,
+  blankFormValues, buildClusterWrite, describeVerifyStatus, emptyApiServerRow, formatUtcTime,
+  formValuesOf, resolveGitBinding,
+  type ApiServerRow, type ClusterFormValues, type VerifyStatusView, type VerifyTone,
 } from './clusterForm'
 import { Card, Chip, EmptyState, Field, PageHeader, Section, Select, TableCard } from '../components/ui'
 
@@ -72,7 +73,7 @@ function ClusterListSection({ clusters, error, loading, onChanged }: {
   return (
     <Section
       title="已注册集群"
-      description="Git 绑定为空时显式写「未绑定」——空单元格会被读成「加载中」或「未知」，两者都不是这里想表达的事实。「编辑」在行内展开，用于补上或改动登记信息（含 Git 绑定）；保存是整体替换，表单已按现值预填。"
+      description="Git 绑定为空时显式写「未绑定」——空单元格会被读成「加载中」或「未知」，两者都不是这里想表达的事实；同一条理由，没校验过的绑定写「未校验」而不是留白。校验只做只读查询：它能确认仓库可达、认证通过、分支与路径存在，但它从不向仓库提交任何内容，因此证明不了平台能往那个路径提交——那要等真正提交一次才知道。「编辑」在行内展开，用于补上或改动登记信息（含 Git 绑定）；保存是整体替换，表单已按现值预填。"
       meta={clusters ? `${clusters.length} 个` : undefined}
     >
       {error ? (
@@ -91,6 +92,7 @@ function ClusterListSection({ clusters, error, loading, onChanged }: {
               <th>Node 网段</th>
               <th>apiserver</th>
               <th>接入状态</th>
+              <th>CCNP</th>
               <th>Git 绑定</th>
               <th>操作</th>
             </tr>
@@ -108,13 +110,15 @@ function ClusterListSection({ clusters, error, loading, onChanged }: {
                   <td className="mono">{c.nodeCidr}</td>
                   <td><ApiServerList servers={c.apiServers} /></td>
                   <td><Chip strong={c.state === 'READY'}>{ONBOARD_STATE_LABEL[c.state]}</Chip></td>
+                  {/*
+                    这一格存在的理由与「未绑定」「未校验」同一条：一个看不见
+                    的降级理由，等于操作者无法解释他看到的判定，也无法察觉
+                    一次编辑把它清掉了。
+                  */}
+                  <td><CCNPMark present={c.ccnpPresent} /></td>
                   <td>
                     {c.git
-                      ? (
-                        <span className="mono" style={{ fontSize: 'var(--text-sm)' }}>
-                          {c.git.repoUrl}@{c.git.branch}
-                        </span>
-                      )
+                      ? <GitBindingCell clusterId={c.id} git={c.git} onChanged={onChanged} />
                       : <span style={{ color: 'var(--text-muted)' }}>未绑定</span>}
                   </td>
                   <td>
@@ -137,7 +141,7 @@ function ClusterListSection({ clusters, error, loading, onChanged }: {
                 </tr>
                 {editingId === c.id && (
                   <tr>
-                    <td colSpan={8} style={{ background: 'var(--surface-sunken)' }}>
+                    <td colSpan={9} style={{ background: 'var(--surface-sunken)' }}>
                       {/*
                         key 绑定集群 ID：换一个集群展开时必须重新播种，
                         复用同一份表单状态会把上一个集群的网段带进来。
@@ -157,6 +161,103 @@ function ClusterListSection({ clusters, error, loading, onChanged }: {
         </TableCard>
       )}
     </Section>
+  )
+}
+
+/**
+ * Git 绑定这一格：仓库指向、校验结论、校验时刻、重新校验。
+ *
+ * 四样东西挤在同一格而不是拆成四列，是因为它们说的是同一件事的四个侧面
+ * ——一个「只读校验通过」脱离了它指向的仓库和它发生的时刻就没有意义。
+ *
+ * 结论与时刻一律显示，不做「没问题就不说话」的省略：一格空白在这张表里
+ * 会被读成「没什么要报告的」，而「从未校验过」与「校验通过」是相反的两
+ * 件事实（同本节 description 里「未绑定」的理由）。
+ */
+function GitBindingCell({ clusterId, git, onChanged }: {
+  clusterId: string
+  git: GitBinding
+  onChanged: () => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const view = describeVerifyStatus(git)
+
+  async function reverify() {
+    setBusy(true)
+    try {
+      await api.verifyGitBinding(clusterId)
+      // 响应里的结论不就地贴进这一行：服务端是唯一真相源，重新拉一次
+      // 列表（同本页 refreshKey 的纪律）。就地拼接会让这一行显示出一份
+      // 由前端合成、没人能核对的状态。
+      onChanged()
+    } catch (err) {
+      // 未绑定的集群这个端点回 404，但这一格只在已绑定时渲染，所以真正
+      // 会撞上的是校验本身出错。原样展示后端的 msg，不收窄成一句「失败」。
+      window.alert(err instanceof ApiError ? err.msg : '重新校验失败，请稍后重试')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div style={{
+      display: 'flex', flexDirection: 'column', alignItems: 'flex-start',
+      gap: 'var(--space-1)', maxWidth: 340,
+    }}>
+      <span className="mono" style={{ fontSize: 'var(--text-sm)' }}>
+        {git.repoUrl}@{git.branch}
+      </span>
+      <VerifyBadge view={view} />
+      <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+        {view.checkedAt}
+      </span>
+      <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)' }}>
+        {view.detail}
+      </span>
+      <button
+        type="button"
+        onClick={reverify}
+        disabled={busy}
+        style={{ ...secondaryButtonStyle, marginTop: 'var(--space-1)' }}
+      >
+        {busy ? '校验中…' : '重新校验（只读）'}
+      </button>
+    </div>
+  )
+}
+
+/**
+ * 校验结论的样式：三种语气三种画法。
+ *
+ * 借用判定语义色（本该只归 VerdictBadge）是有意为之，与同文件里
+ * GitVerifiedMark 同一条理由：这里陈述的正是「这个绑定可不可信」，是
+ * 判断结论而不是元信息。未校验用描边而非灰化——灰掉等于把「没查过」
+ * 弱化成一句次要提示，而它恰恰是这一格里最需要被看见的事实。
+ */
+const VERIFY_TONE_STYLE: Record<VerifyTone, CSSProperties> = {
+  ok: {
+    color: 'var(--verdict-allow)', background: 'var(--verdict-allow-bg)',
+    border: '1px solid var(--verdict-allow)',
+  },
+  bad: {
+    color: 'var(--verdict-deny)', background: 'var(--verdict-deny-bg)',
+    border: '1px solid var(--verdict-deny)',
+  },
+  unverified: {
+    color: 'var(--verdict-unknown)', background: 'transparent',
+    border: 'var(--degraded-stroke-width) solid var(--verdict-unknown)',
+  },
+}
+
+function VerifyBadge({ view }: { view: VerifyStatusView }) {
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', padding: '2px 8px',
+      fontSize: 'var(--text-xs)', fontWeight: 500, borderRadius: 999,
+      ...VERIFY_TONE_STYLE[view.tone],
+    }}>
+      {view.label}
+    </span>
   )
 }
 
@@ -212,6 +313,36 @@ function ClusterFields({ values, patch, mode, current }: {
         <TextField label="Node CIDR" value={values.nodeCidr} onChange={(v) => patch({ nodeCidr: v })} required mono />
       </FormGrid>
 
+      {/*
+        这一项不是技术开关，措辞也就不能写成技术开关。它声明的是「这个
+        集群里还有别的东西在影响连通性」，而平台不求值 CCNP，因此凡是
+        勾上的集群，回放判定一律降级为 DEGRADED——标签要说的是这个后果，
+        不是「有没有装 Cilium」。
+
+        表单里必须有它、且必须按现值预填：PUT 是整体替换，界面上不出现
+        就等于每次编辑都把它清成 false，让一个本该降级的集群显示成正常
+        判定。这是"看上去更有把握"的方向，也是最难被发现的方向。
+      */}
+      <label style={{
+        display: 'flex', alignItems: 'flex-start', gap: 'var(--space-2)',
+        fontSize: 'var(--text-sm)', marginBottom: 'var(--space-3)',
+      }}>
+        <input
+          type="checkbox"
+          checked={values.ccnpPresent}
+          onChange={(e) => patch({ ccnpPresent: e.target.checked })}
+          style={{ marginTop: 3 }}
+        />
+        <span>
+          该集群存在 CiliumClusterwideNetworkPolicy
+          <span style={{ display: 'block', color: 'var(--text-muted)', fontSize: 'var(--text-xs)' }}>
+            勾选后，这个集群的所有回放判定一律降级为「结论不可信（DEGRADED）」——
+            平台不求值 CCNP，看不见它放行或拒绝了什么，因此给不出可信的结论。
+            装了却不勾，平台会用一个它其实解释不了的模型给出笃定的结论。
+          </span>
+        </span>
+      </label>
+
       <SubHeading>
         apiserver（可选，可添加多个 —— HA 控制面通常不止一个端点，
         漏填一个就是漏了一条 baseline 放行规则，后果是生产阻断而不是注册报错。
@@ -266,7 +397,9 @@ function ClusterFields({ values, patch, mode, current }: {
 
       <div style={{ marginTop: 'var(--space-3)' }}>
         <SubHeading>
-          Git 绑定（可选；一旦填写任意一项——含 credentialRef——repoUrl / branch / policyPath 三项均为必填）
+          Git 绑定（可选；一旦填写任意一项——含 credentialRef——repoUrl / branch / policyPath 三项均为必填）。
+          repoUrl 必须是 SSH 形态（ssh://git@host/path 或 git@host:path）：平台按仓库发放 deploy key，
+          https:// 地址连拨号都不会发生，服务端会在保存时直接拒绝。
         </SubHeading>
         {/*
           「解除绑定」是一个勾选动作，不是「把四个字段清空」的推断：整体
@@ -290,6 +423,7 @@ function ClusterFields({ values, patch, mode, current }: {
         <FormGrid>
           <TextField
             label="repoUrl" value={values.git.repoUrl} mono disabled={values.clearGit}
+            placeholder="ssh://git@gitlab.example.com/net/policies.git"
             onChange={(v) => patch({ git: { ...values.git, repoUrl: v } })}
           />
           <TextField
@@ -620,7 +754,7 @@ function ImportSection({ clusters, refreshKey, onChanged }: {
                 <td><Chip>{IMPORT_ROLE_LABEL[it.role] ?? it.role}</Chip></td>
                 <td><Chip>{IMPORT_SOURCE_LABEL[it.source] ?? it.source}</Chip></td>
                 <td>{it.importedBy}</td>
-                <td className="mono" style={{ fontSize: 'var(--text-xs)' }}>{formatTime(it.importedAt)}</td>
+                <td className="mono" style={{ fontSize: 'var(--text-xs)' }}>{formatUtcTime(it.importedAt)}</td>
                 <td><GitVerifiedMark item={it} /></td>
                 <td>
                   <button onClick={() => remove(it.importId)} style={buttonStyle}>删除</button>
@@ -657,6 +791,29 @@ function GitVerifiedMark({ item }: { item: PolicyImportItem }) {
 }
 
 /**
+ * CCNP 这一格：装了就说判定被降级，没装就说没有，两种都写出来。
+ *
+ * 不做「有才显示、没有就留空」：空单元格会被读成「不知道」，而这一项
+ * 恰恰是解释判定为什么降级的那个原因。用描边而非灰化，与 VerdictBadge
+ * 处理 DEGRADED 同一条纪律——它是结论的一部分，不是次要元信息。
+ */
+function CCNPMark({ present }: { present: boolean }) {
+  if (!present) {
+    return <span style={{ color: 'var(--text-muted)', fontSize: 'var(--text-xs)' }}>无</span>
+  }
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', padding: '2px 8px',
+      fontSize: 'var(--text-xs)', fontWeight: 500, borderRadius: 999,
+      color: 'var(--verdict-unknown)',
+      border: 'var(--degraded-stroke-width) solid var(--verdict-unknown)',
+    }}>
+      有 · 判定降级
+    </span>
+  )
+}
+
+/**
  * apiserver 列表：渲染全部条目而不是只取第一个。HA 控制面通常有多个
  * apiserver 端点，只展示一个会让运维误以为集群"已完整登记"，而平台
  * 实际只认识其中一个——baseline 推导依赖这份清单的完整性，漏一条
@@ -678,10 +835,6 @@ function ApiServerList({ servers }: { servers?: APIServer[] | null }) {
 /* ---------------------------------------------------------------------- */
 /* 共享小件                                                                 */
 /* ---------------------------------------------------------------------- */
-
-function formatTime(iso: string): string {
-  return new Date(iso).toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC')
-}
 
 function FormGrid({ children }: { children: ReactNode }) {
   return (

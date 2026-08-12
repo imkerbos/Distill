@@ -1,5 +1,5 @@
 import type {
-  APIServer, ClusterWrite, GitBinding, GitBindingWrite, RegisteredCluster,
+  APIServer, ClusterWrite, GitBinding, GitBindingWrite, RegisteredCluster, VerifyResult,
 } from '../api/types'
 
 /**
@@ -45,6 +45,15 @@ export interface ClusterFormValues {
   displayName: string
   podCidr: string
   nodeCidr: string
+  /**
+   * 集群里另有 CiliumClusterwideNetworkPolicy 在生效。
+   *
+   * 它不是一个"技术开关"，而是一句会改变判定结论的事实声明：置真会让
+   * 该集群的回放判定整体降级为 DEGRADED（后端 replay.WithCCNPPresent）。
+   * 表单必须携带并预填它——PUT 是整体替换，不带就等于每次编辑都悄悄
+   * 把它清成 false，让平台显得比它应该的样子更有把握。
+   */
+  ccnpPresent: boolean
   apiServerRows: ApiServerRow[]
   /** 健康检查网段，每行一个 CIDR。 */
   healthChecks: string
@@ -58,7 +67,7 @@ const emptyGitValues = (): GitFormValues => ({ repoUrl: '', branch: '', policyPa
 /** 注册表单的初始值：全空。 */
 export function blankFormValues(): ClusterFormValues {
   return {
-    id: '', displayName: '', podCidr: '', nodeCidr: '',
+    id: '', displayName: '', podCidr: '', nodeCidr: '', ccnpPresent: false,
     apiServerRows: [emptyApiServerRow()], healthChecks: '',
     git: emptyGitValues(), clearGit: false,
   }
@@ -81,6 +90,10 @@ export function formValuesOf(c: RegisteredCluster): ClusterFormValues {
     displayName: c.displayName,
     podCidr: c.podCidr,
     nodeCidr: c.nodeCidr,
+    // 与其余字段同一条纪律，但后果的方向不同：漏播网段会让判定用错的
+    // 网段回答，漏播这一项会让一个本该降级的集群显示成正常判定——
+    // 前者是错误，后者是"看上去更有把握的错误"，更难被发现。
+    ccnpPresent: c.ccnpPresent,
     // 至少留一行空行，否则界面上没有任何可填的输入框，"添加"按钮成了唯一入口。
     apiServerRows: rows.length > 0 ? rows : [emptyApiServerRow()],
     healthChecks: (c.healthCheckSources ?? []).join('\n'),
@@ -162,6 +175,151 @@ export function resolveGitBinding(
   }
 }
 
+/* ---------------------------------------------------------------------- */
+/* Git 绑定校验结论的展示形态                                                */
+/* ---------------------------------------------------------------------- */
+
+/**
+ * 结论的语气分档。只有三档，且刻意不做成"分数"：
+ * 「没查过」与「查了、没通过」不是程度差别，是不同性质的事实。
+ */
+export type VerifyTone = 'ok' | 'bad' | 'unverified'
+
+export interface VerifyStatusView {
+  /** 结论本身，一律非空。 */
+  label: string
+  /** 一句话说明这个结论意味着什么、该找谁。 */
+  detail: string
+  tone: VerifyTone
+  /** 校验时刻的说明，已明示是历史事实而非当前状态。 */
+  checkedAt: string
+}
+
+/**
+ * 校验结论的中文标签。
+ *
+ * 键类型是封闭枚举而不是 string：后端新增一个取值却忘了在这里补文案，
+ * `tsc` 会直接报错，而不是让界面渲染出一个空白的结论列（同 PolicyPage 的
+ * WORKLOAD_EXCLUSION_REASON_LABEL）。这里比那处更要紧一档——空白的排除
+ * 原因只是少了一条解释，空白的校验结论会被读成「这个绑定没问题」。
+ *
+ * PATH_MISSING 说的是「路径不存在」，不是「不可写入」：校验只做只读操作，
+ * 它查的是路径在不在，从来没试过往那里放东西（design doc §3.1）。
+ */
+const VERIFY_RESULT_LABEL: Record<VerifyResult, string> = {
+  NOT_VERIFIED: '未校验',
+  OK: '只读校验通过',
+  CREDENTIAL_UNRESOLVED: '凭据取不到',
+  AUTH_FAILED: '认证被拒绝',
+  REPO_UNREACHABLE: '仓库不可达',
+  BRANCH_MISSING: '分支不存在',
+  PATH_MISSING: '路径不存在',
+}
+
+/**
+ * 每条结论的处置说明。
+ *
+ * CREDENTIAL_UNRESOLVED 与 AUTH_FAILED 的文字必须让人一眼看出该找谁：
+ * 前者是平台侧配置错，后者是仓库侧权限错，处置人不是同一个人，读者把
+ * 两者混在一起就会去敲错人的门（design doc §3.2）。
+ *
+ * OK 这一条的措辞是本页最容易出事的地方：只读校验没有向仓库放过任何
+ * 东西，所以它证明不了平台能往那个路径放东西。整张表里不出现「写」这
+ * 个字，正是为了让这条约束有一个能被测试抓住的形状——见 clusterForm
+ * 测试里那条禁用词断言。
+ */
+const VERIFY_RESULT_DETAIL: Record<VerifyResult, string> = {
+  NOT_VERIFIED: '这个绑定从未被校验过。没查过不等于查过没问题，两者是相反的事实。',
+  OK: '仓库可达、认证通过，分支与路径都存在。只读校验能得出的结论到此为止：'
+    + '它没有向仓库提交过任何内容，因此也证明不了平台能往这个路径提交。',
+  CREDENTIAL_UNRESOLVED: 'credentialRef 在凭据服务里解析不到，是平台侧的配置问题，找平台管理员。',
+  AUTH_FAILED: '凭据取到了，但仓库拒绝了这次连接，是仓库侧的权限问题，找仓库管理员。',
+  REPO_UNREACHABLE: '网络、地址或超时导致没能到达仓库，分支与路径都还没来得及查。',
+  BRANCH_MISSING: '仓库可达、认证通过，但这个分支在仓库里找不到。',
+  PATH_MISSING: 'policyPath 在该分支上找不到。校验只做只读查询，查的是路径在不在。',
+}
+
+/**
+ * 结论到语气的映射。
+ *
+ * NOT_VERIFIED 单独一档，不并进 bad 也不并进 ok：它在界面上必须与 OK
+ * 一眼可分，而与「查了没过」也不是一回事——前者要去按一次校验，后者
+ * 要去修一个系统。
+ */
+const VERIFY_RESULT_TONE: Record<VerifyResult, VerifyTone> = {
+  NOT_VERIFIED: 'unverified',
+  OK: 'ok',
+  CREDENTIAL_UNRESOLVED: 'bad',
+  AUTH_FAILED: 'bad',
+  REPO_UNREACHABLE: 'bad',
+  BRANCH_MISSING: 'bad',
+  PATH_MISSING: 'bad',
+}
+
+/**
+ * 全部已登记的结论取值。
+ *
+ * 从文案表的键推导而不是另写一份字面量数组：文案表的键类型是
+ * `Record<VerifyResult, string>`，`tsc` 已经保证它一个不多一个不少，
+ * 再抄一份只会多出一处可以漂移的地方。
+ */
+export const ALL_VERIFY_RESULTS = Object.keys(VERIFY_RESULT_LABEL) as VerifyResult[]
+
+/**
+ * 把一个 RFC3339 时刻格式化成 UTC 展示串。
+ *
+ * 解析不出来时原样返回而不是抛错：一个格式意外的时间戳该让那一格显示
+ * 得难看，不该让整张表白屏——同一张表里还有别的集群的登记信息要看。
+ */
+export function formatUtcTime(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  return d.toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC')
+}
+
+/**
+ * 把校验时刻写成一句明确的历史陈述。
+ *
+ * 不能只甩一个时间戳：一个孤零零的时间挨着「只读校验通过」，读起来就是
+ * 「现在是通过的」。轮 4 写回前必须重新校验，拿几天前的结论当此刻的状态
+ * 正是 design doc §3.4 禁止的那件事，界面上的措辞是第一道拦截。
+ */
+function describeCheckedAt(at: string | null | undefined): string {
+  if (!at) return '从未校验过'
+  return `上次校验于 ${formatUtcTime(at)} —— 这是当时的结论，不代表此刻的状态`
+}
+
+/**
+ * 把一个绑定的校验结论折算成可直接渲染的形态。
+ *
+ * 单独成函数而不是在组件里就地查表，是为了让这段判断能被测试直接跑：
+ * 组件是 .tsx，`node --test` 的类型擦除读不了 JSX，留在组件里就等于
+ * 这套文案永远没有测试。
+ *
+ * 未登记的取值不按原样透出，也不留空，而是收窄成「未校验」的语气：
+ * 结论字段是封闭枚举，一个界面还不认识的值只能说明文案没跟上，此时
+ * 失败方向朝「未确认」关，不朝「可信」开（与后端 VerifyResult.Valid
+ * 的收窄同一条纪律）。
+ */
+export function describeVerifyStatus(git: GitBinding): VerifyStatusView {
+  const result = git.verifyResult
+  if (!Object.hasOwn(VERIFY_RESULT_LABEL, result)) {
+    return {
+      label: '结论无法识别',
+      detail: `服务端给出了本界面还不认识的结论「${String(result)}」。`
+        + '在文案补齐之前一律按未校验处置：不认识的结论不是通过了的结论。',
+      tone: 'unverified',
+      checkedAt: describeCheckedAt(git.verifiedAt),
+    }
+  }
+  return {
+    label: VERIFY_RESULT_LABEL[result],
+    detail: VERIFY_RESULT_DETAIL[result],
+    tone: VERIFY_RESULT_TONE[result],
+    checkedAt: describeCheckedAt(git.verifiedAt),
+  }
+}
+
 export type ApiServerResolution =
   | { ok: true; apiServers: APIServer[] }
   | { ok: false; error: string }
@@ -230,6 +388,7 @@ export function buildClusterWrite(
       displayName: values.displayName.trim(),
       podCidr: values.podCidr.trim(),
       nodeCidr: values.nodeCidr.trim(),
+      ccnpPresent: values.ccnpPresent,
       apiServers: servers.apiServers,
       healthCheckSources: values.healthChecks.split('\n').map((s) => s.trim()).filter(Boolean),
       git: git.git,

@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/imkerbos/Distill/internal/config"
 	"github.com/imkerbos/Distill/internal/mysqlregistry"
@@ -47,7 +48,7 @@ func sampleCluster() registry.Cluster {
 		APIServers:         []registry.APIServer{{Host: "10.9.0.2", CIDR: "10.9.0.0/28", Port: 443}},
 		HealthCheckSources: []string{"35.191.0.0/16", "130.211.0.0/22"},
 		Git: &registry.GitBinding{
-			RepoURL: "https://gitlab.example.com/net/policies.git",
+			RepoURL: "ssh://git@gitlab.example.com/net/policies.git",
 			Branch:  "main", PolicyPath: "clusters/prod-asia-1",
 		},
 	}
@@ -279,11 +280,69 @@ func TestClusterSurvivesAFullRoundTripThroughMySQL(t *testing.T) {
 		{Host: "10.9.0.3", CIDR: "10.9.0.16/28", Port: 6443},
 	}
 	want.HealthCheckSources = []string{"130.211.0.0/22", "35.191.0.0/16"}
+	// sampleCluster 没填 VerifyResult：Go 零值 "" 不是一个登记过的枚举值，
+	// 写入时被落成 NOT_VERIFIED（cluster.go insertChildren），读回来
+	// 因此就是 NOT_VERIFIED 而不是空串。
+	want.Git.VerifyResult = registry.VerifyNotVerified
 
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("round-tripped cluster =\n%+v\nwant\n%+v", got, want)
 	}
 	if got.Git == nil || *got.Git != *want.Git {
 		t.Errorf("git binding = %+v, want %+v", got.Git, want.Git)
+	}
+}
+
+// verified_at 为 NULL 时必须映射成 nil，不能映射成零值 time.Time：
+// 零值是 1970 年的一个真实时间点，任何新鲜度检查都会把它当成
+// 「校验过」而不是「从未校验」放行（design doc §3.4 讲的正是这类混淆）。
+func TestUnverifiedGitBindingReadsBackAsNilNotZeroTime(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+
+	in := sampleCluster() // Git 绑定不带 VerifiedAt / VerifyResult
+	if err := s.CreateCluster(ctx, registry.Actor{Username: "admin"}, in); err != nil {
+		t.Fatalf("CreateCluster() error = %v", err)
+	}
+	got, ok, err := s.Cluster(ctx, in.ID)
+	if err != nil || !ok {
+		t.Fatalf("Cluster() = %+v, %v, %v", got, ok, err)
+	}
+	if got.Git == nil {
+		t.Fatal("Git binding missing after round trip")
+	}
+	if got.Git.VerifiedAt != nil {
+		t.Errorf("VerifiedAt = %v, want nil for a never-verified binding", got.Git.VerifiedAt)
+	}
+	if got.Git.VerifyResult != registry.VerifyNotVerified {
+		t.Errorf("VerifyResult = %q, want %q", got.Git.VerifyResult, registry.VerifyNotVerified)
+	}
+}
+
+// 校验结论与时间戳的往返：写入 OK 加一个具体时间戳，读回逐字相等。
+func TestVerifiedGitBindingRoundTripsResultAndTimestamp(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+
+	verifiedAt := time.Date(2026, 8, 1, 12, 30, 0, 0, time.UTC)
+	in := sampleCluster()
+	in.Git.VerifyResult = registry.VerifyOK
+	in.Git.VerifiedAt = &verifiedAt
+	if err := s.CreateCluster(ctx, registry.Actor{Username: "admin"}, in); err != nil {
+		t.Fatalf("CreateCluster() error = %v", err)
+	}
+
+	got, ok, err := s.Cluster(ctx, in.ID)
+	if err != nil || !ok {
+		t.Fatalf("Cluster() = %+v, %v, %v", got, ok, err)
+	}
+	if got.Git == nil {
+		t.Fatal("Git binding missing after round trip")
+	}
+	if got.Git.VerifyResult != registry.VerifyOK {
+		t.Errorf("VerifyResult = %q, want %q", got.Git.VerifyResult, registry.VerifyOK)
+	}
+	if got.Git.VerifiedAt == nil || !got.Git.VerifiedAt.Equal(verifiedAt) {
+		t.Errorf("VerifiedAt = %v, want %v", got.Git.VerifiedAt, verifiedAt)
 	}
 }

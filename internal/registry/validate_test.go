@@ -71,7 +71,7 @@ func TestValidateClusterRejectsUnregisteredState(t *testing.T) {
 // 指向不存在路径的写入尝试，而错误信息只会说「路径不存在」。
 func TestValidateClusterRejectsPartialGitBinding(t *testing.T) {
 	c := validCluster()
-	c.Git = &registry.GitBinding{RepoURL: "https://gitlab.example.com/net/policies.git"}
+	c.Git = &registry.GitBinding{RepoURL: "ssh://git@gitlab.example.com/net/policies.git"}
 	if err := registry.ValidateCluster(c); !errors.Is(err, registry.ErrInvalid) {
 		t.Errorf("err = %v, want ErrInvalid for a git binding missing branch and path", err)
 	}
@@ -80,11 +80,57 @@ func TestValidateClusterRejectsPartialGitBinding(t *testing.T) {
 func TestValidateClusterAcceptsCompleteGitBinding(t *testing.T) {
 	c := validCluster()
 	c.Git = &registry.GitBinding{
-		RepoURL: "https://gitlab.example.com/net/policies.git",
+		RepoURL: "ssh://git@gitlab.example.com/net/policies.git",
 		Branch:  "main", PolicyPath: "clusters/prod-asia-1",
 	}
 	if err := registry.ValidateCluster(c); err != nil {
 		t.Errorf("ValidateCluster() error = %v, want nil", err)
+	}
+}
+
+// validClusterWithGit 是一个完整的、已通过校验的 Git 绑定，供只需要
+// 改动绑定里单个字段的用例复用。
+func validClusterWithGit() registry.Cluster {
+	c := validCluster()
+	c.Git = &registry.GitBinding{ //nolint:gosec // G101 false positive: CredentialRef holds a Secret Manager name, not a credential.
+		RepoURL:       "ssh://git@gitlab.example.com/net/policies.git",
+		Branch:        "main",
+		PolicyPath:    "clusters/prod-asia-1",
+		CredentialRef: "prod-asia-1-git",
+	}
+	return c
+}
+
+// verifyResult 是封闭枚举：一个未登记的取值不能悄悄存进去，否则前端
+// 文案映射与统计口径都对不上号。
+func TestValidateClusterRejectsUnknownVerifyResult(t *testing.T) {
+	c := validClusterWithGit()
+	c.Git.VerifyResult = "PROBABLY_FINE"
+	if err := registry.ValidateCluster(c); !errors.Is(err, registry.ErrInvalid) {
+		t.Fatalf("ValidateCluster() = %v, want ErrInvalid", err)
+	}
+}
+
+// credentialRef 复用 secrets.ValidateRef 而不是另写一份字符集校验，
+// 这条用例锁住这个复用关系：路径穿越式的引用必须在这里就被拦下。
+func TestValidateClusterRejectsMalformedCredentialRef(t *testing.T) {
+	c := validClusterWithGit()
+	c.Git.CredentialRef = "../escape"
+	err := registry.ValidateCluster(c)
+	if !errors.Is(err, registry.ErrInvalid) {
+		t.Fatalf("ValidateCluster() = %v, want ErrInvalid", err)
+	}
+	if !strings.Contains(err.Error(), "credentialRef") {
+		t.Errorf("error %q does not name the offending field", err)
+	}
+}
+
+// credentialRef 可以为空：绑定可以先记下来，凭据稍后再配。
+func TestValidateClusterAllowsEmptyCredentialRef(t *testing.T) {
+	c := validClusterWithGit()
+	c.Git.CredentialRef = ""
+	if err := registry.ValidateCluster(c); err != nil {
+		t.Fatalf("ValidateCluster() = %v, want nil", err)
 	}
 }
 
@@ -148,5 +194,63 @@ func TestValidGitImportReportsItselfVerified(t *testing.T) {
 	}
 	if !p.VerifiedAgainstGit() {
 		t.Error("a validated GIT import does not report itself as verified against Git")
+	}
+}
+
+// 非 SSH 的 repoUrl 必须在保存时就被拒绝，而不是留到校验。
+//
+// 这条守的不是「样式统一」，是一句假结论：校验路径给 clone 挂的是 SSH
+// 认证方法，而传输按 scheme 选 —— https:// 会在拨号之前就失败，几微秒
+// 内返回，然后落进 REPO_UNREACHABLE。那是一句关于网络的结论，而网络
+// 从未被碰过，操作者会被送去查一道不存在的防火墙（spec §2.2）。
+//
+// 报错文本要指名真正的原因：只说「地址不合法」等于把配置错误说成打字错。
+func TestValidateClusterRejectsNonSSHRepoURL(t *testing.T) {
+	for _, url := range []string{
+		"https://gitlab.example.com/net/policies.git",
+		"http://gitlab.example.com/net/policies.git",
+		"git://gitlab.example.com/net/policies.git",
+		"file:///tmp/policies.git",
+		"http://169.254.169.254/latest/meta-data/",
+		"gitlab.example.com/net/policies.git",
+		"ssh://",
+		"",
+	} {
+		c := validClusterWithGit()
+		c.Git.RepoURL = url
+		err := registry.ValidateCluster(c)
+		if !errors.Is(err, registry.ErrInvalid) {
+			t.Errorf("ValidateCluster(repoUrl=%q) = %v, want ErrInvalid", url, err)
+			continue
+		}
+		if url == "" {
+			// 空值由「三项必须同时填写」那条先接住，不必再谈 SSH。
+			continue
+		}
+		var ie *registry.InvalidError
+		if !errors.As(err, &ie) || !strings.Contains(ie.Detail, "SSH") {
+			t.Errorf("ValidateCluster(repoUrl=%q) detail = %q, want it to name SSH as the real reason",
+				url, ie.Detail)
+		}
+	}
+}
+
+// 平台真正会去连的两种写法都要收：scheme 式与 scp 式。
+//
+// 只认其中一种的话，另一种会被报成配置错误 —— 而它是对的地址，操作者
+// 会去改一个没有错的东西。
+func TestValidateClusterAcceptsTheSSHFormsThePlatformDials(t *testing.T) {
+	for _, url := range []string{
+		"ssh://git@gitlab.example.com/net/policies.git",
+		"ssh://gitlab.example.com/net/policies.git",
+		"ssh://git@gitlab.example.com:2222/net/policies.git",
+		"SSH://git@gitlab.example.com/net/policies.git",
+		"git@gitlab.example.com:net/policies.git",
+	} {
+		c := validClusterWithGit()
+		c.Git.RepoURL = url
+		if err := registry.ValidateCluster(c); err != nil {
+			t.Errorf("ValidateCluster(repoUrl=%q) = %v, want nil", url, err)
+		}
 	}
 }

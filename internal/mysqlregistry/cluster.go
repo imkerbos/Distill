@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/imkerbos/Distill/internal/registry"
 )
@@ -95,11 +96,14 @@ func (s *Store) loadChildren(ctx context.Context, c *registry.Cluster) error {
 	}
 
 	var g registry.GitBinding
-	var credRef, lastCommit sql.NullString
+	var credRef, lastCommit, verifyResult sql.NullString
+	var verifiedAt sql.NullTime
 	err = s.db.QueryRowContext(ctx,
-		`SELECT repo_url, branch, policy_path, credential_ref, last_written_commit
+		`SELECT repo_url, branch, policy_path, credential_ref, last_written_commit,
+		        verified_at, verify_result
 		   FROM cluster_git_binding WHERE cluster_id = ?`, c.ID).
-		Scan(&g.RepoURL, &g.Branch, &g.PolicyPath, &credRef, &lastCommit)
+		Scan(&g.RepoURL, &g.Branch, &g.PolicyPath, &credRef, &lastCommit,
+			&verifiedAt, &verifyResult)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return nil
@@ -108,6 +112,14 @@ func (s *Store) loadChildren(ctx context.Context, c *registry.Cluster) error {
 	}
 	g.CredentialRef = credRef.String
 	g.LastWrittenCommit = lastCommit.String
+	// NULL 必须落成 nil，不能落成零值 time.Time：零值是一个真实存在的
+	// 过去时间点（1970 年），任何新鲜度检查都会把它当成「校验过」而非
+	// 「从未校验」放行。
+	if verifiedAt.Valid {
+		t := verifiedAt.Time
+		g.VerifiedAt = &t
+	}
+	g.VerifyResult = registry.VerifyResult(verifyResult.String)
 	c.Git = &g
 	return nil
 }
@@ -239,12 +251,21 @@ func insertChildren(ctx context.Context, tx *sql.Tx, c registry.Cluster) error {
 		}
 	}
 	if c.Git != nil {
+		// 空值按 NOT_VERIFIED 落库，不落空串：空串不是登记过的枚举值，
+		// 会让「从未校验」在数据库里以一个不合法的值存在（registry.validateGit
+		// 对零值做的是同一种归一化，但那处只影响校验、不改写调用方的结构体）。
+		verifyResult := c.Git.VerifyResult
+		if verifyResult == "" {
+			verifyResult = registry.VerifyNotVerified
+		}
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO cluster_git_binding
-			   (cluster_id, repo_url, branch, policy_path, credential_ref, last_written_commit)
-			 VALUES (?, ?, ?, ?, ?, ?)`,
+			   (cluster_id, repo_url, branch, policy_path, credential_ref, last_written_commit,
+			    verified_at, verify_result)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			c.ID, c.Git.RepoURL, c.Git.Branch, c.Git.PolicyPath,
 			nullIfEmpty(c.Git.CredentialRef), nullIfEmpty(c.Git.LastWrittenCommit),
+			nullTimeIfNil(c.Git.VerifiedAt), string(verifyResult),
 		); err != nil {
 			return fmt.Errorf("insert git binding: %w", err)
 		}
@@ -261,4 +282,15 @@ func nullIfEmpty(s string) any {
 		return nil
 	}
 	return s
+}
+
+// nullTimeIfNil 把 nil 指针转成 SQL NULL，非 nil 时取其指向的值。
+//
+// database/sql 不接受 *time.Time 作为驱动参数（它既不是基础类型也没
+// 实现 driver.Valuer），必须在这里显式拆箱，否则 ExecContext 直接报错。
+func nullTimeIfNil(t *time.Time) any {
+	if t == nil {
+		return nil
+	}
+	return *t
 }

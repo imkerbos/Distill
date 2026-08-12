@@ -23,3 +23,27 @@ database:
 
 log:
   level: INFO
+
+# secrets / gitverify 两段在 demo 里刻意留空：不解析凭据，也就不做 Git
+# 绑定校验，界面上结论一律是 NOT_VERIFIED。这不是"暂时没开"，而是一个
+# 说得出口的状态 —— 没做过的检查不是通过了的检查。
+#
+# 打开校验需要两段一起配（少一段启动即失败，见 config.validateVerification）。
+# secrets 段选一个后端，**不能两个都写** —— 同时出现启动即失败，因为最坏的
+# 一种落法是生产进程从本地目录读私钥。
+#
+# 生产（Secret Manager，身份走 Workload Identity，没有密钥文件这个选项）：
+#
+# secrets:
+#   project: distill-prod          # secret 所在项目
+#   prefix: distill-git-           # 短名拼进资源路径前的固定前缀；两者都必填
+#
+# 本地开发（目录解析器）：
+#
+# secrets:
+#   dir: /run/secrets/distill      # 一个 ref 一个文件；该目录必须 gitignored
+#
+# gitverify:
+#   timeout: 10s                   # 出站超时，超时归入 REPO_UNREACHABLE
+#   host_keys: |                   # known_hosts 格式；公钥不是机密，与凭据分开存放
+#     gitlab.example.com ssh-ed25519 AAAA...

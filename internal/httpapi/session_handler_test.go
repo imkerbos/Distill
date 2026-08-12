@@ -45,14 +45,32 @@ func newTestRouterWithRegistry(
 ) (http.Handler, *auth.SessionStore, *http.Cookie) {
 	t.Helper()
 
-	// reader 允许为 nil（见上），因此默认窗口只在拿到 fixture 实现时取。
-	// 走类型断言而非扩展 store.Reader：数据窗口是 fixture 特有的概念，
-	// 真实存储没有"全部数据的时间范围"这回事。
-	var window store.TimeWindow
+	return newTestRouterWithWindow(t, reader, reg, fixtureWindow(reader))
+}
+
+// fixtureWindow 取 fixture 数据的全量时间窗。
+//
+// reader 允许为 nil（见上），因此默认窗口只在拿到 fixture 实现时取。
+// 走类型断言而非扩展 store.Reader：数据窗口是 fixture 特有的概念，
+// 真实存储没有"全部数据的时间范围"这回事。
+func fixtureWindow(reader store.Reader) store.TimeWindow {
 	if fr, ok := reader.(*store.FixtureReader); ok {
-		window = fr.DataWindow()
+		return fr.DataWindow()
 	}
-	return newTestRouterWithWindow(t, reader, reg, window)
+	return store.TimeWindow{}
+}
+
+// newTestRouterWithGitVerifier 是 newTestRouterWithRegistry 的变体，
+// 额外注入一个 Git 绑定校验器。
+//
+// 单独开一个入口而不是给既有构造器加参数：绝大多数用例装配的是"未配置
+// secrets"的部署形态（校验器为 nil），而那正是必须持续被覆盖的默认形态 ——
+// 让它保持零参数，就不会有人为了改签名顺手给它塞一个非 nil 的替身。
+func newTestRouterWithGitVerifier(
+	t *testing.T, reader store.Reader, reg registry.Store, gv httpapi.GitVerifier,
+) (http.Handler, *auth.SessionStore, *http.Cookie) {
+	t.Helper()
+	return buildTestRouter(t, reader, reg, fixtureWindow(reader), gv)
 }
 
 // newTestRouterWithWindow 是 newTestRouterWithRegistry 的底层版本，
@@ -70,6 +88,17 @@ func newTestRouterWithWindow(
 	t *testing.T, reader store.Reader, reg registry.Store, window store.TimeWindow,
 ) (http.Handler, *auth.SessionStore, *http.Cookie) {
 	t.Helper()
+	// 校验器为 nil：未配置 secrets 是绝大多数用例要的形态，也是部署上
+	// 真实存在的一种 —— 结论一律 NOT_VERIFIED，而不是"校验都通过"。
+	return buildTestRouter(t, reader, reg, window, nil)
+}
+
+// buildTestRouter 是全部装配入口的底层实现。
+func buildTestRouter(
+	t *testing.T, reader store.Reader, reg registry.Store,
+	window store.TimeWindow, gv httpapi.GitVerifier,
+) (http.Handler, *auth.SessionStore, *http.Cookie) {
+	t.Helper()
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(testPassword), bcrypt.MinCost)
 	if err != nil {
@@ -82,11 +111,12 @@ func newTestRouterWithWindow(
 	}
 
 	h := httpapi.NewRouter(httpapi.Deps{
-		Sessions: sessions,
-		Verifier: auth.NewVerifier([]config.User{{Username: "demo", PasswordHash: string(hash)}}),
-		Logger:   logger,
-		Reader:   reader,
-		Registry: reg,
+		Sessions:    sessions,
+		Verifier:    auth.NewVerifier([]config.User{{Username: "demo", PasswordHash: string(hash)}}),
+		Logger:      logger,
+		Reader:      reader,
+		Registry:    reg,
+		GitVerifier: gv,
 		// 流量查询的时间窗是必填的；测试装配方与 cmd 一样注入覆盖
 		// 全量数据的窗口，使不关心时间维的用例无须逐个传 from/to。
 		DefaultWindow: window,
