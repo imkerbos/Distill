@@ -513,6 +513,127 @@ func TestFixtureExcludedWorkloadsNameHostNetworkAndUnlabelledPods(t *testing.T) 
 	}
 }
 
+// Helm chart 常见同时打 app.kubernetes.io/name 与 app 两个标签，且取值
+// 不同（迁移期、chart 内部命名与对外服务名不一致等）。workloadLabelKeys
+// 顺序即优先级：app.kubernetes.io/name 必须赢，而且赢的是这个键本身，
+// 不是"随便挑一个非空的"——podSelector 的键和值都要来自赢家，输家的取值
+// 一个字符都不能泄进去。
+func TestPodWithMultipleResolvableLabelsUsesHighestPriorityKey(t *testing.T) {
+	web := replay.PodRef{
+		ClusterID: "c1", Namespace: "shop", Name: "web-1", IP: "10.0.0.2",
+		Labels: map[string]string{
+			"app.kubernetes.io/name": "web-canonical",
+			"app":                    "web-legacy",
+		},
+	}
+	client := replay.PodRef{
+		ClusterID: "c1", Namespace: "shop", Name: "client-1", IP: "10.0.0.1",
+		Labels: map[string]string{"app": "client"},
+	}
+	flow := replay.Flow{
+		Source:    replay.Endpoint{IP: client.IP, ClusterID: client.ClusterID, Pod: &client},
+		Dest:      replay.Endpoint{IP: web.IP, ClusterID: web.ClusterID, Pod: &web},
+		Protocol:  replay.ProtocolTCP,
+		Port:      8080,
+		Timestamp: time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC),
+	}
+	res := policygen.Generate(policygen.Input{
+		ClusterID: "c1",
+		Pods:      []replay.PodRef{web, client},
+		Observations: []policygen.Observation{{
+			FlowID: "f1", Flow: flow,
+			Decision: replay.Decision{Verdict: replay.VerdictAllow, Confidence: replay.ConfidenceTrusted},
+		}},
+	})
+
+	var found *policygen.CandidatePolicy
+	for i := range res.Policies {
+		if res.Policies[i].Namespace == "shop" && res.Policies[i].Cluster == "c1" &&
+			res.Policies[i].WorkloadLabelKey == "app.kubernetes.io/name" {
+			found = &res.Policies[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("no candidate policy resolved via app.kubernetes.io/name")
+	}
+	if found.Workload != "web-canonical" {
+		t.Errorf("Workload = %q, want web-canonical (the app.kubernetes.io/name value, not the app value)",
+			found.Workload)
+	}
+
+	var np *networkingv1.NetworkPolicy
+	for _, p := range res.EnabledPolicies() {
+		if p.Namespace == "shop" && p.Spec.PodSelector.MatchLabels["app.kubernetes.io/name"] == "web-canonical" {
+			pCopy := p
+			np = &pCopy
+		}
+	}
+	if np == nil {
+		t.Fatal("EnabledPolicies() has no policy with podSelector {app.kubernetes.io/name: web-canonical}")
+	}
+	if v, wrongKey := np.Spec.PodSelector.MatchLabels["app"]; wrongKey {
+		t.Errorf("podSelector = %v, must not carry the losing app=%q label at all",
+			np.Spec.PodSelector.MatchLabels, v)
+	}
+}
+
+// hostNetwork 判断先于标签判断（peerOf 的既有注释已经这么写），理由是
+// hostNetwork 是更根本的事实——policy 根本够不着这个 Pod，而缺标签是
+// 运维能修的。但这个优先级只活在代码里：谁都能在下次改动时不小心把
+// 判断顺序换过来，换完之后所有测试大概率照样绿——因为大多数 hostNetwork
+// Pod 恰好也没有 workload 标签，两个分支报的都是"排除"，只是原因不同，
+// 谁都不会注意到原因错了。这条用例专门构造两者都成立的 Pod，把顺序
+// 钉死成一个可验证的事实：必须恰好一条排除记录，原因是 hostNetwork，
+// 不是 NO_WORKLOAD_LABEL。
+func TestHostNetworkTakesPrecedenceOverMissingLabel(t *testing.T) {
+	privileged := replay.PodRef{
+		ClusterID: "c1", Namespace: "kube-system", Name: "cni-agent-1", IP: "10.0.0.9",
+		HostNetwork: true, Labels: map[string]string{"env": "prod"}, // 无任何可识别 workload 标签
+	}
+	res := policygen.Generate(policygen.Input{
+		ClusterID: "c1",
+		Pods:      []replay.PodRef{privileged},
+	})
+
+	var matches []policygen.ExcludedWorkload
+	for _, w := range res.ExcludedWorkloads {
+		if w.Namespace == "kube-system" && w.Pod == "cni-agent-1" {
+			matches = append(matches, w)
+		}
+	}
+	if len(matches) != 1 {
+		t.Fatalf("ExcludedWorkloads entries for cni-agent-1 = %d, want exactly 1: %+v", len(matches), matches)
+	}
+	if matches[0].Reason != policygen.ExclusionHostNetwork {
+		t.Errorf("reason = %q, want %q (hostNetwork must win over the missing-label case)",
+			matches[0].Reason, policygen.ExclusionHostNetwork)
+	}
+}
+
+// 手工构造的 Pod 证明了机制成立，但没有证明真实数据集受影响。这里用
+// prod-asia-1 的真实快照钉住那个曾经手工用 curl 验证过的事实：
+// kube-system/kube-dns（k8s-app: kube-dns 的 Pod）现在真的进了候选集，
+// 且用的是 k8s-app 键。少了这条，"kube-dns 现在有候选策略了"这句话
+// 只在人手工跑一次 docker compose 时成立，下一次改动就可能悄悄回退
+// 而没有任何测试报错。
+func TestFixtureKubeDNSGetsCandidateWithK8sAppKey(t *testing.T) {
+	res := policygen.Generate(observe(t, "prod-asia-1"))
+
+	var found *policygen.CandidatePolicy
+	for i := range res.Policies {
+		if res.Policies[i].Namespace == "kube-system" && res.Policies[i].Workload == "kube-dns" {
+			found = &res.Policies[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("prod-asia-1: no candidate policy for kube-system/kube-dns; " +
+			"the k8s-app-labelled kube-dns Pods never entered the roster")
+	}
+	if found.WorkloadLabelKey != "k8s-app" {
+		t.Errorf("kube-system/kube-dns WorkloadLabelKey = %q, want k8s-app", found.WorkloadLabelKey)
+	}
+}
+
 // 展示视图必须与它渲染的规则体一致：selector 对端渲染成 namespace/workload，
 // ipBlock 对端渲染成 CIDR 原文。渲染错了比不渲染更糟——它看起来是事实。
 func TestPeersAndPortsMatchTheRuleBody(t *testing.T) {

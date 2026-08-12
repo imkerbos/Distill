@@ -19,6 +19,16 @@ import (
 // 名册里静默消失。顺序即优先级，不接受配置——这条归属规则关系到
 // selector 语义，配置化会让同一个平台对同一个 Pod 在不同时间给出
 // 不同的 podSelector。
+//
+// 改动这份顺序——包括调整已有条目的先后——是一次会改变规则指纹的
+// 变更：Helm chart 常见同时打 app.kubernetes.io/name 与 app 两个标签且
+// 取值不同，某个 workload 命中的键一旦因为改顺序而改变，podSelector
+// 的键和值都会变，FingerprintOf 随之改变，该 workload 下所有人工确认
+// （override.go 的 Override.Fingerprint）会静默失效——不报错，只是
+// 从此再也匹配不上任何规则，页面上表现为"确认过的规则又变回待确认"。
+// 目前平台没有已上线用户，这条列表还没被任何真实确认依赖，因此改动
+// 安全；上线后再改，必须当成一次破坏性变更来对待，而不是当成一次
+// 内部实现调整。
 var workloadLabelKeys = []string{
 	"app.kubernetes.io/name", // Kubernetes 官方推荐标签，优先级最高
 	"app",                    // 事实标准，历史遗留集群的主流写法
