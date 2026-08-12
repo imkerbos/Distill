@@ -213,6 +213,7 @@ export type Kind =
 /** 一条流量无法生成候选规则的封闭原因枚举。 */
 export type UngeneratableReason =
   | 'NO_WORKLOAD_LABEL' | 'IDENTITY_UNKNOWN' | 'DEGRADED_EVIDENCE' | 'UNMANAGED_ENDPOINT'
+  | 'LABEL_KEY_CONFLICT'
 
 /** dry-run 预测的四类变化，WOULD_OPEN 不是"通过"而是敞口扩大。 */
 export type ChangeKind = 'WOULD_BREAK' | 'WOULD_OPEN' | 'UNCHANGED' | 'UNKNOWN'
@@ -239,6 +240,48 @@ export interface CandidateRule {
   peers: string[]
   /** 端口，形如 TCP/8080。 */
   ports: string[]
+  /** 规则内容的 SHA-256，人工覆盖决定（RuleOverride）挂在它上面。 */
+  fingerprint: string
+}
+
+/** 人工决定的方向。ENABLE 覆盖一条默认禁用的规则，DISABLE 覆盖一条默认启用的规则。 */
+export type OverrideDecision = 'ENABLE' | 'DISABLE'
+
+/**
+ * 一条人工确认或否决。与 registry.RuleOverride 逐字段对齐
+ * （Task 5 实测响应，见 task-5-report.md）。
+ */
+export interface RuleOverride {
+  clusterId: string
+  namespace: string
+  workload: string
+  fingerprint: string
+  decision: OverrideDecision
+  /** 做出该决定的理由，非空——半年后有人问「这条规则为什么是开的」，答案在这里。 */
+  reason: string
+  decidedBy: string
+  decidedAt: string
+  /** 落进 Git 的 commit；本轮恒为空，"已提交决定"与"已在集群生效"是两回事。 */
+  mergedCommitSha: string
+}
+
+/**
+ * 一条已失效的确认：规则内容变了，指纹不再匹配当前候选集，
+ * 或者当初的决定试图禁用一条 BASELINE 规则（不接受）。
+ */
+export interface StaleOverride {
+  /** 当初的决定，含当时的理由与时间。 */
+  override: RuleOverride
+  /** 该 (namespace, workload) 当前的全部规则描述；workload 已不存在时为空数组。 */
+  currentRules: string[]
+  /** 失效原因，固定文案（封闭集合，非自由文本）。 */
+  reason: string
+}
+
+/** 应用人工决定之后的候选策略与预测，与默认推荐并列展示。 */
+export interface OverriddenView {
+  candidates: CandidatePolicy[]
+  prediction: PredictionReport
 }
 
 export interface CandidatePolicy {
@@ -257,6 +300,25 @@ export interface UngeneratableItem {
   flowId: string
   reason: UngeneratableReason
   detail: string
+}
+
+/**
+ * 一个 Pod 未进入候选策略花名册的封闭原因枚举。
+ *
+ * 与 UngeneratableReason 分列，不合并：后者说的是"某条流量表达不成规则"，
+ * 这一套说的是更早一步的缺口——这个 Pod 从未进入名册，因此不会作为主体
+ * 出现在任何一条流量判定里，UngeneratableReason 报不出它。
+ */
+export type WorkloadExclusionReason =
+  | 'UNMANAGED_ENDPOINT' | 'NO_WORKLOAD_LABEL' | 'LABEL_KEY_CONFLICT'
+
+/** 一个从未进入候选策略花名册的 Pod：它没有任何候选策略覆盖。 */
+export interface ExcludedWorkload {
+  namespace: string
+  pod: string
+  /** 该 Pod 的原始标签，供排查是否只是标签键拼错或用了平台还未识别的键。 */
+  labels: Record<string, string>
+  reason: WorkloadExclusionReason
 }
 
 export interface ChangedFlow {
@@ -363,7 +425,28 @@ export interface PolicyPreview {
   candidates: CandidatePolicy[]
   missingBaselines: MissingBaseline[]
   ungeneratable: UngeneratableItem[]
+  /**
+   * 从未进入候选策略花名册的 Pod。
+   *
+   * 类型带 `| null`，理由同 overrides：后端用 `var excluded []ExcludedWorkload`
+   * 收集，零条时是 nil 切片，`encoding/json` 序列化成 `null` 而不是 `[]`。
+   */
+  excludedWorkloads: ExcludedWorkload[] | null
   prediction: PredictionReport
   /** 全量 baseline 类型清单，用于把 missingBaselines 的"没缺"与"没查"区分开。 */
   baselineKinds: Kind[]
+  /**
+   * 当前生效的人工决定。
+   *
+   * 类型带 `| null`——这不是照抄 Go 结构体，是实测出来的：mysqlregistry.
+   * RuleOverrides 用 `var out []registry.RuleOverride` 收集结果，零条时
+   * 是 nil 切片，`encoding/json` 把它序列化成 `null` 而不是 `[]`。没有
+   * 覆盖是本页最常见的初始状态，这个 null 必须由调用方兜底，不能假设
+   * 后端总给数组。
+   */
+  overrides: RuleOverride[] | null
+  /** 已失效的确认，单独报出而不是静默丢弃。 */
+  staleOverrides: StaleOverride[]
+  /** 应用人工决定之后的版本，与默认推荐（本对象其余字段）并列展示。 */
+  overridden: OverriddenView
 }

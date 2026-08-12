@@ -37,8 +37,11 @@ type Input struct {
 
 // Result 是一次生成的全部产物。
 //
-// 三块必须一起返回：只报 Policies 而不报 MissingBaselines 与
-// Ungeneratable，等于宣称覆盖完整。
+// 四块必须一起返回：只报 Policies 而不报 MissingBaselines、Ungeneratable
+// 与 ExcludedWorkloads，等于宣称覆盖完整。Ungeneratable 报的是"某条流量
+// 表达不了"，ExcludedWorkloads 报的是更前一步的缺口——"这个 workload
+// 从未进入候选集，因此不会出现在任何一条流量的判定里"。少了后者，一个
+// hostNetwork 或无标签的 Pod 会以"0 不可生成"的面貌被系统悄悄吞掉。
 type Result struct {
 	// Policies 是候选策略，按 (namespace, workload) 确定排序。
 	Policies []CandidatePolicy `json:"policies"`
@@ -46,6 +49,8 @@ type Result struct {
 	MissingBaselines []MissingBaseline `json:"missingBaselines"`
 	// Ungeneratable 是无法表达为规则的流量。
 	Ungeneratable []UngeneratableItem `json:"ungeneratable"`
+	// ExcludedWorkloads 是从未进入候选策略花名册的 Pod，按 (namespace, pod) 确定排序。
+	ExcludedWorkloads []ExcludedWorkload `json:"excludedWorkloads"`
 }
 
 // MissingBaseline 是一个 namespace 缺失的 Baseline 类型。
@@ -63,11 +68,15 @@ type MissingBaseline struct {
 // namespace 的流量落到 ALLOW，凭空造出敞口告警（spec §5）。按 namespace
 // 看只是展示需求，由消费方裁剪产物完成。
 func Generate(in Input) Result {
+	// 归属键的赢家先定下来：名册与流量两条路径必须用同一份判定，各算
+	// 各的会让「哪个 Pod 进了候选集」与「哪条流量学得进规则」互相矛盾。
+	winners := resolveWinningKeys(in)
+
 	counts := map[aggKey]int{}
 	var bad []UngeneratableItem
 
 	for _, o := range in.Observations {
-		items, gaps := classify(o, in.ClusterID)
+		items, gaps := classify(o, in.ClusterID, winners)
 		for _, it := range items {
 			counts[it.key]++
 		}
@@ -83,27 +92,57 @@ func Generate(in Input) Result {
 	// 里消失——这两类恰恰是最需要被看见的："平台学不出它的流量"，不是
 	// "它没有流量"。
 	//
-	// 排除条件与 subjectOf 对齐：hostNetwork Pod 选不中，没有 app 标签的
-	// Pod 无法用 podSelector 表达，两者都不能进名册，否则会生成一条谁都
-	// 匹配不到、或者选中了不该选对象的幽灵策略。
+	// 排除条件与 subjectOf 对齐：hostNetwork Pod 选不中，没有可识别
+	// workload 标签的 Pod 无法用 podSelector 表达，两者都不能进名册，
+	// 否则会生成一条谁都匹配不到、或者选中了不该选对象的幽灵策略。
+	//
+	// 被排除的 Pod 必须单独记下来（ExcludedWorkloads）：它们从未进入
+	// 名册，因此永远不会出现在任何一条流量的判定里，Ungeneratable 那条
+	// 报不出这个缺口——一个不存在的候选策略不会"缺"任何东西。
 	workloads := map[subject]bool{}
+	var excluded []ExcludedWorkload
 	for _, p := range in.Pods {
 		if p.ClusterID != in.ClusterID {
 			continue
 		}
 		if replay.IsUnmanaged(p) {
+			excluded = append(excluded, ExcludedWorkload{
+				Namespace: p.Namespace, Pod: p.Name, Labels: cloneLabels(p.Labels),
+				Reason: ExclusionHostNetwork,
+			})
 			continue
 		}
-		wl := p.Labels[workloadLabel]
-		if wl == "" {
+		key, wl, ok := resolveWorkloadLabel(p.Labels)
+		if !ok {
+			excluded = append(excluded, ExcludedWorkload{
+				Namespace: p.Namespace, Pod: p.Name, Labels: cloneLabels(p.Labels),
+				Reason: ExclusionNoWorkloadLabel,
+			})
 			continue
 		}
-		workloads[subject{namespace: p.Namespace, workload: wl}] = true
+		// 同名 workload 挂在不同标签键上时只留赢家（resolveWinningKeys），
+		// 输家在这里点名报出去：赢家的 podSelector 用的是赢家的键，选不中
+		// 这个 Pod，所以它确实没有候选策略。报一条"它被排除了"，好过发一条
+		// 名字相同、却谁都选不中的第二份策略——后者不报错，只是永远不生效。
+		if win, seen := winners[nsWorkload{namespace: p.Namespace, workload: wl}]; seen && win != key {
+			excluded = append(excluded, ExcludedWorkload{
+				Namespace: p.Namespace, Pod: p.Name, Labels: cloneLabels(p.Labels),
+				Reason: ExclusionLabelKeyConflict,
+			})
+			continue
+		}
+		workloads[subject{namespace: p.Namespace, workload: wl, labelKey: key}] = true
 	}
+	sort.Slice(excluded, func(i, j int) bool {
+		if excluded[i].Namespace != excluded[j].Namespace {
+			return excluded[i].Namespace < excluded[j].Namespace
+		}
+		return excluded[i].Pod < excluded[j].Pod
+	})
 
 	byWorkload := map[subject][]Rule{}
 	for k, n := range counts {
-		s := subject{namespace: k.SubjectNS, workload: k.Subject}
+		s := subject{namespace: k.SubjectNS, workload: k.Subject, labelKey: k.SubjectKey}
 		// 名册之外仍学到规则理论上不会发生——subjectOf 已经把 hostNetwork
 		// 与无标签 Pod 挡在外面——但稳妥起见仍然按学习结果建一条策略，
 		// 而不是静默丢弃这批规则。
@@ -131,21 +170,31 @@ func Generate(in Input) Result {
 		}
 	}
 
-	res := Result{Ungeneratable: dedupeGaps(bad)}
+	res := Result{Ungeneratable: dedupeGaps(bad), ExcludedWorkloads: excluded}
 	for s := range workloads {
 		rules := append([]Rule{}, byWorkload[s]...)
 		rules = append(rules, baselineByNS[s.namespace]...)
 		sortRules(rules)
 		res.Policies = append(res.Policies, CandidatePolicy{
-			Cluster: in.ClusterID, Namespace: s.namespace, Workload: s.workload, Rules: rules,
+			Cluster: in.ClusterID, Namespace: s.namespace, Workload: s.workload,
+			WorkloadLabelKey: s.labelKey, Rules: rules,
 		})
 	}
+	// 比较到 WorkloadLabelKey 为止：resolveWinningKeys 保证 (namespace,
+	// workload) 唯一，这一项理论上永远比不到。写出来是因为 sort.Slice
+	// 不稳定、上面的 res.Policies 又是 range map 建起来的——排序器一旦
+	// 打平，输出顺序就退化成 map 遍历顺序，而整个指纹机制挂在"同一份
+	// 输入两次生成逐字节相同"上。让确定性依赖另一个函数的不变量，是把
+	// 一次未来的重构变成一次静默的指纹失效。
 	sort.Slice(res.Policies, func(i, j int) bool {
 		a, b := res.Policies[i], res.Policies[j]
 		if a.Namespace != b.Namespace {
 			return a.Namespace < b.Namespace
 		}
-		return a.Workload < b.Workload
+		if a.Workload != b.Workload {
+			return a.Workload < b.Workload
+		}
+		return a.WorkloadLabelKey < b.WorkloadLabelKey
 	})
 
 	for ns := range nsWithWorkload {
@@ -197,6 +246,10 @@ func learnedRule(k aggKey, flowCount int) Rule {
 }
 
 // peerSpec 把聚合键里的对端表达成 NetworkPolicy peer。
+//
+// podSelector 必须用 k.PeerKey——对端实际命中的标签键——而不是固定的
+// app：一条从 k8s-app 归属出来的 coredns 对端若被拼成 {app: kube-dns}，
+// 生成的是一条集群里没有任何 Pod 会命中的幽灵 selector。
 func peerSpec(k aggKey) networkingv1.NetworkPolicyPeer {
 	if k.PeerCIDR != "" {
 		return networkingv1.NetworkPolicyPeer{
@@ -208,9 +261,22 @@ func peerSpec(k aggKey) networkingv1.NetworkPolicyPeer {
 			MatchLabels: map[string]string{nsNameLabel: k.PeerNamespace},
 		},
 		PodSelector: &metav1.LabelSelector{
-			MatchLabels: map[string]string{workloadLabel: k.PeerWorkload},
+			MatchLabels: map[string]string{k.PeerKey: k.PeerWorkload},
 		},
 	}
+}
+
+// cloneLabels 拷贝一份 Pod 标签，供 ExcludedWorkload 使用。
+//
+// 不直接引用 in.Pods 里的底层 map：ExcludedWorkload 要在生成之外存活
+// 展示，若与快照共享同一份 map，调用方对快照的任何后续修改都会
+// 悄悄改写已经返回给界面的排查证据。
+func cloneLabels(labels map[string]string) map[string]string {
+	out := make(map[string]string, len(labels))
+	for k, v := range labels {
+		out[k] = v
+	}
+	return out
 }
 
 // baselineRule 把一条 Baseline 包装成候选策略里的规则。
@@ -301,6 +367,11 @@ func ruleProtocol(r Rule) string {
 
 // rulePeer 取规则的第一个对端，供排序使用。namespace 与 workload 来自
 // selector 组合，cidr 来自 ipBlock；两种表达互斥，用不到的一律留空。
+//
+// PodSelector 的取值不按固定键取——peerSpec 按对端实际命中的标签键
+// 构造 matchLabels，键可以是 app、k8s-app 等任意一种——而是直接取
+// 这张单键 map 里唯一的值：peerSpec 生成的 podSelector 恒为单条
+// matchLabels，遍历顺序在只有一个元素时不影响结果。
 func rulePeer(r Rule) (ns, workload, cidr string) {
 	var peers []networkingv1.NetworkPolicyPeer
 	switch {
@@ -320,7 +391,9 @@ func rulePeer(r Rule) (ns, workload, cidr string) {
 		ns = p.NamespaceSelector.MatchLabels[nsNameLabel]
 	}
 	if p.PodSelector != nil {
-		workload = p.PodSelector.MatchLabels[workloadLabel]
+		for _, v := range p.PodSelector.MatchLabels {
+			workload = v
+		}
 	}
 	return ns, workload, ""
 }
@@ -370,7 +443,7 @@ func (r Result) EnabledPolicies() []networkingv1.NetworkPolicy {
 			},
 			Spec: networkingv1.NetworkPolicySpec{
 				PodSelector: metav1.LabelSelector{
-					MatchLabels: map[string]string{workloadLabel: p.Workload},
+					MatchLabels: map[string]string{p.WorkloadLabelKey: p.Workload},
 				},
 				PolicyTypes: []networkingv1.PolicyType{
 					networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress,

@@ -3,6 +3,7 @@ package mysqlregistry_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -26,7 +27,7 @@ func newTestStore(t *testing.T) (*mysqlregistry.Store, *sql.DB) {
 	}
 	// 每个测试从干净状态开始。删除顺序与外键依赖相反。
 	for _, tbl := range []string{
-		"audit_log", "policy_import", "cluster_git_binding",
+		"audit_log", "rule_override", "policy_import", "cluster_git_binding",
 		"cluster_health_check_source", "cluster_apiserver", "cluster",
 	} {
 		//nolint:gosec // G202: tbl comes from the fixed literal slice above, not external input
@@ -127,6 +128,29 @@ func TestUpdateClusterWritesAudit(t *testing.T) {
 	}
 	if actions != 1 {
 		t.Errorf("UPDATE_CLUSTER audit rows = %d, want 1", actions)
+	}
+
+	// 一行审计只证明「有人改过」；复盘要问的是「改之前是什么」。
+	// 没有这条断言，把 UpdateCluster 里的 before 传成 nil，上面的计数
+	// 照样是 1，测试照样绿，而那一行从此回答不了任何问题。
+	var before sql.NullString
+	if err := db.QueryRow(
+		`SELECT before_val FROM audit_log WHERE action = 'UPDATE_CLUSTER'`).Scan(&before); err != nil {
+		t.Fatalf("query audit: %v", err)
+	}
+	if !before.Valid {
+		t.Fatal("before_val is NULL; the audit row says nothing about what the cluster looked like")
+	}
+	var prior registry.Cluster
+	if err := json.Unmarshal([]byte(before.String), &prior); err != nil {
+		t.Fatalf("decode before_val: %v", err)
+	}
+	if prior.DisplayName != sampleCluster().DisplayName {
+		t.Errorf("before_val displayName = %q, want %q — the value that was replaced",
+			prior.DisplayName, sampleCluster().DisplayName)
+	}
+	if prior.ID != "prod-asia-1" || prior.PodCIDR != sampleCluster().PodCIDR {
+		t.Errorf("before_val = %+v, want the pre-update cluster", prior)
 	}
 }
 

@@ -1,0 +1,181 @@
+# 端口语义矩阵：命名端口解析、endPort 范围、ipBlock + except。
+# 三个目标命名空间各挂一条只在端口语义上不同的 ingress 策略，共用同一个
+# client/prober 客户端发起连接，把"选择器判定对不对"和"端口/CIDR
+# 判定对不对"这两件事分开测。
+apiVersion: v1
+kind: Namespace
+metadata: {name: probe-named, labels: {env: dev}}
+---
+apiVersion: v1
+kind: Namespace
+metadata: {name: probe-range, labels: {env: dev}}
+---
+apiVersion: v1
+kind: Namespace
+metadata: {name: probe-ipblock, labels: {env: dev}}
+---
+apiVersion: v1
+kind: Namespace
+metadata: {name: client, labels: {env: dev, role: prober}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: multi, namespace: probe-named}
+data:
+  default.conf: |
+    server { listen 8080; location / { return 200 "ok\n"; } }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: multi, namespace: probe-range}
+data:
+  default.conf: |
+    server { listen 9090; location / { return 200 "ok\n"; } }
+    server { listen 9190; location / { return 200 "ok\n"; } }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: multi, namespace: probe-ipblock}
+data:
+  default.conf: |
+    server { listen 8080; location / { return 200 "ok\n"; } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: srv, namespace: probe-named}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: srv}}
+  template:
+    metadata: {labels: {app: srv}}
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.29-alpine
+          ports: [{name: http, containerPort: 8080, protocol: TCP}]
+          volumeMounts: [{name: c, mountPath: /etc/nginx/conf.d}]
+      volumes: [{name: c, configMap: {name: multi}}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: srv, namespace: probe-range}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: srv}}
+  template:
+    metadata: {labels: {app: srv}}
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.29-alpine
+          ports:
+            - {name: lo, containerPort: 9090, protocol: TCP}
+            - {name: hi, containerPort: 9190, protocol: TCP}
+          volumeMounts: [{name: c, mountPath: /etc/nginx/conf.d}]
+      volumes: [{name: c, configMap: {name: multi}}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: srv, namespace: probe-ipblock}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: srv}}
+  template:
+    metadata: {labels: {app: srv}}
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.29-alpine
+          ports: [{name: http, containerPort: 8080, protocol: TCP}]
+          volumeMounts: [{name: c, mountPath: /etc/nginx/conf.d}]
+      volumes: [{name: c, configMap: {name: multi}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: srv, namespace: probe-named}
+spec: {selector: {app: srv}, ports: [{port: 8080, targetPort: 8080}]}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: srv, namespace: probe-range}
+spec:
+  selector: {app: srv}
+  ports: [{name: lo, port: 9090, targetPort: 9090}, {name: hi, port: 9190, targetPort: 9190}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: srv, namespace: probe-ipblock}
+spec: {selector: {app: srv}, ports: [{port: 8080, targetPort: 8080}]}
+---
+# 命名端口：策略写 port: http，引擎必须解析成 8080，而不是把 "http"
+# 当成字面端口号（会永远不命中）或者干脆放弃求值。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: named-port, namespace: probe-named}
+spec:
+  podSelector: {matchLabels: {app: srv}}
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{namespaceSelector: {matchLabels: {role: prober}}}]
+      ports: [{protocol: TCP, port: http}]
+---
+# 端口范围：9000-9100 放行，9190 落在范围外。srv 在 probe-range 里同时
+# 监听 9090（范围内）和 9190（范围外），用同一个策略、同一对 Pod 测出
+# endPort 边界两侧的判定。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: port-range, namespace: probe-range}
+spec:
+  podSelector: {matchLabels: {app: srv}}
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{namespaceSelector: {matchLabels: {role: prober}}}]
+      ports: [{protocol: TCP, port: 9000, endPort: 9100}]
+---
+# ipBlock + except：整个 Pod 网段放行，但把 10.244.1.0/24 挖掉。
+#
+# 这个 kind 集群只有一个 worker 节点，所有业务 Pod（包括本文件的
+# client/prober）都落在同一个节点 CIDR 里，也就是被 except 挖掉的
+# 那个 /24。结果是这条策略对这份夹具里的每一次连接都判 DENY——这不是
+# 夹具的错，是刻意用单节点拓扑把 ipBlock/except 的"精确匹配"逼到最严格
+# 的那一档：只要 except 命中，CIDR 本身多宽都不救。conformance_test.go
+# 的期望矩阵把这条连接标成 DENY，正是照着这个事实写的，不是照着策略
+# 名字"字面上应该放行"的直觉写的。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: ipblock-except, namespace: probe-ipblock}
+spec:
+  podSelector: {matchLabels: {app: srv}}
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{ipBlock: {cidr: "10.244.0.0/16", except: ["10.244.1.0/24"]}}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: prober, namespace: client}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: prober}}
+  template:
+    metadata: {labels: {app: prober}}
+    spec:
+      containers:
+        - name: c
+          image: busybox:1.37
+          command:
+            - sh
+            - -c
+            - |
+              while true; do
+                wget -q -T2 -O- http://srv.probe-named.svc:8080/  >/dev/null 2>&1
+                wget -q -T2 -O- http://srv.probe-range.svc:9090/  >/dev/null 2>&1
+                wget -q -T2 -O- http://srv.probe-range.svc:9190/  >/dev/null 2>&1
+                wget -q -T2 -O- http://srv.probe-ipblock.svc:8080/ >/dev/null 2>&1
+                sleep 2
+              done
+
+# client namespace 刻意不带任何 egress 策略。出向判定属于 egress.yaml 的
+# client-egress namespace，两者必须分开：一旦 client 也挂上 egress 策略，
+# 本文件里所有 ingress 用例都会先被出向拦掉，named-port / port-range /
+# ipblock-except 就都变成"因为出不去所以不通"，看着照样是 DENY，实际上
+# 一条 ingress 语义都没验证到。这里曾经真的挂过一条，必须保持不挂。

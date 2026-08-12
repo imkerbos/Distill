@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	networkingv1 "k8s.io/api/networking/v1"
 
@@ -78,10 +79,13 @@ func policyContent(t *testing.T, p policygen.CandidatePolicy) string {
 			Ingress: r.Ingress, Egress: r.Egress,
 		}
 	}
+	// WorkloadLabelKey 一并比对：它直接决定生成的 podSelector 的键，
+	// 是"会变的字段"里最要紧的一个——归属键换了，策略选中的对象就换了，
+	// 而 Namespace/Workload/Rules 全都可以一字不差。
 	b, err := json.Marshal(struct {
-		Cluster, Namespace, Workload string
-		Rules                        []ruleContent
-	}{p.Cluster, p.Namespace, p.Workload, rules})
+		Cluster, Namespace, Workload, WorkloadLabelKey string
+		Rules                                          []ruleContent
+	}{p.Cluster, p.Namespace, p.Workload, p.WorkloadLabelKey, rules})
 	if err != nil {
 		t.Fatalf("marshal policy content: %v", err)
 	}
@@ -181,8 +185,22 @@ func TestOnlyTrustedAllowRulesAreEnabled(t *testing.T) {
 	}
 }
 
-// 四类不可生成原因在 fixture 上都要真实出现过，否则那些分支从未被验证。
-func TestUngeneratableCoversAllFourReasons(t *testing.T) {
+// fixtureUnreachableReasons 是 fixture 流量构造不出、由专门用例覆盖的原因。
+//
+// 列出来而不是从下面的断言里删掉：新增一个原因时，作者必须显式回答
+// "它由谁覆盖"，否则那条断言会失败。值是覆盖它的用例名，好让读的人
+// 直接去看，而不是相信这句话。
+var fixtureUnreachableReasons = map[policygen.UngeneratableReason]string{
+	// LABEL_KEY_CONFLICT 要求同一个 namespace 里两个 Pod 带同一个 workload
+	// 取值却挂在不同标签键上，且输家有流量。往 fixture 加这样一对 Pod 会
+	// 改动 spec §6 钉死的验收数字（81/0/123/44），因此单独构造。
+	policygen.ReasonLabelKeyConflict: "TestSameWorkloadUnderTwoLabelKeysYieldsOneCandidatePolicy",
+}
+
+// 每一类不可生成原因都必须被验证过：fixture 上真实出现过，或由
+// fixtureUnreachableReasons 点名的专门用例覆盖。两者都不满足，
+// 那个分支就是从未被执行过的代码。
+func TestUngeneratableCoversEveryReason(t *testing.T) {
 	seen := map[policygen.UngeneratableReason]bool{}
 	for _, cluster := range []string{"prod-asia-1", "prod-eu-1"} {
 		for _, item := range policygen.Generate(observe(t, cluster)).Ungeneratable {
@@ -193,8 +211,14 @@ func TestUngeneratableCoversAllFourReasons(t *testing.T) {
 		}
 	}
 	for _, want := range policygen.AllUngeneratableReasons() {
-		if !seen[want] {
-			t.Errorf("reason %q never occurs in the fixture; that branch is unverified", want)
+		covered, listed := fixtureUnreachableReasons[want]
+		switch {
+		case seen[want] && listed:
+			t.Errorf("reason %q now occurs in the fixture; drop it from fixtureUnreachableReasons"+
+				" so %s is not the only thing claiming to cover it", want, covered)
+		case !seen[want] && !listed:
+			t.Errorf("reason %q never occurs in the fixture and no test claims it;"+
+				" that branch is unverified", want)
 		}
 	}
 }
@@ -262,9 +286,15 @@ func TestEnabledPoliciesExcludeDisabledRules(t *testing.T) {
 			t.Errorf("%s/%s: policyTypes = %v, want both Ingress and Egress",
 				p.Namespace, p.Name, p.Spec.PolicyTypes)
 		}
-		workload := p.Spec.PodSelector.MatchLabels["app"]
+		// 不假定固定的 app 键：真实集群里 workload 归属键因 Pod 而异
+		// （coredns 用 k8s-app 等），生成的 podSelector 恒为单键
+		// matchLabels，直接取这唯一的值。
+		var workload string
+		for _, v := range p.Spec.PodSelector.MatchLabels {
+			workload = v
+		}
 		if workload == "" {
-			t.Errorf("%s/%s: podSelector has no app label", p.Namespace, p.Name)
+			t.Errorf("%s/%s: podSelector has no workload label", p.Namespace, p.Name)
 			continue
 		}
 
@@ -415,6 +445,320 @@ func TestEveryRuleCarriesPeersAndPorts(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// 真实集群不会都用 app 标签：coredns / kube-proxy 用 k8s-app。一条从
+// k8s-app 归属出来的候选策略，podSelector 必须真的用 k8s-app 构造，
+// 否则生成的是一条集群里没有任何 Pod 会命中的幽灵 selector
+// （{app: kube-dns} 而不是 {k8s-app: kube-dns}）。
+func TestK8sAppLabelledPodProducesMatchingPodSelector(t *testing.T) {
+	coredns := replay.PodRef{
+		ClusterID: "c1", Namespace: "kube-system", Name: "coredns-1", IP: "10.0.0.2",
+		Labels: map[string]string{"k8s-app": "kube-dns"},
+	}
+	client := replay.PodRef{
+		ClusterID: "c1", Namespace: "default", Name: "client-1", IP: "10.0.0.1",
+		Labels: map[string]string{"app": "client"},
+	}
+	flow := replay.Flow{
+		Source:    replay.Endpoint{IP: client.IP, ClusterID: client.ClusterID, Pod: &client},
+		Dest:      replay.Endpoint{IP: coredns.IP, ClusterID: coredns.ClusterID, Pod: &coredns},
+		Protocol:  replay.ProtocolUDP,
+		Port:      53,
+		Timestamp: time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC),
+	}
+	res := policygen.Generate(policygen.Input{
+		ClusterID: "c1",
+		Pods:      []replay.PodRef{coredns, client},
+		Observations: []policygen.Observation{{
+			FlowID: "f1", Flow: flow,
+			Decision: replay.Decision{Verdict: replay.VerdictAllow, Confidence: replay.ConfidenceTrusted},
+		}},
+	})
+
+	var found *policygen.CandidatePolicy
+	for i := range res.Policies {
+		if res.Policies[i].Namespace == "kube-system" && res.Policies[i].Workload == "kube-dns" {
+			found = &res.Policies[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("no candidate policy generated for the k8s-app-labelled coredns Pod")
+	}
+	if found.WorkloadLabelKey != "k8s-app" {
+		t.Errorf("WorkloadLabelKey = %q, want k8s-app", found.WorkloadLabelKey)
+	}
+
+	var np *networkingv1.NetworkPolicy
+	for _, p := range res.EnabledPolicies() {
+		if p.Namespace == "kube-system" && p.Spec.PodSelector.MatchLabels["k8s-app"] == "kube-dns" {
+			pCopy := p
+			np = &pCopy
+		}
+	}
+	if np == nil {
+		t.Fatal("EnabledPolicies() has no policy with podSelector {k8s-app: kube-dns}")
+	}
+	if _, wrongKey := np.Spec.PodSelector.MatchLabels["app"]; wrongKey {
+		t.Errorf("podSelector = %v, must not use the app key for a k8s-app-labelled workload",
+			np.Spec.PodSelector.MatchLabels)
+	}
+}
+
+// hostNetwork 与无 workload 标签的 Pod 从未进入候选策略花名册，因此
+// 永远不会作为主体出现在任何一条流量判定里——Ungeneratable 报不出这个
+// 缺口。ExcludedWorkloads 必须点名这两类 Pod，各自带上正确的原因。
+func TestFixtureExcludedWorkloadsNameHostNetworkAndUnlabelledPods(t *testing.T) {
+	res := policygen.Generate(observe(t, "prod-asia-1"))
+
+	var gotHostNetwork, gotNoLabel *policygen.ExcludedWorkload
+	for i := range res.ExcludedWorkloads {
+		w := &res.ExcludedWorkloads[i]
+		if w.Namespace == "kube-system" && w.Pod == "kube-proxy-1" {
+			gotHostNetwork = w
+		}
+		if w.Namespace == "legacy" && w.Pod == "legacy-unlabelled" {
+			gotNoLabel = w
+		}
+	}
+	if gotHostNetwork == nil {
+		t.Fatal("kube-system/kube-proxy-1 not present in ExcludedWorkloads")
+	}
+	if gotHostNetwork.Reason != policygen.ExclusionHostNetwork {
+		t.Errorf("kube-proxy-1 reason = %q, want %q", gotHostNetwork.Reason, policygen.ExclusionHostNetwork)
+	}
+	if gotNoLabel == nil {
+		t.Fatal("legacy/legacy-unlabelled not present in ExcludedWorkloads")
+	}
+	if gotNoLabel.Reason != policygen.ExclusionNoWorkloadLabel {
+		t.Errorf("legacy-unlabelled reason = %q, want %q", gotNoLabel.Reason, policygen.ExclusionNoWorkloadLabel)
+	}
+}
+
+// Helm chart 常见同时打 app.kubernetes.io/name 与 app 两个标签，且取值
+// 不同（迁移期、chart 内部命名与对外服务名不一致等）。workloadLabelKeys
+// 顺序即优先级：app.kubernetes.io/name 必须赢，而且赢的是这个键本身，
+// 不是"随便挑一个非空的"——podSelector 的键和值都要来自赢家，输家的取值
+// 一个字符都不能泄进去。
+func TestPodWithMultipleResolvableLabelsUsesHighestPriorityKey(t *testing.T) {
+	web := replay.PodRef{
+		ClusterID: "c1", Namespace: "shop", Name: "web-1", IP: "10.0.0.2",
+		Labels: map[string]string{
+			"app.kubernetes.io/name": "web-canonical",
+			"app":                    "web-legacy",
+		},
+	}
+	client := replay.PodRef{
+		ClusterID: "c1", Namespace: "shop", Name: "client-1", IP: "10.0.0.1",
+		Labels: map[string]string{"app": "client"},
+	}
+	flow := replay.Flow{
+		Source:    replay.Endpoint{IP: client.IP, ClusterID: client.ClusterID, Pod: &client},
+		Dest:      replay.Endpoint{IP: web.IP, ClusterID: web.ClusterID, Pod: &web},
+		Protocol:  replay.ProtocolTCP,
+		Port:      8080,
+		Timestamp: time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC),
+	}
+	res := policygen.Generate(policygen.Input{
+		ClusterID: "c1",
+		Pods:      []replay.PodRef{web, client},
+		Observations: []policygen.Observation{{
+			FlowID: "f1", Flow: flow,
+			Decision: replay.Decision{Verdict: replay.VerdictAllow, Confidence: replay.ConfidenceTrusted},
+		}},
+	})
+
+	var found *policygen.CandidatePolicy
+	for i := range res.Policies {
+		if res.Policies[i].Namespace == "shop" && res.Policies[i].Cluster == "c1" &&
+			res.Policies[i].WorkloadLabelKey == "app.kubernetes.io/name" {
+			found = &res.Policies[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("no candidate policy resolved via app.kubernetes.io/name")
+	}
+	if found.Workload != "web-canonical" {
+		t.Errorf("Workload = %q, want web-canonical (the app.kubernetes.io/name value, not the app value)",
+			found.Workload)
+	}
+
+	var np *networkingv1.NetworkPolicy
+	for _, p := range res.EnabledPolicies() {
+		if p.Namespace == "shop" && p.Spec.PodSelector.MatchLabels["app.kubernetes.io/name"] == "web-canonical" {
+			pCopy := p
+			np = &pCopy
+		}
+	}
+	if np == nil {
+		t.Fatal("EnabledPolicies() has no policy with podSelector {app.kubernetes.io/name: web-canonical}")
+	}
+	if v, wrongKey := np.Spec.PodSelector.MatchLabels["app"]; wrongKey {
+		t.Errorf("podSelector = %v, must not carry the losing app=%q label at all",
+			np.Spec.PodSelector.MatchLabels, v)
+	}
+}
+
+// 同一个 namespace 里两个 Pod 带同一个 workload 取值、却挂在不同的标签
+// 键上——Helm chart 改标签的滚动更新期间就是这个形态。(namespace, workload)
+// 是覆盖机制的定位键：Apply 按它找策略、EnsureRuleExists 按它校验、
+// EnabledPolicies 按它命名、排序比较器按它定序。它一旦不唯一，这四处
+// 会各自给出不同的答案，而其中三处不报错。
+//
+// 因此这里钉死：赢家只有一个，输家进 ExcludedWorkloads 并点名，输家的
+// 流量进 Ungeneratable 并点名。输家确实没有候选策略——赢家的 podSelector
+// 用赢家的键构造，选不中它——报出这个缺口，好过发一条同名、却谁都选不中
+// 的第二份策略。
+func TestSameWorkloadUnderTwoLabelKeysYieldsOneCandidatePolicy(t *testing.T) {
+	canonical := replay.PodRef{
+		ClusterID: "c1", Namespace: "shop", Name: "web-new-1", IP: "10.0.0.2",
+		Labels: map[string]string{"app.kubernetes.io/name": "web"},
+	}
+	legacy := replay.PodRef{
+		ClusterID: "c1", Namespace: "shop", Name: "web-legacy-1", IP: "10.0.0.3",
+		Labels: map[string]string{"app": "web"},
+	}
+	client := replay.PodRef{
+		ClusterID: "c1", Namespace: "shop", Name: "client-1", IP: "10.0.0.1",
+		Labels: map[string]string{"app": "client"},
+	}
+	flowTo := func(dst replay.PodRef) replay.Flow {
+		return replay.Flow{
+			Source:   replay.Endpoint{IP: client.IP, ClusterID: client.ClusterID, Pod: &client},
+			Dest:     replay.Endpoint{IP: dst.IP, ClusterID: dst.ClusterID, Pod: &dst},
+			Protocol: replay.ProtocolTCP, Port: 8080,
+			Timestamp: time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC),
+		}
+	}
+	allow := replay.Decision{Verdict: replay.VerdictAllow, Confidence: replay.ConfidenceTrusted}
+	res := policygen.Generate(policygen.Input{
+		ClusterID: "c1",
+		Pods:      []replay.PodRef{canonical, legacy, client},
+		Observations: []policygen.Observation{
+			{FlowID: "f-new", Flow: flowTo(canonical), Decision: allow},
+			{FlowID: "f-legacy", Flow: flowTo(legacy), Decision: allow},
+		},
+	})
+
+	var forWeb []policygen.CandidatePolicy
+	for _, p := range res.Policies {
+		if p.Namespace == "shop" && p.Workload == "web" {
+			forWeb = append(forWeb, p)
+		}
+	}
+	if len(forWeb) != 1 {
+		t.Fatalf("candidate policies for shop/web = %d, want exactly 1: %+v", len(forWeb), forWeb)
+	}
+	if forWeb[0].WorkloadLabelKey != "app.kubernetes.io/name" {
+		t.Errorf("WorkloadLabelKey = %q, want app.kubernetes.io/name (the higher-priority key)",
+			forWeb[0].WorkloadLabelKey)
+	}
+
+	// 同名 NetworkPolicy 对 predict.Run 是加法、无害，但轮 3 要把它写回
+	// Git：两个同名对象在一个 namespace 里，后写的那个会覆盖前一个。
+	seen := map[string]bool{}
+	for _, np := range res.EnabledPolicies() {
+		id := np.Namespace + "/" + np.Name
+		if seen[id] {
+			t.Errorf("EnabledPolicies() emits two NetworkPolicies named %s", id)
+		}
+		seen[id] = true
+	}
+
+	var excluded []policygen.ExcludedWorkload
+	for _, w := range res.ExcludedWorkloads {
+		if w.Pod == "web-legacy-1" {
+			excluded = append(excluded, w)
+		}
+	}
+	if len(excluded) != 1 {
+		t.Fatalf("ExcludedWorkloads entries for web-legacy-1 = %d, want exactly 1: %+v",
+			len(excluded), excluded)
+	}
+	if excluded[0].Reason != policygen.ExclusionLabelKeyConflict {
+		t.Errorf("reason = %q, want %q", excluded[0].Reason, policygen.ExclusionLabelKeyConflict)
+	}
+	if excluded[0].Labels["app"] != "web" {
+		t.Errorf("Labels = %v, want the losing Pod's own labels for triage", excluded[0].Labels)
+	}
+
+	// 输家的那条流量必须留下痕迹：它的目的侧不再产出任何规则，只报
+	// "候选策略 N 条" 会让这条连接凭空消失，而人正是照着这份清单判断
+	// 上线会不会断。
+	var gaps []policygen.UngeneratableItem
+	for _, it := range res.Ungeneratable {
+		if it.Reason == policygen.ReasonLabelKeyConflict {
+			gaps = append(gaps, it)
+		}
+	}
+	if len(gaps) != 1 {
+		t.Fatalf("LABEL_KEY_CONFLICT gaps = %d, want exactly 1 (the f-legacy ingress side): %+v",
+			len(gaps), gaps)
+	}
+	if gaps[0].FlowID != "f-legacy" {
+		t.Errorf("gap flowID = %q, want f-legacy", gaps[0].FlowID)
+	}
+	if !strings.Contains(gaps[0].Detail, "web-legacy-1") {
+		t.Errorf("detail = %q, must name the Pod; a count alone says nothing about what to fix",
+			gaps[0].Detail)
+	}
+}
+
+// hostNetwork 判断先于标签判断（peerOf 的既有注释已经这么写），理由是
+// hostNetwork 是更根本的事实——policy 根本够不着这个 Pod，而缺标签是
+// 运维能修的。但这个优先级只活在代码里：谁都能在下次改动时不小心把
+// 判断顺序换过来，换完之后所有测试大概率照样绿——因为大多数 hostNetwork
+// Pod 恰好也没有 workload 标签，两个分支报的都是"排除"，只是原因不同，
+// 谁都不会注意到原因错了。这条用例专门构造两者都成立的 Pod，把顺序
+// 钉死成一个可验证的事实：必须恰好一条排除记录，原因是 hostNetwork，
+// 不是 NO_WORKLOAD_LABEL。
+func TestHostNetworkTakesPrecedenceOverMissingLabel(t *testing.T) {
+	privileged := replay.PodRef{
+		ClusterID: "c1", Namespace: "kube-system", Name: "cni-agent-1", IP: "10.0.0.9",
+		HostNetwork: true, Labels: map[string]string{"env": "prod"}, // 无任何可识别 workload 标签
+	}
+	res := policygen.Generate(policygen.Input{
+		ClusterID: "c1",
+		Pods:      []replay.PodRef{privileged},
+	})
+
+	var matches []policygen.ExcludedWorkload
+	for _, w := range res.ExcludedWorkloads {
+		if w.Namespace == "kube-system" && w.Pod == "cni-agent-1" {
+			matches = append(matches, w)
+		}
+	}
+	if len(matches) != 1 {
+		t.Fatalf("ExcludedWorkloads entries for cni-agent-1 = %d, want exactly 1: %+v", len(matches), matches)
+	}
+	if matches[0].Reason != policygen.ExclusionHostNetwork {
+		t.Errorf("reason = %q, want %q (hostNetwork must win over the missing-label case)",
+			matches[0].Reason, policygen.ExclusionHostNetwork)
+	}
+}
+
+// 手工构造的 Pod 证明了机制成立，但没有证明真实数据集受影响。这里用
+// prod-asia-1 的真实快照钉住那个曾经手工用 curl 验证过的事实：
+// kube-system/kube-dns（k8s-app: kube-dns 的 Pod）现在真的进了候选集，
+// 且用的是 k8s-app 键。少了这条，"kube-dns 现在有候选策略了"这句话
+// 只在人手工跑一次 docker compose 时成立，下一次改动就可能悄悄回退
+// 而没有任何测试报错。
+func TestFixtureKubeDNSGetsCandidateWithK8sAppKey(t *testing.T) {
+	res := policygen.Generate(observe(t, "prod-asia-1"))
+
+	var found *policygen.CandidatePolicy
+	for i := range res.Policies {
+		if res.Policies[i].Namespace == "kube-system" && res.Policies[i].Workload == "kube-dns" {
+			found = &res.Policies[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("prod-asia-1: no candidate policy for kube-system/kube-dns; " +
+			"the k8s-app-labelled kube-dns Pods never entered the roster")
+	}
+	if found.WorkloadLabelKey != "k8s-app" {
+		t.Errorf("kube-system/kube-dns WorkloadLabelKey = %q, want k8s-app", found.WorkloadLabelKey)
 	}
 }
 

@@ -1,0 +1,147 @@
+# 基础拓扑：一个 namespaceSelector 放行、其余隐式拒绝的经典场景。
+#
+# payment 是唯一挂了 NetworkPolicy 的命名空间：default-deny-ingress 把
+# ingress 清零，allow-gateway 只放行带 role=edge 标签的命名空间。
+# gateway 命名空间挂了 role=edge，batch 和 legacy 没有 —— 三者对 payment
+# 发起同样的连接，期望出三种不同的判定，专门测 namespaceSelector 的
+# 正例、反例，以及"策略只字未提、但仍受同 namespace 里其他策略牵连"
+# 这三档语义有没有被引擎正确地区分开。
+apiVersion: v1
+kind: Namespace
+metadata: {name: gateway, labels: {env: dev, role: edge}}
+---
+apiVersion: v1
+kind: Namespace
+metadata: {name: payment, labels: {env: dev}}
+---
+apiVersion: v1
+kind: Namespace
+metadata: {name: batch, labels: {env: dev}}
+---
+# legacy 专门放一个没有 app 标签的裸 Pod（见下方 legacy-unlabelled）：
+# 求值引擎不能假设每个 Pod 都能推出 workload 归属，podSelector/labels
+# 缺失时必须仍然按标签本身求值，而不是崩溃或跳过。
+apiVersion: v1
+kind: Namespace
+metadata: {name: legacy, labels: {env: dev}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: api, namespace: payment}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: api}}
+  template:
+    metadata: {labels: {app: api}}
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.29-alpine
+          ports: [{name: http, containerPort: 8080, protocol: TCP}]
+          volumeMounts: [{name: conf, mountPath: /etc/nginx/conf.d}]
+      volumes:
+        - name: conf
+          configMap: {name: nginx-8080}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: nginx-8080, namespace: payment}
+data:
+  default.conf: |
+    server { listen 8080; location / { return 200 "ok\n"; } }
+---
+apiVersion: v1
+kind: Service
+metadata: {name: api, namespace: payment}
+spec:
+  selector: {app: api}
+  ports: [{name: http, port: 8080, targetPort: 8080, protocol: TCP}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: gateway, namespace: gateway}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: gateway}}
+  template:
+    metadata: {labels: {app: gateway}}
+    spec:
+      containers:
+        - name: client
+          image: busybox:1.37
+          command: ["sh","-c","while true; do wget -q -T2 -O- http://api.payment.svc:8080/ >/dev/null 2>&1; sleep 2; done"]
+---
+# LoadBalancer type 只是给 baseline 推导用的既有夹具，conformance 矩阵
+# 本身不依赖它——留着是因为它和 gateway workload 是同一份历史夹具，
+# 拆开会让这份 manifest 和另一份基线测试的期望互相脱节。
+apiVersion: v1
+kind: Service
+metadata: {name: gateway-lb, namespace: gateway}
+spec:
+  type: LoadBalancer
+  selector: {app: gateway}
+  ports: [{name: https, port: 443, targetPort: 8443, protocol: TCP}]
+---
+# batch 没有任何标签能匹配 allow-gateway 的 role=edge 选择器，所以它对
+# payment 的连接必须被 default-deny-ingress 拒绝——这是 namespaceSelector
+# 判"不匹配"的反例。
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: worker, namespace: batch}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: worker}}
+  template:
+    metadata: {labels: {app: worker}}
+    spec:
+      containers:
+        - name: client
+          image: busybox:1.37
+          command: ["sh","-c","while true; do wget -q -T2 -O- http://api.payment.svc:8080/ >/dev/null 2>&1; nc -w2 -z api.payment.svc 3306 >/dev/null 2>&1; sleep 3; done"]
+---
+# 没有 app 标签的裸 Pod：workload 归属推不出来，但 NetworkPolicy 求值
+# 不关心 workload，只关心标签本身——这条连接照样必须落到"未选中，
+# 被同 namespace 的 default-deny-ingress 隔离"这一档。
+apiVersion: v1
+kind: Pod
+metadata: {name: legacy-unlabelled, namespace: legacy, labels: {env: dev}}
+spec:
+  containers:
+    - name: client
+      image: busybox:1.37
+      command: ["sh","-c","while true; do wget -q -T2 -O- http://api.payment.svc:8080/ >/dev/null 2>&1; sleep 5; done"]
+---
+# hostNetwork Pod：NetworkPolicy 管不到它，引擎必须把它排除在 Pod 网络
+# 求值之外而不是当作一个 IP 未知的普通端点。这份夹具目前只用来验证
+# 快照能正确标出 HostNetwork=true；conformance 矩阵本身不对它发起连接
+# ——README 里明确写了这是覆盖范围之外的一项。
+apiVersion: v1
+kind: Pod
+metadata: {name: node-agent, namespace: kube-system, labels: {app: node-agent}}
+spec:
+  hostNetwork: true
+  containers:
+    - name: app
+      image: busybox:1.37
+      command: ["sh","-c","sleep 100000"]
+---
+# 整个 payment namespace 默认拒绝所有 ingress；下面的 allow-gateway
+# 是唯一的例外口子。两条策略配合，才能测出"没有任何策略选中 = ALLOW"
+# 与"被选中但没有一条规则命中 = DENY"这两档在同一个 namespace 里的区别。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: default-deny-ingress, namespace: payment}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+# 唯一的放行口子：只认 role=edge 的命名空间，与端口无关的选择器语义。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: allow-gateway, namespace: payment}
+spec:
+  podSelector: {matchLabels: {app: api}}
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{namespaceSelector: {matchLabels: {role: edge}}}]
+      ports: [{protocol: TCP, port: 8080}]

@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.test.tsbuildinfo",
+    "target": "es2023",
+    "lib": ["ES2023"],
+    /* node 类型只在这里打开：测试用 node:test 跑，而应用代码不该看得见 node API。 */
+    "types": ["node"],
+    "skipLibCheck": true,
+
+    /* 与 tsconfig.app.json 同一套解析规则：测试直接 import src 下的模块，
+       两边解析方式不一致会让类型检查在"能跑起来的代码"上报错。 */
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["tests"]
+}

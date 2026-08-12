@@ -29,6 +29,11 @@ func (m memSource) Cluster(_ context.Context, id string) (registry.Cluster, bool
 	return registry.Cluster{}, false, nil
 }
 
+// RuleOverrides 这里的测试不关心人工决定，返回空集即可。
+func (m memSource) RuleOverrides(context.Context, string) ([]registry.RuleOverride, error) {
+	return nil, nil
+}
+
 func fixtureSource() memSource { return memSource{clusters: fixtureClusters()} }
 
 // fixtureClusters 镜像 internal/fixture/asset.go 里两个集群的注册信息。

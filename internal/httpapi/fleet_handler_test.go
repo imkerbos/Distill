@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/imkerbos/Distill/internal/policygen"
 	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/store"
 )
@@ -38,6 +39,12 @@ func (brokenReader) Security(context.Context, string, store.TimeWindow) (store.S
 
 func (brokenReader) PolicyPreview(context.Context, string, string, store.TimeWindow) (store.PolicyPreview, error) {
 	return store.PolicyPreview{}, errors.New("bigquery: connection refused at 10.0.0.5:9050")
+}
+
+func (brokenReader) EnsureRuleExists(
+	context.Context, string, string, string, string, policygen.OverrideDecision, store.TimeWindow,
+) error {
+	return errors.New("bigquery: connection refused at 10.0.0.5:9050")
 }
 
 // panicReader 在查询时 panic，用来验证路由本身确实装了 Recoverer——

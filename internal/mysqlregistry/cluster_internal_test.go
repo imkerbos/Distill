@@ -39,7 +39,7 @@ func newRaceTestStore(t *testing.T) (*Store, *sql.DB) {
 		t.Fatalf("Migrate() error = %v", err)
 	}
 	for _, tbl := range []string{
-		"audit_log", "policy_import", "cluster_git_binding",
+		"audit_log", "rule_override", "policy_import", "cluster_git_binding",
 		"cluster_health_check_source", "cluster_apiserver", "cluster",
 	} {
 		//nolint:gosec // G202: tbl comes from the fixed literal slice above, not external input

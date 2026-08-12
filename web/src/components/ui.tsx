@@ -95,6 +95,39 @@ export function TableCard({ children }: { children: ReactNode }) {
 }
 
 /**
+ * 带纵向滚动的表格容器。
+ *
+ * 后端刻意不分页、不截断（每类变化都带完整连接清单），把全部行铺开会
+ * 让页面高达数万像素；这里用固定高度 + 内部滚动承接，而不是截断数据——
+ * 总数与每一行都必须可达，只是不必同时进入视口。
+ */
+export function ScrollTableCard({ children, maxHeight = 420 }: {
+  children: ReactNode
+  maxHeight?: number
+}) {
+  return (
+    <Card style={{ overflow: 'auto', maxHeight }}>
+      <table className="dt">{children}</table>
+    </Card>
+  )
+}
+
+/**
+ * ScrollTableCard 的表头。
+ *
+ * 做成组件而不是导出一份样式常量：滚到第 300 行还知道在看哪一列，是
+ * ScrollTableCard 这个形状能成立的前提，不是调用方可选的装饰——把它写成
+ * 常量，就总有一张表会忘了贴。
+ */
+export function StickyHead({ children }: { children: ReactNode }) {
+  return (
+    <thead style={{ position: 'sticky', top: 0, background: 'var(--surface)' }}>
+      {children}
+    </thead>
+  )
+}
+
+/**
  * 中性标签。
  *
  * 刻意不接受语义色：位置、方向、粒度这类元信息一旦借用 ALLOW/DENY/UNKNOWN

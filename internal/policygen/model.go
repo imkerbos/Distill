@@ -85,12 +85,17 @@ const (
 	ReasonDegradedEvidence UngeneratableReason = "DEGRADED_EVIDENCE"
 	// ReasonUnmanagedEndpoint 表示端点不受 NetworkPolicy 管控，如 hostNetwork Pod。
 	ReasonUnmanagedEndpoint UngeneratableReason = "UNMANAGED_ENDPOINT"
+	// ReasonLabelKeyConflict 表示主体 Pod 的 workload 归属键不是该
+	// (namespace, workload) 的赢家（见 resolveWinningKeys），候选策略的
+	// podSelector 选不中它，这条流量因此没有能承载它的规则。
+	ReasonLabelKeyConflict UngeneratableReason = "LABEL_KEY_CONFLICT"
 )
 
 // allUngeneratableReasons 是枚举的唯一登记处。
 var allUngeneratableReasons = []UngeneratableReason{
 	ReasonNoWorkloadLabel, ReasonIdentityUnknown,
 	ReasonDegradedEvidence, ReasonUnmanagedEndpoint,
+	ReasonLabelKeyConflict,
 }
 
 // AllUngeneratableReasons 返回全部已登记的不可生成原因。
@@ -118,6 +123,70 @@ type UngeneratableItem struct {
 	Reason UngeneratableReason `json:"reason"`
 	// Detail 仅用于展示，不参与统计。
 	Detail string `json:"detail"`
+}
+
+// WorkloadExclusionReason 是 workload 未进入候选策略花名册的原因。封闭枚举。
+//
+// 与 UngeneratableReason 分开建一套：后者报的是"某条流量表达不了"，
+// 前者报的是更早一步的缺口——这个 workload 从未进入名册，因此根本
+// 不会出现在任何一条流量的判定里，UngeneratableReason 那条报不出来。
+type WorkloadExclusionReason string
+
+const (
+	// ExclusionHostNetwork 表示 Pod 使用 hostNetwork，不受 NetworkPolicy 管控。
+	ExclusionHostNetwork WorkloadExclusionReason = "UNMANAGED_ENDPOINT"
+	// ExclusionNoWorkloadLabel 表示 Pod 不带任何可识别的 workload 标签
+	// （见 workloadLabelKeys），podSelector 无法表达。
+	ExclusionNoWorkloadLabel WorkloadExclusionReason = "NO_WORKLOAD_LABEL"
+	// ExclusionLabelKeyConflict 表示同一个 (namespace, workload) 上另有
+	// 优先级更高的归属标签键，这个 Pod 挂在输的那个键上。
+	//
+	// 它确实没有候选策略：赢家的 podSelector 用赢家的键构造，选不中它。
+	// 报出来好过发第二条同名策略——后者不报错，只是永远选不中任何 Pod。
+	ExclusionLabelKeyConflict WorkloadExclusionReason = "LABEL_KEY_CONFLICT"
+)
+
+// allWorkloadExclusionReasons 是枚举的唯一登记处。
+var allWorkloadExclusionReasons = []WorkloadExclusionReason{
+	ExclusionHostNetwork, ExclusionNoWorkloadLabel, ExclusionLabelKeyConflict,
+}
+
+// AllWorkloadExclusionReasons 返回全部已登记的排除原因。
+func AllWorkloadExclusionReasons() []WorkloadExclusionReason {
+	out := make([]WorkloadExclusionReason, len(allWorkloadExclusionReasons))
+	copy(out, allWorkloadExclusionReasons)
+	return out
+}
+
+// Valid 判断该原因是否已登记。
+func (r WorkloadExclusionReason) Valid() bool {
+	for _, known := range allWorkloadExclusionReasons {
+		if r == known {
+			return true
+		}
+	}
+	return false
+}
+
+// ExcludedWorkload 是一个从未进入候选策略花名册的 Pod。
+//
+// 候选策略按 Pod 名册生成（见 Input.Pods 的注释）；hostNetwork 与无
+// workload 标签的 Pod 在名册构建时就被挡在外面。这两类 Pod 因此永远
+// 不会作为主体出现在任何一条流量判定里，只报 Ungeneratable 会把它们
+// 的存在完全抹掉——"候选策略 4 条，不可生成 0 条"读起来像是覆盖完整，
+// 实际上集群里另外 12 个 Pod 根本没进入候选集。
+type ExcludedWorkload struct {
+	// Namespace 是 Pod 所在命名空间。
+	Namespace string `json:"namespace"`
+	// Pod 是 Pod 名称。按 Pod 而非按聚合的 workload 计数展示：同一
+	// namespace 可能有多个不同原因或不同标签取值的问题 Pod，只报统计
+	// 数字找不到该去改哪一个。
+	Pod string `json:"pod"`
+	// Labels 是该 Pod 的原始标签，供排查是否只是标签键拼错或用了
+	// 平台还未识别的键。
+	Labels map[string]string `json:"labels"`
+	// Reason 是排除原因，取值为封闭枚举。
+	Reason WorkloadExclusionReason `json:"reason"`
 }
 
 // Observation 是一条带判定结果的观测流量。
@@ -160,6 +229,16 @@ type Rule struct {
 	Peers []string `json:"peers"`
 	// Ports 是端口的展示视图，形如 TCP/8080。
 	Ports []string `json:"ports"`
+	// Fingerprint 是规则内容的 SHA-256，人工覆盖决定挂在它上面。
+	//
+	// 只覆盖内容（Origin / Evidence / Direction / Peers / Ports），
+	// 不含 FlowCount：流量条数每天都在变，算进去会让每一次重新生成
+	// 都作废掉全部人工确认。
+	//
+	// 指纹变了覆盖自动失效，这是刻意的 —— 内容变了就不是当初被确认
+	// 的那一条。用 (namespace, workload, 序号) 作键会出现「确认的是
+	// MySQL，重新生成后那个位置变成了 SSH，覆盖仍在」。
+	Fingerprint string `json:"fingerprint"`
 	// Ingress 在 Direction 为 INGRESS 时非空。
 	//
 	// 不出 API：k8s 结构体一旦进了响应体，界面就得自己解释 selector
@@ -179,8 +258,15 @@ type CandidatePolicy struct {
 	Cluster string `json:"cluster"`
 	// Namespace 是所属命名空间。
 	Namespace string `json:"namespace"`
-	// Workload 是主体 workload，即 podSelector 的 app 标签值。
+	// Workload 是主体 workload，即 podSelector 的标签值。
 	Workload string `json:"workload"`
+	// WorkloadLabelKey 是 Workload 命中的标签键，见 workloadLabelKeys。
+	//
+	// 与 Workload 分开存放而不是拼进去：真实集群里 app.kubernetes.io/name、
+	// app、k8s-app、component 并存，podSelector 必须用实际命中的键构造——
+	// coredns 用 k8s-app 归属，生成的 selector 就必须是 {k8s-app: kube-dns}，
+	// 拼成 {app: kube-dns} 是一条集群里没有任何 Pod 会命中的幽灵策略。
+	WorkloadLabelKey string `json:"workloadLabelKey"`
 	// Rules 是规则列表，确定排序。
 	Rules []Rule `json:"rules"`
 }

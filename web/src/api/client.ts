@@ -1,6 +1,6 @@
 import type {
   Decision, Envelope, FlowFilter, FlowPage,
-  Identity, ImportRole, ImportSource, PolicyImportItem, PolicyPreview,
+  Identity, ImportRole, ImportSource, OverrideDecision, PolicyImportItem, PolicyPreview,
   Quality, RegisteredCluster, SecurityReport, Topology, TopologyLevel,
 } from './types'
 
@@ -138,6 +138,28 @@ export const api = {
     const q = p.toString()
     return request<PolicyPreview>(
       `/api/v1/clusters/${encodeURIComponent(cluster)}/policy-preview${q ? `?${q}` : ''}`,
+    )
+  },
+
+  createOverride: (
+    cluster: string,
+    body: {
+      namespace: string; workload: string; fingerprint: string
+      decision: OverrideDecision; reason: string
+    },
+  ) =>
+    request<{ fingerprint: string }>(
+      `/api/v1/clusters/${encodeURIComponent(cluster)}/rule-overrides`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+
+  deleteOverride: (
+    cluster: string, namespace: string, workload: string, fingerprint: string,
+  ) => {
+    const p = new URLSearchParams({ namespace, workload, fingerprint })
+    return request<{ fingerprint: string }>(
+      `/api/v1/clusters/${encodeURIComponent(cluster)}/rule-overrides?${p}`,
+      { method: 'DELETE' },
     )
   },
 }
