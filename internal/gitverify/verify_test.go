@@ -141,6 +141,31 @@ func TestVerifyReportsUnresolvableCredentialWithoutReachingOut(t *testing.T) {
 	}
 }
 
+// 还没配 credentialRef 的绑定归「凭据取不到」，不归「仓库不可达」。
+//
+// 「绑定先记下来、凭据稍后再配」是一个受支持的常规状态（registry 的
+// validateGit 明确放行空 credentialRef），所以这条路径操作者一定会走到。
+// 报成仓库不可达会把他送去查网络，而该做的事是补一个 credential_ref
+// —— spec §3.2 专门写了这两类不得混淆。
+//
+// 这里用真的 DirResolver 而不是 stubResolver：要验的是空引用穿过一个
+// **真实**的解析器之后落在哪一档，stub 会把解析器自己的 ValidateRef
+// 一起跳过，于是这条测试就只在测它自己。仓库是存在的，所以「没到达
+// 仓库」这个结论若出现，只可能来自错误分类，不可能来自真实的不可达。
+func TestVerifyReportsAMissingCredentialRefAsUnresolved(t *testing.T) {
+	v, err := gitverify.New(secrets.NewDirResolver(t.TempDir()), hostKeyLine(t), 10*time.Second)
+	if err != nil {
+		t.Fatalf("New() = %v", err)
+	}
+	binding := registry.GitBinding{
+		RepoURL: newBareTestRepo(t), Branch: "master", PolicyPath: "policies/prod",
+		CredentialRef: "",
+	}
+	if got := v.Verify(context.Background(), binding); got != registry.VerifyCredentialUnresolved {
+		t.Fatalf("Verify(empty credentialRef) = %q, want %q", got, registry.VerifyCredentialUnresolved)
+	}
+}
+
 // 取到了内容但它不是一把私钥，仍然是平台侧的凭据问题。
 func TestVerifyReportsUnusableCredential(t *testing.T) {
 	v, err := gitverify.New(stubResolver{key: []byte("this is not a private key")}, hostKeyLine(t), 10*time.Second)

@@ -22,6 +22,11 @@ func TestClassifyDistinguishesWhoNeedsToFixIt(t *testing.T) {
 		want registry.VerifyResult
 	}{
 		{"credential missing", secrets.ErrNotFound, registry.VerifyCredentialUnresolved},
+		// 引用本身不合法（最常见的形态是绑定还没配 credentialRef，
+		// 而空串过不了 ValidateRef）同样是「平台取不到凭据」，不是
+		// 网络问题 —— 归 REPO_UNREACHABLE 会就着一次从未发出的请求
+		// 断言网络有故障（spec §3.2）。
+		{"credential ref unusable", secrets.ErrInvalidRef, registry.VerifyCredentialUnresolved},
 		{"auth rejected", transport.ErrAuthenticationRequired, registry.VerifyAuthFailed},
 		{"auth invalid", transport.ErrAuthorizationFailed, registry.VerifyAuthFailed},
 		{"repo absent", transport.ErrRepositoryNotFound, registry.VerifyRepoUnreachable},

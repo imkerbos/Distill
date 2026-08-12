@@ -48,7 +48,7 @@ func sampleCluster() registry.Cluster {
 		APIServers:         []registry.APIServer{{Host: "10.9.0.2", CIDR: "10.9.0.0/28", Port: 443}},
 		HealthCheckSources: []string{"35.191.0.0/16", "130.211.0.0/22"},
 		Git: &registry.GitBinding{
-			RepoURL: "https://gitlab.example.com/net/policies.git",
+			RepoURL: "ssh://git@gitlab.example.com/net/policies.git",
 			Branch:  "main", PolicyPath: "clusters/prod-asia-1",
 		},
 	}

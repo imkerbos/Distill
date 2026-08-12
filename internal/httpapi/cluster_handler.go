@@ -103,6 +103,24 @@ func carryDriftBaseline(next, existing *registry.GitBinding) {
 	}
 }
 
+// validatedBeforeVerifying 在发出站之前先跑一遍领域校验，报告是否可以继续。
+//
+// 落库那一步的 registry.Store 仍然会自己校验一次，那才是不可绕过的关卡；
+// 这里这道是**时序**上的，不是安全上的：verifyOnSave 会为一个注定要被
+// 拒绝的请求体做一次带秒级超时的 SSH 握手。最刺眼的形态是 repoUrl 不是
+// SSH 地址 —— 那种绑定在保存这一步就会被指名拒绝，可要是先校验，操作者
+// 得先等一个超时，才等到一句和超时无关的报错。
+//
+// 顺序不能反过来靠「把校验挪进事务」解决：校验必须在事务之外（见
+// gitverify_handler.go），所以先校验一道请求体是唯一不改变事务边界的做法。
+func validatedBeforeVerifying(w http.ResponseWriter, r *http.Request, d Deps, c registry.Cluster) bool {
+	if err := registry.ValidateCluster(c); err != nil {
+		writeRegistryError(w, r, d, err)
+		return false
+	}
+	return true
+}
+
 // decodeClusterPayload 解析请求体。
 //
 // 解析失败是协议层的问题（请求体本身不是合法 JSON），不是业务失败 ——
@@ -145,6 +163,9 @@ func handleCreateCluster(d Deps) http.HandlerFunc {
 			return
 		}
 		c := p.toCluster()
+		if !validatedBeforeVerifying(w, r, d, c) {
+			return
+		}
 		verifyOnSave(r, d, c.Git)
 		if err := d.Registry.CreateCluster(r.Context(), actorOf(r), c); err != nil {
 			writeRegistryError(w, r, d, err)
@@ -184,6 +205,9 @@ func handleUpdateCluster(d Deps) http.HandlerFunc {
 		// 同一条纪律的第二处应用：漂移基准是平台自己的断言，只能从库里
 		// 已有的值推导，不能由请求体携带。
 		carryDriftBaseline(c.Git, existing.Git)
+		if !validatedBeforeVerifying(w, r, d, c) {
+			return
+		}
 		verifyOnSave(r, d, c.Git)
 		if err := d.Registry.UpdateCluster(r.Context(), actorOf(r), c); err != nil {
 			writeRegistryError(w, r, d, err)

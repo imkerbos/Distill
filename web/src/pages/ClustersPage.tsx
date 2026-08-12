@@ -92,6 +92,7 @@ function ClusterListSection({ clusters, error, loading, onChanged }: {
               <th>Node 网段</th>
               <th>apiserver</th>
               <th>接入状态</th>
+              <th>CCNP</th>
               <th>Git 绑定</th>
               <th>操作</th>
             </tr>
@@ -109,6 +110,12 @@ function ClusterListSection({ clusters, error, loading, onChanged }: {
                   <td className="mono">{c.nodeCidr}</td>
                   <td><ApiServerList servers={c.apiServers} /></td>
                   <td><Chip strong={c.state === 'READY'}>{ONBOARD_STATE_LABEL[c.state]}</Chip></td>
+                  {/*
+                    这一格存在的理由与「未绑定」「未校验」同一条：一个看不见
+                    的降级理由，等于操作者无法解释他看到的判定，也无法察觉
+                    一次编辑把它清掉了。
+                  */}
+                  <td><CCNPMark present={c.ccnpPresent} /></td>
                   <td>
                     {c.git
                       ? <GitBindingCell clusterId={c.id} git={c.git} onChanged={onChanged} />
@@ -134,7 +141,7 @@ function ClusterListSection({ clusters, error, loading, onChanged }: {
                 </tr>
                 {editingId === c.id && (
                   <tr>
-                    <td colSpan={8} style={{ background: 'var(--surface-sunken)' }}>
+                    <td colSpan={9} style={{ background: 'var(--surface-sunken)' }}>
                       {/*
                         key 绑定集群 ID：换一个集群展开时必须重新播种，
                         复用同一份表单状态会把上一个集群的网段带进来。
@@ -306,6 +313,36 @@ function ClusterFields({ values, patch, mode, current }: {
         <TextField label="Node CIDR" value={values.nodeCidr} onChange={(v) => patch({ nodeCidr: v })} required mono />
       </FormGrid>
 
+      {/*
+        这一项不是技术开关，措辞也就不能写成技术开关。它声明的是「这个
+        集群里还有别的东西在影响连通性」，而平台不求值 CCNP，因此凡是
+        勾上的集群，回放判定一律降级为 DEGRADED——标签要说的是这个后果，
+        不是「有没有装 Cilium」。
+
+        表单里必须有它、且必须按现值预填：PUT 是整体替换，界面上不出现
+        就等于每次编辑都把它清成 false，让一个本该降级的集群显示成正常
+        判定。这是"看上去更有把握"的方向，也是最难被发现的方向。
+      */}
+      <label style={{
+        display: 'flex', alignItems: 'flex-start', gap: 'var(--space-2)',
+        fontSize: 'var(--text-sm)', marginBottom: 'var(--space-3)',
+      }}>
+        <input
+          type="checkbox"
+          checked={values.ccnpPresent}
+          onChange={(e) => patch({ ccnpPresent: e.target.checked })}
+          style={{ marginTop: 3 }}
+        />
+        <span>
+          该集群存在 CiliumClusterwideNetworkPolicy
+          <span style={{ display: 'block', color: 'var(--text-muted)', fontSize: 'var(--text-xs)' }}>
+            勾选后，这个集群的所有回放判定一律降级为「结论不可信（DEGRADED）」——
+            平台不求值 CCNP，看不见它放行或拒绝了什么，因此给不出可信的结论。
+            装了却不勾，平台会用一个它其实解释不了的模型给出笃定的结论。
+          </span>
+        </span>
+      </label>
+
       <SubHeading>
         apiserver（可选，可添加多个 —— HA 控制面通常不止一个端点，
         漏填一个就是漏了一条 baseline 放行规则，后果是生产阻断而不是注册报错。
@@ -360,7 +397,9 @@ function ClusterFields({ values, patch, mode, current }: {
 
       <div style={{ marginTop: 'var(--space-3)' }}>
         <SubHeading>
-          Git 绑定（可选；一旦填写任意一项——含 credentialRef——repoUrl / branch / policyPath 三项均为必填）
+          Git 绑定（可选；一旦填写任意一项——含 credentialRef——repoUrl / branch / policyPath 三项均为必填）。
+          repoUrl 必须是 SSH 形态（ssh://git@host/path 或 git@host:path）：平台按仓库发放 deploy key，
+          https:// 地址连拨号都不会发生，服务端会在保存时直接拒绝。
         </SubHeading>
         {/*
           「解除绑定」是一个勾选动作，不是「把四个字段清空」的推断：整体
@@ -384,6 +423,7 @@ function ClusterFields({ values, patch, mode, current }: {
         <FormGrid>
           <TextField
             label="repoUrl" value={values.git.repoUrl} mono disabled={values.clearGit}
+            placeholder="ssh://git@gitlab.example.com/net/policies.git"
             onChange={(v) => patch({ git: { ...values.git, repoUrl: v } })}
           />
           <TextField
@@ -746,6 +786,29 @@ function GitVerifiedMark({ item }: { item: PolicyImportItem }) {
       border: 'var(--degraded-stroke-width) solid var(--verdict-unknown)',
     }}>
       未经 Git 核对
+    </span>
+  )
+}
+
+/**
+ * CCNP 这一格：装了就说判定被降级，没装就说没有，两种都写出来。
+ *
+ * 不做「有才显示、没有就留空」：空单元格会被读成「不知道」，而这一项
+ * 恰恰是解释判定为什么降级的那个原因。用描边而非灰化，与 VerdictBadge
+ * 处理 DEGRADED 同一条纪律——它是结论的一部分，不是次要元信息。
+ */
+function CCNPMark({ present }: { present: boolean }) {
+  if (!present) {
+    return <span style={{ color: 'var(--text-muted)', fontSize: 'var(--text-xs)' }}>无</span>
+  }
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', padding: '2px 8px',
+      fontSize: 'var(--text-xs)', fontWeight: 500, borderRadius: 999,
+      color: 'var(--verdict-unknown)',
+      border: 'var(--degraded-stroke-width) solid var(--verdict-unknown)',
+    }}>
+      有 · 判定降级
     </span>
   )
 }

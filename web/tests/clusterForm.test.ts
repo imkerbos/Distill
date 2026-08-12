@@ -9,7 +9,7 @@ import {
 import type { GitBinding, RegisteredCluster, VerifyResult } from '../src/api/types.ts'
 
 const binding: GitBinding = {
-  repoUrl: 'https://gitlab.example.com/net/policies.git',
+  repoUrl: 'ssh://git@gitlab.example.com/net/policies.git',
   branch: 'main',
   policyPath: 'clusters/prod-asia-1',
   credentialRef: 'git-token',
@@ -25,7 +25,9 @@ function verified(result: VerifyResult, at?: string): GitBinding {
 function bound(): RegisteredCluster {
   return {
     id: 'prod-asia-1', displayName: '亚太生产', podCidr: '10.4.0.0/14',
-    nodeCidr: '10.128.0.0/20', ccnpPresent: false, state: 'READY',
+    // 真值而非 false：一个恒为 false 的夹具让「这一项被原样提交」与
+    // 「这一项被清成 false」两种实现给出同一个结果，断言就什么也没证明。
+    nodeCidr: '10.128.0.0/20', ccnpPresent: true, state: 'READY',
     apiServers: [{ host: '10.9.0.2', cidr: '10.9.0.0/28', port: 443 }],
     healthCheckSources: ['35.191.0.0/16', '130.211.0.0/22'],
     git: binding,
@@ -52,7 +54,7 @@ function unbound(): RegisteredCluster {
 test('编辑只改仓库地址时，未触碰的字段原样提交', () => {
   const cluster = bound()
   const values = formValuesOf(cluster)
-  values.git.repoUrl = 'https://gitlab.example.com/net/policies-v2.git'
+  values.git.repoUrl = 'ssh://git@gitlab.example.com/net/policies-v2.git'
 
   const built = buildClusterWrite(values, cluster.git ?? null)
   assert.equal(built.ok, true)
@@ -63,7 +65,54 @@ test('编辑只改仓库地址时，未触碰的字段原样提交', () => {
   assert.equal(built.body.displayName, '亚太生产')
   assert.deepEqual(built.body.apiServers, [{ host: '10.9.0.2', cidr: '10.9.0.0/28', port: 443 }])
   assert.deepEqual(built.body.healthCheckSources, ['35.191.0.0/16', '130.211.0.0/22'])
-  assert.equal(built.body.git?.repoUrl, 'https://gitlab.example.com/net/policies-v2.git')
+  assert.equal(built.body.git?.repoUrl, 'ssh://git@gitlab.example.com/net/policies-v2.git')
+  // 这一项与上面几项同等要紧，方向却更危险：网段被清空会让判定用错的
+  // 网段回答，而它被清成 false 会让一个本该整体降级为 DEGRADED 的集群
+  // 给出笃定的判定——平台因此显得比它应该的样子更有把握。
+  assert.equal(built.body.ccnpPresent, true,
+    'ccnpPresent 没有被原样提交：一次与它无关的编辑会把该集群的判定降级悄悄关掉')
+})
+
+/**
+ * 上一条只能证明 true 活了下来。单靠它，一个把 ccnpPresent 写死成 true
+ * 的实现同样是绿的——而那会让所有集群永久降级，方向相反、一样是错的。
+ * 这一条走另外两个方向：现值为 false 时提交 false，操作者勾上时提交 true。
+ * 两条合起来才说明这一项确实是"跟着表单走"，而不是被某个常量顶替。
+ */
+test('ccnpPresent 双向跟随：现值为假就提交假，勾上就提交真', () => {
+  const cluster = bound()
+  cluster.ccnpPresent = false
+  const values = formValuesOf(cluster)
+  assert.equal(values.ccnpPresent, false, '播种时没有读取集群现值')
+
+  const asIs = buildClusterWrite(values, cluster.git ?? null)
+  assert.equal(asIs.ok, true)
+  if (!asIs.ok) return
+  assert.equal(asIs.body.ccnpPresent, false)
+
+  // 操作者在集群里装上了 Cilium：这一项必须改得动，否则它就成了一个
+  // 只能看不能改的事实，而"集群里装上 CCNP"是随时会发生的事。
+  values.ccnpPresent = true
+  const toggled = buildClusterWrite(values, cluster.git ?? null)
+  assert.equal(toggled.ok, true)
+  if (!toggled.ok) return
+  assert.equal(toggled.body.ccnpPresent, true)
+})
+
+/** 注册表单从"没有 CCNP"起步，且这一项确实出现在提交体里。 */
+test('注册表单默认不声明 CCNP，但字段必须出现在提交体里', () => {
+  const values = blankFormValues()
+  values.id = 'prod-us-1'
+  values.displayName = '美西生产'
+  values.podCidr = '10.16.0.0/14'
+  values.nodeCidr = '10.140.0.0/20'
+
+  const built = buildClusterWrite(values, null)
+  assert.equal(built.ok, true)
+  if (!built.ok) return
+  assert.equal(Object.hasOwn(built.body, 'ccnpPresent'), true,
+    '字段缺席时服务端按 false 落库，等于替操作者做了一个他没做过的声明')
+  assert.equal(built.body.ccnpPresent, false)
 })
 
 /**
@@ -152,7 +201,7 @@ test('未绑定集群可以补上绑定，且不受「清空即解除」的拦�
   assert.deepEqual(values.git, { repoUrl: '', branch: '', policyPath: '', credentialRef: '' })
 
   values.git = {
-    repoUrl: 'https://gitlab.example.com/net/policies.git',
+    repoUrl: 'ssh://git@gitlab.example.com/net/policies.git',
     branch: 'main', policyPath: 'clusters/prod-eu-1', credentialRef: '',
   }
   const built = buildClusterWrite(values, null)
@@ -329,6 +378,12 @@ test('集群列表确实经由 describeVerifyStatus 渲染校验结论', () => {
   assert.match(src, /describeVerifyStatus\(/,
     '这一格没有调用 describeVerifyStatus，上面那一整组文案断言就管不到界面')
   assert.match(src, /<GitBindingCell\b/)
+  // 表单与列表都必须碰到 ccnpPresent：看不见的降级理由，操作者既解释不了
+  // 眼前的判定，也察觉不到一次编辑把它清掉了。
+  assert.match(src, /values\.ccnpPresent/,
+    '编辑/注册表单没有这一项：整体替换会把它清成 false')
+  assert.match(src, /c\.ccnpPresent/,
+    '列表里看不到这一项：一个看不见的字段被清掉时没有人会发现')
   for (const banned of ['可以写入', '不可写入', '可写入', '不可写']) {
     assert.equal(src.includes(banned), false,
       `ClustersPage 里出现了「${banned}」：只读校验得不出与写有关的结论`)

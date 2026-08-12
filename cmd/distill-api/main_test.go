@@ -9,6 +9,7 @@ import (
 
 	"github.com/imkerbos/Distill/internal/config"
 	"github.com/imkerbos/Distill/internal/secrets"
+	"github.com/imkerbos/Distill/internal/secrets/gcpsecrets"
 )
 
 // sampleHostKey 是一条 known_hosts 记录。公钥不是机密，配置里的 host key
@@ -100,8 +101,8 @@ func TestNewSecretResolverPicksTheDirectoryBackend(t *testing.T) {
 // 断的是类型而不是「非 nil」：一个把选择写死成 NewDirResolver 的实现，
 // 在「非 nil」下是绿的，在这里是红的。
 //
-// 本机没有 GCP 凭据，NewGCPResolver 是成是败取决于环境，因此两种结果都
-// 接受 —— 但只接受这两种：要么带着构造错误失败，要么给出 *GCPResolver。
+// 本机没有 GCP 凭据，gcpsecrets.NewResolver 是成是败取决于环境，因此两种结果都
+// 接受 —— 但只接受这两种：要么带着构造错误失败，要么给出 *gcpsecrets.Resolver。
 // 落到 *DirResolver 一律算失败。真实的 API 调用不在这条断言的覆盖范围内。
 func TestNewSecretResolverNeverFallsBackToTheDirectoryBackend(t *testing.T) {
 	cfg := config.SecretsConfig{Project: "distill-prod", Prefix: "distill-git-"}
@@ -113,8 +114,8 @@ func TestNewSecretResolverNeverFallsBackToTheDirectoryBackend(t *testing.T) {
 		t.Logf("newSecretResolver() error = %v (no application default credentials on this machine)", err)
 		return
 	}
-	if _, ok := r.(*secrets.GCPResolver); !ok {
-		t.Fatalf("resolver = %T, want *secrets.GCPResolver", r)
+	if _, ok := r.(*gcpsecrets.Resolver); !ok {
+		t.Fatalf("resolver = %T, want *gcpsecrets.Resolver", r)
 	}
 }
 

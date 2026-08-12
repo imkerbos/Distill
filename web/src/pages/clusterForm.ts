@@ -45,6 +45,15 @@ export interface ClusterFormValues {
   displayName: string
   podCidr: string
   nodeCidr: string
+  /**
+   * 集群里另有 CiliumClusterwideNetworkPolicy 在生效。
+   *
+   * 它不是一个"技术开关"，而是一句会改变判定结论的事实声明：置真会让
+   * 该集群的回放判定整体降级为 DEGRADED（后端 replay.WithCCNPPresent）。
+   * 表单必须携带并预填它——PUT 是整体替换，不带就等于每次编辑都悄悄
+   * 把它清成 false，让平台显得比它应该的样子更有把握。
+   */
+  ccnpPresent: boolean
   apiServerRows: ApiServerRow[]
   /** 健康检查网段，每行一个 CIDR。 */
   healthChecks: string
@@ -58,7 +67,7 @@ const emptyGitValues = (): GitFormValues => ({ repoUrl: '', branch: '', policyPa
 /** 注册表单的初始值：全空。 */
 export function blankFormValues(): ClusterFormValues {
   return {
-    id: '', displayName: '', podCidr: '', nodeCidr: '',
+    id: '', displayName: '', podCidr: '', nodeCidr: '', ccnpPresent: false,
     apiServerRows: [emptyApiServerRow()], healthChecks: '',
     git: emptyGitValues(), clearGit: false,
   }
@@ -81,6 +90,10 @@ export function formValuesOf(c: RegisteredCluster): ClusterFormValues {
     displayName: c.displayName,
     podCidr: c.podCidr,
     nodeCidr: c.nodeCidr,
+    // 与其余字段同一条纪律，但后果的方向不同：漏播网段会让判定用错的
+    // 网段回答，漏播这一项会让一个本该降级的集群显示成正常判定——
+    // 前者是错误，后者是"看上去更有把握的错误"，更难被发现。
+    ccnpPresent: c.ccnpPresent,
     // 至少留一行空行，否则界面上没有任何可填的输入框，"添加"按钮成了唯一入口。
     apiServerRows: rows.length > 0 ? rows : [emptyApiServerRow()],
     healthChecks: (c.healthCheckSources ?? []).join('\n'),
@@ -375,6 +388,7 @@ export function buildClusterWrite(
       displayName: values.displayName.trim(),
       podCidr: values.podCidr.trim(),
       nodeCidr: values.nodeCidr.trim(),
+      ccnpPresent: values.ccnpPresent,
       apiServers: servers.apiServers,
       healthCheckSources: values.healthChecks.split('\n').map((s) => s.trim()).filter(Boolean),
       git: git.git,

@@ -23,6 +23,7 @@ import (
 	"github.com/imkerbos/Distill/internal/mysqlregistry"
 	"github.com/imkerbos/Distill/internal/response"
 	"github.com/imkerbos/Distill/internal/secrets"
+	"github.com/imkerbos/Distill/internal/secrets/gcpsecrets"
 	"github.com/imkerbos/Distill/internal/store"
 )
 
@@ -149,15 +150,15 @@ func newGitVerifier(ctx context.Context, cfg *config.Config) (httpapi.GitVerifie
 // 说了什么」与「据此构造什么」分开，前者可以在 config 包里单测，后者在
 // 这里单测，两边都不必依赖对方。
 //
-// 每个分支都显式写出返回值，不用 `return secrets.NewGCPResolver(...)` 那种
-// 直接转发：构造失败时它返回的是 (*GCPResolver)(nil)，装进接口就成了一个
+// 每个分支都显式写出返回值，不用 `return gcpsecrets.NewResolver(...)` 那种
+// 直接转发：构造失败时它返回的是 (*gcpsecrets.Resolver)(nil)，装进接口就成了一个
 // 非 nil 的接口值，而调用方正是用 `resolver == nil` 判断「没有解析器」的。
 func newSecretResolver(ctx context.Context, cfg config.SecretsConfig) (secrets.Resolver, error) {
 	switch cfg.Backend() {
 	case config.SecretsBackendDir:
 		return secrets.NewDirResolver(cfg.Dir), nil
 	case config.SecretsBackendSecretManager:
-		r, err := secrets.NewGCPResolver(ctx, cfg.Project, cfg.Prefix)
+		r, err := gcpsecrets.NewResolver(ctx, cfg.Project, cfg.Prefix)
 		if err != nil {
 			return nil, err
 		}

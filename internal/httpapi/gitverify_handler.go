@@ -118,6 +118,14 @@ func handleVerifyGitBinding(d Deps) http.HandlerFunc {
 			response.WriteBusiness(w, response.CodeNotFound)
 			return
 		}
+		// 库里的记录未必还满足今天的校验规则（比如收紧 repoUrl 之前存下的
+		// https:// 绑定）。这种记录走完出站也白走：结论回写要经过
+		// UpdateCluster，而那里的 ValidateCluster 会拒掉整行。先在这里判一次，
+		// 操作者拿到的是「repoUrl 不是 SSH 形态」这个真实原因，而不是一个
+		// 花掉一次握手才得到、随后又存不下去的结论。
+		if !validatedBeforeVerifying(w, r, d, c) {
+			return
+		}
 
 		result, at := verifyBinding(r.Context(), d, *c.Git)
 		applyVerdict(c.Git, result, at)

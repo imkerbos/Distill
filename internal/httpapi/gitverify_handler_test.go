@@ -40,7 +40,7 @@ func boundCluster() registry.Cluster {
 		ID: "c1", DisplayName: "C1", PodCIDR: "10.4.0.0/14",
 		NodeCIDR: "10.128.0.0/20", State: registry.StateReady,
 		Git: &registry.GitBinding{
-			RepoURL: "https://gitlab.example.com/net/policies.git", Branch: "main",
+			RepoURL: "ssh://git@gitlab.example.com/net/policies.git", Branch: "main",
 			PolicyPath: "clusters/c1", CredentialRef: gitBindingRef,
 		},
 	}
@@ -272,5 +272,36 @@ func TestSavingABindingVerifiesBeforeTheStoreWrite(t *testing.T) {
 	}
 	if len(trace) != 2 || trace[0] != "verify" || trace[1] != "update" {
 		t.Errorf("call order = %v, want [verify update]", trace)
+	}
+}
+
+// 库里存着一条今天已经不合法的绑定时，重校验说出真实原因，不发出站。
+//
+// 现实来源：repoUrl 的 SSH 形态校验是后加的，此前存下的 https:// 绑定
+// 还躺在库里。对这种记录做一次出站是纯粹的浪费——结论回写要经过
+// UpdateCluster，而那一步的 ValidateCluster 会拒掉整行，操作者最终什么
+// 结论也拿不到，却先等了一个超时。让他直接看到「repoUrl 不是 SSH 形态」，
+// 才是能据以行动的那句话。
+func TestVerifyGitBindingRefusesAStoredBindingItCanNoLongerAccept(t *testing.T) {
+	reg := newMemRegistry()
+	c := boundCluster()
+	c.Git.RepoURL = "https://gitlab.example.com/net/policies.git"
+	reg.clusters["c1"] = c
+	stub := &stubGitVerifier{result: registry.VerifyOK}
+	h, _, cookie := newTestRouterWithGitVerifier(t, fixtureReader(), reg, stub)
+
+	rec := authedPostNoBody(t, h, cookie, verifyPath)
+	got := bodyOf(t, rec)
+	if got["code"] != float64(20001) {
+		t.Fatalf("code = %v, want 20001 (body %s)", got["code"], rec.Body.String())
+	}
+	if msg, _ := got["msg"].(string); !strings.Contains(msg, "SSH") {
+		t.Errorf("msg = %q, want it to name SSH as the real reason", msg)
+	}
+	if stub.calls != 0 {
+		t.Errorf("verifier calls = %d, want 0 — a verdict that cannot be stored is not worth a handshake", stub.calls)
+	}
+	if stored := reg.clusters["c1"].Git; stored.VerifyResult == registry.VerifyOK {
+		t.Error("a rejected re-verify still wrote a verdict")
 	}
 }

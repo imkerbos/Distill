@@ -401,7 +401,7 @@ func TestUpdateClusterIsReplacementNotMerge(t *testing.T) {
 
 	rec := authedPutJSON(t, h, cookie, "/api/v1/clusters/c1", map[string]any{
 		"git": map[string]any{
-			"repoUrl": "https://gitlab.example.com/net/policies.git",
+			"repoUrl": "ssh://git@gitlab.example.com/net/policies.git",
 			"branch":  "main", "policyPath": "clusters/c1",
 		},
 	})
@@ -442,7 +442,7 @@ func TestUpdateClusterBindsAndClearsGit(t *testing.T) {
 		"apiServers":         []map[string]any{{"host": "10.9.0.2", "cidr": "10.9.0.0/28", "port": 443}},
 		"healthCheckSources": []string{"35.191.0.0/16"},
 		"git": map[string]any{
-			"repoUrl": "https://gitlab.example.com/net/policies.git",
+			"repoUrl": "ssh://git@gitlab.example.com/net/policies.git",
 			"branch":  "main", "policyPath": "clusters/c1", "credentialRef": bindingRef,
 		},
 	}
@@ -503,7 +503,7 @@ func TestUpdateClusterIgnoresCallerSuppliedDriftBaseline(t *testing.T) {
 		ID: "c1", DisplayName: "C1", PodCIDR: "10.4.0.0/14",
 		NodeCIDR: "10.128.0.0/20", State: registry.StateReady,
 		Git: &registry.GitBinding{
-			RepoURL: "https://gitlab.example.com/net/policies.git", Branch: "main",
+			RepoURL: "ssh://git@gitlab.example.com/net/policies.git", Branch: "main",
 			PolicyPath: "clusters/c1", LastWrittenCommit: storedSHA,
 		},
 	}
@@ -514,7 +514,7 @@ func TestUpdateClusterIgnoresCallerSuppliedDriftBaseline(t *testing.T) {
 		return map[string]any{
 			"displayName": "C1", "podCidr": "10.4.0.0/14", "nodeCidr": "10.128.0.0/20",
 			"git": map[string]any{
-				"repoUrl": "https://gitlab.example.com/net/policies.git", "branch": branch,
+				"repoUrl": "ssh://git@gitlab.example.com/net/policies.git", "branch": branch,
 				"policyPath": policyPath, "credentialRef": bindingRef,
 				"lastWrittenCommit": forgedSHA,
 			},
@@ -563,7 +563,7 @@ func TestCreateClusterIgnoresCallerSuppliedDriftBaseline(t *testing.T) {
 		"id": "new-2", "displayName": "New", "podCidr": "10.20.0.0/14",
 		"nodeCidr": "10.140.0.0/20",
 		"git": map[string]any{
-			"repoUrl": "https://gitlab.example.com/net/policies.git", "branch": "main",
+			"repoUrl": "ssh://git@gitlab.example.com/net/policies.git", "branch": "main",
 			"policyPath":        "clusters/new-2",
 			"lastWrittenCommit": "fedcba9876543210fedcba9876543210fedcba98",
 		},
@@ -583,7 +583,7 @@ func TestCreateClusterIgnoresCallerSuppliedDriftBaseline(t *testing.T) {
 // 字段 —— 请求体必须能表达它们，测试才证明得了它们被忽略。
 func fullClusterBody(extraGit map[string]any) map[string]any {
 	git := map[string]any{
-		"repoUrl": "https://gitlab.example.com/net/policies.git", "branch": "main",
+		"repoUrl": "ssh://git@gitlab.example.com/net/policies.git", "branch": "main",
 		"policyPath": "clusters/c1", "credentialRef": gitBindingRef,
 	}
 	for k, v := range extraGit {
@@ -612,7 +612,7 @@ func TestUpdateClusterIgnoresCallerSuppliedVerifyResult(t *testing.T) {
 		ID: "c1", DisplayName: "C1", PodCIDR: "10.4.0.0/14",
 		NodeCIDR: "10.128.0.0/20", State: registry.StateReady,
 		Git: &registry.GitBinding{
-			RepoURL: "https://gitlab.example.com/net/policies.git", Branch: "main",
+			RepoURL: "ssh://git@gitlab.example.com/net/policies.git", Branch: "main",
 			PolicyPath: "clusters/c1", CredentialRef: gitBindingRef,
 			VerifyResult: registry.VerifyOK, VerifiedAt: &stale,
 		},
@@ -667,7 +667,7 @@ func TestSavingABindingSucceedsEvenWhenVerificationFails(t *testing.T) {
 		t.Fatal("binding was not stored")
 	}
 	want := registry.GitBinding{
-		RepoURL: "https://gitlab.example.com/net/policies.git", Branch: "main",
+		RepoURL: "ssh://git@gitlab.example.com/net/policies.git", Branch: "main",
 		PolicyPath: "clusters/c1", CredentialRef: gitBindingRef,
 		VerifyResult: registry.VerifyRepoUnreachable, VerifiedAt: stored.VerifiedAt,
 	}
@@ -862,7 +862,7 @@ func TestCreateClusterCarriesEveryFieldIntoTheDomainObject(t *testing.T) {
 		},
 		"healthCheckSources": []string{"35.191.0.0/16", "130.211.0.0/22"},
 		"git": map[string]any{
-			"repoUrl": "https://gitlab.example.com/net/policies.git", "branch": "main",
+			"repoUrl": "ssh://git@gitlab.example.com/net/policies.git", "branch": "main",
 			"policyPath": "clusters/rt-1", "credentialRef": gitBindingRef,
 			// 与上面的 state 同一个手法：漂移基准也是服务端决定的，请求体
 			// 里给一个具体的 SHA，期望值里写空 —— 创建时平台还没往那个
@@ -884,7 +884,7 @@ func TestCreateClusterCarriesEveryFieldIntoTheDomainObject(t *testing.T) {
 		},
 		HealthCheckSources: []string{"35.191.0.0/16", "130.211.0.0/22"},
 		Git: &registry.GitBinding{
-			RepoURL: "https://gitlab.example.com/net/policies.git", Branch: "main",
+			RepoURL: "ssh://git@gitlab.example.com/net/policies.git", Branch: "main",
 			PolicyPath: "clusters/rt-1", CredentialRef: gitBindingRef,
 			LastWrittenCommit: "",
 			// 这套装配没有校验器（未配置 secrets），结论只能是 NOT_VERIFIED。
@@ -902,5 +902,84 @@ func TestCreateClusterCarriesEveryFieldIntoTheDomainObject(t *testing.T) {
 	}
 	if got.Git == nil || *got.Git != *want.Git {
 		t.Errorf("git binding = %+v, want %+v", got.Git, want.Git)
+	}
+}
+
+// 非 SSH 的 repoUrl 在保存这一步就被拒绝，且**不发出站**。
+//
+// 两半都要断言，缺一半都不成立：
+//   - 拒绝：一个 https:// 绑定存下来之后没有任何一次校验能通过它，
+//     它只会稳定地产出一句「仓库不可达」—— 关于一次从未发生的网络请求
+//     的结论（spec §2.2）。
+//   - 不发出站：校验早于校验（verifyOnSave 在写库之前），如果不先跑一遍
+//     领域校验，操作者要先等满一个出站超时，才等到一句和超时无关的报错。
+//     这一半同时守住 M5 那条「注定被拒的请求体不该产生 SSH 握手」。
+//
+// 回传文案必须点名 SSH：只说「地址不合法」会让操作者以为自己打错了字。
+func TestSavingANonSSHRepoURLIsRejectedWithoutReachingOut(t *testing.T) {
+	for _, method := range []string{http.MethodPost, http.MethodPut} {
+		t.Run(method, func(t *testing.T) {
+			reg := newMemRegistry()
+			reg.clusters["c1"] = registry.Cluster{
+				ID: "c1", DisplayName: "C1", PodCIDR: "10.4.0.0/14",
+				NodeCIDR: "10.128.0.0/20", State: registry.StateReady,
+			}
+			stub := &stubGitVerifier{result: registry.VerifyOK}
+			h, _, cookie := newTestRouterWithGitVerifier(t, fixtureReader(), reg, stub)
+
+			body := fullClusterBody(map[string]any{
+				"repoUrl": "https://gitlab.example.com/net/policies.git",
+			})
+			var rec *httptest.ResponseRecorder
+			if method == http.MethodPost {
+				body["id"] = "new-9"
+				rec = authedPostJSON(t, h, cookie, "/api/v1/clusters", body)
+			} else {
+				rec = authedPutJSON(t, h, cookie, "/api/v1/clusters/c1", body)
+			}
+
+			got := bodyOf(t, rec)
+			if got["code"] != float64(20001) {
+				t.Fatalf("code = %v, want 20001 — an https repoUrl is a configuration error, not a verdict", got["code"])
+			}
+			if msg, _ := got["msg"].(string); !strings.Contains(msg, "SSH") {
+				t.Errorf("msg = %q, want it to name SSH as the real reason", msg)
+			}
+			if stub.calls != 0 {
+				t.Errorf("verifier calls = %d, want 0 — a body that cannot be saved must not cost an outbound handshake", stub.calls)
+			}
+			if reg.clusters["new-9"].ID != "" {
+				t.Error("a rejected create still stored a cluster")
+			}
+			if reg.clusters["c1"].Git != nil {
+				t.Error("a rejected update still stored a binding")
+			}
+		})
+	}
+}
+
+// 请求体本身不合法时同样不发出站 —— 与 repoUrl 无关的字段也算。
+//
+// 单独一条 https 用例证明不了「先校验后出站」这条时序：它可以被一个
+// 「只在 repoUrl 上特判」的实现通过。换一个毫不相干的非法字段再测一次，
+// 才能说明拦住出站的是整条领域校验，不是某一个字段的特例。
+func TestSavingAnInvalidBodyDoesNotCostAnOutboundHandshake(t *testing.T) {
+	reg := newMemRegistry()
+	reg.clusters["c1"] = registry.Cluster{
+		ID: "c1", DisplayName: "C1", PodCIDR: "10.4.0.0/14",
+		NodeCIDR: "10.128.0.0/20", State: registry.StateReady,
+	}
+	stub := &stubGitVerifier{result: registry.VerifyOK}
+	h, _, cookie := newTestRouterWithGitVerifier(t, fixtureReader(), reg, stub)
+
+	body := fullClusterBody(nil)
+	body["podCidr"] = "10.20.0/14"
+	rec := authedPutJSON(t, h, cookie, "/api/v1/clusters/c1", body)
+
+	if got := bodyOf(t, rec)["code"]; got != float64(20001) {
+		t.Fatalf("code = %v, want 20001 for a malformed podCidr", got)
+	}
+	if stub.calls != 0 {
+		t.Errorf("verifier calls = %d, want 0 — validation must run before the outbound call", stub.calls)
 	}
 }

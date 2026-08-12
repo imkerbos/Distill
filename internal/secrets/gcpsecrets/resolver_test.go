@@ -1,17 +1,18 @@
-package secrets_test
+package gcpsecrets_test
 
 import (
 	"strings"
 	"testing"
 
 	"github.com/imkerbos/Distill/internal/secrets"
+	"github.com/imkerbos/Distill/internal/secrets/gcpsecrets"
 )
 
 // 资源路径由「配置里的 project + prefix」加「绑定里的短名」拼成，短名
 // 自己永远不是一条完整路径（spec §2.1）。这条断言盯的就是那三段来源：
 // 把拼装改成只用 ref、或漏掉 prefix，结果都不再等于 want。
 func TestResourceNameIsBuiltFromConfigNotFromTheRef(t *testing.T) {
-	got := secrets.ResourceName("my-proj", "distill-", "prod-asia-1")
+	got := gcpsecrets.ResourceName("my-proj", "distill-", "prod-asia-1")
 	want := "projects/my-proj/secrets/distill-prod-asia-1/versions/latest"
 	if got != want {
 		t.Fatalf("ResourceName() = %q, want %q", got, want)
@@ -24,8 +25,8 @@ func TestResourceNameIsBuiltFromConfigNotFromTheRef(t *testing.T) {
 // 比如把 project 写死成常量，上面那条仍然是绿的。这条用另一组配置再取
 // 一次，让「配置进不去结果」这类改动无处可藏。
 func TestResourceNameFollowsTheConfiguredProjectAndPrefix(t *testing.T) {
-	first := secrets.ResourceName("proj-a", "distill-", "asia-1")
-	second := secrets.ResourceName("proj-b", "other-", "asia-1")
+	first := gcpsecrets.ResourceName("proj-a", "distill-", "asia-1")
+	second := gcpsecrets.ResourceName("proj-b", "other-", "asia-1")
 	if first == second {
 		t.Fatalf("ResourceName() = %q for both projects, want the configured project and prefix to reach the result", first)
 	}
@@ -52,7 +53,7 @@ func TestRefsThatCouldEscapeTheConfiguredNamespaceAreRejected(t *testing.T) {
 
 // 一个合法短名拼出来的路径，secrets/ 之后的那一段必须以配置的前缀开头。
 func TestResourceNameKeepsTheRefInsideTheConfiguredPrefix(t *testing.T) {
-	got := secrets.ResourceName("my-proj", "distill-", "prod-asia-1")
+	got := gcpsecrets.ResourceName("my-proj", "distill-", "prod-asia-1")
 	const want = "projects/my-proj/secrets/distill-"
 	if !strings.HasPrefix(got, want) {
 		t.Fatalf("ResourceName() = %q, want it to start with %q", got, want)

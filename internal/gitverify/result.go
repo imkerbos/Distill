@@ -28,7 +28,15 @@ func Classify(err error) registry.VerifyResult {
 
 	// 引用取不到是平台侧配置问题，与「取到了但仓库拒绝」处置人不同，
 	// 不能合并（spec §2.4）。
-	case errors.Is(err, secrets.ErrNotFound):
+	//
+	// ErrInvalidRef 与 ErrNotFound 同归一类，且这不是凑数：绑定允许先
+	// 记下来、凭据稍后再配（validateGit 明确放行空 credentialRef），于是
+	// 空引用是一个常规状态，而它送进任何一个 Resolver 都是 ErrInvalidRef。
+	// 落进 default 的话，一次连拨号都没有的失败会被报成「仓库不可达」，
+	// 把操作者送去查网络，而实际要做的是补一个 credential_ref
+	// （spec §3.2：这两类混起来会把排查引向错误的方向）。
+	case errors.Is(err, secrets.ErrNotFound),
+		errors.Is(err, secrets.ErrInvalidRef):
 		return registry.VerifyCredentialUnresolved
 
 	case errors.Is(err, transport.ErrAuthenticationRequired),

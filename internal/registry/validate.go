@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"regexp"
 
 	"github.com/imkerbos/Distill/internal/secrets"
 )
@@ -178,6 +179,12 @@ func validateGit(g *GitBinding) error {
 	if g.RepoURL == "" || g.Branch == "" || g.PolicyPath == "" {
 		return invalid("Git 绑定的 repoUrl、branch、policyPath 三项必须同时填写")
 	}
+	if !isSSHRepoURL(g.RepoURL) {
+		return invalidf("repoUrl %q 不是 SSH 形态：平台按 per-repo deploy key 访问策略仓库，"+
+			"只支持 ssh://[user@]host[:port]/path 与 git@host:path 两种写法。"+
+			"填 https:// 的后果不是「校验不通过」而是一句假的结论 —— 认证方法与传输对不上，"+
+			"一次拨号都不会发生，失败却会被报成「仓库不可达」", g.RepoURL)
+	}
 	// credentialRef 可以为空：绑定可以先记下来，凭据稍后再配。非空时
 	// 复用 secrets.ValidateRef，不另写一份字符集校验 —— 两份安全相关的
 	// 字符类定义迟早会走样。
@@ -196,6 +203,35 @@ func validateGit(g *GitBinding) error {
 		return invalidf("verifyResult %q 不在已登记的取值范围内", g.VerifyResult)
 	}
 	return nil
+}
+
+// schemeRepoURL 匹配 ssh://[user@]host[:port]/path。
+//
+// (?i) 是因为 scheme 大小写不敏感：一个 SSH:// 的地址是对的地址，不该
+// 因为大写被指成配置错误。结尾要求有一段非空路径 —— 只有 "ssh://" 的
+// 串通过校验也没有意义，它到不了任何仓库。
+var schemeRepoURL = regexp.MustCompile(`(?i)^ssh://([A-Za-z0-9._-]+@)?[A-Za-z0-9._-]+(:[0-9]+)?/\S+$`)
+
+// scpLikeRepoURL 匹配 scp 式的 SSH 地址：user@host:path。
+//
+// 要求 user@ 与 host 都在，且冒号之后不再出现冒号 —— 后半句是为了让
+// scheme 形态（https://、file://、git://）落不进这条分支，而不是靠
+// 另写一份 scheme 黑名单：黑名单漏掉一个就是放行一个。
+var scpLikeRepoURL = regexp.MustCompile(`^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+:[^:\s]+$`)
+
+// isSSHRepoURL 报告 repoUrl 是否是平台真正会去连的那种地址。
+//
+// 白名单而非黑名单：校验路径给 clone 挂的是 SSH 认证方法，而 go-git 按
+// scheme 选传输 —— 除 SSH 之外的任何传输都会在拨号之前就拒掉这个认证
+// 方法，几微秒内失败，然后这个失败被归进 REPO_UNREACHABLE。那是一句
+// 关于网络的结论，而网络从未被碰过：操作者会去查一道不存在的防火墙。
+// 拒绝的时机必须是保存，不是校验（spec §2.2）。
+//
+// 顺带关掉的一件事：repoUrl 不加限制时，校验端点就是一个由调用方指定
+// 目标的出站探针（file:///…、http://169.254.169.254/… 都能填），回答虽然
+// 只有七个枚举值，但目标是任意的。白名单让这个形状不复存在。
+func isSSHRepoURL(u string) bool {
+	return schemeRepoURL.MatchString(u) || scpLikeRepoURL.MatchString(u)
 }
 
 // checkCIDR 校验一个网段，错误信息带上字段名。

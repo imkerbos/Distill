@@ -82,6 +82,12 @@ func New(r secrets.Resolver, hostKeys []byte, timeout time.Duration) (*Verifier,
 //
 // 私钥字节从 Resolver 取出后直接交给 go-git 的 SSH 认证，不落盘、不进
 // 日志、不进错误信息，也不会留在 Verifier 上（spec §2.5）。
+//
+// b.RepoURL 必须是 SSH 形态，这条由保存路径保证（registry.validateGit），
+// 不在这里重复判断：这个函数回答的是「查了之后发现了什么」，而一个非
+// SSH 地址根本到不了查这一步。真让它进来的话，下面挂着的 SSH 认证方法
+// 会被传输层当场拒掉 —— 一次拨号都没有，却会被归成「仓库不可达」。
+// 那不是一个严格的结论，是一句关于网络的假话。
 func (v *Verifier) Verify(ctx context.Context, b registry.GitBinding) registry.VerifyResult {
 	ctx, cancel := context.WithTimeout(ctx, v.timeout)
 	defer cancel()

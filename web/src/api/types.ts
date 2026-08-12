@@ -435,12 +435,24 @@ export interface RegisteredCluster {
  *
  * state 不在这里：接入状态由服务端根据实际采集到的数据推进，请求体
  * 里提供它就等于允许调用方把"还没有数据"标成"可以出推荐了"。
+ *
+ * ccnpPresent 与 state 恰恰相反，必须在这里：它是操作者告诉平台的一个
+ * 事实（这个集群里另有 CiliumClusterwideNetworkPolicy 在生效），没有任何
+ * 自动探测在维护它，而它的用途是**强制把该集群的判定降级为 DEGRADED**。
+ * 漏掉它的后果是单向的：整体替换会把它写成 false，于是一次与它无关的
+ * 编辑让平台看上去比它应该的样子更有把握——正是 CLAUDE.md §3 禁止的
+ * 「为了好看的结论放宽严谨性」，且悄无声息。
+ *
+ * 也不能改成"服务端保留库里的现值"：那会让这一项永远改不了，而集群里
+ * 装上 Cilium 是随时可能发生的事。既然它由调用方提供，就必须由调用方
+ * 每次原样带上。
  */
 export interface ClusterWrite {
   id: string
   displayName: string
   podCidr: string
   nodeCidr: string
+  ccnpPresent: boolean
   apiServers: APIServer[]
   healthCheckSources: string[]
   git: GitBindingWrite | null
