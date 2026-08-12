@@ -1,5 +1,5 @@
 import type {
-  ClusterWrite, Decision, Envelope, FlowFilter, FlowPage,
+  ClusterWrite, Decision, Envelope, FlowFilter, FlowPage, GitBindingWrite,
   Identity, ImportRole, ImportSource, OverrideDecision, PolicyImportItem, PolicyPreview,
   Quality, RegisteredCluster, SecurityReport, Topology, TopologyLevel, VerifyStatus,
 } from './types'
@@ -97,6 +97,29 @@ export const api = {
 
   deleteCluster: (cluster: string) =>
     request<{ id: string }>(`/api/v1/clusters/${encodeURIComponent(cluster)}`, {
+      method: 'DELETE',
+    }),
+
+  // 绑定或改绑一个集群的策略仓库。
+  //
+  // 独立端点而不是集群 PUT 的一部分：绑定有自己的生命周期与自己的审计
+  // 动作（design doc 2026-08-13 §5）。走集群写路径的后果不是多发一次
+  // 请求，而是一次只想改网段的编辑顺手重写了绑定——服务端的 clusterPayload
+  // 现在根本不收 git，那样的请求会成功返回而绑定原封不动。
+  //
+  // 返回的是校验结论而不是「已保存」：保存会顺带跑一次只读校验，形状与
+  // 重校验端点一致，两处显示的是同一套结论。
+  bindGitRepo: (cluster: string, body: GitBindingWrite) =>
+    request<VerifyStatus>(`/api/v1/clusters/${encodeURIComponent(cluster)}/git-binding`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+
+  // 解绑是自己的动词，不是「把四个字段清空后保存一次」：后者要靠调用方
+  // 与服务端就一个约定俗成的空值形状达成默契，而任何一次误发的空请求体
+  // 都会变成一次无声的解绑。
+  unbindGitRepo: (cluster: string) =>
+    request<{ id: string }>(`/api/v1/clusters/${encodeURIComponent(cluster)}/git-binding`, {
       method: 'DELETE',
     }),
 

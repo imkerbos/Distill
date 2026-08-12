@@ -3,8 +3,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  ALL_VERIFY_RESULTS, blankFormValues, buildClusterWrite, describeVerifyStatus,
-  formatUtcTime, formValuesOf, resolveGitBinding,
+  ALL_VERIFY_RESULTS, blankFormValues, blankGitValues, buildClusterWrite, describeVerifyOutcome,
+  describeVerifyStatus, formatUtcTime, formValuesOf, gitFormValuesOf, resolveGitBinding,
 } from '../src/pages/clusterForm.ts'
 import type { GitBinding, RegisteredCluster, VerifyResult } from '../src/api/types.ts'
 
@@ -43,29 +43,92 @@ function unbound(): RegisteredCluster {
   }
 }
 
+const CLUSTER_WRITE_KEYS = [
+  'apiServers', 'ccnpPresent', 'displayName', 'healthCheckSources', 'id', 'nodeCidr', 'podCidr',
+]
+
+/* ---------------------------------------------------------------------- */
+/* 1. 两个资源，两份提交体                                                    */
+/* ---------------------------------------------------------------------- */
+
 /**
- * 这是本轮最重要的一条：PUT 整体替换，表单里没有的字段提交后就是库里
- * 没有的字段。一个只想改仓库地址的操作者，绝不该因此丢掉 apiserver 清单
- * 或健康检查网段 —— 少掉的是 baseline 里的一条放行规则，事后表现为
- * 生产阻断，而不是提交时报错。
+ * 集群提交体里没有 git —— 一个键都没有。
  *
- * 断言落在「提交体」上而不是「表单显示了什么」：真正被写进库的是前者。
+ * 服务端的 clusterPayload 已经不接受 git（internal/httpapi/cluster_handler.go）。
+ * 在这里带上它的后果不是多一个被忽略的字段，而是：操作者在集群表单里改了
+ * 仓库地址、请求返回成功、界面显示保存生效，而库里的绑定原封不动 —— 直到
+ * 某天有人发现这个集群的策略一直下发到旧仓库去了。
+ *
+ * 断言整个键集合而不是 `hasOwn(body, 'git') === false`：后者只挡住 `git`
+ * 这一个拼法，`gitBinding` / `repo` 换个名字照样溜进去，而服务端同样会
+ * 静默丢弃它们。
  */
-test('编辑只改仓库地址时，未触碰的字段原样提交', () => {
+test('集群提交体里没有 git', () => {
+  const cluster = bound()
+  const built = buildClusterWrite(formValuesOf(cluster))
+  assert.equal(built.ok, true)
+  if (!built.ok) return
+
+  assert.deepEqual(Object.keys(built.body).sort(), CLUSTER_WRITE_KEYS,
+    '集群提交体的字段集合变了：绑定必须走它自己的端点，集群写路径不碰它')
+})
+
+/**
+ * 解绑不经由集群提交体表达。
+ *
+ * 上一轮「把四个字段清空」与「我要解绑」在整体替换下提交结果相同，所以
+ * 需要一个勾选框来消歧义。现在解绑是 DELETE /clusters/{id}/git-binding，
+ * 成因消失，那个勾选框也就必须消失 —— 留着它等于留着一条能从集群写路径
+ * 影响绑定的表达方式，而那条路径服务端根本不看。
+ *
+ * 这条从三个方向堵：表单值里没有 clearGit、集群提交体不因绑定而变、
+ * 绑定折算函数永远给不出一个「空绑定」。
+ */
+test('解绑不经由集群提交体表达', () => {
+  const values = formValuesOf(bound())
+  assert.equal(Object.hasOwn(values, 'clearGit'), false,
+    '集群表单里还留着解绑开关：解绑已经是 DELETE，它不该有任何集群侧的表达')
+  assert.equal(Object.hasOwn(values, 'git'), false,
+    '集群表单里还带着绑定字段：两个资源混在一份表单状态里，一次保存会写两处')
+
+  // 已绑定与未绑定两个集群，集群提交体的形状必须完全一样：绑定的有无
+  // 不该在集群写路径上留下任何痕迹。
+  const fromBound = buildClusterWrite(formValuesOf(bound()))
+  const fromUnbound = buildClusterWrite(formValuesOf(unbound()))
+  assert.equal(fromBound.ok && fromUnbound.ok, true)
+  if (!fromBound.ok || !fromUnbound.ok) return
+  assert.deepEqual(Object.keys(fromBound.body).sort(), Object.keys(fromUnbound.body).sort())
+
+  // 绑定表单交不出「空绑定」：清空输入框得到的是一句拒绝，不是一次解绑。
+  const cleared = resolveGitBinding(blankGitValues())
+  assert.equal(cleared.ok, false)
+  if (cleared.ok) return
+  assert.match(cleared.error, /解除绑定/, '拒绝时没有告诉操作者解绑该走哪里')
+})
+
+/* ---------------------------------------------------------------------- */
+/* 2. 集群提交体：整体替换下每一项都得原样带上                                 */
+/* ---------------------------------------------------------------------- */
+
+/**
+ * PUT 整体替换，表单里没有的字段提交后就是库里没有的字段。一个只想改
+ * 显示名的操作者，绝不该因此丢掉 apiserver 清单或健康检查网段 —— 少掉的
+ * 是 baseline 里的一条放行规则，事后表现为生产阻断，而不是提交时报错。
+ */
+test('编辑只改显示名时，未触碰的字段原样提交', () => {
   const cluster = bound()
   const values = formValuesOf(cluster)
-  values.git.repoUrl = 'ssh://git@gitlab.example.com/net/policies-v2.git'
+  values.displayName = '亚太生产（新）'
 
-  const built = buildClusterWrite(values, cluster.git ?? null)
+  const built = buildClusterWrite(values)
   assert.equal(built.ok, true)
   if (!built.ok) return
 
   assert.equal(built.body.podCidr, '10.4.0.0/14')
   assert.equal(built.body.nodeCidr, '10.128.0.0/20')
-  assert.equal(built.body.displayName, '亚太生产')
+  assert.equal(built.body.displayName, '亚太生产（新）')
   assert.deepEqual(built.body.apiServers, [{ host: '10.9.0.2', cidr: '10.9.0.0/28', port: 443 }])
   assert.deepEqual(built.body.healthCheckSources, ['35.191.0.0/16', '130.211.0.0/22'])
-  assert.equal(built.body.git?.repoUrl, 'ssh://git@gitlab.example.com/net/policies-v2.git')
   // 这一项与上面几项同等要紧，方向却更危险：网段被清空会让判定用错的
   // 网段回答，而它被清成 false 会让一个本该整体降级为 DEGRADED 的集群
   // 给出笃定的判定——平台因此显得比它应该的样子更有把握。
@@ -85,7 +148,7 @@ test('ccnpPresent 双向跟随：现值为假就提交假，勾上就提交真',
   const values = formValuesOf(cluster)
   assert.equal(values.ccnpPresent, false, '播种时没有读取集群现值')
 
-  const asIs = buildClusterWrite(values, cluster.git ?? null)
+  const asIs = buildClusterWrite(values)
   assert.equal(asIs.ok, true)
   if (!asIs.ok) return
   assert.equal(asIs.body.ccnpPresent, false)
@@ -93,7 +156,7 @@ test('ccnpPresent 双向跟随：现值为假就提交假，勾上就提交真',
   // 操作者在集群里装上了 Cilium：这一项必须改得动，否则它就成了一个
   // 只能看不能改的事实，而"集群里装上 CCNP"是随时会发生的事。
   values.ccnpPresent = true
-  const toggled = buildClusterWrite(values, cluster.git ?? null)
+  const toggled = buildClusterWrite(values)
   assert.equal(toggled.ok, true)
   if (!toggled.ok) return
   assert.equal(toggled.body.ccnpPresent, true)
@@ -107,7 +170,7 @@ test('注册表单默认不声明 CCNP，但字段必须出现在提交体里', 
   values.podCidr = '10.16.0.0/14'
   values.nodeCidr = '10.140.0.0/20'
 
-  const built = buildClusterWrite(values, null)
+  const built = buildClusterWrite(values)
   assert.equal(built.ok, true)
   if (!built.ok) return
   assert.equal(Object.hasOwn(built.body, 'ccnpPresent'), true,
@@ -116,39 +179,58 @@ test('注册表单默认不声明 CCNP，但字段必须出现在提交体里', 
 })
 
 /**
- * 「四个字段都空着」在编辑一个已绑定集群时是有歧义的：可能是要解除，
- * 也可能是误删了输入框内容。整体替换让这两种意图提交结果相同，所以
- * 必须在提交前把它们分开 —— 拒绝并要求勾选，而不是替操作者猜。
+ * apiserver 行号用界面上看到的序号（从 1 开始、过滤前的下标）：一旦
+ * 前面有整行空白被跳过，过滤后的下标就和操作者盯着的表单对不上。
  */
-test('已绑定集群清空四个字段不等于解除，必须拒绝', () => {
-  const cluster = bound()
-  const values = formValuesOf(cluster)
-  values.git = { repoUrl: '', branch: '', policyPath: '', credentialRef: '' }
+test('apiserver 半填的行按界面序号报错', () => {
+  const values = blankFormValues()
+  values.apiServerRows = [
+    { host: '', cidr: '', port: '' },
+    { host: '', cidr: '10.9.0.0/28', port: '443' },
+  ]
 
-  const built = buildClusterWrite(values, cluster.git ?? null)
+  const built = buildClusterWrite(values)
   assert.equal(built.ok, false)
   if (built.ok) return
-  assert.match(built.error, /解除 Git 绑定/)
+  assert.match(built.error, /第 2 行/)
+  assert.match(built.error, /host/)
 })
 
-test('勾选解除后提交 null，且文案点名当前绑定的去向', () => {
-  const cluster = bound()
-  const values = formValuesOf(cluster)
-  values.clearGit = true
+/* ---------------------------------------------------------------------- */
+/* 3. 绑定提交体                                                            */
+/* ---------------------------------------------------------------------- */
 
-  const resolution = resolveGitBinding(values.git, { current: binding, clearRequested: true })
-  assert.equal(resolution.ok, true)
-  if (!resolution.ok) return
-  assert.equal(resolution.git, null)
-  assert.match(resolution.summary, /解除 Git 绑定/)
-  assert.match(resolution.summary, /gitlab\.example\.com/)
+/** 播种只取四个可写字段：平台自产的三项一旦进了表单，下一个人就会提交它们。 */
+test('绑定表单只播种四个可写字段', () => {
+  assert.deepEqual(gitFormValuesOf(binding), {
+    repoUrl: 'ssh://git@gitlab.example.com/net/policies.git',
+    branch: 'main',
+    policyPath: 'clusters/prod-asia-1',
+    credentialRef: 'git-token',
+  })
+  // 未绑定集群（prod-eu-1 的真实形态）给一份空值，而不是抛错或留 undefined。
+  assert.deepEqual(gitFormValuesOf(unbound().git), blankGitValues())
+})
 
-  const built = buildClusterWrite(values, cluster.git ?? null)
-  assert.equal(built.ok, true)
-  if (!built.ok) return
-  // null 而非 undefined：字段缺席读起来像"这次不谈这件事"，
-  // 在整体替换语义下含糊的那一种不该出现在写路径上。
-  assert.equal(built.body.git, null)
+/**
+ * 提交体里只有四个字段：没有 lastWrittenCommit，也没有校验结论。
+ *
+ * lastWrittenCommit 是平台对「我最近一次往这个仓库写了什么」的断言，漂移
+ * 检测拿它与 Git 现状比对；verifyResult / verifiedAt 是平台对绑定可信度的
+ * 判断。三者但凡有一个能由客户端提供，对应的那句话就再也无法被证伪。
+ *
+ * 断言整个键集合而不是逐个 `hasOwn(...) === false`：逐个断言只挡住已经
+ * 想到的那三个拼法。
+ */
+test('绑定提交体只有四个可写字段', () => {
+  const resolved = resolveGitBinding(gitFormValuesOf(binding))
+  assert.equal(resolved.ok, true)
+  if (!resolved.ok) return
+  assert.deepEqual(Object.keys(resolved.binding).sort(),
+    ['branch', 'credentialRef', 'policyPath', 'repoUrl'],
+    '绑定提交体多出了字段：平台自产的结论与基准一旦能被客户端设定，就无法被证伪')
+  assert.equal(resolved.binding.repoUrl, 'ssh://git@gitlab.example.com/net/policies.git')
+  assert.equal(resolved.binding.credentialRef, 'git-token')
 })
 
 /**
@@ -156,87 +238,92 @@ test('勾选解除后提交 null，且文案点名当前绑定的去向', () => 
  * 的字段，若不由「任意一项非空」触发检查，它录入的值会被静默丢弃。
  */
 test('只填 credentialRef 也要求 repoUrl / branch / policyPath', () => {
-  const values = blankFormValues()
-  values.git.credentialRef = 'git-token'
+  const values = blankGitValues()
+  values.credentialRef = 'git-token'
 
-  const built = buildClusterWrite(values, null)
-  assert.equal(built.ok, false)
-  if (built.ok) return
-  assert.match(built.error, /repoUrl/)
-  assert.match(built.error, /branch/)
-  assert.match(built.error, /policyPath/)
-})
-
-/**
- * 提交体里不带 lastWrittenCommit —— 一个字节都不带。
- *
- * 它是平台对「我最近一次往这个仓库写了什么」的断言，漂移检测拿它与 Git
- * 现状比对；能被客户端设定的基准可以被调成与仓库现状一致，于是「无漂移」
- * 这句话再也无法被证伪。基准由服务端从库里的现值推导（同一仓库同一分支
- * 沿用，改指向则归零），这里唯一要守的是「客户端不参与」。
- *
- * 断言的是键不存在，而不是值等于空串：把库里的 SHA 原样回填也会让
- * 「值等于某个东西」的断言通过，而那正是要禁止的行为。
- */
-test('提交体不含 lastWrittenCommit：漂移基准不由客户端提供', () => {
-  const cluster = bound()
-  const values = formValuesOf(cluster)
-  values.git.policyPath = 'clusters/prod-asia-1/net'
-
-  const built = buildClusterWrite(values, binding)
-  assert.equal(built.ok, true)
-  if (!built.ok) return
-  assert.notEqual(built.body.git, null)
-  assert.equal(Object.hasOwn(built.body.git as object, 'lastWrittenCommit'), false,
-    '客户端一旦能带上这个字段，伪造的基准就有了入口')
-  // 其余四项照常提交：credentialRef 是操作者填写的引用，本就该由调用方给。
-  assert.equal(built.body.git?.credentialRef, 'git-token')
-  assert.equal(built.body.git?.policyPath, 'clusters/prod-asia-1/net')
+  const resolved = resolveGitBinding(values)
+  assert.equal(resolved.ok, false)
+  if (resolved.ok) return
+  assert.match(resolved.error, /repoUrl/)
+  assert.match(resolved.error, /branch/)
+  assert.match(resolved.error, /policyPath/)
 })
 
 /** 未绑定集群补上绑定：这是本轮的动机场景，prod-eu-1 的真实形态。 */
-test('未绑定集群可以补上绑定，且不受「清空即解除」的拦截', () => {
-  const cluster = unbound()
-  const values = formValuesOf(cluster)
-  assert.deepEqual(values.git, { repoUrl: '', branch: '', policyPath: '', credentialRef: '' })
+test('未绑定集群可以补上绑定', () => {
+  const values = gitFormValuesOf(unbound().git)
+  values.repoUrl = 'ssh://git@gitlab.example.com/net/policies.git'
+  values.branch = 'main'
+  values.policyPath = 'clusters/prod-eu-1'
 
-  values.git = {
-    repoUrl: 'ssh://git@gitlab.example.com/net/policies.git',
-    branch: 'main', policyPath: 'clusters/prod-eu-1', credentialRef: '',
-  }
-  const built = buildClusterWrite(values, null)
-  assert.equal(built.ok, true)
-  if (!built.ok) return
-  assert.equal(built.body.git?.policyPath, 'clusters/prod-eu-1')
-  assert.deepEqual(built.body.apiServers, [{ host: '10.10.0.2', cidr: '10.10.0.0/28', port: 443 }])
+  const resolved = resolveGitBinding(values)
+  assert.equal(resolved.ok, true)
+  if (!resolved.ok) return
+  assert.equal(resolved.binding.policyPath, 'clusters/prod-eu-1')
+  // credentialRef 可选：不填就是空串，不是「缺一项」。
+  assert.equal(resolved.binding.credentialRef, '')
+  assert.match(resolved.summary, /clusters\/prod-eu-1/)
 })
+
+/* ---------------------------------------------------------------------- */
+/* 4. 一次校验请求的回执                                                     */
+/* ---------------------------------------------------------------------- */
 
 /**
- * 校验结论与校验时刻都不是可提交项。
+ * 未配置校验器时，服务端返回 NOT_VERIFIED + 无时间戳，并且**刻意什么都
+ * 不落库**（internal/httpapi/gitverify_handler.go）。于是响应会与刷新后
+ * 看到的东西不一致：响应说「从未校验」，库里那行还留着更早的结论。
  *
- * 它们是平台对绑定可信度的判断，由服务端在保存时自己校验后写入。一个
- * 能由调用方提交的结论可以被填成 OK，于是「已校验通过」这句话再也无法
- * 被证伪 —— 与 lastWrittenCommit 同一条理由，且后果更直接：轮 4 写回前
- * 会看这个结论。
- *
- * 断言的是键不存在，而不是值等于某个东西：把库里的现值原样回填同样能
- * 让「值等于 NOT_VERIFIED」的断言通过，而那正是要禁止的行为。
+ * 界面必须把这一次读成「什么都没发生」，而不是一个崭新的 NOT_VERIFIED ——
+ * 后者会让操作者以为自己刚把结论刷掉了，而下一次刷新它又变回旧结论。
+ * 一个自己会变回去的界面，比一个说「什么都没发生」的界面更难被信任。
  */
-test('提交体不含 verifyResult / verifiedAt：校验结论不由客户端提供', () => {
-  const cluster = bound()
-  cluster.git = verified('OK', '2026-08-12T15:20:15Z')
-  const values = formValuesOf(cluster)
+test('无时间戳的响应读作「这次没有发生校验」，不当成新结论', () => {
+  const outcome = describeVerifyOutcome({ verifyResult: 'NOT_VERIFIED' })
+  assert.equal(outcome.happened, false)
+  assert.notEqual(outcome.message.trim(), '', '什么都不说，操作者只能猜是按钮坏了')
+  assert.match(outcome.message, /没有发生校验/)
+  // 必须点明列表里那一格显示的是库里原有的结论，否则「响应与刷新不一致」
+  // 这件事仍然要靠操作者自己想明白。
+  assert.match(outcome.message, /库里原有的结论/)
+  assert.equal(outcome.tone, 'unverified')
 
-  const built = buildClusterWrite(values, cluster.git)
-  assert.equal(built.ok, true)
-  if (!built.ok) return
-  assert.notEqual(built.body.git, null)
-  const git = built.body.git as object
-  assert.equal(Object.hasOwn(git, 'verifyResult'), false,
-    '客户端一旦能带上结论，就能把一个没校验过的绑定标成 OK')
-  assert.equal(Object.hasOwn(git, 'verifiedAt'), false,
-    '客户端一旦能带上时刻，一个伪造的"刚刚校验过"就有了入口')
+  // verifiedAt 显式为 null（后端 omitempty 之外的另一种可能）同样处理。
+  assert.equal(describeVerifyOutcome({ verifyResult: 'OK', verifiedAt: null }).happened, false,
+    '带着 OK 却没有时刻的响应被当成了一次真的校验：那个 OK 没有发生过')
 })
+
+/** 真的发生了校验时，回执点名结论与时刻，且读得出是刚刚那一次。 */
+test('带时间戳的响应读作一次真实发生的校验', () => {
+  const outcome = describeVerifyOutcome({
+    verifyResult: 'PATH_MISSING', verifiedAt: '2026-08-13T09:30:00Z',
+  })
+  assert.equal(outcome.happened, true)
+  assert.match(outcome.message, /2026-08-13 09:30:00 UTC/)
+  assert.match(outcome.message, /路径不存在/)
+  assert.equal(outcome.tone, 'bad')
+
+  const ok = describeVerifyOutcome({ verifyResult: 'OK', verifiedAt: '2026-08-13T09:30:00Z' })
+  assert.equal(ok.tone, 'ok')
+  assert.notEqual(ok.message, outcome.message)
+})
+
+/** 回执与徽章共用同一套文案表：两处对同一个结论说不同的话，读者只能挑一个信。 */
+test('回执文案与列表徽章同源，不各写一套', () => {
+  for (const result of ALL_VERIFY_RESULTS) {
+    const badge = describeVerifyStatus(verified(result, '2026-08-13T09:30:00Z'))
+    const outcome = describeVerifyOutcome({ verifyResult: result, verifiedAt: '2026-08-13T09:30:00Z' })
+    assert.equal(outcome.message.includes(badge.label), true,
+      `${result} 的回执没有用列表那一套文案`)
+    assert.equal(outcome.tone, badge.tone, `${result} 的回执与徽章语气不一致`)
+    assert.equal(outcome.message.includes('写'), false,
+      `${result} 的回执谈到了写：只读校验得不出与写有关的结论`)
+  }
+})
+
+/* ---------------------------------------------------------------------- */
+/* 5. 校验结论的展示形态                                                     */
+/* ---------------------------------------------------------------------- */
 
 /**
  * 七个取值必须各有非空文案。
@@ -354,6 +441,13 @@ test('未登记的结论收窄成未校验，不显示成空白或裸枚举', ()
   assert.notEqual(view.label, 'PROBABLY_FINE')
   assert.notEqual(view.label, ok.label)
   assert.equal(view.tone, 'unverified')
+
+  // 回执走同一条收窄：一个界面还不认识的结论不是通过了的结论。
+  const outcome = describeVerifyOutcome({
+    verifyResult: 'PROBABLY_FINE' as VerifyResult, verifiedAt: '2026-08-13T09:30:00Z',
+  })
+  assert.equal(outcome.tone, 'unverified')
+  assert.equal(outcome.message.includes('PROBABLY_FINE'), false)
 })
 
 test('时间戳解析不出来时原样返回，不让一张表白屏', () => {
@@ -361,49 +455,86 @@ test('时间戳解析不出来时原样返回，不让一张表白屏', () => {
   assert.equal(formatUtcTime('2026-08-12T15:20:15.123456Z'), '2026-08-12 15:20:15 UTC')
 })
 
-/**
- * 上面所有断言管的都是 describeVerifyStatus 的返回值。没有任何一条能
- * 证明列表那一格真的把它渲染出来了 —— 这个项目上一次前端缺陷正是这个
- * 形状：dry-run 磁贴和它下面的表格报着两份不同的数字，四道门禁全绿。
- *
- * `node --test` 的类型擦除读不了 JSX，组件没法在这里挂载，所以退而求
- * 其次断言源码：那一格调用了 describeVerifyStatus，而不是自己另写一套
- * 文案。这是文本级的绑定，不是渲染级的 —— 它抓得住「有人绕过这个函数
- * 自己写死一句话」，抓不住「调用了但把 label 渲染到了看不见的地方」。
- * 这个局限是真的，不该假装门禁覆盖了它。
- */
-test('集群列表确实经由 describeVerifyStatus 渲染校验结论', () => {
-  const src = readFileSync(new URL('../src/pages/ClustersPage.tsx', import.meta.url), 'utf8')
+/* ---------------------------------------------------------------------- */
+/* 6. 组件确实按这些规则接线                                                  */
+/* ---------------------------------------------------------------------- */
 
-  assert.match(src, /describeVerifyStatus\(/,
-    '这一格没有调用 describeVerifyStatus，上面那一整组文案断言就管不到界面')
-  assert.match(src, /<GitBindingCell\b/)
-  // 表单与列表都必须碰到 ccnpPresent：看不见的降级理由，操作者既解释不了
-  // 眼前的判定，也察觉不到一次编辑把它清掉了。
-  assert.match(src, /values\.ccnpPresent/,
-    '编辑/注册表单没有这一项：整体替换会把它清成 false')
-  assert.match(src, /c\.ccnpPresent/,
-    '列表里看不到这一项：一个看不见的字段被清掉时没有人会发现')
-  for (const banned of ['可以写入', '不可写入', '可写入', '不可写']) {
-    assert.equal(src.includes(banned), false,
-      `ClustersPage 里出现了「${banned}」：只读校验得不出与写有关的结论`)
+const PAGE_SRC = readFileSync(new URL('../src/pages/ClustersPage.tsx', import.meta.url), 'utf8')
+
+/**
+ * 从 ClustersPage.tsx 里截出一个顶层组件的源码。
+ *
+ * 顶层函数的收尾大括号是这个文件里唯一顶格出现的 `}`（组件内部的一切
+ * 都有缩进），所以从 `function X(` 截到下一个 `\n}\n` 就是它的函数体。
+ * 这个办法很土，但它换来的是一条"这个组件调用了谁"的断言 —— 见下面
+ * 那条测试对自身局限的说明。
+ */
+function componentSource(name: string): string {
+  const start = PAGE_SRC.indexOf(`function ${name}(`)
+  assert.notEqual(start, -1, `ClustersPage.tsx 里找不到组件 ${name}`)
+  const end = PAGE_SRC.indexOf('\n}\n', start)
+  assert.notEqual(end, -1, `${name} 的函数体没有正常收尾，截取失败`)
+  return PAGE_SRC.slice(start, end)
+}
+
+/**
+ * 上面所有断言管的都是纯函数的返回值。没有任何一条能证明界面真的按这些
+ * 规则接线 —— 这个项目上一次前端缺陷正是这个形状：dry-run 磁贴和它下面
+ * 的表格报着两份不同的数字，四道门禁全绿。
+ *
+ * `node --test` 的类型擦除读不了 JSX，组件没法在这里挂载，所以退而求其次
+ * 断言源码。**这是文本级的绑定，不是渲染级的**：它抓得住「有人在绑定表单
+ * 里顺手发一次集群 PUT」，抓不住「把这次调用挪进一个被绑定表单调用的
+ * helper 里」，也抓不住「调用了但把结果渲染到看不见的地方」。这个局限是
+ * 真的，`tsc` / lint / build 三道门禁一道都覆盖不到它，不该假装它们能。
+ */
+test('绑定表单只打绑定端点，不顺手重写集群', () => {
+  const src = componentSource('GitBindingForm')
+
+  assert.match(src, /api\.bindGitRepo\(/, '绑定表单没有调用绑定端点')
+  assert.match(src, /api\.unbindGitRepo\(/, '解绑没有走 DELETE 端点')
+  // 顺手补一次集群写入不会报错、类型也对 —— 它的后果是把集群表单里没有
+  // 播种过的一份状态写进库，比如把 ccnpPresent 清成 false。
+  assert.equal(src.includes('api.updateCluster'), false,
+    '绑定表单顺带发了一次集群 PUT：改绑定不该重写集群，被重写的字段没有一个是这张表单播种过的')
+  assert.equal(src.includes('api.createCluster'), false, '绑定表单调用了集群创建端点')
+  assert.equal(src.includes('buildClusterWrite'), false, '绑定表单折算了一份集群提交体')
+})
+
+/** 反向：集群表单只打集群端点，不顺手改绑定。 */
+test('集群表单只打集群端点，不顺手改绑定', () => {
+  for (const name of ['EditClusterForm', 'RegisterSection']) {
+    const src = componentSource(name)
+    assert.match(src, /buildClusterWrite\(/, `${name} 没有走集群提交体的折算`)
+    assert.equal(src.includes('api.bindGitRepo'), false, `${name} 顺带写了一次绑定`)
+    assert.equal(src.includes('api.unbindGitRepo'), false, `${name} 顺带解了一次绑`)
+    assert.equal(src.includes('resolveGitBinding'), false, `${name} 折算了一份绑定提交体`)
   }
 })
 
-/**
- * apiserver 行号用界面上看到的序号（从 1 开始、过滤前的下标）：一旦
- * 前面有整行空白被跳过，过滤后的下标就和操作者盯着的表单对不上。
- */
-test('apiserver 半填的行按界面序号报错', () => {
-  const values = blankFormValues()
-  values.apiServerRows = [
-    { host: '', cidr: '', port: '' },
-    { host: '', cidr: '10.9.0.0/28', port: '443' },
-  ]
+/** 那个勾选框及其消歧义逻辑必须整个消失，不是留着不用。 */
+test('「解除 Git 绑定」勾选框已删除，DELETE 是唯一解绑路径', () => {
+  assert.equal(PAGE_SRC.includes('clearGit'), false,
+    '解绑开关的状态还在：它的成因（整体替换下清空与解绑不可分）已经消失')
+  assert.equal(PAGE_SRC.includes('解除 Git 绑定（'), false, '解绑勾选框还在界面上')
+})
 
-  const built = buildClusterWrite(values, null)
-  assert.equal(built.ok, false)
-  if (built.ok) return
-  assert.match(built.error, /第 2 行/)
-  assert.match(built.error, /host/)
+/** 列表与回执确实经由这一套纯函数渲染，且 ccnpPresent 两侧都没被顺手删掉。 */
+test('集群列表与校验回执确实经由这些纯函数渲染', () => {
+  assert.match(PAGE_SRC, /describeVerifyStatus\(/,
+    '这一格没有调用 describeVerifyStatus，上面那一整组文案断言就管不到界面')
+  assert.match(PAGE_SRC, /describeVerifyOutcome\(/,
+    '没有调用 describeVerifyOutcome：响应与刷新的不一致会被界面当成一个新结论')
+  assert.match(PAGE_SRC, /<GitBindingCell\b/)
+  assert.match(PAGE_SRC, /<GitBindingForm\b/, '绑定表单没有被挂上去，界面上根本改不了绑定')
+  // 表单与列表都必须碰到 ccnpPresent：看不见的降级理由，操作者既解释不了
+  // 眼前的判定，也察觉不到一次编辑把它清掉了。
+  assert.match(PAGE_SRC, /values\.ccnpPresent/,
+    '编辑/注册表单没有这一项：整体替换会把它清成 false')
+  assert.match(PAGE_SRC, /c\.ccnpPresent/,
+    '列表里看不到这一项：一个看不见的字段被清掉时没有人会发现')
+  for (const banned of ['可以写入', '不可写入', '可写入', '不可写']) {
+    assert.equal(PAGE_SRC.includes(banned), false,
+      `ClustersPage 里出现了「${banned}」：只读校验得不出与写有关的结论`)
+  }
 })
