@@ -1,11 +1,15 @@
-import { useState, type CSSProperties, type FormEvent, type ReactNode } from 'react'
+import { Fragment, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react'
 import { api, ApiError } from '../api/client'
 import {
   IMPORT_ROLE_LABEL, IMPORT_SOURCE_LABEL, ONBOARD_STATE_LABEL,
-  type APIServer, type ImportRole, type ImportSource, type PolicyImportItem,
-  type RegisteredCluster,
+  type APIServer, type GitBinding, type ImportRole, type ImportSource,
+  type PolicyImportItem, type RegisteredCluster,
 } from '../api/types'
 import { useResource } from '../api/useResource'
+import {
+  blankFormValues, buildClusterWrite, emptyApiServerRow, formValuesOf, resolveGitBinding,
+  type ApiServerRow, type ClusterFormValues,
+} from './clusterForm'
 import { Card, Chip, EmptyState, Field, PageHeader, Section, Select, TableCard } from '../components/ui'
 
 /**
@@ -50,6 +54,7 @@ function ClusterListSection({ clusters, error, loading, onChanged }: {
   onChanged: () => void
 }) {
   const [busyId, setBusyId] = useState<string | null>(null)
+  const [editingId, setEditingId] = useState<string | null>(null)
 
   async function offboard(id: string) {
     if (!window.confirm(`确认下线集群 ${id}？`)) return
@@ -67,7 +72,7 @@ function ClusterListSection({ clusters, error, loading, onChanged }: {
   return (
     <Section
       title="已注册集群"
-      description="Git 绑定为空时显式写「未绑定」——空单元格会被读成「加载中」或「未知」，两者都不是这里想表达的事实。"
+      description="Git 绑定为空时显式写「未绑定」——空单元格会被读成「加载中」或「未知」，两者都不是这里想表达的事实。「编辑」在行内展开，用于补上或改动登记信息（含 Git 绑定）；保存是整体替换，表单已按现值预填。"
       meta={clusters ? `${clusters.length} 个` : undefined}
     >
       {error ? (
@@ -92,32 +97,61 @@ function ClusterListSection({ clusters, error, loading, onChanged }: {
           </thead>
           <tbody>
             {clusters.map((c) => (
-              <tr key={c.id}>
-                <td className="mono">{c.id}</td>
-                <td>{c.displayName}</td>
-                <td className="mono">{c.podCidr}</td>
-                <td className="mono">{c.nodeCidr}</td>
-                <td><ApiServerList servers={c.apiServers} /></td>
-                <td><Chip strong={c.state === 'READY'}>{ONBOARD_STATE_LABEL[c.state]}</Chip></td>
-                <td>
-                  {c.git
-                    ? (
-                      <span className="mono" style={{ fontSize: 'var(--text-sm)' }}>
-                        {c.git.repoUrl}@{c.git.branch}
-                      </span>
-                    )
-                    : <span style={{ color: 'var(--text-muted)' }}>未绑定</span>}
-                </td>
-                <td>
-                  <button
-                    onClick={() => offboard(c.id)}
-                    disabled={busyId === c.id}
-                    style={buttonStyle}
-                  >
-                    {busyId === c.id ? '下线中…' : '下线'}
-                  </button>
-                </td>
-              </tr>
+              // Fragment 而非单个 <tr>：编辑面板作为紧随其后的整宽行展开，
+              // 与被编辑的那一行同处一张表，操作者不必在弹层与表格之间
+              // 比对自己正在改哪个集群。
+              <Fragment key={c.id}>
+                <tr>
+                  <td className="mono">{c.id}</td>
+                  <td>{c.displayName}</td>
+                  <td className="mono">{c.podCidr}</td>
+                  <td className="mono">{c.nodeCidr}</td>
+                  <td><ApiServerList servers={c.apiServers} /></td>
+                  <td><Chip strong={c.state === 'READY'}>{ONBOARD_STATE_LABEL[c.state]}</Chip></td>
+                  <td>
+                    {c.git
+                      ? (
+                        <span className="mono" style={{ fontSize: 'var(--text-sm)' }}>
+                          {c.git.repoUrl}@{c.git.branch}
+                        </span>
+                      )
+                      : <span style={{ color: 'var(--text-muted)' }}>未绑定</span>}
+                  </td>
+                  <td>
+                    <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
+                      <button
+                        onClick={() => setEditingId(editingId === c.id ? null : c.id)}
+                        style={secondaryButtonStyle}
+                      >
+                        {editingId === c.id ? '收起' : '编辑'}
+                      </button>
+                      <button
+                        onClick={() => offboard(c.id)}
+                        disabled={busyId === c.id}
+                        style={buttonStyle}
+                      >
+                        {busyId === c.id ? '下线中…' : '下线'}
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+                {editingId === c.id && (
+                  <tr>
+                    <td colSpan={8} style={{ background: 'var(--surface-sunken)' }}>
+                      {/*
+                        key 绑定集群 ID：换一个集群展开时必须重新播种，
+                        复用同一份表单状态会把上一个集群的网段带进来。
+                      */}
+                      <EditClusterForm
+                        key={c.id}
+                        cluster={c}
+                        onCancel={() => setEditingId(null)}
+                        onSaved={() => { setEditingId(null); onChanged() }}
+                      />
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
             ))}
           </tbody>
         </TableCard>
@@ -127,125 +161,197 @@ function ClusterListSection({ clusters, error, loading, onChanged }: {
 }
 
 /* ---------------------------------------------------------------------- */
-/* 2. 注册新集群                                                           */
+/* 2. 集群表单：注册与编辑共用                                              */
 /* ---------------------------------------------------------------------- */
 
 /**
- * apiserver 表单行的本地形态：port 保持字符串，交给用户在提交前编辑；提交时才转数字。
- * 三个字段的初始值都是空串（port 不预填 "443"，只作为 placeholder 提示）——
- * 让"这一行完全没被碰过"在数据层面等价于"三个字段都是空串"，提交时才能
- * 用同一条"全空则忽略、有一项非空则三项必填"的规则处理，不用另开一条
- * "port 的默认值不算真的填了"的特例。
+ * 集群表单的公共字段。
+ *
+ * 注册与编辑共用同一份字段与同一套校验（见 clusterForm.ts）：两份拷贝
+ * 一定会漂移，而漂移的落点是策略下发路径——一个只在注册表单拦得住的
+ * 半截 Git 绑定，会在编辑表单被放进库里。
+ *
+ * mode 只影响两处：集群 ID 在编辑时只读（它是全平台的身份主键，改它
+ * 不是改这个集群而是指向另一个集群），以及「解除 Git 绑定」只在编辑
+ * 已绑定集群时出现。接入状态两种模式下都没有控件：它由服务端根据
+ * 实际采集到的数据推进，表单能提交它就等于允许把「还没有数据」标成
+ * 「可以出推荐了」。
  */
-interface ApiServerRow { host: string; cidr: string; port: string }
-const emptyApiServerRow = (): ApiServerRow => ({ host: '', cidr: '', port: '' })
-const REQUIRED_APISERVER_FIELDS: readonly ['host', 'cidr', 'port'] = ['host', 'cidr', 'port']
+function ClusterFields({ values, patch, mode, current }: {
+  values: ClusterFormValues
+  patch: (p: Partial<ClusterFormValues>) => void
+  mode: 'create' | 'edit'
+  current: GitBinding | null
+}) {
+  function updateApiServerRow(i: number, rowPatch: Partial<ApiServerRow>) {
+    patch({
+      apiServerRows: values.apiServerRows.map((r, idx) => (idx === i ? { ...r, ...rowPatch } : r)),
+    })
+  }
+  function addApiServerRow() {
+    patch({ apiServerRows: [...values.apiServerRows, emptyApiServerRow()] })
+  }
+  function removeApiServerRow(i: number) {
+    if (values.apiServerRows.length <= 1) return
+    patch({ apiServerRows: values.apiServerRows.filter((_, idx) => idx !== i) })
+  }
+
+  return (
+    <>
+      <FormGrid>
+        <TextField
+          label={mode === 'edit' ? '集群 ID（不可修改）' : '集群 ID'}
+          value={values.id}
+          onChange={(v) => patch({ id: v })}
+          required
+          readOnly={mode === 'edit'}
+          mono
+        />
+        <TextField label="显示名" value={values.displayName} onChange={(v) => patch({ displayName: v })} required />
+        <TextField label="Pod CIDR" value={values.podCidr} onChange={(v) => patch({ podCidr: v })} required mono />
+        <TextField label="Node CIDR" value={values.nodeCidr} onChange={(v) => patch({ nodeCidr: v })} required mono />
+      </FormGrid>
+
+      <SubHeading>
+        apiserver（可选，可添加多个 —— HA 控制面通常不止一个端点，
+        漏填一个就是漏了一条 baseline 放行规则，后果是生产阻断而不是注册报错。
+        每一行要么整行留空（会被忽略），要么 host / cidr / port 三项都填）
+      </SubHeading>
+      {values.apiServerRows.map((row, i) => (
+        <div key={i} style={{
+          display: 'flex', gap: 'var(--space-3)', alignItems: 'flex-end',
+          marginBottom: 'var(--space-2)',
+        }}>
+          <div style={{ flex: 1 }}>
+            <TextField label="host" value={row.host} onChange={(v) => updateApiServerRow(i, { host: v })} mono />
+          </div>
+          <div style={{ flex: 1 }}>
+            <TextField label="cidr" value={row.cidr} onChange={(v) => updateApiServerRow(i, { cidr: v })} mono />
+          </div>
+          <div style={{ width: 110 }}>
+            <TextField
+              label="port" value={row.port} onChange={(v) => updateApiServerRow(i, { port: v })}
+              mono placeholder="443"
+            />
+          </div>
+          <button
+            type="button"
+            onClick={() => removeApiServerRow(i)}
+            disabled={values.apiServerRows.length <= 1}
+            style={{
+              ...secondaryButtonStyle,
+              opacity: values.apiServerRows.length <= 1 ? 0.5 : 1,
+              cursor: values.apiServerRows.length <= 1 ? 'default' : 'pointer',
+            }}
+          >
+            删除
+          </button>
+        </div>
+      ))}
+      <button type="button" onClick={addApiServerRow} style={secondaryButtonStyle}>
+        + 添加 apiserver
+      </button>
+
+      <div style={{ marginTop: 'var(--space-4)' }}>
+        <SubHeading>健康检查网段（可选，每行一个 CIDR）</SubHeading>
+        <textarea
+          className="ctl"
+          aria-label="健康检查网段"
+          value={values.healthChecks}
+          onChange={(e) => patch({ healthChecks: e.target.value })}
+          rows={3}
+          style={textareaStyle}
+        />
+      </div>
+
+      <div style={{ marginTop: 'var(--space-3)' }}>
+        <SubHeading>
+          Git 绑定（可选；一旦填写任意一项——含 credentialRef——repoUrl / branch / policyPath 三项均为必填）
+        </SubHeading>
+        {/*
+          「解除绑定」是一个勾选动作，不是「把四个字段清空」的推断：整体
+          替换下两者提交结果相同，但一次误删输入框内容不该静默切断集群与
+          策略仓库的关联。勾上后四个输入框禁用——留着可编辑会让界面同时
+          显示「仓库地址」与「将解除绑定」两句互相矛盾的话。
+        */}
+        {mode === 'edit' && current && (
+          <label style={{
+            display: 'flex', alignItems: 'center', gap: 'var(--space-2)',
+            fontSize: 'var(--text-sm)', marginBottom: 'var(--space-2)',
+          }}>
+            <input
+              type="checkbox"
+              checked={values.clearGit}
+              onChange={(e) => patch({ clearGit: e.target.checked })}
+            />
+            解除 Git 绑定（该集群将不再有策略仓库，平台不会再向它写策略）
+          </label>
+        )}
+        <FormGrid>
+          <TextField
+            label="repoUrl" value={values.git.repoUrl} mono disabled={values.clearGit}
+            onChange={(v) => patch({ git: { ...values.git, repoUrl: v } })}
+          />
+          <TextField
+            label="branch" value={values.git.branch} mono disabled={values.clearGit}
+            onChange={(v) => patch({ git: { ...values.git, branch: v } })}
+          />
+          <TextField
+            label="policyPath" value={values.git.policyPath} mono disabled={values.clearGit}
+            onChange={(v) => patch({ git: { ...values.git, policyPath: v } })}
+          />
+          <TextField
+            label="credentialRef" value={values.git.credentialRef} mono disabled={values.clearGit}
+            onChange={(v) => patch({ git: { ...values.git, credentialRef: v } })}
+          />
+        </FormGrid>
+        <GitOutcome values={values} current={current} />
+      </div>
+    </>
+  )
+}
 
 /**
- * Git 绑定四个字段在表单里的合法组合只有两种：全空，或 repoUrl/branch/
- * policyPath 三项全填（credentialRef 可选，但只要它非空就已经表达了
- * "这是一处真实绑定"的意图，此时同样要求三项必填齐全）——否则
- * credentialRef 会在三项检查之外被静默丢弃，成为唯一录入了值却从不
- * 出现在提交请求里的字段。
+ * 提交前把「这一次会把绑定改成什么」写出来。
+ *
+ * 绑定的三种去向（保持、改指向、解除）在表单上长得很像——都是四个
+ * 输入框的不同填法。让结果只在提交后从列表里的一行文字体现，等于把
+ * 「我以为我只是清空了一个字段」留到已经写进库之后才被发现。
  */
-const REQUIRED_GIT_FIELDS: readonly ['repoUrl', 'branch', 'policyPath'] = ['repoUrl', 'branch', 'policyPath']
+function GitOutcome({ values, current }: { values: ClusterFormValues; current: GitBinding | null }) {
+  const resolution = resolveGitBinding(values.git, { current, clearRequested: values.clearGit })
+  return (
+    <p style={{
+      margin: 'var(--space-2) 0 0', fontSize: 'var(--text-xs)',
+      color: resolution.ok ? 'var(--text-secondary)' : 'var(--verdict-unknown)',
+    }}>
+      {resolution.ok ? resolution.summary : resolution.error}
+    </p>
+  )
+}
 
 function RegisterSection({ onCreated }: { onCreated: () => void }) {
-  const [id, setId] = useState('')
-  const [displayName, setDisplayName] = useState('')
-  const [podCidr, setPodCidr] = useState('')
-  const [nodeCidr, setNodeCidr] = useState('')
-  const [apiServerRows, setApiServerRows] = useState<ApiServerRow[]>([emptyApiServerRow()])
-  const [healthChecks, setHealthChecks] = useState('')
-  const [repoUrl, setRepoUrl] = useState('')
-  const [branch, setBranch] = useState('')
-  const [policyPath, setPolicyPath] = useState('')
-  const [credentialRef, setCredentialRef] = useState('')
+  const [values, setValues] = useState<ClusterFormValues>(blankFormValues)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
-  function updateApiServerRow(i: number, patch: Partial<ApiServerRow>) {
-    setApiServerRows((rows) => rows.map((r, idx) => (idx === i ? { ...r, ...patch } : r)))
-  }
-  function addApiServerRow() {
-    setApiServerRows((rows) => [...rows, emptyApiServerRow()])
-  }
-  function removeApiServerRow(i: number) {
-    setApiServerRows((rows) => (rows.length <= 1 ? rows : rows.filter((_, idx) => idx !== i)))
-  }
+  const patch = (p: Partial<ClusterFormValues>) => setValues((v) => ({ ...v, ...p }))
 
   async function submit(e: FormEvent) {
     e.preventDefault()
     setError('')
 
-    const gitValues: Record<'repoUrl' | 'branch' | 'policyPath' | 'credentialRef', string> = {
-      repoUrl, branch, policyPath, credentialRef,
-    }
-    const anyGitFilled = Object.values(gitValues).some((v) => v.trim() !== '')
-    const missingGit = REQUIRED_GIT_FIELDS.filter((k) => gitValues[k].trim() === '')
-    if (anyGitFilled && missingGit.length > 0) {
-      setError(
-        `Git 绑定缺少：${missingGit.join('、')}。repoUrl / branch / policyPath 三项在你填写了 `
-        + `Git 绑定的任意一项（含 credentialRef）时都是必需的，否则已填的值不会被保存。`,
-      )
+    // 注册时没有「当前绑定」，传 null：清空即未绑定，不存在「解除」这件事。
+    const built = buildClusterWrite(values, null)
+    if (!built.ok) {
+      setError(built.error)
       return
     }
-
-    // 每一行独立按"全空则忽略、有一项非空则三项必填"判断——与 Git 绑定
-    // 同一条纪律，且不能只查 host：只查 host 会把"填了 cidr/port 但漏了
-    // host"的行放过去，静默丢弃已经打进去的字符，跟这一轮要修的
-    // credentialRef 缺口是同一个洞。行号用界面上看到的序号（从 1 开始，
-    // 过滤前的下标），不用提交前过滤之后的下标——否则一旦前面有整行
-    // 空白被跳过，报错里的行号就和操作者盯着的表单对不上。
-    const apiServers: APIServer[] = []
-    const apiServerErrors: string[] = []
-    apiServerRows.forEach((r, idx) => {
-      const anyFilled = REQUIRED_APISERVER_FIELDS.some((k) => r[k].trim() !== '')
-      if (!anyFilled) return
-      const missing = REQUIRED_APISERVER_FIELDS.filter((k) => r[k].trim() === '')
-      if (missing.length > 0) {
-        apiServerErrors.push(`apiserver 第 ${idx + 1} 行缺少：${missing.join('、')}`)
-        return
-      }
-      apiServers.push({ host: r.host.trim(), cidr: r.cidr.trim(), port: Number(r.port) || 0 })
-    })
-    if (apiServerErrors.length > 0) {
-      setError(
-        `${apiServerErrors.join('；')}。每一行 host / cidr / port 要么三项都填，要么整行留空`
-        + `（留空的行会被忽略，不会提交），否则已填的值不会被保存。`,
-      )
-      return
-    }
-
-    const healthCheckSources = healthChecks
-      .split('\n')
-      .map((s) => s.trim())
-      .filter(Boolean)
 
     setBusy(true)
     try {
-      await api.createCluster({
-        id: id.trim(),
-        displayName: displayName.trim(),
-        podCidr: podCidr.trim(),
-        nodeCidr: nodeCidr.trim(),
-        apiServers,
-        healthCheckSources,
-        ...(anyGitFilled
-          ? {
-            git: {
-              repoUrl: repoUrl.trim(),
-              branch: branch.trim(),
-              policyPath: policyPath.trim(),
-              credentialRef: credentialRef.trim(),
-              lastWrittenCommit: '',
-            },
-          }
-          : {}),
-      })
-      setId(''); setDisplayName(''); setPodCidr(''); setNodeCidr('')
-      setApiServerRows([emptyApiServerRow()]); setHealthChecks('')
-      setRepoUrl(''); setBranch(''); setPolicyPath(''); setCredentialRef('')
+      await api.createCluster(built.body)
+      setValues(blankFormValues())
       onCreated()
     } catch (err) {
       // 后端把校验失败的具体字段写进 msg（比如「podCIDR "10.20.0/14" 不是
@@ -260,79 +366,11 @@ function RegisterSection({ onCreated }: { onCreated: () => void }) {
   return (
     <Section
       title="注册新集群"
-      description="仅登记元数据；接入状态从「已登记」起步，不受本表单任何字段影响，包括你在这里可能填的任何值。"
+      description="仅登记元数据；接入状态从「已登记」起步，不受本表单任何字段影响，包括你在这里可能填的任何值。Git 绑定可以留到之后在上方列表里补，注册时不知道仓库路径是常态。"
     >
       <Card style={{ padding: 'var(--space-4)' }}>
         <form onSubmit={submit}>
-          <FormGrid>
-            <TextField label="集群 ID" value={id} onChange={setId} required />
-            <TextField label="显示名" value={displayName} onChange={setDisplayName} required />
-            <TextField label="Pod CIDR" value={podCidr} onChange={setPodCidr} required mono />
-            <TextField label="Node CIDR" value={nodeCidr} onChange={setNodeCidr} required mono />
-          </FormGrid>
-
-          <SubHeading>
-            apiserver（可选，可添加多个 —— HA 控制面通常不止一个端点，
-            漏填一个就是漏了一条 baseline 放行规则，后果是生产阻断而不是注册报错。
-            每一行要么整行留空（会被忽略），要么 host / cidr / port 三项都填）
-          </SubHeading>
-          {apiServerRows.map((row, i) => (
-            <div key={i} style={{
-              display: 'flex', gap: 'var(--space-3)', alignItems: 'flex-end',
-              marginBottom: 'var(--space-2)',
-            }}>
-              <div style={{ flex: 1 }}>
-                <TextField label="host" value={row.host} onChange={(v) => updateApiServerRow(i, { host: v })} mono />
-              </div>
-              <div style={{ flex: 1 }}>
-                <TextField label="cidr" value={row.cidr} onChange={(v) => updateApiServerRow(i, { cidr: v })} mono />
-              </div>
-              <div style={{ width: 110 }}>
-                <TextField
-                  label="port" value={row.port} onChange={(v) => updateApiServerRow(i, { port: v })}
-                  mono placeholder="443"
-                />
-              </div>
-              <button
-                type="button"
-                onClick={() => removeApiServerRow(i)}
-                disabled={apiServerRows.length <= 1}
-                style={{
-                  ...secondaryButtonStyle,
-                  opacity: apiServerRows.length <= 1 ? 0.5 : 1,
-                  cursor: apiServerRows.length <= 1 ? 'default' : 'pointer',
-                }}
-              >
-                删除
-              </button>
-            </div>
-          ))}
-          <button type="button" onClick={addApiServerRow} style={secondaryButtonStyle}>
-            + 添加 apiserver
-          </button>
-
-          <div style={{ marginTop: 'var(--space-4)' }}>
-            <SubHeading>健康检查网段（可选，每行一个 CIDR）</SubHeading>
-            <textarea
-              className="ctl"
-              value={healthChecks}
-              onChange={(e) => setHealthChecks(e.target.value)}
-              rows={3}
-              style={textareaStyle}
-            />
-          </div>
-
-          <div style={{ marginTop: 'var(--space-3)' }}>
-            <SubHeading>
-              Git 绑定（可选；一旦填写任意一项——含 credentialRef——repoUrl / branch / policyPath 三项均为必填）
-            </SubHeading>
-            <FormGrid>
-              <TextField label="repoUrl" value={repoUrl} onChange={setRepoUrl} mono />
-              <TextField label="branch" value={branch} onChange={setBranch} mono />
-              <TextField label="policyPath" value={policyPath} onChange={setPolicyPath} mono />
-              <TextField label="credentialRef" value={credentialRef} onChange={setCredentialRef} mono />
-            </FormGrid>
-          </div>
+          <ClusterFields values={values} patch={patch} mode="create" current={null} />
 
           {error && <FormError>{error}</FormError>}
 
@@ -342,6 +380,74 @@ function RegisterSection({ onCreated }: { onCreated: () => void }) {
         </form>
       </Card>
     </Section>
+  )
+}
+
+/**
+ * 编辑已注册集群。
+ *
+ * 表单从集群现值播种，一项都不能省：PUT 是整体替换，表单里空着的字段
+ * 提交后就是库里空着的字段。一个只想改仓库地址的操作者不该因此丢掉
+ * apiserver 清单——那少掉的是一条 control-plane 放行规则，事后表现为
+ * 生产阻断，而不是提交时报错。
+ *
+ * 已知限制：整体替换 + 无版本号意味着两个人同时编辑同一个集群时后写
+ * 覆盖先写，且双方都不会收到提示。乐观锁需要在存储层引入版本列，不在
+ * 本轮范围。
+ */
+function EditClusterForm({ cluster, onSaved, onCancel }: {
+  cluster: RegisteredCluster
+  onSaved: () => void
+  onCancel: () => void
+}) {
+  const [values, setValues] = useState<ClusterFormValues>(() => formValuesOf(cluster))
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const current = cluster.git ?? null
+  const patch = (p: Partial<ClusterFormValues>) => setValues((v) => ({ ...v, ...p }))
+
+  async function submit(e: FormEvent) {
+    e.preventDefault()
+    setError('')
+
+    const built = buildClusterWrite(values, current)
+    if (!built.ok) {
+      setError(built.error)
+      return
+    }
+
+    setBusy(true)
+    try {
+      await api.updateCluster(cluster.id, built.body)
+      onSaved()
+    } catch (err) {
+      setError(err instanceof ApiError ? err.msg : '保存失败，请稍后重试')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Card style={{ padding: 'var(--space-4)', margin: 'var(--space-3) 0' }}>
+      <form onSubmit={submit}>
+        <SubHeading>
+          编辑 {cluster.id}：提交会整体替换该集群的登记信息，表单里的每一项都会被写入，
+          因此下面的值已按当前登记内容预填——清空一项就是把它从库里清空。
+          接入状态不在此列，它由服务端推进。
+        </SubHeading>
+        <ClusterFields values={values} patch={patch} mode="edit" current={current} />
+
+        {error && <FormError>{error}</FormError>}
+
+        <div style={{ display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-3)' }}>
+          <button type="submit" disabled={busy} style={buttonStyle}>
+            {busy ? '保存中…' : '保存修改'}
+          </button>
+          <button type="button" onClick={onCancel} style={secondaryButtonStyle}>取消</button>
+        </div>
+      </form>
+    </Card>
   )
 }
 
@@ -603,14 +709,17 @@ const fieldLabelStyle: CSSProperties = {
   display: 'block', marginBottom: 4, fontSize: 'var(--text-xs)', color: 'var(--text-muted)',
 }
 
-function TextField({ label, value, onChange, required, mono, placeholder }: {
+function TextField({ label, value, onChange, required, mono, placeholder, readOnly, disabled }: {
   label: string
   value: string
   onChange: (v: string) => void
   required?: boolean
   mono?: boolean
   placeholder?: string
+  readOnly?: boolean
+  disabled?: boolean
 }) {
+  const inert = readOnly || disabled
   return (
     <label style={{ display: 'block' }}>
       <span style={fieldLabelStyle}>{label}</span>
@@ -620,7 +729,16 @@ function TextField({ label, value, onChange, required, mono, placeholder }: {
         onChange={(e) => onChange(e.target.value)}
         required={required}
         placeholder={placeholder}
-        style={{ width: '100%', fontFamily: mono ? 'var(--mono)' : undefined }}
+        readOnly={readOnly}
+        disabled={disabled}
+        style={{
+          width: '100%',
+          fontFamily: mono ? 'var(--mono)' : undefined,
+          // 不可编辑的输入框必须看得出不可编辑：一个外观正常却打不进字的
+          // 输入框会被读成界面卡住，而不是"这一项不能改"。
+          background: inert ? 'var(--surface-sunken)' : undefined,
+          color: inert ? 'var(--text-muted)' : undefined,
+        }}
       />
     </label>
   )
