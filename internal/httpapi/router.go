@@ -27,6 +27,12 @@ type Deps struct {
 	Reader store.Reader
 	// Registry 提供集群注册与策略导入的持久化。
 	Registry registry.Store
+	// GitVerifier 对 Git 绑定做只读校验。
+	//
+	// 允许为 nil：未配置 secrets 的部署（比如 demo）不做校验，结论一律是
+	// NOT_VERIFIED。nil 表示"没有校验这回事"，**不是**"校验都通过"——
+	// 见 verifyBinding。
+	GitVerifier GitVerifier
 	// DefaultWindow 是流量查询未指定 from/to 时使用的时间窗。
 	//
 	// 由装配方注入而非在此取默认值：合适的默认窗口取决于部署形态。
@@ -68,6 +74,10 @@ func NewRouter(d Deps) http.Handler {
 			// 判定都用错了网段分类，且没有任何报错。
 			protected.Put("/clusters/{clusterID}", handleUpdateCluster(d))
 			protected.Delete("/clusters/{clusterID}", handleDeleteCluster(d))
+			// POST 而非 GET：这次调用会真的发起一次出站认证连接，并写下
+			// 新的结论与一条审计行 —— 不是一次读取，不该被浏览器、代理
+			// 或前端的重试逻辑当成可以随手重放的东西。
+			protected.Post("/clusters/{clusterID}/git-binding/verify", handleVerifyGitBinding(d))
 			protected.Get("/clusters/{clusterID}/policy-imports", handleListImports(d))
 			protected.Post("/clusters/{clusterID}/policy-imports", handleCreateImport(d))
 			protected.Delete("/clusters/{clusterID}/policy-imports/{importID}", handleDeleteImport(d))

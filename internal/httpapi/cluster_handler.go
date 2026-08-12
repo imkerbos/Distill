@@ -40,6 +40,11 @@ type clusterPayload struct {
 //
 // credentialRef 不在此列：它是 Secret Manager 里的引用，是操作者填写的
 // 配置，不是平台对外部世界的断言 —— 由调用方提供正是它的设计意图。
+//
+// verifyResult 与 verifiedAt 同样**不在**请求形状里，理由与
+// lastWrittenCommit 完全一样：结论是平台自己校验出来的事实，一个能被
+// 请求体设置的 OK 就是一句无法被证伪的「可以下发」。它们由保存路径从
+// verifyBinding 的返回值填入（见 applyVerdict）。
 type gitPayload struct {
 	RepoURL       string `json:"repoUrl"`
 	Branch        string `json:"branch"`
@@ -129,13 +134,19 @@ func handleListClustersFromRegistry(d Deps) http.HandlerFunc {
 }
 
 // handleCreateCluster 注册一个集群。
+//
+// 带绑定注册时同样先校验一次（spec §3.3「保存绑定时自动触发一次」）：
+// 一个只在修改时校验的实现，会让「注册时就填好绑定」这条最常见的路径
+// 永远停在 NOT_VERIFIED 上。
 func handleCreateCluster(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		p, ok := decodeClusterPayload(w, r)
 		if !ok {
 			return
 		}
-		if err := d.Registry.CreateCluster(r.Context(), actorOf(r), p.toCluster()); err != nil {
+		c := p.toCluster()
+		verifyOnSave(r, d, c.Git)
+		if err := d.Registry.CreateCluster(r.Context(), actorOf(r), c); err != nil {
 			writeRegistryError(w, r, d, err)
 			return
 		}
@@ -173,6 +184,7 @@ func handleUpdateCluster(d Deps) http.HandlerFunc {
 		// 同一条纪律的第二处应用：漂移基准是平台自己的断言，只能从库里
 		// 已有的值推导，不能由请求体携带。
 		carryDriftBaseline(c.Git, existing.Git)
+		verifyOnSave(r, d, c.Git)
 		if err := d.Registry.UpdateCluster(r.Context(), actorOf(r), c); err != nil {
 			writeRegistryError(w, r, d, err)
 			return
