@@ -1,5 +1,5 @@
 import type {
-  Decision, Envelope, FlowFilter, FlowPage,
+  ClusterWrite, Decision, Envelope, FlowFilter, FlowPage,
   Identity, ImportRole, ImportSource, OverrideDecision, PolicyImportItem, PolicyPreview,
   Quality, RegisteredCluster, SecurityReport, Topology, TopologyLevel,
 } from './types'
@@ -79,15 +79,19 @@ export const api = {
 
   clusters: () => request<RegisteredCluster[]>('/api/v1/clusters'),
 
-  createCluster: (body: Partial<RegisteredCluster>) =>
+  createCluster: (body: ClusterWrite) =>
     request<{ id: string }>('/api/v1/clusters', {
       method: 'POST',
       body: JSON.stringify(body),
     }),
 
-  updateCluster: (cluster: string, body: Partial<RegisteredCluster>) =>
+  // PUT 而非 PATCH：服务端写整行，请求体缺省的字段会被写成空值。用
+  // PATCH 命名一个整体替换的端点，早晚有人按 PATCH 的语义只发一个
+  // 字段，然后把 podCidr 清成空串——那不是一次失败的请求，是此后
+  // 每一次判定都用错了网段分类。ClusterWrite 全字段必填与这条同源。
+  updateCluster: (cluster: string, body: ClusterWrite) =>
     request<{ id: string }>(`/api/v1/clusters/${encodeURIComponent(cluster)}`, {
-      method: 'PATCH',
+      method: 'PUT',
       body: JSON.stringify(body),
     }),
 

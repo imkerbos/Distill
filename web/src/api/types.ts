@@ -386,6 +386,42 @@ export interface RegisteredCluster {
   git?: GitBinding
 }
 
+/**
+ * 集群写入体（POST /clusters 与 PUT /clusters/{id} 共用）。
+ *
+ * 刻意不是 `Partial<RegisteredCluster>`：PUT 是整体替换，服务端把请求体
+ * 的每一个字段都写进那一行，缺省的字段被写成空值而不是保持原样。而
+ * podCidr / nodeCidr 是求值层做网段分类的依据，悄悄清零它们会污染此后
+ * 每一次判定。因此每一项都是必填——少给一项要在编译期就是错误，不能
+ * 留给运行时。
+ *
+ * git 用 `GitBindingWrite | null` 而非可选：null 是一句明确的"没有绑定"，
+ * 而"字段不存在"读起来像"这次不谈这件事"，在整体替换语义下这两者
+ * 结果相同、意图不同，含糊的那一种不该出现在写路径上。
+ *
+ * state 不在这里：接入状态由服务端根据实际采集到的数据推进，请求体
+ * 里提供它就等于允许调用方把"还没有数据"标成"可以出推荐了"。
+ */
+export interface ClusterWrite {
+  id: string
+  displayName: string
+  podCidr: string
+  nodeCidr: string
+  apiServers: APIServer[]
+  healthCheckSources: string[]
+  git: GitBindingWrite | null
+}
+
+/**
+ * 写入体里的 Git 绑定：没有 lastWrittenCommit。
+ *
+ * 那个字段是平台对"我最近一次往这个仓库写了什么"的断言，漂移检测拿它
+ * 与 Git 现状比对。它由服务端从库里的现值推导，请求体带上去也不会被
+ * 采纳（见 internal/httpapi 的 gitPayload）——所以这里根本不给它位置：
+ * 一个永远不会被采纳的字段留在类型里，只会让下一个调用方以为它有用。
+ */
+export type GitBindingWrite = Omit<GitBinding, 'lastWrittenCommit'>
+
 export interface PolicyImportItem {
   clusterId: string
   importId: string
