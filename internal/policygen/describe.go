@@ -1,6 +1,8 @@
 package policygen
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"sort"
 	"strconv"
 	"strings"
@@ -40,6 +42,36 @@ func (r *Rule) describe() {
 	for _, p := range ports {
 		r.Ports = append(r.Ports, describePort(p))
 	}
+	r.Fingerprint = FingerprintOf(*r)
+}
+
+// FingerprintOf 计算一条规则的内容指纹。
+//
+// 导出是为了让测试能对手工构造的规则求指纹 —— 「改了内容指纹必须变」
+// 这条性质只有对着两份仅差一个字段的规则才验证得了。
+//
+// 各字段之间用 \x00 分隔而非直接拼接：peers 与 ports 都是自由文本，
+// 直接拼接会让 ["a","bc"] 与 ["ab","c"] 得到同一个指纹。写入长度前缀
+// 的理由与分隔符相同：只有分隔符时 ["a\x00b"] 与 ["a","b"] 仍会碰撞。
+func FingerprintOf(r Rule) string {
+	h := sha256.New()
+	write := func(parts ...string) {
+		for _, p := range parts {
+			_, _ = h.Write([]byte(p))
+			_, _ = h.Write([]byte{0})
+		}
+	}
+	write(string(r.Origin), string(r.Evidence), string(r.Direction))
+	if r.Baseline != nil {
+		write(string(*r.Baseline))
+	} else {
+		write("")
+	}
+	write(strconv.Itoa(len(r.Peers)))
+	write(r.Peers...)
+	write(strconv.Itoa(len(r.Ports)))
+	write(r.Ports...)
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // describePeer 把一个 peer 渲染成 namespace/workload 或 CIDR。

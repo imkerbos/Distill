@@ -160,6 +160,16 @@ type Rule struct {
 	Peers []string `json:"peers"`
 	// Ports 是端口的展示视图，形如 TCP/8080。
 	Ports []string `json:"ports"`
+	// Fingerprint 是规则内容的 SHA-256，人工覆盖决定挂在它上面。
+	//
+	// 只覆盖内容（Origin / Evidence / Direction / Peers / Ports），
+	// 不含 FlowCount：流量条数每天都在变，算进去会让每一次重新生成
+	// 都作废掉全部人工确认。
+	//
+	// 指纹变了覆盖自动失效，这是刻意的 —— 内容变了就不是当初被确认
+	// 的那一条。用 (namespace, workload, 序号) 作键会出现「确认的是
+	// MySQL，重新生成后那个位置变成了 SSH，覆盖仍在」。
+	Fingerprint string `json:"fingerprint"`
 	// Ingress 在 Direction 为 INGRESS 时非空。
 	//
 	// 不出 API：k8s 结构体一旦进了响应体，界面就得自己解释 selector
