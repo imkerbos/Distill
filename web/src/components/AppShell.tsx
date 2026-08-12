@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { NavLink, useNavigate } from 'react-router-dom'
 import { api } from '../api/client'
 import { Select } from './ui'
-import type { ClusterSummary } from '../api/types'
+import type { RegisteredCluster } from '../api/types'
 import { useSession } from '../auth/SessionContext'
 
 interface Props {
@@ -13,7 +13,7 @@ interface Props {
 
 export default function AppShell({ cluster, onClusterChange, children }: Props) {
   const { identity, logout } = useSession()
-  const [clusters, setClusters] = useState<ClusterSummary[]>([])
+  const [clusters, setClusters] = useState<RegisteredCluster[]>([])
   const [clustersError, setClustersError] = useState(false)
   const navigate = useNavigate()
 
@@ -76,6 +76,7 @@ export default function AppShell({ cluster, onClusterChange, children }: Props) 
           { to: '/security', label: '安全发现' },
           { to: '/policy', label: '候选策略' },
           { to: '/quality', label: '数据质量' },
+          { to: '/clusters', label: '集群管理' },
         ].map((item) => (
           <NavLink
             key={item.to}

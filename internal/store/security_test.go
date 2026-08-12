@@ -10,7 +10,7 @@ import (
 
 func newSecurityReport(t *testing.T, cluster string) store.SecurityReport {
 	t.Helper()
-	r := store.NewFixtureReader(fixture.Load())
+	r := store.NewFixtureReader(fixture.Load(), fixtureSource())
 	rep, err := r.Security(context.Background(), cluster, r.DataWindow())
 	if err != nil {
 		t.Fatalf("Security(%s): %v", cluster, err)
@@ -143,14 +143,14 @@ func TestNakedPodsExcludeHostNetwork(t *testing.T) {
 }
 
 func TestSecurityRejectsMissingWindow(t *testing.T) {
-	r := store.NewFixtureReader(fixture.Load())
+	r := store.NewFixtureReader(fixture.Load(), fixtureSource())
 	if _, err := r.Security(context.Background(), "prod-asia-1", store.TimeWindow{}); err == nil {
 		t.Fatal("缺时间窗时应返回错误")
 	}
 }
 
 func TestSecurityUnknownClusterIsNotFound(t *testing.T) {
-	r := store.NewFixtureReader(fixture.Load())
+	r := store.NewFixtureReader(fixture.Load(), fixtureSource())
 	if _, err := r.Security(context.Background(), "no-such", r.DataWindow()); err == nil {
 		t.Fatal("集群不存在时应返回错误")
 	}

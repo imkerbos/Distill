@@ -16,6 +16,7 @@ import (
 	"github.com/imkerbos/Distill/internal/fixture"
 	"github.com/imkerbos/Distill/internal/httpapi"
 	applog "github.com/imkerbos/Distill/internal/log"
+	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/store"
 )
 
@@ -28,7 +29,20 @@ const testPassword = "distill-demo"
 // 测试要一个全失败的 Reader，但登录与依赖装配这段逻辑三处都一样，
 // 分成几个签名不同的构造器只会让它们慢慢长歪。reader 可以为 nil，
 // 用于不触达数据层的测试。
+//
+// Registry 固定传一个空的 memRegistry：绝大多数用例只关心 Fleet/Flow
+// 数据层，不需要注册任何集群。需要注册数据的测试改用
+// newTestRouterWithRegistry。
 func newTestRouter(t *testing.T, reader store.Reader) (http.Handler, *auth.SessionStore, *http.Cookie) {
+	t.Helper()
+	return newTestRouterWithRegistry(t, reader, newMemRegistry())
+}
+
+// newTestRouterWithRegistry 是 newTestRouter 的变体，额外接受一个
+// registry.Store 实现，供注册与导入相关的 handler 测试使用。
+func newTestRouterWithRegistry(
+	t *testing.T, reader store.Reader, reg registry.Store,
+) (http.Handler, *auth.SessionStore, *http.Cookie) {
 	t.Helper()
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(testPassword), bcrypt.MinCost)
@@ -54,6 +68,7 @@ func newTestRouter(t *testing.T, reader store.Reader) (http.Handler, *auth.Sessi
 		Verifier: auth.NewVerifier([]config.User{{Username: "demo", PasswordHash: string(hash)}}),
 		Logger:   logger,
 		Reader:   reader,
+		Registry: reg,
 		// 流量查询的时间窗是必填的；测试装配方与 cmd 一样注入覆盖
 		// 全量数据的窗口，使不关心时间维的用例无须逐个传 from/to。
 		DefaultWindow: window,
@@ -69,9 +84,44 @@ func newTestRouter(t *testing.T, reader store.Reader) (http.Handler, *auth.Sessi
 	return h, sessions, cookies[0]
 }
 
+// fixtureClusters 镜像 internal/fixture/asset.go 里两个集群的注册信息。
+// 值必须与那里的 Registry/APIServers 逐字一致，否则测试读到的网段会
+// 与 fixture 兜底值不一致。
+func fixtureClusters() []registry.Cluster {
+	return []registry.Cluster{
+		{
+			ID: "prod-asia-1", DisplayName: "Asia Prod",
+			PodCIDR: "10.4.0.0/14", NodeCIDR: "10.128.0.0/20",
+			State:              registry.StateReady,
+			APIServers:         []registry.APIServer{{Host: "10.9.0.2", CIDR: "10.9.0.0/28", Port: 443}},
+			HealthCheckSources: []string{"35.191.0.0/16", "130.211.0.0/22"},
+		},
+		{
+			ID: "prod-eu-1", DisplayName: "EU Prod",
+			PodCIDR: "10.4.0.0/14", NodeCIDR: "10.132.0.0/20",
+			State:              registry.StateReady,
+			APIServers:         []registry.APIServer{{Host: "10.13.0.2", CIDR: "10.13.0.0/28", Port: 443}},
+			HealthCheckSources: []string{"35.191.0.0/16", "130.211.0.0/22"},
+		},
+	}
+}
+
+// fixtureSource 是装了两个 fixture 集群的内存注册表。
+//
+// memRegistry 同时满足 registry.Store 与 store.ClusterSource：注册状态
+// 现在每个请求现查（spec §4.5），reader 与 handler 要用同一份注册信息，
+// 否则一个空注册表会让所有按集群解析的端点都报「未找到」。
+func fixtureSource() *memRegistry {
+	reg := newMemRegistry()
+	for _, c := range fixtureClusters() {
+		reg.clusters[c.ID] = c
+	}
+	return reg
+}
+
 // fixtureReader 是走真实合成数据的 Reader，供需要真实响应内容的测试使用。
 func fixtureReader() store.Reader {
-	return store.NewFixtureReader(fixture.Load())
+	return store.NewFixtureReader(fixture.Load(), fixtureSource())
 }
 
 func postJSON(t *testing.T, h http.Handler, path string, body any) *httptest.ResponseRecorder {

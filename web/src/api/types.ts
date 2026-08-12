@@ -10,14 +10,6 @@ export interface Envelope<T> {
 
 export interface Identity { username: string }
 
-export interface ClusterSummary {
-  id: string
-  namespaceCount: number
-  podCount: number
-  flowCount: number
-  ccnpPresent: boolean
-}
-
 export interface TopologyNode {
   id: string
   cluster: string
@@ -293,6 +285,75 @@ export interface PredictionReport {
   crossClusterCount: number
   unmanagedCount: number
   totalEvaluated: number
+}
+
+/** 集群接入状态：登记完成 → 学习中 → 可产出候选策略。由服务端推进，前端只读。 */
+export type OnboardState = 'REGISTERED' | 'OBSERVING' | 'READY'
+export type ImportRole = 'BASELINE_CURRENT' | 'CANDIDATE_ADDITION'
+export type ImportSource = 'PASTE' | 'GIT' | 'CLUSTER'
+
+export interface APIServer {
+  host: string
+  cidr: string
+  port: number
+}
+
+export interface GitBinding {
+  repoUrl: string
+  branch: string
+  policyPath: string
+  credentialRef: string
+  lastWrittenCommit: string
+}
+
+/**
+ * 已注册集群。GET /api/v1/clusters 现在直接返回 registry.Cluster——
+ * 旧形状（namespaceCount/podCount/flowCount）已整体不存在，不保留两套类型。
+ * apiServers/healthCheckSources 为空时后端落库为 null，因此这两项与
+ * git 均标为可选，不能假设它们总是数组/对象。
+ */
+export interface RegisteredCluster {
+  id: string
+  displayName: string
+  podCidr: string
+  nodeCidr: string
+  ccnpPresent: boolean
+  state: OnboardState
+  apiServers?: APIServer[] | null
+  healthCheckSources?: string[] | null
+  git?: GitBinding
+}
+
+export interface PolicyImportItem {
+  clusterId: string
+  importId: string
+  plane: string
+  role: ImportRole
+  source: ImportSource
+  namespace: string
+  name: string
+  yaml: string
+  specHash: string
+  gitCommitSha: string
+  importedBy: string
+  importedAt: string
+}
+
+export const ONBOARD_STATE_LABEL: Record<OnboardState, string> = {
+  REGISTERED: '已登记 · 尚未采集到流量',
+  OBSERVING: '学习中',
+  READY: '可产出候选策略',
+}
+
+export const IMPORT_ROLE_LABEL: Record<ImportRole, string> = {
+  BASELINE_CURRENT: '现状（当前生效策略）',
+  CANDIDATE_ADDITION: '候选补充',
+}
+
+export const IMPORT_SOURCE_LABEL: Record<ImportSource, string> = {
+  PASTE: '粘贴',
+  GIT: 'Git',
+  CLUSTER: '集群',
 }
 
 export interface PolicyPreview {

@@ -58,6 +58,9 @@ func asiaAssets() snapshot.Assets {
 				TargetNamespace: "gateway", TargetPort: 9090,
 			},
 		},
+		// Registry 与 APIServers 现在由 internal/registry 提供，
+		// 这里的值仅供不接数据库的单元测试兜底。两处必须保持一致 ——
+		// 不一致时以注册信息为准，而 fixture 的值会静默失效。
 		APIServers: []snapshot.APIServerEndpoint{
 			{ClusterID: clusterID, Host: "10.9.0.2", CIDR: "10.9.0.0/28", Port: 443},
 		},
@@ -111,6 +114,9 @@ func euAssets() snapshot.Assets {
 				TargetNamespace: "payment", TargetPort: 9090,
 			},
 		},
+		// Registry 与 APIServers 现在由 internal/registry 提供，
+		// 这里的值仅供不接数据库的单元测试兜底。两处必须保持一致 ——
+		// 不一致时以注册信息为准，而 fixture 的值会静默失效。
 		APIServers: []snapshot.APIServerEndpoint{
 			{ClusterID: clusterID, Host: "10.13.0.2", CIDR: "10.13.0.0/28", Port: 443},
 		},

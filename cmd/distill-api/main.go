@@ -18,6 +18,7 @@ import (
 	"github.com/imkerbos/Distill/internal/fixture"
 	"github.com/imkerbos/Distill/internal/httpapi"
 	applog "github.com/imkerbos/Distill/internal/log"
+	"github.com/imkerbos/Distill/internal/mysqlregistry"
 	"github.com/imkerbos/Distill/internal/response"
 	"github.com/imkerbos/Distill/internal/store"
 )
@@ -46,7 +47,27 @@ func run(configPath string) error {
 	}
 	logger.Info("starting", "version", buildinfo.Version(), "addr", cfg.Server.Addr)
 
-	reader := store.NewFixtureReader(fixture.Load())
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	db, err := mysqlregistry.Open(cfg.Database)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+
+	// 迁移在启动时执行：schema 落后于代码的进程不该接受请求，
+	// 而在启动时失败比在第一个请求时失败更容易定位。
+	if err := mysqlregistry.Migrate(cfg.Database, "migrations"); err != nil {
+		return err
+	}
+
+	reg := mysqlregistry.New(db)
+	// reader 拿到的是注册表本身而不是启动时读出的一份集群清单：
+	// 集群是否受平台管理必须在每个请求上现查（spec §4.5）。传快照的话，
+	// 下线一个集群之后 /security 与 /policy-preview 会继续供数直到进程
+	// 重启 —— 操作者收到「已下线」的确认，事实却相反。
+	reader := store.NewFixtureReader(fixture.Load(), reg)
 
 	r := chi.NewRouter()
 	r.Mount("/healthz", newHealthHandler())
@@ -55,6 +76,7 @@ func run(configPath string) error {
 		Verifier: auth.NewVerifier(cfg.Auth.Users),
 		Logger:   logger,
 		Reader:   reader,
+		Registry: reg,
 		// demo 的默认时间窗取 fixture 数据的实际范围。任何"最近 N 天"
 		// 的取值都会随真实时间推移而在某天返回 0 条 —— demo 会在没有
 		// 人改动代码的情况下自己坏掉。接真实存储时这里换成有界窗口。
@@ -67,9 +89,6 @@ func run(configPath string) error {
 		ReadTimeout:  cfg.Server.ReadTimeout,
 		WriteTimeout: cfg.Server.WriteTimeout,
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	errCh := make(chan error, 1)
 	go func() {

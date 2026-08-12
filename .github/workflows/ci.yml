@@ -8,6 +8,17 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: distill-local
+          MYSQL_DATABASE: distill
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -pdistill-local"
+          --health-interval=3s --health-timeout=3s --health-retries=20
     steps:
       - uses: actions/checkout@v4
 
@@ -16,9 +27,14 @@ jobs:
           go-version: '1.25'
 
       - name: Lint
+        # 钉死版本，不用 latest：CLAUDE.md §8 指定 golangci-lint v2，而
+        # latest 会在上游发新版的那天把一次无关的 PR 变成红的，或者反过来
+        # 悄悄放宽某条规则 —— 两种都让 CI 不再是可复现的门禁。
         uses: golangci/golangci-lint-action@v7
         with:
-          version: latest
+          version: v2.12.2
 
       - name: Test
+        env:
+          DISTILL_TEST_MYSQL_DSN: "root:distill-local@tcp(127.0.0.1:3306)/distill?parseTime=true&loc=UTC"
         run: go test ./... -race -count=1

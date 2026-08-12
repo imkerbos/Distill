@@ -100,6 +100,17 @@ func (r *FixtureReader) Security(ctx context.Context, clusterID string, window T
 	if !ok {
 		return SecurityReport{}, fmt.Errorf("%w: %s", ErrClusterNotFound, clusterID)
 	}
+	// 与 Topology、Quality、PolicyPreview 一致：注册表是集群是否被平台
+	// 管理的唯一判据。这是四者里暴露最敏感信息的一个——风险流量、出网
+	// 目标、裸奔 Pod——漏掉这道门槛，未注册或已下线的集群会在别处都不
+	// 可见、唯独在这里读得一清二楚。
+	_, ok, err := r.registeredCluster(ctx, clusterID)
+	if err != nil {
+		return SecurityReport{}, err
+	}
+	if !ok {
+		return SecurityReport{}, fmt.Errorf("%w: %s", ErrClusterNotFound, clusterID)
+	}
 
 	rep := SecurityReport{
 		Cluster:         clusterID,

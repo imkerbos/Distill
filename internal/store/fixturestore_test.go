@@ -8,32 +8,77 @@ import (
 	"testing"
 
 	"github.com/imkerbos/Distill/internal/fixture"
+	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/store"
 )
 
+// fixtureClusters 镜像 internal/fixture/asset.go 里两个集群的注册信息。
+// 值必须与那里的 Registry/APIServers 逐字一致，否则既有用例会在
+// "fixture 的兜底值"与"注册信息"之间读到不同的网段。
+func fixtureClusters() []registry.Cluster {
+	return []registry.Cluster{
+		{
+			ID: "prod-asia-1", DisplayName: "Asia Prod",
+			PodCIDR: "10.4.0.0/14", NodeCIDR: "10.128.0.0/20",
+			State:              registry.StateReady,
+			APIServers:         []registry.APIServer{{Host: "10.9.0.2", CIDR: "10.9.0.0/28", Port: 443}},
+			HealthCheckSources: []string{"35.191.0.0/16", "130.211.0.0/22"},
+		},
+		{
+			ID: "prod-eu-1", DisplayName: "EU Prod",
+			PodCIDR: "10.4.0.0/14", NodeCIDR: "10.132.0.0/20",
+			State:              registry.StateReady,
+			APIServers:         []registry.APIServer{{Host: "10.13.0.2", CIDR: "10.13.0.0/28", Port: 443}},
+			HealthCheckSources: []string{"35.191.0.0/16", "130.211.0.0/22"},
+		},
+	}
+}
+
+// memSource 是内存版 store.ClusterSource。
+//
+// 可增删而不是构造后固定：注册状态必须每请求现查（spec §4.5），而
+// 「现查」与「启动时读一次」的差别只有在同一个 reader 实例上先后读到
+// 两个不同结果时才看得出来 —— 一个不可变的数据源测不出这件事。
+type memSource struct {
+	clusters map[string]registry.Cluster
+}
+
+func newSource(cs ...registry.Cluster) *memSource {
+	idx := make(map[string]registry.Cluster, len(cs))
+	for _, c := range cs {
+		idx[c.ID] = c
+	}
+	return &memSource{clusters: idx}
+}
+
+func (m *memSource) Clusters(context.Context) ([]registry.Cluster, error) {
+	out := make([]registry.Cluster, 0, len(m.clusters))
+	for _, c := range m.clusters {
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+func (m *memSource) Cluster(_ context.Context, id string) (registry.Cluster, bool, error) {
+	c, ok := m.clusters[id]
+	return c, ok, nil
+}
+
+// offboard 模拟一次下线：软删除之后集群不再出现在注册表的读结果里。
+func (m *memSource) offboard(id string) { delete(m.clusters, id) }
+
+func fixtureSource() *memSource {
+	return newSource(fixtureClusters()...)
+}
+
 func newReader() *store.FixtureReader {
-	return store.NewFixtureReader(fixture.Load())
+	return store.NewFixtureReader(fixture.Load(), fixtureSource())
 }
 
 // allTime 是覆盖整个 fixture 数据集的时间窗。Flows 的时间窗是必填的
 // （见 store.FlowFilter.Window），只关心其他筛选条件的用例用它把时间维打开。
 func allTime() store.TimeWindow {
 	return newReader().DataWindow()
-}
-
-func TestClusters(t *testing.T) {
-	got, err := newReader().Clusters(context.Background())
-	if err != nil {
-		t.Fatalf("Clusters: %v", err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("got %d clusters, want 2", len(got))
-	}
-	for _, c := range got {
-		if c.PodCount == 0 {
-			t.Errorf("cluster %s reports no pods", c.ID)
-		}
-	}
 }
 
 func TestTopologyHasNodesAndEdges(t *testing.T) {
@@ -424,5 +469,160 @@ func TestCrossClusterFlowsAppearForBothClusters(t *testing.T) {
 		if cross == 0 {
 			t.Errorf("%s: no cross-cluster rows in its own flow list", cluster)
 		}
+	}
+}
+
+// 集群元数据来自注册信息而非 fixture 硬编码：Baseline 的推导依据
+// 因此可以在后台修改，而不必改代码重新编译。
+func TestReaderUsesRegisteredCIDRs(t *testing.T) {
+	clusters := []registry.Cluster{{
+		ID: "prod-asia-1", DisplayName: "Asia", PodCIDR: "10.4.0.0/14",
+		NodeCIDR: "10.200.0.0/20", State: registry.StateReady,
+		APIServers:         []registry.APIServer{{Host: "10.9.0.2", CIDR: "10.9.0.0/28", Port: 443}},
+		HealthCheckSources: []string{"35.191.0.0/16"},
+	}}
+	r := store.NewFixtureReader(fixture.Load(), newSource(clusters...))
+
+	pv, err := r.PolicyPreview(context.Background(), "prod-asia-1", "", r.DataWindow())
+	if err != nil {
+		t.Fatalf("PolicyPreview() error = %v", err)
+	}
+	found := false
+	for _, p := range pv.Candidates {
+		for _, rule := range p.Rules {
+			for _, peer := range rule.Peers {
+				if peer == "10.200.0.0/20" {
+					found = true
+				}
+			}
+		}
+	}
+	if !found {
+		t.Error("no rule uses the registered node CIDR 10.200.0.0/20; " +
+			"the reader is still reading the hardcoded fixture value")
+	}
+}
+
+// 未注册的集群即便 fixture 里有数据也不可见：注册表是集群是否
+// 被平台管理的唯一判据。
+//
+// 表驱动、按方法名逐条列出，而不是挑一个方法代表全部——早前的版本只测
+// 了集群列表，Security() 漏掉门禁那次事故因此在 make check 里全绿。
+// 以后新增一个"按集群解析"的 Reader 方法却忘记接门禁，表现是这张表里
+// 缺一行，而不是沉默地放过去。
+//
+// 覆盖到的方法都通过 clusterID 参数（或等价的 Cluster 筛选）指名一个
+// 集群，注册表缺席时统一报 ErrClusterNotFound。Flow 按 flow ID 而非
+// 集群解析，不适用同一条断言，单独处理并说明原因（见下）。
+func TestClusterResolvingMethodsHideUnregisteredCluster(t *testing.T) {
+	const targetCluster = "prod-asia-1"
+
+	// 注册表里只有 eu，asia 缺席：asia 在 fixture 里仍有完整数据，
+	// 这正是要验证的场景——数据在，但没登记，就必须处处不可见。
+	src := fixtureSource()
+	src.offboard(targetCluster)
+	r := store.NewFixtureReader(fixture.Load(), src)
+	ctx := context.Background()
+	window := r.DataWindow()
+
+	// asiaInternalFlowID 是一条两端都在 asia、不涉及 eu 的流量 ID：
+	// 如果挑一条跨集群流量，registered 的 eu 端会让 hasRegisteredEndpoint
+	// 判定"有一端已注册"而放行，测不出漏洞。
+	asiaInternalFlowID := ""
+	for _, f := range fixture.Load().Flows {
+		if f.Flow.Source.ClusterID == targetCluster && f.Flow.Dest.ClusterID == targetCluster {
+			asiaInternalFlowID = f.ID
+			break
+		}
+	}
+	if asiaInternalFlowID == "" {
+		t.Fatal("fixture has no asia-internal flow to drive the Flow() case")
+	}
+
+	cases := map[string]func(t *testing.T){
+		"Topology": func(t *testing.T) {
+			_, err := r.Topology(ctx, targetCluster, store.LevelNamespace)
+			if !errors.Is(err, store.ErrClusterNotFound) {
+				t.Errorf("Topology() error = %v, want ErrClusterNotFound", err)
+			}
+		},
+		"Quality": func(t *testing.T) {
+			_, err := r.Quality(ctx, targetCluster)
+			if !errors.Is(err, store.ErrClusterNotFound) {
+				t.Errorf("Quality() error = %v, want ErrClusterNotFound", err)
+			}
+		},
+		"Security": func(t *testing.T) {
+			_, err := r.Security(ctx, targetCluster, window)
+			if !errors.Is(err, store.ErrClusterNotFound) {
+				t.Errorf("Security() error = %v, want ErrClusterNotFound", err)
+			}
+		},
+		"PolicyPreview": func(t *testing.T) {
+			_, err := r.PolicyPreview(ctx, targetCluster, "", window)
+			if !errors.Is(err, store.ErrClusterNotFound) {
+				t.Errorf("PolicyPreview() error = %v, want ErrClusterNotFound", err)
+			}
+		},
+		"Flows": func(t *testing.T) {
+			_, err := r.Flows(ctx, store.FlowFilter{Window: window, Cluster: targetCluster})
+			if !errors.Is(err, store.ErrClusterNotFound) {
+				t.Errorf("Flows(cluster=%s) error = %v, want ErrClusterNotFound", targetCluster, err)
+			}
+		},
+		// Flow 按不透明的 flow ID 解析，不像其余方法那样把集群名当参数，
+		// 所以它不报 ErrClusterNotFound——那样反而会告诉调用方"这个 ID
+		// 存在，只是集群被隐藏了"，等于把隐藏本身也泄露出去。它退化成
+		// 与"ID 不存在"完全相同的响应：ok = false，err = nil。
+		"Flow": func(t *testing.T) {
+			_, ok, err := r.Flow(ctx, asiaInternalFlowID)
+			if err != nil {
+				t.Fatalf("Flow() error = %v", err)
+			}
+			if ok {
+				t.Error("Flow() resolved a flow whose only cluster is unregistered")
+			}
+		},
+	}
+
+	for name, check := range cases {
+		t.Run(name, check)
+	}
+}
+
+// 下线必须立刻生效：同一个 reader 实例，下线前读得到、下线后必须读不到。
+//
+// 这是本轮 C1 的回归测试。此前 reader 持有的是启动时读出的一份集群清单，
+// 于是 DELETE /clusters/{id} 返回成功、GET /clusters 已经不再列出它，而
+// /security 与 /policy-preview 继续返回它的完整数据，直到有人重启进程 ——
+// 操作者收到「已下线」的确认，两个最敏感的端点却在继续供数，时间窗没有
+// 上限也没有任何迹象（spec §4.5）。
+//
+// 断言落在同一个 reader 实例上：换一个新实例去读，测的是构造函数，
+// 而不是「这次请求有没有重新解析注册状态」。
+func TestOffboardingTakesEffectWithoutRebuildingTheReader(t *testing.T) {
+	const targetCluster = "prod-asia-1"
+
+	src := fixtureSource()
+	r := store.NewFixtureReader(fixture.Load(), src)
+	ctx := context.Background()
+	window := r.DataWindow()
+
+	if _, err := r.Security(ctx, targetCluster, window); err != nil {
+		t.Fatalf("Security() before offboarding = %v, want the cluster to be readable", err)
+	}
+	if _, err := r.PolicyPreview(ctx, targetCluster, "", window); err != nil {
+		t.Fatalf("PolicyPreview() before offboarding = %v, want the cluster to be readable", err)
+	}
+
+	src.offboard(targetCluster)
+
+	if _, err := r.Security(ctx, targetCluster, window); !errors.Is(err, store.ErrClusterNotFound) {
+		t.Errorf("Security() after offboarding = %v, want ErrClusterNotFound — "+
+			"the reader is still answering from a startup snapshot", err)
+	}
+	if _, err := r.PolicyPreview(ctx, targetCluster, "", window); !errors.Is(err, store.ErrClusterNotFound) {
+		t.Errorf("PolicyPreview() after offboarding = %v, want ErrClusterNotFound — "+
+			"the reader is still answering from a startup snapshot", err)
 	}
 }

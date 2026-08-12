@@ -12,7 +12,7 @@ import (
 // workload 粒度必须比 namespace 粒度更细。相等说明聚合没生效，
 // 而界面会照常显示"workload 视图"。
 func TestWorkloadTopologyIsFinerThanNamespace(t *testing.T) {
-	r := store.NewFixtureReader(fixture.Load())
+	r := store.NewFixtureReader(fixture.Load(), fixtureSource())
 	ns, err := r.Topology(context.Background(), "prod-asia-1", store.LevelNamespace)
 	if err != nil {
 		t.Fatalf("namespace: %v", err)
@@ -33,7 +33,7 @@ func TestWorkloadTopologyIsFinerThanNamespace(t *testing.T) {
 // 每条边的两端都必须在节点集合里。悬空引用会让渲染器要么报错、
 // 要么悄悄丢掉那条边 —— 而最容易被丢掉的正是跨集群边。
 func TestWorkloadTopologyHasNoDanglingEdges(t *testing.T) {
-	r := store.NewFixtureReader(fixture.Load())
+	r := store.NewFixtureReader(fixture.Load(), fixtureSource())
 	for _, cluster := range []string{"prod-asia-1", "prod-eu-1"} {
 		topo, err := r.Topology(context.Background(), cluster, store.LevelWorkload)
 		if err != nil {
@@ -70,7 +70,7 @@ func TestWorkloadTopologySurfacesUnlabelledPods(t *testing.T) {
 		t.Skip("数据集里所有 Pod 都有 app 标签，本用例无从验证")
 	}
 
-	r := store.NewFixtureReader(f)
+	r := store.NewFixtureReader(f, fixtureSource())
 	topo, err := r.Topology(context.Background(), "prod-asia-1", store.LevelWorkload)
 	if err != nil {
 		t.Fatalf("Topology: %v", err)
@@ -88,7 +88,7 @@ func TestWorkloadTopologySurfacesUnlabelledPods(t *testing.T) {
 
 // 边必须说明是哪一侧做的判定，否则"该改哪边的策略"无从回答。
 func TestEdgesReportDecidingDirection(t *testing.T) {
-	r := store.NewFixtureReader(fixture.Load())
+	r := store.NewFixtureReader(fixture.Load(), fixtureSource())
 	topo, err := r.Topology(context.Background(), "prod-asia-1", store.LevelNamespace)
 	if err != nil {
 		t.Fatalf("Topology: %v", err)

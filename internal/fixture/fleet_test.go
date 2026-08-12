@@ -5,9 +5,52 @@ import (
 	"testing"
 
 	"github.com/imkerbos/Distill/internal/fixture"
+	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/replay"
 	"github.com/imkerbos/Distill/internal/store"
 )
+
+// memSource 是内存版 store.ClusterSource：reader 现在每个请求向注册表
+// 求证，测试给它一份内存里的注册信息即可，不必为此接一个数据库。
+type memSource struct {
+	clusters []registry.Cluster
+}
+
+func (m memSource) Clusters(context.Context) ([]registry.Cluster, error) {
+	return m.clusters, nil
+}
+
+func (m memSource) Cluster(_ context.Context, id string) (registry.Cluster, bool, error) {
+	for _, c := range m.clusters {
+		if c.ID == id {
+			return c, true, nil
+		}
+	}
+	return registry.Cluster{}, false, nil
+}
+
+func fixtureSource() memSource { return memSource{clusters: fixtureClusters()} }
+
+// fixtureClusters 镜像 internal/fixture/asset.go 里两个集群的注册信息。
+// 值必须与那里的 Registry/APIServers 逐字一致。
+func fixtureClusters() []registry.Cluster {
+	return []registry.Cluster{
+		{
+			ID: "prod-asia-1", DisplayName: "Asia Prod",
+			PodCIDR: "10.4.0.0/14", NodeCIDR: "10.128.0.0/20",
+			State:              registry.StateReady,
+			APIServers:         []registry.APIServer{{Host: "10.9.0.2", CIDR: "10.9.0.0/28", Port: 443}},
+			HealthCheckSources: []string{"35.191.0.0/16", "130.211.0.0/22"},
+		},
+		{
+			ID: "prod-eu-1", DisplayName: "EU Prod",
+			PodCIDR: "10.4.0.0/14", NodeCIDR: "10.132.0.0/20",
+			State:              registry.StateReady,
+			APIServers:         []registry.APIServer{{Host: "10.13.0.2", CIDR: "10.13.0.0/28", Port: 443}},
+			HealthCheckSources: []string{"35.191.0.0/16", "130.211.0.0/22"},
+		},
+	}
+}
 
 func TestLoadHasTwoClusters(t *testing.T) {
 	f := fixture.Load()
@@ -132,7 +175,10 @@ func TestDatasetContainsCrossClusterFlows(t *testing.T) {
 // 到那时这道守卫验的就不再是产品实际跑的东西了。
 func TestDatasetProducesAllDeliberateGaps(t *testing.T) {
 	f := fixture.Load()
-	r := store.NewFixtureReader(f)
+	// 不带 Cluster 筛选的 Flows 现在也按注册状态过滤（两端都未注册的
+	// 记录不出现，见 FixtureReader.hasRegisteredEndpoint）；两个 fixture
+	// 集群都要注册，这条断言才能看到全量求值结果。
+	r := store.NewFixtureReader(f, fixtureSource())
 	page, err := r.Flows(context.Background(),
 		store.FlowFilter{Limit: len(f.Flows), Window: r.DataWindow()})
 	if err != nil {
