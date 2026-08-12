@@ -3,6 +3,7 @@ package registry
 import (
 	"context"
 	"errors"
+	"time"
 )
 
 // ErrNotFound 表示目标不存在。
@@ -52,4 +53,27 @@ type Store interface {
 	CreateRuleOverride(ctx context.Context, actor Actor, o RuleOverride) error
 	// SoftDeleteRuleOverride 撤销一条人工决定，同事务写审计。
 	SoftDeleteRuleOverride(ctx context.Context, actor Actor, clusterID, namespace, workload, fingerprint string) error
+
+	// BindGitRepo 写入或替换一个集群的 Git 绑定，同事务写审计。
+	// 集群不存在时返回 ErrNotFound。
+	//
+	// 整体替换，不做部分更新：可写字段是绑定的全部内容
+	// （design doc 2026-08-13 §5）。这一步是操作者在改配置——仓库地址、
+	// 分支、路径都是平台自己不会产生的值，谁改的、改成了什么，必须能
+	// 从审计里单独认出来，不与 SetGitVerifyResult 的写入混在一起
+	// （理由见该方法的注释）。
+	BindGitRepo(ctx context.Context, actor Actor, clusterID string, b GitBinding) error
+	// UnbindGitRepo 解除一个集群的 Git 绑定，同事务写审计。
+	// 绑定不存在时返回 ErrNotFound。
+	UnbindGitRepo(ctx context.Context, actor Actor, clusterID string) error
+	// SetGitVerifyResult 只写一次只读校验的结论与时间，同事务写审计。
+	//
+	// 与 BindGitRepo 分开而不是合成一个方法：二者的授权含义不同。
+	// BindGitRepo 是操作者在下达配置变更；SetGitVerifyResult 是平台在
+	// 记录自己跑校验得到的判断，操作者并未提供这个结论、也不该能顺着
+	// 这条路径伪造它。合成一个方法之后，审计行就分不清"谁改了仓库
+	// 地址"与"平台跑了一次校验"这两件不同的事——这正是绑定嵌在集群
+	// 写模型里时已经付出的代价之一（design doc 2026-08-13 §1）。
+	SetGitVerifyResult(ctx context.Context, actor Actor, clusterID string,
+		result VerifyResult, at time.Time) error
 }
