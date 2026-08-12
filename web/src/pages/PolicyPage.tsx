@@ -1,9 +1,10 @@
-import type { ReactNode } from 'react'
-import { api } from '../api/client'
+import { useState, type CSSProperties, type ReactNode } from 'react'
+import { api, ApiError } from '../api/client'
 import {
   RISK_CATEGORY_LABEL, UNKNOWN_REASON_LABEL,
   type CandidatePolicy, type CandidateRule, type ChangedFlow, type Confidence,
-  type Kind, type MissingBaseline, type PredictionReport, type RuleOrigin,
+  type Kind, type MissingBaseline, type OverrideDecision, type PredictionReport,
+  type RuleOrigin, type RuleOverride, type StaleOverride,
   type UngeneratableItem, type UngeneratableReason, type Verdict,
 } from '../api/types'
 import { useResource } from '../api/useResource'
@@ -31,12 +32,28 @@ export default function PolicyPage({ cluster }: { cluster: string }) {
   const { data: clusters } = useResource('registered-clusters', () => api.clusters())
   const current = clusters?.find((c) => c.id === cluster)
 
-  const { data: pv, error, loading } = useResource(cluster, () => api.policyPreview(cluster))
+  // refreshKey 驱动确认/撤销之后的重新拉取——服务端是人工决定的唯一
+  // 真相源，本页不在本地叠加一份乐观状态（与 ClustersPage 的 refreshKey
+  // 同一条纪律：写操作成功后自增，让 useResource 重新发请求）。
+  const [refreshKey, setRefreshKey] = useState(0)
+  const onChanged = () => setRefreshKey((k) => k + 1)
+
+  // cluster 为空串时 key 必须也是空串——useResource 把空 key 当作"还没有
+  // 可查询的目标"，直接跳过请求（见 useResource 的 `if (!key)` 分支）。
+  // 拼上 refreshKey 之前先判空，否则 `":0"` 这类非空字符串会绕过那道
+  // 门禁，在集群尚未选定时就拿着空 clusterID 发一次注定失败的请求。
+  const { data: pv, error, loading } = useResource(
+    cluster ? `${cluster}:${refreshKey}` : '', () => api.policyPreview(cluster),
+  )
 
   if (current?.state === 'REGISTERED') return <NoTrafficNotice />
 
   if (error) return <p style={{ color: 'var(--verdict-deny)' }}>{error}</p>
   if (loading || !pv) return <p style={{ color: 'var(--text-muted)' }}>加载中…</p>
+
+  // 零条覆盖时后端把 overrides 序列化成 null（见 types.ts 里的注释）——
+  // 在这唯一一处兜底成 []，下游所有组件都能假设它是数组，不必每处重复判空。
+  const overrides = pv.overrides ?? []
 
   return (
     <div>
@@ -45,9 +62,14 @@ export default function PolicyPage({ cluster }: { cluster: string }) {
         description="dry-run 预测置顶：先看这条推荐会拦掉多少条当前正在工作的连接，再看策略本身长什么样。顺序即优先级。"
       />
 
-      <DryRunSection prediction={pv.prediction} />
-      <CandidateSection candidates={pv.candidates} />
-      <PendingSection candidates={pv.candidates} />
+      <DryRunSection
+        prediction={pv.prediction}
+        overridden={pv.overridden.prediction}
+        overrideCount={overrides.length}
+      />
+      <CandidateSection candidates={pv.candidates} overrides={overrides} cluster={cluster} onChanged={onChanged} />
+      <PendingSection candidates={pv.candidates} overrides={overrides} cluster={cluster} onChanged={onChanged} />
+      <StaleOverridesSection staleOverrides={pv.staleOverrides} />
       <MissingBaselineSection missing={pv.missingBaselines} baselineKinds={pv.baselineKinds} />
       <UngeneratableSection items={pv.ungeneratable} />
     </div>
@@ -92,33 +114,65 @@ function NoTrafficNotice() {
 /* 1. dry-run 影响                                                        */
 /* ---------------------------------------------------------------------- */
 
-function DryRunSection({ prediction }: { prediction: PredictionReport }) {
+/**
+ * dry-run 影响：默认推荐 vs 应用人工决定之后的版本。
+ *
+ * 无覆盖时（overrideCount === 0）两套预测在结构上恒等——store 层的
+ * Apply 对空覆盖列表是恒等变换——此时只显示一组数：否则每个集群第一次
+ * 打开都要看一堆 `→ 0`，噪声掩盖了真正有覆盖时该看的差值。
+ */
+function DryRunSection({ prediction, overridden, overrideCount }: {
+  prediction: PredictionReport
+  overridden: PredictionReport
+  overrideCount: number
+}) {
   const c = prediction.counts
+  const o = overridden.counts
+  const showDelta = overrideCount > 0
+
+  const breakDelta = o.WOULD_BREAK - c.WOULD_BREAK
+  const openDelta = o.WOULD_OPEN - c.WOULD_OPEN
+  const unchangedDelta = o.UNCHANGED - c.UNCHANGED
+  const unknownDelta = o.UNKNOWN - c.UNKNOWN
+  const allZero = breakDelta === 0 && openDelta === 0 && unchangedDelta === 0 && unknownDelta === 0
 
   return (
     <Section
       title="dry-run 影响"
       description="按当前候选策略重放同一段观测流量得到的四类变化。WOULD_BREAK 是本页最重要的数字——它是这条推荐一旦下发会拦断的、当前正在工作的连接数。"
     >
+      {showDelta && !allZero && (
+        <Notice>{summarizeDeltas(breakDelta, openDelta, overrideCount)}</Notice>
+      )}
+      {showDelta && allZero && (
+        <Notice>
+          已记录 {overrideCount} 次人工决定，但应用后 dry-run 预测的四类计数与默认推荐完全一致。
+          常见原因：这条连接属于「镜像对」——集群内连接会拆成源端 egress 与目的端 ingress
+          两条独立规则，NetworkPolicy 要求两端都放行才会真正生效，单独确认一侧不会改变判定。
+          到下方「待确认规则」核对被标记「镜像对待确认」的行，把另一侧也确认掉。
+        </Notice>
+      )}
+
       <div style={{
-        display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+        display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
         gap: 'var(--space-3)', marginBottom: 'var(--space-4)',
       }}>
-        <StatTile
-          label="WOULD_BREAK · 会被拦断" value={String(c.WOULD_BREAK)}
-          tone="deny" size="lg" note="当前放行、新策略会拒绝的连接"
+        <DryRunMetric
+          label="WOULD_BREAK · 会被拦断" defaultValue={c.WOULD_BREAK} overriddenValue={o.WOULD_BREAK}
+          tone="deny" size="lg" showDelta={showDelta} note="当前放行、新策略会拒绝的连接"
         />
-        <StatTile
-          label="WOULD_OPEN · 敞口扩大" value={String(c.WOULD_OPEN)}
-          tone="unknown" note="当前拒绝、新策略会放行 —— 不是好消息"
+        <DryRunMetric
+          label="WOULD_OPEN · 敞口扩大" defaultValue={c.WOULD_OPEN} overriddenValue={o.WOULD_OPEN}
+          tone="unknown" size="lg" showDelta={showDelta}
+          note="当前拒绝、新策略会放行 —— 不是好消息，增量与 WOULD_BREAK 的减量同等显著"
         />
-        <StatTile
-          label="UNCHANGED · 无变化" value={String(c.UNCHANGED)}
-          note="两侧都判得出、且结论一致"
+        <DryRunMetric
+          label="UNCHANGED · 无变化" defaultValue={c.UNCHANGED} overriddenValue={o.UNCHANGED}
+          showDelta={showDelta} note="两侧都判得出、且结论一致"
         />
-        <StatTile
-          label="UNKNOWN · 无法判定" value={String(c.UNKNOWN)}
-          tone="unknown" note="当前判定或新策略判定有一侧给不出结论"
+        <DryRunMetric
+          label="UNKNOWN · 无法判定" defaultValue={c.UNKNOWN} overriddenValue={o.UNKNOWN}
+          tone="unknown" showDelta={showDelta} note="当前判定或新策略判定有一侧给不出结论"
         />
       </div>
 
@@ -189,6 +243,87 @@ function DryRunSection({ prediction }: { prediction: PredictionReport }) {
   )
 }
 
+/**
+ * 把默认推荐与人工版本的差值拼成一句话，两个方向都提。
+ *
+ * 只有前者显眼时人的直觉是"数字变好了"——而变好的原因恰恰是刚放开了
+ * 一个已知敞口。DISABLE 覆盖会反向移动这两个数（WOULD_BREAK 增、
+ * WOULD_OPEN 减），因此四种符号组合都要覆盖，不能假设只有"启用风险
+ * 规则"这一种操作方向。
+ */
+function summarizeDeltas(breakDelta: number, openDelta: number, overrideCount: number): string {
+  const parts: string[] = []
+  if (breakDelta < 0) parts.push(`让 ${-breakDelta} 条连接不再被拦断`)
+  else if (breakDelta > 0) parts.push(`让 ${breakDelta} 条此前放行的连接被拦断`)
+  if (openDelta > 0) parts.push(`放开了 ${openDelta} 条当前被拒绝的连接`)
+  else if (openDelta < 0) parts.push(`收紧了 ${-openDelta} 条此前被放行的连接`)
+  if (parts.length === 0) return `你的 ${overrideCount} 次人工决定没有改变会被拦断或放开的连接数。`
+  return `你的 ${overrideCount} 次人工决定，${parts.join('，同时')}。`
+}
+
+/**
+ * dry-run 单项指标：无覆盖时退化为原有的单值 StatTile；有覆盖时并列
+ * 展示"默认 → 人工版本"与差值。
+ *
+ * WOULD_OPEN 与 WOULD_BREAK 用同一个 size='lg'，让敞口扩大的增量与
+ * 拦断减少的降幅同等显著——这是 spec 的硬约束，不是排版偏好：只放大
+ * WOULD_BREAK 会让人只看见"数字变好了"，看不见代价。
+ */
+function DryRunMetric({
+  label, defaultValue, overriddenValue, tone, size, note, showDelta,
+}: {
+  label: string
+  defaultValue: number
+  overriddenValue: number
+  tone?: 'unknown' | 'degraded' | 'deny'
+  size?: 'lg'
+  note?: ReactNode
+  showDelta: boolean
+}) {
+  if (!showDelta) {
+    return <StatTile label={label} value={String(defaultValue)} tone={tone} size={size} note={note} />
+  }
+
+  const delta = overriddenValue - defaultValue
+  const deltaLabel = delta === 0 ? '±0' : delta > 0 ? `+${delta}` : String(delta)
+  const accent =
+    tone === 'unknown' ? 'var(--verdict-unknown)'
+      : tone === 'degraded' ? 'var(--degraded-stroke)'
+        : tone === 'deny' ? 'var(--verdict-deny)'
+          : undefined
+
+  return (
+    <Card style={{ padding: 'var(--space-3)', borderLeft: accent ? `3px solid ${accent}` : undefined }}>
+      <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>{label}</div>
+      <div style={{
+        display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 'var(--space-1)', flexWrap: 'wrap',
+      }}>
+        <span style={{
+          fontSize: size === 'lg' ? 'var(--text-xl)' : 'var(--text-lg)', fontWeight: 500,
+          color: 'var(--text-muted)', fontVariantNumeric: 'tabular-nums',
+        }}>
+          {defaultValue}
+        </span>
+        <span style={{ color: 'var(--text-muted)' }}>→</span>
+        <span style={{
+          fontSize: size === 'lg' ? 'var(--text-2xl)' : 'var(--text-xl)', fontWeight: 600,
+          color: accent ?? 'var(--text)', fontVariantNumeric: 'tabular-nums',
+        }}>
+          {overriddenValue}
+        </span>
+        <span style={{ fontSize: 'var(--text-sm)', fontWeight: 600, color: accent ?? 'var(--text-muted)' }}>
+          {deltaLabel}
+        </span>
+      </div>
+      {note && (
+        <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginTop: 'var(--space-1)' }}>
+          {note}
+        </div>
+      )}
+    </Card>
+  )
+}
+
 function ChangeDetailTable({ title, rows, emptyMessage, emptyDetail }: {
   title: string
   rows: ChangedFlow[]
@@ -246,21 +381,198 @@ function ChangeDetailTable({ title, rows, emptyMessage, emptyDetail }: {
 }
 
 /* ---------------------------------------------------------------------- */
+/* 人工决定的共享控件                                                       */
+/* ---------------------------------------------------------------------- */
+
+/** 定位一条规则人工决定的复合键：(namespace, workload, fingerprint)。 */
+function overrideKey(namespace: string, workload: string, fingerprint: string): string {
+  return `${namespace}::${workload}::${fingerprint}`
+}
+
+function buildOverrideIndex(overrides: RuleOverride[]): Map<string, RuleOverride> {
+  const idx = new Map<string, RuleOverride>()
+  for (const o of overrides) idx.set(overrideKey(o.namespace, o.workload, o.fingerprint), o)
+  return idx
+}
+
+/** 一条规则在应用人工决定之后是否生效——覆盖不存在时退回它自己的默认 enabled。 */
+function effectiveEnabled(
+  overrideIndex: Map<string, RuleOverride>, namespace: string, workload: string, rule: CandidateRule,
+): boolean {
+  const o = overrideIndex.get(overrideKey(namespace, workload, rule.fingerprint))
+  return o ? o.decision === 'ENABLE' : rule.enabled
+}
+
+/**
+ * 一条人工决定的操作位：未决定时是"确认启用/确认禁用"按钮 + 必填理由
+ * 输入；已有覆盖时委托给 OverrideAppliedRow 展示谁/何时/为什么 + 撤销。
+ *
+ * 理由为空时提交按钮不可用——这是 reason NOT NULL 在界面上的对应物，
+ * 不是排版意义上的 courtesy。
+ */
+function OverrideControl({
+  cluster, namespace, workload, fingerprint, decision, override, onChanged, disabledReason,
+}: {
+  cluster: string
+  namespace: string
+  workload: string
+  fingerprint: string
+  decision: OverrideDecision
+  override?: RuleOverride
+  onChanged: () => void
+  disabledReason?: string
+}) {
+  const [open, setOpen] = useState(false)
+  const [reason, setReason] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  if (override) {
+    return <OverrideAppliedRow cluster={cluster} override={override} onChanged={onChanged} />
+  }
+
+  if (disabledReason) {
+    return (
+      <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }} title={disabledReason}>
+        不可禁用
+      </span>
+    )
+  }
+
+  if (!open) {
+    return (
+      <button type="button" onClick={() => setOpen(true)} style={secondarySmallButtonStyle}>
+        {decision === 'ENABLE' ? '确认启用' : '确认禁用'}
+      </button>
+    )
+  }
+
+  async function submit() {
+    setBusy(true)
+    setError('')
+    try {
+      await api.createOverride(cluster, { namespace, workload, fingerprint, decision, reason: reason.trim() })
+      setReason('')
+      setOpen(false)
+      onChanged()
+    } catch (err) {
+      // 后端把校验失败的具体字段写进 msg（比如"指纹与当前候选规则不匹配"）——
+      // 原样展示，这是轮 1 的 WriteInvalid 存在的理由。
+      setError(err instanceof ApiError ? err.msg : '提交失败，请稍后重试')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 240 }}>
+      <textarea
+        className="ctl"
+        value={reason}
+        onChange={(e) => setReason(e.target.value)}
+        placeholder="理由（必填）——半年后有人会问为什么"
+        rows={2}
+        style={{
+          width: '100%', fontFamily: 'inherit', fontSize: 'var(--text-xs)',
+          resize: 'vertical', padding: 6, height: 'auto',
+        }}
+      />
+      {error && <span role="alert" style={{ color: 'var(--verdict-deny)', fontSize: 'var(--text-xs)' }}>{error}</span>}
+      <div style={{ display: 'flex', gap: 6 }}>
+        {/* 理由为空时禁用：disabled 属性本身已经拦下点击，但按钮外观必须
+            跟着变——不透明度不降，操作者会以为按钮坏了而不是"还差一步"。
+            与 ClustersPage 的 removeApiServerRow 同一条约定。 */}
+        <button
+          type="button" onClick={submit} disabled={busy || reason.trim() === ''}
+          style={{
+            ...smallButtonStyle,
+            opacity: busy || reason.trim() === '' ? 0.5 : 1,
+            cursor: busy || reason.trim() === '' ? 'default' : 'pointer',
+          }}
+        >
+          {busy ? '提交中…' : '提交'}
+        </button>
+        <button
+          type="button"
+          onClick={() => { setOpen(false); setReason(''); setError('') }}
+          disabled={busy}
+          style={{ ...secondarySmallButtonStyle, opacity: busy ? 0.5 : 1, cursor: busy ? 'default' : 'pointer' }}
+        >
+          取消
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * 已有覆盖的行：谁、何时、什么理由直接显示在行上，不放进 tooltip——
+ * 半年后有人问「这条 SSH 出公网为什么是开的」，答案得在他正在看的那一屏。
+ * strong 徽标区分「人工启用」与「人工禁用」，同一处渲染同时覆盖两种方向。
+ */
+function OverrideAppliedRow({ cluster, override, onChanged }: {
+  cluster: string
+  override: RuleOverride
+  onChanged: () => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  async function revoke() {
+    setBusy(true)
+    setError('')
+    try {
+      await api.deleteOverride(cluster, override.namespace, override.workload, override.fingerprint)
+      onChanged()
+    } catch (err) {
+      setError(err instanceof ApiError ? err.msg : '撤销失败，请稍后重试')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div style={{ fontSize: 'var(--text-xs)', minWidth: 200 }}>
+      <Chip strong={override.decision === 'ENABLE'}>
+        {override.decision === 'ENABLE' ? '人工启用' : '人工禁用'}
+      </Chip>
+      <div style={{ marginTop: 4, color: 'var(--text-secondary)' }}>
+        {override.decidedBy} · {formatTime(override.decidedAt)}
+      </div>
+      <div style={{ marginTop: 2 }}>「{override.reason}」</div>
+      {error && <div role="alert" style={{ color: 'var(--verdict-deny)', marginTop: 4 }}>{error}</div>}
+      <button type="button" onClick={revoke} disabled={busy} style={{ ...secondarySmallButtonStyle, marginTop: 4 }}>
+        {busy ? '撤销中…' : '撤销'}
+      </button>
+    </div>
+  )
+}
+
+/* ---------------------------------------------------------------------- */
 /* 2. 候选策略列表（仅启用规则）                                            */
 /* ---------------------------------------------------------------------- */
 
-function CandidateSection({ candidates }: { candidates: CandidatePolicy[] }) {
+function CandidateSection({ candidates, overrides, cluster, onChanged }: {
+  candidates: CandidatePolicy[]
+  overrides: RuleOverride[]
+  cluster: string
+  onChanged: () => void
+}) {
+  const overrideIndex = buildOverrideIndex(overrides)
   return (
     <Section
       title="候选策略"
-      description="按 namespace/workload 分组，仅展示会被启用的规则。BASELINE 来自基础设施事实推导，LEARNED 来自观测流量学习——两者证据强度不同，徽标视觉可分。待确认（enabled=false）的规则见下一节，不在此处出现。"
+      description="按 namespace/workload 分组，仅展示会被启用的规则。BASELINE 来自基础设施事实推导，LEARNED 来自观测流量学习——两者证据强度不同，徽标视觉可分。待确认（enabled=false）的规则见下一节，不在此处出现；已被人工禁用的规则也移到下一节，同一处能看到全部人工决定。"
       meta={`${candidates.length} 组`}
     >
       {candidates.length === 0 ? (
         <EmptyState message="没有可生成的候选策略。" detail="见下方「不可生成清单」了解原因。" />
       ) : (
         candidates.map((c) => {
-          const enabled = c.rules.filter((r) => r.enabled)
+          // 默认启用、且没有被人工禁用覆盖的规则——被禁用的移到「待确认
+          // 规则」一节，与其它人工决定同屏，不在这里以"仍然启用"的样子留着。
+          const enabled = c.rules.filter((r) =>
+            r.enabled && overrideIndex.get(overrideKey(c.namespace, c.workload, r.fingerprint))?.decision !== 'DISABLE')
           return (
             <div key={`${c.namespace}/${c.workload}`} style={{ marginBottom: 'var(--space-4)' }}>
               <div style={{ marginBottom: 'var(--space-2)' }}>
@@ -277,7 +589,10 @@ function CandidateSection({ candidates }: { candidates: CandidatePolicy[] }) {
                   detail="全部规则处于待确认状态，见下方「待确认规则」一节。"
                 />
               ) : (
-                <RuleTable rules={enabled} />
+                <RuleTable
+                  rules={enabled} namespace={c.namespace} workload={c.workload}
+                  cluster={cluster} onChanged={onChanged}
+                />
               )}
             </div>
           )
@@ -287,7 +602,13 @@ function CandidateSection({ candidates }: { candidates: CandidatePolicy[] }) {
   )
 }
 
-function RuleTable({ rules }: { rules: CandidateRule[] }) {
+function RuleTable({ rules, namespace, workload, cluster, onChanged }: {
+  rules: CandidateRule[]
+  namespace: string
+  workload: string
+  cluster: string
+  onChanged: () => void
+}) {
   return (
     <TableCard>
       <thead>
@@ -298,17 +619,29 @@ function RuleTable({ rules }: { rules: CandidateRule[] }) {
           <th>对端</th>
           <th>端口</th>
           <th className="num">流量条数</th>
+          <th>人工决定</th>
         </tr>
       </thead>
       <tbody>
-        {rules.map((r, i) => (
-          <tr key={i}>
+        {rules.map((r) => (
+          <tr key={r.fingerprint}>
             <td><OriginBadge origin={r.origin} /></td>
             <td><RuleBasis rule={r} /></td>
             <td><Chip>{r.direction}</Chip></td>
             <td><RuleTargets values={r.peers} /></td>
             <td><RuleTargets values={r.ports} /></td>
             <td className="num">{r.flowCount}</td>
+            <td>
+              <OverrideControl
+                cluster={cluster} namespace={namespace} workload={workload}
+                fingerprint={r.fingerprint} decision="DISABLE" onChanged={onChanged}
+                disabledReason={
+                  r.origin === 'BASELINE'
+                    ? 'BASELINE 规则不接受人工禁用：需要修正其推导依据，而不是在这里覆盖'
+                    : undefined
+                }
+              />
+            </td>
           </tr>
         ))}
       </tbody>
@@ -380,27 +713,87 @@ function RuleBasis({ rule }: { rule: CandidateRule }) {
 /* 3. 待确认规则（enabled = false）                                        */
 /* ---------------------------------------------------------------------- */
 
-interface PendingRule extends CandidateRule {
+interface PendingRow {
   namespace: string
   workload: string
+  rule: CandidateRule
+  /** true：默认启用、当前被一条 DISABLE 覆盖收紧；false：默认禁用，走常规确认流程。 */
+  originallyEnabled: boolean
+  override?: RuleOverride
 }
 
-function PendingSection({ candidates }: { candidates: CandidatePolicy[] }) {
-  const pending: PendingRule[] = candidates.flatMap((c) =>
-    c.rules
-      .filter((r) => !r.enabled)
-      .map((r) => ({ ...r, namespace: c.namespace, workload: c.workload })))
+function buildPendingRows(
+  candidates: CandidatePolicy[], overrideIndex: Map<string, RuleOverride>,
+): PendingRow[] {
+  const rows: PendingRow[] = []
+  for (const c of candidates) {
+    for (const r of c.rules) {
+      const o = overrideIndex.get(overrideKey(c.namespace, c.workload, r.fingerprint))
+      if (!r.enabled) {
+        rows.push({ namespace: c.namespace, workload: c.workload, rule: r, originallyEnabled: false, override: o })
+      } else if (o?.decision === 'DISABLE') {
+        rows.push({ namespace: c.namespace, workload: c.workload, rule: r, originallyEnabled: true, override: o })
+      }
+    }
+  }
+  return rows
+}
+
+/** ipBlock 对端形如 "203.0.113.10/32"（可能带 " except ..."），selector 对端形如 "payment/api"。 */
+const CIDR_PEER = /^\d{1,3}(\.\d{1,3}){3}\//
+
+function isWorkloadPeer(peer: string): boolean {
+  return peer.includes('/') && !CIDR_PEER.test(peer)
+}
+
+function sameStrings(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((v, i) => v === b[i])
+}
+
+/**
+ * 找出一条集群内规则的镜像对端。
+ *
+ * 集群内连接会被拆成两条独立指纹的规则：源端 egress、目的端 ingress
+ * （internal/policygen/aggregate.go 的 classify）。NetworkPolicy 要求
+ * 两端都放行连接才会真正打开，单独确认一侧不会移动任何 dry-run 数字——
+ * 这是 Task 4 发现的产品事实，不提示的话，操作者会看到"我确认了、但
+ * 预测没变"，转而怀疑功能本身坏了。只有 selector 对端才可能有镜像对，
+ * ipBlock（公网/CIDR）对端不存在对称的另一侧。
+ */
+function findMirroredCounterpart(
+  candidates: CandidatePolicy[], namespace: string, workload: string, rule: CandidateRule,
+): { namespace: string; workload: string; rule: CandidateRule } | null {
+  if (rule.peers.length !== 1 || !isWorkloadPeer(rule.peers[0])) return null
+  const [peerNs, peerWl] = rule.peers[0].split('/')
+  const mirrorDirection = rule.direction === 'EGRESS' ? 'INGRESS' : 'EGRESS'
+  const selfRef = `${namespace}/${workload}`
+  const target = candidates.find((c) => c.namespace === peerNs && c.workload === peerWl)
+  if (!target) return null
+  const counterpart = target.rules.find((r) =>
+    r.direction === mirrorDirection && r.peers.length === 1 && r.peers[0] === selfRef
+    && sameStrings(r.ports, rule.ports))
+  return counterpart ? { namespace: peerNs, workload: peerWl, rule: counterpart } : null
+}
+
+function PendingSection({ candidates, overrides, cluster, onChanged }: {
+  candidates: CandidatePolicy[]
+  overrides: RuleOverride[]
+  cluster: string
+  onChanged: () => void
+}) {
+  const overrideIndex = buildOverrideIndex(overrides)
+  const pending = buildPendingRows(candidates, overrideIndex)
 
   return (
     <Section
       title="待确认规则"
-      description="enabled = false 的规则：证据不足以自动启用，或命中已知风险端口。这一节承载着这条推荐里已知的风险，因此默认展开、不折叠、不灰化。"
+      description="enabled = false 的规则（证据不足以自动启用，或命中已知风险端口），以及被人工禁用的默认启用规则——两者都是这条推荐里已知的风险或人工判断，因此默认展开、不折叠、不灰化。「镜像对」列出集群内连接需要同时确认的另一侧规则：只确认一侧不会改变任何 dry-run 数字。"
       meta={`${pending.length} 条`}
     >
       {pending.length === 0 ? (
-        <EmptyState message="没有待确认的规则。" detail="全部候选规则都满足自动启用条件。" />
+        <EmptyState message="没有待确认的规则。" detail="全部候选规则都满足自动启用条件，也没有人工禁用过任何默认启用的规则。" />
       ) : (
-        <ScrollTableCard maxHeight={480}>
+        <ScrollTableCard maxHeight={560}>
           <thead style={STICKY_HEAD}>
             <tr>
               <th>namespace/workload</th>
@@ -411,32 +804,64 @@ function PendingSection({ candidates }: { candidates: CandidatePolicy[] }) {
                   而是"它通向 203.0.113.10/32 还是通向整个公网"。 */}
               <th>对端 · 端口</th>
               <th className="num">流量条数</th>
+              <th>镜像对</th>
+              <th>人工决定</th>
             </tr>
           </thead>
           <tbody>
-            {pending.map((r, i) => (
-              <tr key={`${r.namespace}/${r.workload}/${i}`}>
-                <td className="mono" style={{ fontSize: 'var(--text-sm)' }}>
-                  {r.namespace}/{r.workload}
-                </td>
-                <td>{r.evidence ?? r.baseline ?? '—'}</td>
-                <td>
-                  {r.risk ? (
-                    <Chip strong>
-                      {RISK_CATEGORY_LABEL[r.risk.category] ?? r.risk.category} · {r.risk.name}:{r.risk.port}
-                    </Chip>
-                  ) : (
-                    <span style={{ color: 'var(--text-muted)' }}>—</span>
-                  )}
-                </td>
-                <td><Chip>{r.direction}</Chip></td>
-                <td>
-                  <RuleTargets values={r.peers} />
-                  <RuleTargets values={r.ports} />
-                </td>
-                <td className="num">{r.flowCount}</td>
-              </tr>
-            ))}
+            {pending.map(({ namespace, workload, rule: r, originallyEnabled, override }) => {
+              const mirror = findMirroredCounterpart(candidates, namespace, workload, r)
+              const mirrorEnabled = mirror
+                ? effectiveEnabled(overrideIndex, mirror.namespace, mirror.workload, mirror.rule)
+                : false
+              return (
+                <tr key={`${namespace}/${workload}/${r.fingerprint}`}>
+                  <td className="mono" style={{ fontSize: 'var(--text-sm)' }}>
+                    {namespace}/{workload}
+                    {originallyEnabled && (
+                      <div style={{ marginTop: 2 }}>
+                        <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>默认启用</span>
+                      </div>
+                    )}
+                  </td>
+                  <td>{r.evidence ?? r.baseline ?? '—'}</td>
+                  <td>
+                    {r.risk ? (
+                      <Chip strong>
+                        {RISK_CATEGORY_LABEL[r.risk.category] ?? r.risk.category} · {r.risk.name}:{r.risk.port}
+                      </Chip>
+                    ) : (
+                      <span style={{ color: 'var(--text-muted)' }}>—</span>
+                    )}
+                  </td>
+                  <td><Chip>{r.direction}</Chip></td>
+                  <td>
+                    <RuleTargets values={r.peers} />
+                    <RuleTargets values={r.ports} />
+                  </td>
+                  <td className="num">{r.flowCount}</td>
+                  <td style={{ fontSize: 'var(--text-xs)' }}>
+                    {!mirror ? (
+                      <span style={{ color: 'var(--text-muted)' }}>—</span>
+                    ) : mirrorEnabled ? (
+                      <span style={{ color: 'var(--text-muted)' }}>
+                        对端 {mirror.namespace}/{mirror.workload} 已放行
+                      </span>
+                    ) : (
+                      <Chip strong>镜像对待确认 · {mirror.namespace}/{mirror.workload}</Chip>
+                    )}
+                  </td>
+                  <td>
+                    <OverrideControl
+                      cluster={cluster} namespace={namespace} workload={workload}
+                      fingerprint={r.fingerprint}
+                      decision={originallyEnabled ? 'DISABLE' : 'ENABLE'}
+                      override={override} onChanged={onChanged}
+                    />
+                  </td>
+                </tr>
+              )
+            })}
           </tbody>
         </ScrollTableCard>
       )}
@@ -445,7 +870,61 @@ function PendingSection({ candidates }: { candidates: CandidatePolicy[] }) {
 }
 
 /* ---------------------------------------------------------------------- */
-/* 4. 缺失 Baseline                                                       */
+/* 5. 已失效的确认                                                         */
+/* ---------------------------------------------------------------------- */
+
+/**
+ * 只在 staleOverrides 非空时出现，出现时不折叠：它代表一个人做过的判断
+ * 现在悬空了——只说「已失效」等于告诉人「你上周的工作没了，自己去查」。
+ */
+function StaleOverridesSection({ staleOverrides }: { staleOverrides: StaleOverride[] }) {
+  if (staleOverrides.length === 0) return null
+
+  return (
+    <Section
+      title="已失效的确认"
+      description="规则内容已变（指纹不再匹配当前候选集），或当初的决定试图禁用一条 BASELINE 规则（不接受）。当初的判断仍然列在这里，但它不再对应任何一条当前的候选规则，需要重新确认。"
+      meta={`${staleOverrides.length} 条`}
+    >
+      <ScrollTableCard maxHeight={480}>
+        <thead style={STICKY_HEAD}>
+          <tr>
+            <th>namespace/workload</th>
+            <th>当初确认</th>
+            <th>现在这个位置</th>
+            <th>失效原因</th>
+          </tr>
+        </thead>
+        <tbody>
+          {staleOverrides.map((s) => (
+            <tr key={`${s.override.namespace}/${s.override.workload}/${s.override.fingerprint}`}>
+              <td className="mono" style={{ fontSize: 'var(--text-sm)' }}>
+                {s.override.namespace}/{s.override.workload}
+              </td>
+              <td style={{ fontSize: 'var(--text-xs)' }}>
+                {formatTime(s.override.decidedAt)} by {s.override.decidedBy}
+                <div style={{ marginTop: 2, color: 'var(--text-secondary)' }}>「{s.override.reason}」</div>
+              </td>
+              <td style={{ fontSize: 'var(--text-xs)' }}>
+                {s.currentRules.length === 0 ? (
+                  <span style={{ color: 'var(--text-muted)' }}>该 workload 已不存在</span>
+                ) : (
+                  <span className="mono" style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                    {s.currentRules.map((rule, ri) => <span key={ri}>{rule}</span>)}
+                  </span>
+                )}
+              </td>
+              <td style={{ fontSize: 'var(--text-xs)' }}>{s.reason}</td>
+            </tr>
+          ))}
+        </tbody>
+      </ScrollTableCard>
+    </Section>
+  )
+}
+
+/* ---------------------------------------------------------------------- */
+/* 6. 缺失 Baseline                                                       */
 /* ---------------------------------------------------------------------- */
 
 function MissingBaselineSection({ missing, baselineKinds }: {
@@ -493,7 +972,7 @@ function MissingBaselineSection({ missing, baselineKinds }: {
 }
 
 /* ---------------------------------------------------------------------- */
-/* 5. 不可生成清单                                                         */
+/* 7. 不可生成清单                                                         */
 /* ---------------------------------------------------------------------- */
 
 function UngeneratableSection({ items }: { items: UngeneratableItem[] }) {
@@ -552,6 +1031,23 @@ function UngeneratableSection({ items }: { items: UngeneratableItem[] }) {
 /* ---------------------------------------------------------------------- */
 
 const STICKY_HEAD = { position: 'sticky' as const, top: 0, background: 'var(--surface)' }
+
+/** 与 ClustersPage 的 formatTime 同一形状，本页独立维护一份（同一处约定，非共享导出）。 */
+function formatTime(iso: string): string {
+  return new Date(iso).toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC')
+}
+
+const smallButtonStyle: CSSProperties = {
+  padding: '4px 10px', fontSize: 'var(--text-xs)', fontWeight: 500,
+  color: 'var(--text-on-dark)', background: 'var(--accent)',
+  border: 'none', borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+}
+
+const secondarySmallButtonStyle: CSSProperties = {
+  padding: '4px 10px', fontSize: 'var(--text-xs)', fontWeight: 500,
+  color: 'var(--text)', background: 'var(--surface)',
+  border: '1px solid var(--border-strong)', borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+}
 
 /**
  * 带纵向滚动的表格容器。
