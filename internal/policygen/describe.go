@@ -3,6 +3,8 @@ package policygen
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -50,9 +52,22 @@ func (r *Rule) describe() {
 // 导出是为了让测试能对手工构造的规则求指纹 —— 「改了内容指纹必须变」
 // 这条性质只有对着两份仅差一个字段的规则才验证得了。
 //
-// 各字段之间用 \x00 分隔而非直接拼接：peers 与 ports 都是自由文本，
-// 直接拼接会让 ["a","bc"] 与 ["ab","c"] 得到同一个指纹。写入长度前缀
-// 的理由与分隔符相同：只有分隔符时 ["a\x00b"] 与 ["a","b"] 仍会碰撞。
+// 对端与端口取自规则体（Ingress/Egress），**不取** Peers/Ports 那两个
+// 展示串：展示串是写给人看的，为此做了简化 —— describeSelector 命中
+// workloadLabelKeys 时只显示标签值，于是 {app: foo} 与 {k8s-app: foo}
+// 都渲染成 ns/foo，MatchExpressions 更是整块塌缩成字面量
+// "matchExpressions"。让身份挂在这种有损渲染上，两条选中范围完全不同
+// 的规则会得到同一个指纹、同一行 rule_override，人工确认只对其中一条
+// 生效，而界面上那两行长得一模一样 —— 操作者看到的是「我确认了，它没反应」。
+// 简化是展示层的自由，一旦它同时是身份，展示层就再也不能改。
+//
+// 序列化整个规则体而不是逐字段手写：手写的那份必须随 NetworkPolicy 类型
+// 演进同步维护，漏掉一个字段的后果是两条不同的规则碰撞成一个指纹 ——
+// 朝着不安全的方向失败，且不报错。json.Marshal 对 map 键排序，因此结果
+// 是确定的（同一份输入两次生成逐字节相同这条性质依赖于此）。
+//
+// 各字段之间用 \x00 分隔而非直接拼接：直接拼接会让 ["a","bc"] 与
+// ["ab","c"] 得到同一个指纹。
 func FingerprintOf(r Rule) string {
 	h := sha256.New()
 	write := func(parts ...string) {
@@ -67,11 +82,33 @@ func FingerprintOf(r Rule) string {
 	} else {
 		write("")
 	}
-	write(strconv.Itoa(len(r.Peers)))
-	write(r.Peers...)
-	write(strconv.Itoa(len(r.Ports)))
-	write(r.Ports...)
+	write(ruleBody(r))
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// ruleBody 把规则体的对端与端口序列化成用于指纹的规范形式。
+//
+// FlowCount 与 Enabled 都不在规则体里，因此天然不会进指纹：前者每天
+// 都在变，后者恰恰是 Apply 要改的字段 —— 把它算进去会让一条规则在被
+// 确认的那一刻换掉指纹，覆盖立刻指向不存在的规则。
+func ruleBody(r Rule) string {
+	var body struct {
+		Peers []networkingv1.NetworkPolicyPeer `json:"peers"`
+		Ports []networkingv1.NetworkPolicyPort `json:"ports"`
+	}
+	switch {
+	case r.Ingress != nil:
+		body.Peers, body.Ports = r.Ingress.From, r.Ingress.Ports
+	case r.Egress != nil:
+		body.Peers, body.Ports = r.Egress.To, r.Egress.Ports
+	}
+	b, err := json.Marshal(body)
+	if err != nil {
+		// 走不到：这两个都是纯数据结构。真走到了也不能返回一个常量 ——
+		// 那会让所有规则碰撞成同一个指纹。fmt 的 map 输出同样按键排序。
+		return fmt.Sprintf("unserializable:%v:%#v", err, body)
+	}
+	return string(b)
 }
 
 // describePeer 把一个 peer 渲染成 namespace/workload 或 CIDR。

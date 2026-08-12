@@ -68,11 +68,15 @@ type MissingBaseline struct {
 // namespace 的流量落到 ALLOW，凭空造出敞口告警（spec §5）。按 namespace
 // 看只是展示需求，由消费方裁剪产物完成。
 func Generate(in Input) Result {
+	// 归属键的赢家先定下来：名册与流量两条路径必须用同一份判定，各算
+	// 各的会让「哪个 Pod 进了候选集」与「哪条流量学得进规则」互相矛盾。
+	winners := resolveWinningKeys(in)
+
 	counts := map[aggKey]int{}
 	var bad []UngeneratableItem
 
 	for _, o := range in.Observations {
-		items, gaps := classify(o, in.ClusterID)
+		items, gaps := classify(o, in.ClusterID, winners)
 		for _, it := range items {
 			counts[it.key]++
 		}
@@ -113,6 +117,17 @@ func Generate(in Input) Result {
 			excluded = append(excluded, ExcludedWorkload{
 				Namespace: p.Namespace, Pod: p.Name, Labels: cloneLabels(p.Labels),
 				Reason: ExclusionNoWorkloadLabel,
+			})
+			continue
+		}
+		// 同名 workload 挂在不同标签键上时只留赢家（resolveWinningKeys），
+		// 输家在这里点名报出去：赢家的 podSelector 用的是赢家的键，选不中
+		// 这个 Pod，所以它确实没有候选策略。报一条"它被排除了"，好过发一条
+		// 名字相同、却谁都选不中的第二份策略——后者不报错，只是永远不生效。
+		if win, seen := winners[nsWorkload{namespace: p.Namespace, workload: wl}]; seen && win != key {
+			excluded = append(excluded, ExcludedWorkload{
+				Namespace: p.Namespace, Pod: p.Name, Labels: cloneLabels(p.Labels),
+				Reason: ExclusionLabelKeyConflict,
 			})
 			continue
 		}
@@ -165,12 +180,21 @@ func Generate(in Input) Result {
 			WorkloadLabelKey: s.labelKey, Rules: rules,
 		})
 	}
+	// 比较到 WorkloadLabelKey 为止：resolveWinningKeys 保证 (namespace,
+	// workload) 唯一，这一项理论上永远比不到。写出来是因为 sort.Slice
+	// 不稳定、上面的 res.Policies 又是 range map 建起来的——排序器一旦
+	// 打平，输出顺序就退化成 map 遍历顺序，而整个指纹机制挂在"同一份
+	// 输入两次生成逐字节相同"上。让确定性依赖另一个函数的不变量，是把
+	// 一次未来的重构变成一次静默的指纹失效。
 	sort.Slice(res.Policies, func(i, j int) bool {
 		a, b := res.Policies[i], res.Policies[j]
 		if a.Namespace != b.Namespace {
 			return a.Namespace < b.Namespace
 		}
-		return a.Workload < b.Workload
+		if a.Workload != b.Workload {
+			return a.Workload < b.Workload
+		}
+		return a.WorkloadLabelKey < b.WorkloadLabelKey
 	})
 
 	for ns := range nsWithWorkload {

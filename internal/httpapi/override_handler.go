@@ -11,6 +11,7 @@ import (
 	"github.com/imkerbos/Distill/internal/policygen"
 	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/response"
+	"github.com/imkerbos/Distill/internal/store"
 )
 
 // overridePayload 是人工决定的请求体。
@@ -92,6 +93,17 @@ func handleCreateOverride(d Deps) http.HandlerFunc {
 		); err != nil {
 			if errors.Is(err, policygen.ErrBaselineNotDisablable) {
 				response.WriteInvalid(w, baselineNotDisablableMsg)
+				return
+			}
+			// EnsureRuleExists 与 GET /policy-preview 走同一个 Reader、
+			// 同一次集群解析，因此必须给出同一个答案：一个在 MySQL 里
+			// 注册、但 Reader 侧不存在的集群，在那边是 404/20002，在这边
+			// 若落到 writeRegistryError 的 default 分支就成了 500 —— 同一个
+			// 边界条件两种答案，调用方无法判断到底是"集群不存在"还是
+			// "服务坏了"，而后者会把一次纯输入问题记进服务错误率、按故障
+			// 告警。Reader 的哨兵交给 Reader 那套映射。
+			if errors.Is(err, store.ErrClusterNotFound) || errors.Is(err, store.ErrNamespaceNotFound) {
+				writeReaderError(w, r, d, err)
 				return
 			}
 			writeRegistryError(w, r, d, err)

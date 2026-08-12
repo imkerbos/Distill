@@ -5,8 +5,11 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/util/intstr"
+
 	"github.com/imkerbos/Distill/internal/baseline"
 	"github.com/imkerbos/Distill/internal/policygen"
+	"github.com/imkerbos/Distill/internal/replay"
 )
 
 func TestOverrideDecisionEnumIsClosed(t *testing.T) {
@@ -49,27 +52,123 @@ func TestFingerprintIgnoresFlowCount(t *testing.T) {
 
 // 内容变了指纹必须变，否则「确认的是 MySQL，重新生成后变成 SSH，
 // 覆盖仍在」这种情况无法被发现。
+//
+// 改的是规则体，不是 Peers/Ports 展示串：指纹取自规则体（见
+// FingerprintOf 的注释）。改展示串来断言指纹变化，测的就不是"内容变了"
+// 而是渲染函数，而渲染是有损的 —— 两条选中范围不同的规则可以渲染成
+// 同一个串（这正是 T6 的 I3）。
+//
+// 两半都不做条件跳过：fixture 拿不出一条同时带端口与 selector 对端的
+// 出向规则，本身就是该报的失败，不是该静默略过的情况。
 func TestFingerprintChangesWithContent(t *testing.T) {
-	in := observe(t, "prod-asia-1")
-	r := policygen.Generate(in).Policies[0].Rules[0]
+	res := policygen.Generate(observe(t, "prod-asia-1"))
 
-	changed := r
-	changed.Ports = append([]string{}, r.Ports...)
-	if len(changed.Ports) == 0 {
-		t.Skip("rule has no ports to mutate")
+	var base policygen.Rule
+search:
+	for _, p := range res.Policies {
+		for _, r := range p.Rules {
+			if r.Egress != nil && len(r.Egress.Ports) > 0 && len(r.Egress.To) > 0 &&
+				r.Egress.To[0].PodSelector != nil && len(r.Egress.To[0].PodSelector.MatchLabels) > 0 {
+				base = r
+				break search
+			}
+		}
 	}
-	changed.Ports[0] = "TCP/9999"
-	if policygen.FingerprintOf(changed) == r.Fingerprint {
+	if base.Fingerprint == "" {
+		t.Fatal("fixture produced no egress rule carrying both a port and a selector peer")
+	}
+
+	portChanged := base
+	portBody := base.Egress.DeepCopy()
+	newPort := intstr.FromInt32(9999)
+	portBody.Ports[0].Port = &newPort
+	portChanged.Egress = portBody
+	if policygen.FingerprintOf(portChanged) == base.Fingerprint {
 		t.Error("fingerprint unchanged after a port change")
 	}
 
-	changed2 := r
-	changed2.Peers = append([]string{}, r.Peers...)
-	if len(changed2.Peers) > 0 {
-		changed2.Peers[0] = "somewhere/else"
-		if policygen.FingerprintOf(changed2) == r.Fingerprint {
-			t.Error("fingerprint unchanged after a peer change")
+	peerChanged := base
+	peerBody := base.Egress.DeepCopy()
+	for k := range peerBody.To[0].PodSelector.MatchLabels {
+		peerBody.To[0].PodSelector.MatchLabels[k] = "somewhere-else"
+	}
+	peerChanged.Egress = peerBody
+	if policygen.FingerprintOf(peerChanged) == base.Fingerprint {
+		t.Error("fingerprint unchanged after a peer change")
+	}
+
+	keyChanged := base
+	keyBody := base.Egress.DeepCopy()
+	for k, v := range keyBody.To[0].PodSelector.MatchLabels {
+		delete(keyBody.To[0].PodSelector.MatchLabels, k)
+		keyBody.To[0].PodSelector.MatchLabels["k8s-app-renamed"] = v
+	}
+	keyChanged.Egress = keyBody
+	if policygen.FingerprintOf(keyChanged) == base.Fingerprint {
+		t.Error("fingerprint unchanged after the peer's label key changed with the value kept")
+	}
+}
+
+// 两个只差标签键的对端在界面上渲染成同一个串（describeSelector 命中
+// workloadLabelKeys 时只显示取值），但它们选中的是不同的 Pod。指纹
+// 必须把它们分开：否则两条规则共用一个 rule_override 主键，一次人工
+// 确认只对其中一条生效，而另一条在界面上长得一模一样、点了没反应。
+func TestFingerprintDistinguishesPeersThatRenderIdentically(t *testing.T) {
+	client := replay.PodRef{
+		ClusterID: "c1", Namespace: "shop", Name: "client-1", IP: "10.0.0.1",
+		Labels: map[string]string{"app": "client"},
+	}
+	apiApp := replay.PodRef{
+		ClusterID: "c1", Namespace: "payment", Name: "api-app-1", IP: "10.0.1.1",
+		Labels: map[string]string{"app": "api"},
+	}
+	apiK8s := replay.PodRef{
+		ClusterID: "c1", Namespace: "payment", Name: "api-k8s-1", IP: "10.0.1.2",
+		Labels: map[string]string{"k8s-app": "api"},
+	}
+	flowTo := func(dst replay.PodRef) replay.Flow {
+		return replay.Flow{
+			Source:   replay.Endpoint{IP: client.IP, ClusterID: client.ClusterID, Pod: &client},
+			Dest:     replay.Endpoint{IP: dst.IP, ClusterID: dst.ClusterID, Pod: &dst},
+			Protocol: replay.ProtocolTCP, Port: 3306,
+			Timestamp: time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC),
 		}
+	}
+	allow := replay.Decision{Verdict: replay.VerdictAllow, Confidence: replay.ConfidenceTrusted}
+	res := policygen.Generate(policygen.Input{
+		ClusterID: "c1",
+		Pods:      []replay.PodRef{client, apiApp, apiK8s},
+		Observations: []policygen.Observation{
+			{FlowID: "f-app", Flow: flowTo(apiApp), Decision: allow},
+			{FlowID: "f-k8s", Flow: flowTo(apiK8s), Decision: allow},
+		},
+	})
+
+	var rules []policygen.Rule
+	for _, p := range res.Policies {
+		if p.Namespace != "shop" || p.Workload != "client" {
+			continue
+		}
+		for _, r := range p.Rules {
+			if r.Origin == policygen.OriginLearned && len(r.Peers) == 1 && r.Peers[0] == "payment/api" {
+				rules = append(rules, r)
+			}
+		}
+	}
+	if len(rules) != 2 {
+		t.Fatalf("egress rules rendering as payment/api = %d, want 2 (one per peer label key)", len(rules))
+	}
+	// 先证明碰撞的前提确实成立：两条规则的展示视图逐字段相同。少了这
+	// 一句，下面那条断言在"渲染碰巧不同"时也会通过，就测不到它要测的东西。
+	if rules[0].Peers[0] != rules[1].Peers[0] || rules[0].Ports[0] != rules[1].Ports[0] {
+		t.Fatalf("the two rules no longer render identically (%v/%v vs %v/%v); "+
+			"this test only means something while they do",
+			rules[0].Peers, rules[0].Ports, rules[1].Peers, rules[1].Ports)
+	}
+	if rules[0].Fingerprint == rules[1].Fingerprint {
+		t.Errorf("peers {app: api} and {k8s-app: api} share fingerprint %s; "+
+			"they select different Pods and must be separate rule_override rows",
+			rules[0].Fingerprint)
 	}
 }
 

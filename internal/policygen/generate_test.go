@@ -79,10 +79,13 @@ func policyContent(t *testing.T, p policygen.CandidatePolicy) string {
 			Ingress: r.Ingress, Egress: r.Egress,
 		}
 	}
+	// WorkloadLabelKey 一并比对：它直接决定生成的 podSelector 的键，
+	// 是"会变的字段"里最要紧的一个——归属键换了，策略选中的对象就换了，
+	// 而 Namespace/Workload/Rules 全都可以一字不差。
 	b, err := json.Marshal(struct {
-		Cluster, Namespace, Workload string
-		Rules                        []ruleContent
-	}{p.Cluster, p.Namespace, p.Workload, rules})
+		Cluster, Namespace, Workload, WorkloadLabelKey string
+		Rules                                          []ruleContent
+	}{p.Cluster, p.Namespace, p.Workload, p.WorkloadLabelKey, rules})
 	if err != nil {
 		t.Fatalf("marshal policy content: %v", err)
 	}
@@ -182,8 +185,22 @@ func TestOnlyTrustedAllowRulesAreEnabled(t *testing.T) {
 	}
 }
 
-// 四类不可生成原因在 fixture 上都要真实出现过，否则那些分支从未被验证。
-func TestUngeneratableCoversAllFourReasons(t *testing.T) {
+// fixtureUnreachableReasons 是 fixture 流量构造不出、由专门用例覆盖的原因。
+//
+// 列出来而不是从下面的断言里删掉：新增一个原因时，作者必须显式回答
+// "它由谁覆盖"，否则那条断言会失败。值是覆盖它的用例名，好让读的人
+// 直接去看，而不是相信这句话。
+var fixtureUnreachableReasons = map[policygen.UngeneratableReason]string{
+	// LABEL_KEY_CONFLICT 要求同一个 namespace 里两个 Pod 带同一个 workload
+	// 取值却挂在不同标签键上，且输家有流量。往 fixture 加这样一对 Pod 会
+	// 改动 spec §6 钉死的验收数字（81/0/123/44），因此单独构造。
+	policygen.ReasonLabelKeyConflict: "TestSameWorkloadUnderTwoLabelKeysYieldsOneCandidatePolicy",
+}
+
+// 每一类不可生成原因都必须被验证过：fixture 上真实出现过，或由
+// fixtureUnreachableReasons 点名的专门用例覆盖。两者都不满足，
+// 那个分支就是从未被执行过的代码。
+func TestUngeneratableCoversEveryReason(t *testing.T) {
 	seen := map[policygen.UngeneratableReason]bool{}
 	for _, cluster := range []string{"prod-asia-1", "prod-eu-1"} {
 		for _, item := range policygen.Generate(observe(t, cluster)).Ungeneratable {
@@ -194,8 +211,14 @@ func TestUngeneratableCoversAllFourReasons(t *testing.T) {
 		}
 	}
 	for _, want := range policygen.AllUngeneratableReasons() {
-		if !seen[want] {
-			t.Errorf("reason %q never occurs in the fixture; that branch is unverified", want)
+		covered, listed := fixtureUnreachableReasons[want]
+		switch {
+		case seen[want] && listed:
+			t.Errorf("reason %q now occurs in the fixture; drop it from fixtureUnreachableReasons"+
+				" so %s is not the only thing claiming to cover it", want, covered)
+		case !seen[want] && !listed:
+			t.Errorf("reason %q never occurs in the fixture and no test claims it;"+
+				" that branch is unverified", want)
 		}
 	}
 }
@@ -574,6 +597,111 @@ func TestPodWithMultipleResolvableLabelsUsesHighestPriorityKey(t *testing.T) {
 	if v, wrongKey := np.Spec.PodSelector.MatchLabels["app"]; wrongKey {
 		t.Errorf("podSelector = %v, must not carry the losing app=%q label at all",
 			np.Spec.PodSelector.MatchLabels, v)
+	}
+}
+
+// 同一个 namespace 里两个 Pod 带同一个 workload 取值、却挂在不同的标签
+// 键上——Helm chart 改标签的滚动更新期间就是这个形态。(namespace, workload)
+// 是覆盖机制的定位键：Apply 按它找策略、EnsureRuleExists 按它校验、
+// EnabledPolicies 按它命名、排序比较器按它定序。它一旦不唯一，这四处
+// 会各自给出不同的答案，而其中三处不报错。
+//
+// 因此这里钉死：赢家只有一个，输家进 ExcludedWorkloads 并点名，输家的
+// 流量进 Ungeneratable 并点名。输家确实没有候选策略——赢家的 podSelector
+// 用赢家的键构造，选不中它——报出这个缺口，好过发一条同名、却谁都选不中
+// 的第二份策略。
+func TestSameWorkloadUnderTwoLabelKeysYieldsOneCandidatePolicy(t *testing.T) {
+	canonical := replay.PodRef{
+		ClusterID: "c1", Namespace: "shop", Name: "web-new-1", IP: "10.0.0.2",
+		Labels: map[string]string{"app.kubernetes.io/name": "web"},
+	}
+	legacy := replay.PodRef{
+		ClusterID: "c1", Namespace: "shop", Name: "web-legacy-1", IP: "10.0.0.3",
+		Labels: map[string]string{"app": "web"},
+	}
+	client := replay.PodRef{
+		ClusterID: "c1", Namespace: "shop", Name: "client-1", IP: "10.0.0.1",
+		Labels: map[string]string{"app": "client"},
+	}
+	flowTo := func(dst replay.PodRef) replay.Flow {
+		return replay.Flow{
+			Source:   replay.Endpoint{IP: client.IP, ClusterID: client.ClusterID, Pod: &client},
+			Dest:     replay.Endpoint{IP: dst.IP, ClusterID: dst.ClusterID, Pod: &dst},
+			Protocol: replay.ProtocolTCP, Port: 8080,
+			Timestamp: time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC),
+		}
+	}
+	allow := replay.Decision{Verdict: replay.VerdictAllow, Confidence: replay.ConfidenceTrusted}
+	res := policygen.Generate(policygen.Input{
+		ClusterID: "c1",
+		Pods:      []replay.PodRef{canonical, legacy, client},
+		Observations: []policygen.Observation{
+			{FlowID: "f-new", Flow: flowTo(canonical), Decision: allow},
+			{FlowID: "f-legacy", Flow: flowTo(legacy), Decision: allow},
+		},
+	})
+
+	var forWeb []policygen.CandidatePolicy
+	for _, p := range res.Policies {
+		if p.Namespace == "shop" && p.Workload == "web" {
+			forWeb = append(forWeb, p)
+		}
+	}
+	if len(forWeb) != 1 {
+		t.Fatalf("candidate policies for shop/web = %d, want exactly 1: %+v", len(forWeb), forWeb)
+	}
+	if forWeb[0].WorkloadLabelKey != "app.kubernetes.io/name" {
+		t.Errorf("WorkloadLabelKey = %q, want app.kubernetes.io/name (the higher-priority key)",
+			forWeb[0].WorkloadLabelKey)
+	}
+
+	// 同名 NetworkPolicy 对 predict.Run 是加法、无害，但轮 3 要把它写回
+	// Git：两个同名对象在一个 namespace 里，后写的那个会覆盖前一个。
+	seen := map[string]bool{}
+	for _, np := range res.EnabledPolicies() {
+		id := np.Namespace + "/" + np.Name
+		if seen[id] {
+			t.Errorf("EnabledPolicies() emits two NetworkPolicies named %s", id)
+		}
+		seen[id] = true
+	}
+
+	var excluded []policygen.ExcludedWorkload
+	for _, w := range res.ExcludedWorkloads {
+		if w.Pod == "web-legacy-1" {
+			excluded = append(excluded, w)
+		}
+	}
+	if len(excluded) != 1 {
+		t.Fatalf("ExcludedWorkloads entries for web-legacy-1 = %d, want exactly 1: %+v",
+			len(excluded), excluded)
+	}
+	if excluded[0].Reason != policygen.ExclusionLabelKeyConflict {
+		t.Errorf("reason = %q, want %q", excluded[0].Reason, policygen.ExclusionLabelKeyConflict)
+	}
+	if excluded[0].Labels["app"] != "web" {
+		t.Errorf("Labels = %v, want the losing Pod's own labels for triage", excluded[0].Labels)
+	}
+
+	// 输家的那条流量必须留下痕迹：它的目的侧不再产出任何规则，只报
+	// "候选策略 N 条" 会让这条连接凭空消失，而人正是照着这份清单判断
+	// 上线会不会断。
+	var gaps []policygen.UngeneratableItem
+	for _, it := range res.Ungeneratable {
+		if it.Reason == policygen.ReasonLabelKeyConflict {
+			gaps = append(gaps, it)
+		}
+	}
+	if len(gaps) != 1 {
+		t.Fatalf("LABEL_KEY_CONFLICT gaps = %d, want exactly 1 (the f-legacy ingress side): %+v",
+			len(gaps), gaps)
+	}
+	if gaps[0].FlowID != "f-legacy" {
+		t.Errorf("gap flowID = %q, want f-legacy", gaps[0].FlowID)
+	}
+	if !strings.Contains(gaps[0].Detail, "web-legacy-1") {
+		t.Errorf("detail = %q, must name the Pod; a count alone says nothing about what to fix",
+			gaps[0].Detail)
 	}
 }
 

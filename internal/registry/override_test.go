@@ -87,6 +87,33 @@ func TestValidateOverrideRequiresIdentity(t *testing.T) {
 	}
 }
 
+// 同一个坏请求必须每次得到同一句话。
+//
+// 多个身份字段同时为空时，报哪一个不能取决于 map 的遍历顺序：这段
+// 文案会原样回给调用方，两次一模一样的请求得到两个不同的字段名，
+// 排查的人会以为服务在随机拒绝他。断言的是"稳定且是声明顺序里的
+// 第一个"，而不只是"稳定"——只测稳定的话，一份按 workload、namespace、
+// clusterID 倒序检查的实现也能通过，而那与 ValidateCluster 的顺序相反。
+func TestValidateOverrideNamesTheFirstMissingFieldDeterministically(t *testing.T) {
+	o := validOverride()
+	o.ClusterID, o.Namespace, o.Workload = "", "", ""
+
+	const want = "clusterID is required"
+	for i := range 50 {
+		err := registry.ValidateOverride(o)
+		if err == nil {
+			t.Fatal("ValidateOverride() = nil for an override with no identity at all")
+		}
+		var ie *registry.InvalidError
+		if !errors.As(err, &ie) {
+			t.Fatalf("err = %v, want an *InvalidError", err)
+		}
+		if ie.Detail != want {
+			t.Fatalf("run %d: detail = %q, want %q on every run", i, ie.Detail, want)
+		}
+	}
+}
+
 // 转换必须逐字段带过去：漏一个字段不会有编译错误，只会让某条
 // 人工决定在应用时静默对不上。
 func TestToPolicygenCarriesEveryField(t *testing.T) {

@@ -36,6 +36,15 @@ var workloadLabelKeys = []string{
 	"component",              // 控制面组件（kube-apiserver、etcd 等）
 }
 
+// labelKeyRank 是 workloadLabelKeys 的优先级索引，值越小越优先。
+var labelKeyRank = func() map[string]int {
+	out := make(map[string]int, len(workloadLabelKeys))
+	for i, k := range workloadLabelKeys {
+		out[k] = i
+	}
+	return out
+}()
+
 // resolveWorkloadLabel 按优先级从 Pod 标签里选出 workload 归属键与取值。
 //
 // 返回具体命中的键而非固定假设 app：podSelector 必须用实际命中的键
@@ -49,6 +58,82 @@ func resolveWorkloadLabel(labels map[string]string) (key, value string, ok bool)
 		}
 	}
 	return "", "", false
+}
+
+// nsWorkload 是候选策略的身份：(namespace, workload 取值)。
+type nsWorkload struct {
+	namespace string
+	workload  string
+}
+
+// keyClaim 是某个 (namespace, workload) 上一次归属键的主张。
+type keyClaim struct {
+	key string
+	// fromRoster 表示这次主张来自 Pod 名册（Input.Pods），而不是流量里
+	// 出现过的 Pod 引用。
+	fromRoster bool
+}
+
+// resolveWinningKeys 为每个 (namespace, workload) 选出唯一的归属标签键。
+//
+// 同一个 namespace 里两个 Pod 可以带同一个 workload 取值却挂在不同的
+// 标签键上 —— Helm chart 改标签的滚动更新期间就是这个形态：旧 ReplicaSet
+// 是 app: foo，新的是 app.kubernetes.io/name: foo。若两边各自建一条候选
+// 策略，(namespace, workload) 就不再唯一，而这个二元组是覆盖机制的定位
+// 键：Apply 只会命中第一条、EnsureRuleExists 却两条都认，于是一条通过了
+// 写入校验的覆盖在展示时永远显示「已失效」；EnabledPolicies 还会吐出两条
+// 同名 NetworkPolicy，排序比较器在这里打平，输出顺序退化成 map 遍历顺序
+// —— 而整个指纹机制挂在那条确定性上。
+//
+// 因此这里先定一个赢家，输家由调用方按缺口报出去（ExclusionLabelKeyConflict
+// / ReasonLabelKeyConflict），而不是让两条策略并存。
+//
+// 名册优先于流量：赢家决定 podSelector 的键，而 podSelector 要选中的是
+// 当前活着的 Pod。让一条引用了已删除 Pod 的历史流量把赢家改掉，生成的
+// 就是一条集群里没有任何 Pod 会命中的幽灵策略。
+func resolveWinningKeys(in Input) map[nsWorkload]string {
+	claims := map[nsWorkload]keyClaim{}
+	consider := func(p replay.PodRef, fromRoster bool) {
+		if p.ClusterID != in.ClusterID || replay.IsUnmanaged(p) {
+			return
+		}
+		key, wl, ok := resolveWorkloadLabel(p.Labels)
+		if !ok {
+			return
+		}
+		id := nsWorkload{namespace: p.Namespace, workload: wl}
+		cur, seen := claims[id]
+		if !seen || betterClaim(keyClaim{key: key, fromRoster: fromRoster}, cur) {
+			claims[id] = keyClaim{key: key, fromRoster: fromRoster}
+		}
+	}
+	for _, p := range in.Pods {
+		consider(p, true)
+	}
+	for _, o := range in.Observations {
+		if o.Flow.Source.Pod != nil {
+			consider(*o.Flow.Source.Pod, false)
+		}
+		if o.Flow.Dest.Pod != nil {
+			consider(*o.Flow.Dest.Pod, false)
+		}
+	}
+	out := make(map[nsWorkload]string, len(claims))
+	for id, c := range claims {
+		out[id] = c.key
+	}
+	return out
+}
+
+// betterClaim 报告 a 是否该取代 b。
+//
+// 判据只有名册来源与固定优先级两条，都与遍历顺序无关：赢家不能依赖
+// map 的迭代顺序，否则同一份输入两次生成会得到不同的 podSelector 键。
+func betterClaim(a, b keyClaim) bool {
+	if a.fromRoster != b.fromRoster {
+		return a.fromRoster
+	}
+	return labelKeyRank[a.key] < labelKeyRank[b.key]
 }
 
 // aggKey 是规则的聚合键。
@@ -83,7 +168,13 @@ type keyed struct {
 //
 // 某一侧不可表达不连累另一侧：源端没有 app 标签时，目的端的 ingress
 // 规则仍然成立，把它一起丢掉会让候选策略凭空少一条必要放行。
-func classify(o Observation, clusterID string) ([]keyed, []UngeneratableItem) {
+//
+// winners 是每个 (namespace, workload) 唯一的归属标签键，见
+// resolveWinningKeys：主体侧必须与候选策略的 podSelector 用同一个键，
+// 否则学到的规则会挂到一条选不中这个 Pod 的策略上。
+func classify(
+	o Observation, clusterID string, winners map[nsWorkload]string,
+) ([]keyed, []UngeneratableItem) {
 	// 整条流量级别的排除先做：这两类与方向无关，逐侧判会重复报两次。
 	if o.Decision.Confidence == replay.ConfidenceDegraded {
 		return nil, []UngeneratableItem{{
@@ -103,7 +194,7 @@ func classify(o Observation, clusterID string) ([]keyed, []UngeneratableItem) {
 	var bad []UngeneratableItem
 
 	// 源侧：主体是源 Pod，方向为 egress。
-	if sub, ok, item := subjectOf(o, o.Flow.Source, clusterID); ok {
+	if sub, ok, item := subjectOf(o, o.Flow.Source, clusterID, winners); ok {
 		peerNS, peerWL, peerKey, peerCIDR, expressible, peerItem := peerOf(o, o.Flow.Dest, clusterID)
 		if expressible {
 			items = append(items, keyed{key: aggKey{
@@ -120,7 +211,7 @@ func classify(o Observation, clusterID string) ([]keyed, []UngeneratableItem) {
 	}
 
 	// 目的侧：主体是目的 Pod，方向为 ingress。
-	if sub, ok, item := subjectOf(o, o.Flow.Dest, clusterID); ok {
+	if sub, ok, item := subjectOf(o, o.Flow.Dest, clusterID, winners); ok {
 		peerNS, peerWL, peerKey, peerCIDR, expressible, peerItem := peerOf(o, o.Flow.Source, clusterID)
 		if expressible {
 			items = append(items, keyed{key: aggKey{
@@ -150,7 +241,9 @@ type subject struct {
 //
 // 第二个返回值为 false 且第三个为 nil 表示"该端点本就不属于本集群"，
 // 不是缺陷，无需报告；第三个非 nil 才是真正表达不了的情况。
-func subjectOf(o Observation, ep replay.Endpoint, clusterID string) (subject, bool, *UngeneratableItem) {
+func subjectOf(
+	o Observation, ep replay.Endpoint, clusterID string, winners map[nsWorkload]string,
+) (subject, bool, *UngeneratableItem) {
 	if ep.Pod == nil || ep.Pod.ClusterID != clusterID {
 		return subject{}, false, nil
 	}
@@ -169,6 +262,20 @@ func subjectOf(o Observation, ep replay.Endpoint, clusterID string) (subject, bo
 				ep.Pod.Namespace, ep.Pod.Name, strings.Join(workloadLabelKeys, "/")),
 		}
 	}
+	// 归属键与该 (namespace, workload) 的赢家不一致：这个 Pod 没有属于
+	// 自己的候选策略（见 resolveWinningKeys），把它的流量学进赢家那条
+	// 策略等于用一个选不中它的 podSelector 放行它的流量 —— 规则会写进
+	// 集群、看起来覆盖了这条连接，实际一条都放不通，而人是照着这份清单
+	// 判断"上线会不会断"的。
+	if win, ok := winners[nsWorkload{namespace: ep.Pod.Namespace, workload: wl}]; ok && win != key {
+		return subject{}, false, &UngeneratableItem{
+			FlowID: o.FlowID, Reason: ReasonLabelKeyConflict,
+			Detail: fmt.Sprintf(
+				"%s/%s 用标签键 %s 归属到 workload %q，而该 workload 已由优先级更高的 %s 归属；"+
+					"一个 (namespace, workload) 只能有一条候选策略，该 Pod 不在它的 podSelector 范围内",
+				ep.Pod.Namespace, ep.Pod.Name, key, wl, win),
+		}
+	}
 	return subject{namespace: ep.Pod.Namespace, workload: wl, labelKey: key}, true, nil
 }
 
@@ -177,6 +284,12 @@ func subjectOf(o Observation, ep replay.Endpoint, clusterID string) (subject, bo
 // 第五个返回值为 false 表示对端无法表达，该方向不生成规则；第六个返回值
 // 非 nil 时是这次表达失败该报的缺口。第三个返回值是对端命中的标签键，
 // selector 对端才有意义，ipBlock 对端恒为空。
+//
+// 对端不做 resolveWinningKeys 那套唯一化：唯一性是候选策略身份的要求
+// （一个 (namespace, workload) 一条策略），而对端只是一段 selector 表达式
+// —— {k8s-app: foo} 恰好就选中那个 Pod，把它改写成赢家的键反而选不中。
+// 两个只差标签键的对端因此是两条不同的规则，FingerprintOf 取规则体而非
+// 展示串，两者的指纹也不同（见 describe.go）。
 func peerOf(o Observation, ep replay.Endpoint, clusterID string) (
 	ns, workload, labelKey, cidr string, ok bool, unexpressible *UngeneratableItem,
 ) {

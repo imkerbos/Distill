@@ -85,12 +85,17 @@ const (
 	ReasonDegradedEvidence UngeneratableReason = "DEGRADED_EVIDENCE"
 	// ReasonUnmanagedEndpoint 表示端点不受 NetworkPolicy 管控，如 hostNetwork Pod。
 	ReasonUnmanagedEndpoint UngeneratableReason = "UNMANAGED_ENDPOINT"
+	// ReasonLabelKeyConflict 表示主体 Pod 的 workload 归属键不是该
+	// (namespace, workload) 的赢家（见 resolveWinningKeys），候选策略的
+	// podSelector 选不中它，这条流量因此没有能承载它的规则。
+	ReasonLabelKeyConflict UngeneratableReason = "LABEL_KEY_CONFLICT"
 )
 
 // allUngeneratableReasons 是枚举的唯一登记处。
 var allUngeneratableReasons = []UngeneratableReason{
 	ReasonNoWorkloadLabel, ReasonIdentityUnknown,
 	ReasonDegradedEvidence, ReasonUnmanagedEndpoint,
+	ReasonLabelKeyConflict,
 }
 
 // AllUngeneratableReasons 返回全部已登记的不可生成原因。
@@ -133,11 +138,17 @@ const (
 	// ExclusionNoWorkloadLabel 表示 Pod 不带任何可识别的 workload 标签
 	// （见 workloadLabelKeys），podSelector 无法表达。
 	ExclusionNoWorkloadLabel WorkloadExclusionReason = "NO_WORKLOAD_LABEL"
+	// ExclusionLabelKeyConflict 表示同一个 (namespace, workload) 上另有
+	// 优先级更高的归属标签键，这个 Pod 挂在输的那个键上。
+	//
+	// 它确实没有候选策略：赢家的 podSelector 用赢家的键构造，选不中它。
+	// 报出来好过发第二条同名策略——后者不报错，只是永远选不中任何 Pod。
+	ExclusionLabelKeyConflict WorkloadExclusionReason = "LABEL_KEY_CONFLICT"
 )
 
 // allWorkloadExclusionReasons 是枚举的唯一登记处。
 var allWorkloadExclusionReasons = []WorkloadExclusionReason{
-	ExclusionHostNetwork, ExclusionNoWorkloadLabel,
+	ExclusionHostNetwork, ExclusionNoWorkloadLabel, ExclusionLabelKeyConflict,
 }
 
 // AllWorkloadExclusionReasons 返回全部已登记的排除原因。

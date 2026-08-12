@@ -20,8 +20,8 @@ func TestEvidenceClassEnumIsClosed(t *testing.T) {
 }
 
 func TestUngeneratableReasonEnumIsClosed(t *testing.T) {
-	if len(policygen.AllUngeneratableReasons()) != 4 {
-		t.Fatalf("AllUngeneratableReasons() = %d entries, want 4",
+	if len(policygen.AllUngeneratableReasons()) != 5 {
+		t.Fatalf("AllUngeneratableReasons() = %d entries, want 5",
 			len(policygen.AllUngeneratableReasons()))
 	}
 	if policygen.UngeneratableReason("FREE TEXT").Valid() {
@@ -63,6 +63,7 @@ func TestEveryDeclaredUngeneratableReasonIsValid(t *testing.T) {
 		policygen.ReasonIdentityUnknown,
 		policygen.ReasonDegradedEvidence,
 		policygen.ReasonUnmanagedEndpoint,
+		policygen.ReasonLabelKeyConflict,
 	} {
 		if !r.Valid() {
 			t.Errorf("declared reason %q is not registered in allUngeneratableReasons", r)
@@ -71,8 +72,8 @@ func TestEveryDeclaredUngeneratableReasonIsValid(t *testing.T) {
 }
 
 func TestWorkloadExclusionReasonEnumIsClosed(t *testing.T) {
-	if len(policygen.AllWorkloadExclusionReasons()) != 2 {
-		t.Fatalf("AllWorkloadExclusionReasons() = %d entries, want 2",
+	if len(policygen.AllWorkloadExclusionReasons()) != 3 {
+		t.Fatalf("AllWorkloadExclusionReasons() = %d entries, want 3",
 			len(policygen.AllWorkloadExclusionReasons()))
 	}
 	if policygen.WorkloadExclusionReason("FREE TEXT").Valid() {
@@ -91,6 +92,7 @@ func TestEveryDeclaredWorkloadExclusionReasonIsValid(t *testing.T) {
 	for _, r := range []policygen.WorkloadExclusionReason{
 		policygen.ExclusionHostNetwork,
 		policygen.ExclusionNoWorkloadLabel,
+		policygen.ExclusionLabelKeyConflict,
 	} {
 		if !r.Valid() {
 			t.Errorf("declared reason %q is not registered in allWorkloadExclusionReasons", r)

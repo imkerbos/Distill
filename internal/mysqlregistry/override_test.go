@@ -2,6 +2,8 @@ package mysqlregistry_test
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -103,6 +105,55 @@ func TestRepeatedDecisionOverwritesAndAudits(t *testing.T) {
 	}
 	if n != 2 {
 		t.Errorf("audit rows = %d, want 2 — both decisions must be on the record", n)
+	}
+
+	// 两行都在，不等于「改主意」这件事被记下来了：记录一次改主意的
+	// 全部内容就是第二行的 before —— 它必须是第一次的决定。少了这条
+	// 断言，把 CreateRuleOverride 里的 before = existing 删掉，上面的
+	// 计数照样是 2，测试照样绿，而审计从此只能回答「现在是什么」。
+	rows, err := db.Query(
+		`SELECT before_val FROM audit_log
+		  WHERE action = 'CREATE_RULE_OVERRIDE' ORDER BY id`)
+	if err != nil {
+		t.Fatalf("query audit: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var befores []sql.NullString
+	for rows.Next() {
+		var b sql.NullString
+		if err := rows.Scan(&b); err != nil {
+			t.Fatalf("scan audit: %v", err)
+		}
+		befores = append(befores, b)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate audit: %v", err)
+	}
+	if len(befores) != 2 {
+		t.Fatalf("audit rows read = %d, want 2", len(befores))
+	}
+	if befores[0].Valid {
+		t.Errorf("first CREATE_RULE_OVERRIDE before_val = %q, want NULL — there was nothing before it",
+			befores[0].String)
+	}
+	if !befores[1].Valid {
+		t.Fatal("second CREATE_RULE_OVERRIDE before_val is NULL;" +
+			" the row says nothing about the decision it replaced")
+	}
+	var prior registry.RuleOverride
+	if err := json.Unmarshal([]byte(befores[1].String), &prior); err != nil {
+		t.Fatalf("decode before_val: %v", err)
+	}
+	if prior.Decision != policygen.DecisionEnable {
+		t.Errorf("before_val decision = %q, want %q — the decision that was overwritten",
+			prior.Decision, policygen.DecisionEnable)
+	}
+	if prior.Reason != first.Reason {
+		t.Errorf("before_val reason = %q, want %q", prior.Reason, first.Reason)
+	}
+	if prior.Fingerprint != first.Fingerprint || prior.Namespace != first.Namespace ||
+		prior.Workload != first.Workload {
+		t.Errorf("before_val = %+v, want the identity of the decision it replaced", prior)
 	}
 }
 

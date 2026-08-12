@@ -206,6 +206,39 @@ func TestCreateOverrideRequiresSession(t *testing.T) {
 	}
 }
 
+// 一个在注册表里存在、但 Reader 侧不认识的集群（轮 2 的接入端点让这
+// 种状态一次点击就能造出来），两个端点必须给出同一个答案。
+//
+// 断言的是"两者一致"而不是各自的字面量：这条约束的内容就是一致性。
+// 只钉住 POST 的 20002，将来有人改了 GET 那边的映射，这里照样绿，
+// 而两个端点又一次开始互相矛盾。
+func TestUnknownClusterAnswersTheSameOnPreviewAndOverride(t *testing.T) {
+	reg := newRegisteredRegistry()
+	reg.clusters["zz-review-probe"] = registry.Cluster{
+		ID: "zz-review-probe", DisplayName: "Probe", PodCIDR: "10.8.0.0/14",
+		NodeCIDR: "10.129.0.0/20", State: registry.StateReady,
+	}
+	h, _, cookie := newTestRouterWithRegistry(t, fixtureReader(), reg)
+
+	get := authedGet(t, h, cookie, "/api/v1/clusters/zz-review-probe/policy-preview")
+	post := authedPostJSON(t, h, cookie, "/api/v1/clusters/zz-review-probe/rule-overrides",
+		map[string]any{"namespace": "batch", "workload": "worker",
+			"fingerprint": strings.Repeat("a", 64), "decision": "ENABLE", "reason": "r"})
+
+	getCode, postCode := bodyOf(t, get)["code"], bodyOf(t, post)["code"]
+	if get.Code != post.Code || getCode != postCode {
+		t.Errorf("preview = HTTP %d/%v, override = HTTP %d/%v; the same unknown cluster must answer the same",
+			get.Code, getCode, post.Code, postCode)
+	}
+	if postCode != float64(20002) {
+		t.Errorf("override code = %v, want 20002 — an unregistered cluster is a business failure,"+
+			" not a service fault", postCode)
+	}
+	if len(reg.overrides["zz-review-probe"]) != 0 {
+		t.Error("an override was stored for a cluster the reader does not know")
+	}
+}
+
 func TestCreateOverrideRoundTrips(t *testing.T) {
 	reg := newRegisteredRegistry()
 	h, _, cookie := newTestRouterWithRegistry(t, fixtureReader(), reg)

@@ -32,6 +32,15 @@ func obs(src, dst *replay.PodRef, dstIP string, port int32, d replay.Decision) O
 	return Observation{FlowID: "f1", Flow: f, Decision: d}
 }
 
+// classifyOne 按这一条观测自身推出的归属键赢家做分类，等价于 Generate
+// 在名册为空、只有这一条流量时的行为——用例关心的是拆分与表达能力，
+// 不是同名 workload 的归属键竞争（那条在 generate_test.go 里单独钉住）。
+func classifyOne(o Observation, clusterID string) ([]keyed, []UngeneratableItem) {
+	return classify(o, clusterID, resolveWinningKeys(Input{
+		ClusterID: clusterID, Observations: []Observation{o},
+	}))
+}
+
 func allowDecision() replay.Decision {
 	return replay.Decision{Verdict: replay.VerdictAllow, Confidence: replay.ConfidenceTrusted}
 }
@@ -41,7 +50,7 @@ func allowDecision() replay.Decision {
 func TestClassifyProducesBothDirectionsForInClusterFlow(t *testing.T) {
 	o := obs(pod("c1", "gateway", "gateway-1", "gateway"),
 		pod("c1", "payment", "payment-1", "api"), "10.4.0.4", 8080, allowDecision())
-	items, bad := classify(o, "c1")
+	items, bad := classifyOne(o, "c1")
 	if len(bad) != 0 {
 		t.Fatalf("ungeneratable = %+v, want none", bad)
 	}
@@ -63,7 +72,7 @@ func TestClassifyProducesBothDirectionsForInClusterFlow(t *testing.T) {
 // 当前被拦下的连接分到 TRUSTED_DENY，不与正常调用混为一谈。
 func TestClassifyMarksDeniedFlowsAsTrustedDeny(t *testing.T) {
 	d := replay.Decision{Verdict: replay.VerdictDeny, Confidence: replay.ConfidenceTrusted}
-	items, _ := classify(obs(
+	items, _ := classifyOne(obs(
 		pod("c1", "batch", "batch-1", "worker"),
 		pod("c1", "payment", "payment-1", "api"), "10.4.0.4", 3306, d), "c1")
 	for _, it := range items {
@@ -77,7 +86,7 @@ func TestClassifyMarksDeniedFlowsAsTrustedDeny(t *testing.T) {
 func TestClassifyInternetEgressProducesSingleIPBlockItem(t *testing.T) {
 	o := obs(pod("c1", "batch", "batch-1", "worker"), nil, "203.0.113.10", 22, allowDecision())
 	o.Flow.Dest.ClusterID = ""
-	items, _ := classify(o, "c1")
+	items, _ := classifyOne(o, "c1")
 	if len(items) != 1 {
 		t.Fatalf("items = %d, want 1 (egress only)", len(items))
 	}
@@ -101,7 +110,7 @@ func TestClassifyInternetEgressProducesSingleIPBlockItem(t *testing.T) {
 func TestClassifyReportsPodWithoutAppLabel(t *testing.T) {
 	o := obs(pod("c1", "legacy", "legacy-unlabelled", ""),
 		pod("c1", "payment", "payment-1", "api"), "10.4.0.4", 8080, allowDecision())
-	items, bad := classify(o, "c1")
+	items, bad := classifyOne(o, "c1")
 	if len(items) != 0 {
 		t.Errorf("items = %+v, want none; neither direction is expressible", items)
 	}
@@ -124,7 +133,7 @@ func TestClassifyReportsPodWithoutAppLabel(t *testing.T) {
 func TestClassifyExternalPeerKeepsIPBlockFallback(t *testing.T) {
 	o := obs(pod("c1", "checkout", "checkout-1", "checkout"), nil, "198.51.100.7", 443, allowDecision())
 	o.Flow.Dest.ClusterID = ""
-	items, bad := classify(o, "c1")
+	items, bad := classifyOne(o, "c1")
 	if len(bad) != 0 {
 		t.Fatalf("ungeneratable = %+v, want none", bad)
 	}
@@ -146,7 +155,7 @@ func TestClassifyExternalPeerKeepsIPBlockFallback(t *testing.T) {
 // DEGRADED 不得作为推荐依据（spec §6.4），整条流量排除并报原因。
 func TestClassifyRejectsDegradedEvidence(t *testing.T) {
 	d := replay.Decision{Verdict: replay.VerdictAllow, Confidence: replay.ConfidenceDegraded}
-	items, bad := classify(obs(
+	items, bad := classifyOne(obs(
 		pod("c1", "checkout", "checkout-1", "checkout"),
 		pod("c1", "payment", "payment-1", "api"), "10.4.0.4", 8080, d), "c1")
 	if len(items) != 0 {
@@ -160,7 +169,7 @@ func TestClassifyRejectsDegradedEvidence(t *testing.T) {
 func TestClassifyRejectsUnknownVerdict(t *testing.T) {
 	d := replay.Decision{Verdict: replay.VerdictUnknown, Confidence: replay.ConfidenceTrusted,
 		UnknownReason: replay.ReasonSnapshotMissing}
-	items, bad := classify(obs(
+	items, bad := classifyOne(obs(
 		pod("c1", "gateway", "gateway-1", "gateway"), nil, "10.4.9.9", 8080, d), "c1")
 	if len(items) != 0 {
 		t.Errorf("items = %d, want 0", len(items))
@@ -178,7 +187,7 @@ func TestClassifyReportsUnmanagedSubjectEndpoint(t *testing.T) {
 	src.HostNetwork = true
 	o := obs(src, nil, "203.0.113.5", 8080, allowDecision())
 	o.Flow.Dest.ClusterID = ""
-	items, bad := classify(o, "c1")
+	items, bad := classifyOne(o, "c1")
 	if len(bad) != 1 || bad[0].Reason != ReasonUnmanagedEndpoint {
 		t.Errorf("ungeneratable = %+v, want one UNMANAGED_ENDPOINT", bad)
 	}
@@ -201,7 +210,7 @@ func TestClassifyReportsUnmanagedSubjectEndpoint(t *testing.T) {
 func TestClassifyReportsUnmanagedPeerEndpoint(t *testing.T) {
 	src := pod("c1", "kube-system", "kube-proxy-1", "kube-proxy")
 	src.HostNetwork = true
-	items, bad := classify(obs(src,
+	items, bad := classifyOne(obs(src,
 		pod("c1", "payment", "payment-1", "api"), "10.4.0.4", 8080, allowDecision()), "c1")
 	for _, it := range items {
 		if it.key.Direction == replay.DirectionIngress {
@@ -225,7 +234,7 @@ func TestClassifyCrossClusterUsesIPBlock(t *testing.T) {
 		pod("c1", "gateway", "gateway-1", "gateway"), "10.4.0.1", 8443, allowDecision())
 	// 生产链路里这个标记由 replay.Evaluate 填；手工构造 Decision 时须显式设置。
 	o.Decision.CrossCluster = true
-	items, _ := classify(o, "c1")
+	items, _ := classifyOne(o, "c1")
 	if len(items) != 1 {
 		t.Fatalf("items = %d, want 1 (destination side only)", len(items))
 	}

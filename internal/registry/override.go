@@ -49,14 +49,23 @@ func (o RuleOverride) ToPolicygen() policygen.Override {
 }
 
 // ValidateOverride 校验一条人工决定。
+//
+// 身份三项按固定顺序逐个查，而不是 range 一个 map：这段文案经
+// WriteInvalid 直接回给调用方，两个字段同时为空时 map 的遍历顺序会让
+// 两次一模一样的错误请求得到不同的字段名 —— 排查的人据此改一个字段，
+// 重试又被另一个字段拒绝，看起来像服务在随机拒绝他。ValidateCluster
+// 用的就是 if 链，这里对齐。
 func ValidateOverride(o RuleOverride) error {
-	for field, value := range map[string]string{
-		"clusterID": o.ClusterID,
-		"namespace": o.Namespace,
-		"workload":  o.Workload,
+	for _, f := range []struct {
+		name  string
+		value string
+	}{
+		{"clusterID", o.ClusterID},
+		{"namespace", o.Namespace},
+		{"workload", o.Workload},
 	} {
-		if value == "" {
-			return NewInvalidError(fmt.Sprintf("%s is required", field))
+		if f.value == "" {
+			return NewInvalidError(fmt.Sprintf("%s is required", f.name))
 		}
 	}
 	if !o.Decision.Valid() {
