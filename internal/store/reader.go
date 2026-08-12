@@ -17,6 +17,11 @@ import (
 type ClusterSource interface {
 	Clusters(ctx context.Context) ([]registry.Cluster, error)
 	Cluster(ctx context.Context, id string) (registry.Cluster, bool, error)
+	// RuleOverrides 返回一个集群下未删除的人工决定。
+	//
+	// 与集群一起放在同一个来源接口里：两者都来自 registry.Store，
+	// 拆成两个参数只会让装配方有机会传进两个不一致的实现。
+	RuleOverrides(ctx context.Context, clusterID string) ([]registry.RuleOverride, error)
 }
 
 // TopologyNode 是拓扑图中的一个命名空间节点。

@@ -9,7 +9,9 @@ import (
 
 	"github.com/imkerbos/Distill/internal/baseline"
 	"github.com/imkerbos/Distill/internal/fixture"
+	"github.com/imkerbos/Distill/internal/policygen"
 	"github.com/imkerbos/Distill/internal/predict"
+	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/store"
 )
 
@@ -199,5 +201,76 @@ func TestPolicyPreviewWindowNarrowsObservations(t *testing.T) {
 	if small.Prediction.TotalEvaluated >= wide.Prediction.TotalEvaluated {
 		t.Errorf("narrow window evaluated %d, full window %d; the window is not applied",
 			small.Prediction.TotalEvaluated, wide.Prediction.TotalEvaluated)
+	}
+}
+
+// 无覆盖时两套预测必须逐项相同 —— 这是「覆盖层是恒等变换」的证据，
+// 也是判断 Apply 有没有意外改动策略集的唯一可靠信号。
+func TestOverriddenViewIsIdentityWithoutOverrides(t *testing.T) {
+	r := reader()
+	pv, err := r.PolicyPreview(context.Background(), "prod-asia-1", "", fullWindow(r))
+	if err != nil {
+		t.Fatalf("PolicyPreview() error = %v", err)
+	}
+	if !reflect.DeepEqual(pv.Prediction.Counts, pv.Overridden.Prediction.Counts) {
+		t.Errorf("counts differ with no overrides: %v vs %v",
+			pv.Prediction.Counts, pv.Overridden.Prediction.Counts)
+	}
+	if !reflect.DeepEqual(pv.Candidates, pv.Overridden.Candidates) {
+		t.Error("candidates differ with no overrides")
+	}
+	if len(pv.StaleOverrides) != 0 {
+		t.Errorf("StaleOverrides = %d, want 0", len(pv.StaleOverrides))
+	}
+}
+
+// 启用一条默认禁用的规则后，两套预测必须真的不同 —— 否则覆盖层
+// 接上了但没生效，而页面会显示两组一模一样的数字。
+func TestOverriddenViewReflectsAnEnabledRule(t *testing.T) {
+	r := reader()
+	ctx := context.Background()
+	base, err := r.PolicyPreview(ctx, "prod-asia-1", "", fullWindow(r))
+	if err != nil {
+		t.Fatalf("PolicyPreview() error = %v", err)
+	}
+
+	// 限定 INTERNET_EGRESS / CROSS_CLUSTER：同一条集群内连接会在两侧
+	// 各生成一条独立规则（源端 egress、目的端 ingress，指纹不同），
+	// NetworkPolicy 要求两侧都放行才算放行，只启用其中一条不会翻转判定
+	// （已用 fixture 验证：批处理→payment:3306 那条 TRUSTED_DENY 规则单独
+	// 启用后 Overridden 与默认预测逐项相同）。这两类证据的对端是公网 IP
+	// 或另一个集群，不是本集群候选策略集里的主体，启用一条就足以让判定
+	// 翻转，测的才是「覆盖生效」而不是巧合。
+	var ns, wl, fp string
+	for _, p := range base.Candidates {
+		for _, rule := range p.Rules {
+			isSingleSided := rule.Evidence == policygen.EvidenceInternetEgress ||
+				rule.Evidence == policygen.EvidenceCrossCluster
+			if rule.Origin == policygen.OriginLearned && !rule.Enabled && isSingleSided && fp == "" {
+				ns, wl, fp = p.Namespace, p.Workload, rule.Fingerprint
+			}
+		}
+	}
+	if fp == "" {
+		t.Fatal("fixture produced no disabled learned rule whose peer is outside this cluster's candidate set")
+	}
+
+	withOverride := readerWithOverrides([]registry.RuleOverride{{
+		ClusterID: "prod-asia-1", Namespace: ns, Workload: wl, Fingerprint: fp,
+		Decision: policygen.DecisionEnable, Reason: "r", DecidedBy: "admin",
+		DecidedAt: time.Now().UTC(),
+	}})
+	pv, err := withOverride.PolicyPreview(ctx, "prod-asia-1", "", fullWindow(withOverride))
+	if err != nil {
+		t.Fatalf("PolicyPreview() error = %v", err)
+	}
+
+	if reflect.DeepEqual(pv.Prediction.Counts, pv.Overridden.Prediction.Counts) {
+		t.Errorf("counts identical after enabling a rule: %v", pv.Prediction.Counts)
+	}
+	// 默认那一套必须不受影响 —— 它回答的是「平台推荐了什么」。
+	if !reflect.DeepEqual(base.Prediction.Counts, pv.Prediction.Counts) {
+		t.Errorf("default prediction changed: %v vs %v",
+			base.Prediction.Counts, pv.Prediction.Counts)
 	}
 }

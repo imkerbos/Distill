@@ -7,6 +7,7 @@ import (
 	"github.com/imkerbos/Distill/internal/baseline"
 	"github.com/imkerbos/Distill/internal/policygen"
 	"github.com/imkerbos/Distill/internal/predict"
+	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/replay"
 )
 
@@ -38,6 +39,26 @@ type PolicyPreview struct {
 	// 与 RiskPortCatalog 同理：缺失清单为空时，使用者必须能看到
 	// "我们检查了哪五类"，否则一份空缺失与一次根本没做的校验无法区分。
 	Kinds []baseline.Kind `json:"baselineKinds"`
+	// Overrides 是当前生效的人工决定。
+	Overrides []registry.RuleOverride `json:"overrides"`
+	// StaleOverrides 是已失效的确认。
+	//
+	// 单独报出而不是静默丢弃：只说「已失效」等于告诉人「你上周的
+	// 工作没了，自己去查」。
+	StaleOverrides []policygen.StaleOverride `json:"staleOverrides"`
+	// Overridden 是应用人工决定之后的版本。
+	//
+	// 嵌套而非平铺同名字段：前端拿到两个结构相同的块，并列视图用
+	// 同一个组件渲染，不会出现「哪个字段属于哪一套」的混淆。
+	Overridden OverriddenView `json:"overridden"`
+}
+
+// OverriddenView 是应用人工决定之后的候选策略与预测。
+type OverriddenView struct {
+	// Candidates 是应用覆盖后的候选策略。
+	Candidates []policygen.CandidatePolicy `json:"candidates"`
+	// Prediction 是应用覆盖后的四类变化。
+	Prediction predict.Report `json:"prediction"`
 }
 
 // PolicyPreview 生成候选策略并回放预测。集群或命名空间不存在时返回错误。
@@ -105,6 +126,26 @@ func (r *FixtureReader) PolicyPreview(
 		Label: endpointLabel,
 	})
 
+	stored, err := r.source.RuleOverrides(ctx, clusterID)
+	if err != nil {
+		return PolicyPreview{}, err
+	}
+	pgOverrides := make([]policygen.Override, 0, len(stored))
+	for _, o := range stored {
+		pgOverrides = append(pgOverrides, o.ToPolicygen())
+	}
+	// Apply 建在同一次 Generate 的输出上，两套预测因此必然可比 ——
+	// 这是结构性保证，不是约定。
+	overridden, stale := policygen.Apply(gen, pgOverrides)
+	overriddenReport := predict.Run(predict.Input{
+		ClusterID:    clusterID,
+		Policies:     overridden.EnabledPolicies(),
+		Namespaces:   c.Namespaces,
+		CCNPPresent:  c.CCNPPresent,
+		Observations: obs,
+		Label:        func(ep replay.Endpoint) string { return endpointLabel(ep) },
+	})
+
 	return PolicyPreview{
 		Cluster: clusterID, Namespace: namespace, Window: window,
 		Candidates:       filterCandidates(gen.Policies, namespace),
@@ -112,6 +153,12 @@ func (r *FixtureReader) PolicyPreview(
 		Ungeneratable:    gen.Ungeneratable,
 		Prediction:       report,
 		Kinds:            baseline.AllKinds(),
+		Overrides:        stored,
+		StaleOverrides:   stale,
+		Overridden: OverriddenView{
+			Candidates: filterCandidates(overridden.Policies, namespace),
+			Prediction: overriddenReport,
+		},
 	}, nil
 }
 

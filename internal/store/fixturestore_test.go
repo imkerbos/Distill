@@ -40,7 +40,8 @@ func fixtureClusters() []registry.Cluster {
 // 「现查」与「启动时读一次」的差别只有在同一个 reader 实例上先后读到
 // 两个不同结果时才看得出来 —— 一个不可变的数据源测不出这件事。
 type memSource struct {
-	clusters map[string]registry.Cluster
+	clusters  map[string]registry.Cluster
+	overrides map[string][]registry.RuleOverride
 }
 
 func newSource(cs ...registry.Cluster) *memSource {
@@ -48,7 +49,7 @@ func newSource(cs ...registry.Cluster) *memSource {
 	for _, c := range cs {
 		idx[c.ID] = c
 	}
-	return &memSource{clusters: idx}
+	return &memSource{clusters: idx, overrides: map[string][]registry.RuleOverride{}}
 }
 
 func (m *memSource) Clusters(context.Context) ([]registry.Cluster, error) {
@@ -64,6 +65,11 @@ func (m *memSource) Cluster(_ context.Context, id string) (registry.Cluster, boo
 	return c, ok, nil
 }
 
+// RuleOverrides 返回该集群下测试预先装好的人工决定。
+func (m *memSource) RuleOverrides(_ context.Context, clusterID string) ([]registry.RuleOverride, error) {
+	return m.overrides[clusterID], nil
+}
+
 // offboard 模拟一次下线：软删除之后集群不再出现在注册表的读结果里。
 func (m *memSource) offboard(id string) { delete(m.clusters, id) }
 
@@ -73,6 +79,16 @@ func fixtureSource() *memSource {
 
 func newReader() *store.FixtureReader {
 	return store.NewFixtureReader(fixture.Load(), fixtureSource())
+}
+
+// readerWithOverrides 构造一个装了给定人工决定的 reader，集群清单仍是
+// 标准 fixture 集群 —— 覆盖层是测试唯一要控制的变量。
+func readerWithOverrides(overrides []registry.RuleOverride) *store.FixtureReader {
+	src := fixtureSource()
+	for _, o := range overrides {
+		src.overrides[o.ClusterID] = append(src.overrides[o.ClusterID], o)
+	}
+	return store.NewFixtureReader(fixture.Load(), src)
 }
 
 // allTime 是覆盖整个 fixture 数据集的时间窗。Flows 的时间窗是必填的
