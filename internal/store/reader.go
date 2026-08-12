@@ -5,6 +5,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/imkerbos/Distill/internal/policygen"
 	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/replay"
 )
@@ -226,4 +227,20 @@ type Reader interface {
 	Security(ctx context.Context, clusterID string, window TimeWindow) (SecurityReport, error)
 	// PolicyPreview 生成候选策略并回放预测。集群不存在时返回错误。
 	PolicyPreview(ctx context.Context, clusterID, namespace string, window TimeWindow) (PolicyPreview, error)
+	// EnsureRuleExists 重新生成一次候选集，校验该指纹确实出现在
+	// (namespace, workload) 下，且这条决定不会必然失效。
+	//
+	// 前一半防的是过期页面：指纹对不上，写进去的覆盖不会报错，只会
+	// 永远待在「已失效」那一节，而它从来就没生效过。后一半是同一个
+	// 道理再往前挪一步 —— 禁用一条 BASELINE 规则在 policygen.Apply
+	// 眼里本就必然失效（见 policygen.ErrBaselineNotDisablable），
+	// 与其等它落库后才在预览页里显示失效，不如在写库前直接拒绝。
+	//
+	// window 显式传入而非取某个内部默认值：候选集的内容（含
+	// Fingerprint）依赖观测到的流量，换一个窗口，规则可能连带消失或
+	// 变化 ——「当前候选集」这个说法必须绑定到具体窗口才有意义。
+	EnsureRuleExists(
+		ctx context.Context, clusterID, namespace, workload, fingerprint string,
+		decision policygen.OverrideDecision, window TimeWindow,
+	) error
 }
