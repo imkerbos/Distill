@@ -3,6 +3,7 @@ package httpapi
 import (
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -42,14 +43,42 @@ type Deps struct {
 	DefaultWindow store.TimeWindow
 }
 
+// 登录限流的参数。
+//
+// 只有登录挂限流：它是唯一无需会话的端点，而且每次调用要算一次 bcrypt ——
+// 既是撞库的目标，也是「一次请求换几十毫秒 CPU」的放大器（规范 §23、§24）。
+// 其余端点都在 RequireSession 之后，先要有一个有效会话才够得着。
+//
+// 每分钟 10 次：一个记错密码的人重试三五次不会被挡，而在这个速率下撞库
+// 没有意义。
+//
+// 4096 个键封住内存：单条计数是常数大小，键数封顶，整张表的占用就封顶。
+// 表满且回收不出空位时新键一律被拒（见 RateLimiter.Allow）—— 失效的方向
+// 必须是关闭，不是打开。
+const (
+	loginRateLimit   = 10
+	loginRateWindow  = time.Minute
+	loginRateMaxKeys = 4096
+)
+
 // NewRouter 装配 HTTP 路由。
 func NewRouter(d Deps) http.Handler {
+	// 限流器随路由一起构造，生命周期与它相同：计数是本进程内的，
+	// 不跨实例，见 RateLimiter 的文档注释。
+	loginLimiter := NewRateLimiter(loginRateLimit, loginRateWindow, loginRateMaxKeys, nil)
+
 	r := chi.NewRouter()
 	r.Use(RequestID)
 	r.Use(RequestLogger(d.Logger))
 	// Recoverer 在日志之后：panic 的请求同样要留下一条完成日志，
 	// 且日志里要有可供用户报障的 request_id。
 	r.Use(Recoverer(d.Logger))
+	// 安全头在 Recoverer 之内：头在进入 handler 前就写进 w，因此
+	// 500、404、405 这些不经过 handler 的响应同样带着它们。
+	r.Use(SecurityHeaders)
+	// 请求体上限装在路由根部，而不是五个 Decode 调用点各一份 ——
+	// 漏掉的那一个就是会被挑中的那一个。
+	r.Use(LimitRequestBody(MaxRequestBytes))
 
 	r.NotFound(func(w http.ResponseWriter, _ *http.Request) {
 		response.WriteSystem(w, http.StatusNotFound, response.CodeNotFound)
@@ -59,8 +88,8 @@ func NewRouter(d Deps) http.Handler {
 	})
 
 	r.Route("/api/v1", func(api chi.Router) {
-		// 登录是唯一无需会话的端点。
-		api.Post("/sessions", handleCreateSession(d))
+		// 登录是唯一无需会话的端点，也因此是唯一挂了限流的那个。
+		api.With(loginLimiter.Middleware).Post("/sessions", handleCreateSession(d))
 
 		api.Group(func(protected chi.Router) {
 			protected.Use(RequireSession(d.Sessions))

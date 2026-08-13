@@ -22,6 +22,8 @@ const (
 	CodeInvalidParam Code = 20001
 	// CodeNotFound 表示请求的资源不存在。
 	CodeNotFound Code = 20002
+	// CodeRateLimited 表示请求过于频繁，被限流拒绝。
+	CodeRateLimited Code = 20003
 
 	// CodeInternal 表示服务端内部错误。
 	CodeInternal Code = 50001
@@ -42,6 +44,7 @@ var messages = map[Code]string{
 	CodeUnauthenticated:       "请先登录",
 	CodeInvalidParam:          "请求参数不合法",
 	CodeNotFound:              "请求的资源不存在",
+	CodeRateLimited:           "请求过于频繁，请稍后再试",
 	CodeInternal:              "服务内部错误",
 	CodeDependencyUnavailable: "依赖服务暂时不可用",
 }
@@ -69,6 +72,7 @@ var registered = []Code{
 	CodeUnauthenticated,
 	CodeInvalidParam,
 	CodeNotFound,
+	CodeRateLimited,
 	CodeInternal,
 	CodeDependencyUnavailable,
 }
