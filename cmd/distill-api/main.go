@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -152,29 +153,65 @@ func newSettingsGitVerifier(p *settings.Provider, logger *slog.Logger) *settings
 	return &settingsGitVerifier{settings: p, logger: logger}
 }
 
-// Verify 用当前设置做一次只读校验。
+// VerifyRepo 用当前设置做一次仓库级只读校验。
 //
 // **装不出校验器时返回 NOT_VERIFIED，绝不是 OK。** 读不到设置、后端选了
 // NONE、host key 为空、超时非正 —— 每一种都是「这次检查没做成」，而没做过
 // 的检查不是通过了的检查（spec §3.2）。退化成「没有校验器所以放行」会让
 // 一次设置失误变成一串看不出问题的 OK，而这条链路的终点是生产集群的
 // 策略集合。
-func (v *settingsGitVerifier) Verify(ctx context.Context, b registry.GitBinding) registry.VerifyResult {
+//
+// 时刻同样留 nil：没有发生过校验，就没有那个时刻，而一个带时间戳的
+// NOT_VERIFIED 会在界面上显示成一次从未发生的校验。
+func (v *settingsGitVerifier) VerifyRepo(
+	ctx context.Context, r registry.GitRepo,
+) (registry.RepoVerifyResult, *time.Time) {
+	gv, ok := v.current(ctx)
+	if !ok {
+		return registry.RepoVerifyNotVerified, nil
+	}
+	return gv.VerifyRepo(ctx, r)
+}
+
+// VerifyPath 用当前设置做一次路径级只读校验。
+//
+// repoResult 原样交给底层：路径级以仓库级为前提，而「先取仓库级结论」
+// 是调用方的责任（design doc §3.3），这一层不替它决定。
+//
+// 装不出校验器时同样是 NOT_VERIFIED，理由见 VerifyRepo。这两个方法各自
+// 兜一次，不是重复：少掉任何一处，那一层就会在设置失误时退化成放行。
+func (v *settingsGitVerifier) VerifyPath(
+	ctx context.Context, r registry.GitRepo,
+	repoResult registry.RepoVerifyResult, policyPath string,
+) (registry.BindingVerifyResult, *time.Time) {
+	gv, ok := v.current(ctx)
+	if !ok {
+		return registry.BindingVerifyNotVerified, nil
+	}
+	return gv.VerifyPath(ctx, r, repoResult, policyPath)
+}
+
+// current 按当前设置现装一个校验器；装不出来时第二个返回值为 false。
+//
+// 两个方法共用它，而不是各写一遍读设置与装配：分成两份之后，「设置改完
+// 立即生效」这条只会在其中一份上被守住，而另一份会在某次改动里悄悄退回
+// 启动快照。
+func (v *settingsGitVerifier) current(ctx context.Context) (httpapi.GitVerifier, bool) {
 	s, err := v.settings.Current(ctx)
 	if err != nil {
 		v.logger.Error("cannot read the platform setting for git verification", "error", err)
-		return registry.VerifyNotVerified
+		return nil, false
 	}
 	gv, err := newGitVerifier(ctx, s)
 	if err != nil {
 		v.logger.Error("cannot build a git verifier from the current setting", "error", err)
-		return registry.VerifyNotVerified
+		return nil, false
 	}
 	if gv == nil {
 		// 后端是 NONE：操作者明确选了「不解析凭据」，于是也就没有校验。
-		return registry.VerifyNotVerified
+		return nil, false
 	}
-	return gv.Verify(ctx, b)
+	return gv, true
 }
 
 // newGitVerifier 按一份设置装配 Git 绑定校验器。

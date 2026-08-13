@@ -195,6 +195,16 @@ func writeRegistryError(w http.ResponseWriter, r *http.Request, d Deps, err erro
 		response.WriteInvalid(w, ie.Detail)
 	case errors.Is(err, registry.ErrNotFound):
 		response.WriteBusiness(w, response.CodeNotFound)
+	case errors.Is(err, registry.ErrRepoInUse):
+		// 仍被绑定的仓库不能删，这是一个调用方能据以行动的业务失败，
+		// 不是服务故障：走 500 会让它计入服务错误率，而界面上只剩一句
+		// 「服务内部错误」，操作者不会知道该先去解除那个绑定。
+		//
+		// 文案是本平台自己写的固定一句，不回传 err.Error()：那串文本由
+		// mysqlregistry 拼出，里面带着仓库 ID 与**集群 ID**，而回传通道
+		// 只读我们自己写的文字（规范 §19、§22，同 InvalidError 那一支的
+		// 处置）。少掉的那一半信息（是哪个集群绑着）在集群页上看得到。
+		response.WriteInvalid(w, "该仓库仍被某个集群绑定，请先解除绑定再删除")
 	default:
 		d.Logger.Error("registry operation failed",
 			"err", err, "request_id", RequestIDFrom(r.Context()))

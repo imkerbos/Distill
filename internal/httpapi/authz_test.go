@@ -60,6 +60,17 @@ func callWith(
 // 那条断言无论声明改成什么都成立。
 func adminRoutes() []struct{ method, path string } {
 	return []struct{ method, path string }{
+		// 设置的读与写都在这里：读回传凭据后端与 Secret Manager 项目 /
+		// 前缀，属于平台自己的部署形态，不是只读账号该看的东西
+		// （分类存疑时取更严的那一侧，见本次报告）。
+		{http.MethodGet, "/api/v1/settings"},
+		{http.MethodPut, "/api/v1/settings"},
+		// 仓库同理：列表回传仓库地址、分支与凭据引用。
+		{http.MethodGet, "/api/v1/git-repos"},
+		{http.MethodPost, "/api/v1/git-repos"},
+		{http.MethodPut, "/api/v1/git-repos/policies"},
+		{http.MethodDelete, "/api/v1/git-repos/policies"},
+		{http.MethodPost, "/api/v1/git-repos/policies/verify"},
 		{http.MethodPost, "/api/v1/clusters"},
 		{http.MethodPut, "/api/v1/clusters/prod-asia-1"},
 		{http.MethodDelete, "/api/v1/clusters/prod-asia-1"},
@@ -134,6 +145,7 @@ func TestAdminReachesEveryRegisteredRoute(t *testing.T) {
 		"{clusterID}": "prod-asia-1",
 		"{importID}":  "1",
 		"{flowID}":    "no-such-flow",
+		"{repoID}":    "policies",
 	}
 
 	walked := 0

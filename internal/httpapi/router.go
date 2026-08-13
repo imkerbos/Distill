@@ -112,6 +112,28 @@ func NewRouter(d Deps) http.Handler {
 			az.route(protected, http.MethodDelete, "/sessions/current", accessSession, handleDeleteSession(d))
 			az.route(protected, http.MethodGet, "/sessions/current", accessSession, handleCurrentSession())
 
+			// 平台设置：读与写都按管理员算。写是显然的（改 host key 就是
+			// 改平台连接策略仓库时的信任锚，design doc §1.3）；读之所以也是
+			// 管理员，是因为它回传的是凭据后端、Secret Manager 项目与前缀 ——
+			// 平台自己的部署形态，而只读账号的用途是看拓扑与流量。分类存疑时
+			// 取更严的那一侧，与 policy-imports 那条同一处置（见本次报告）。
+			az.route(protected, http.MethodGet, "/settings", accessAdmin, handleGetSetting(d))
+			az.route(protected, http.MethodPut, "/settings", accessAdmin, handleUpdateSetting(d))
+
+			// 策略仓库是独立实体（design doc §3），因此有自己的一组地址。
+			// 列表同样按管理员算：它回传仓库地址、分支与凭据引用，属于策略
+			// 下发链路的内部状态（同上，见本次报告）。
+			az.route(protected, http.MethodGet, "/git-repos", accessAdmin, handleListGitRepos(d))
+			az.route(protected, http.MethodPost, "/git-repos", accessAdmin, handleCreateGitRepo(d))
+			// PUT 而非 PATCH，理由与集群那条一样：这里写整行。仓库 ID 不在
+			// 可改之列 —— 它取自路径，请求体里的 repoId 不参与。
+			az.route(protected, http.MethodPut, "/git-repos/{repoID}", accessAdmin, handleUpdateGitRepo(d))
+			az.route(protected, http.MethodDelete, "/git-repos/{repoID}", accessAdmin, handleDeleteGitRepo(d))
+			// POST 而非 GET：与绑定那条同理，这次调用会真的发起一次出站
+			// 认证连接，并写下新的结论与一条审计行。
+			az.route(protected, http.MethodPost, "/git-repos/{repoID}/verify",
+				accessAdmin, handleVerifyGitRepo(d))
+
 			az.route(protected, http.MethodGet, "/clusters", accessViewer, handleListClustersFromRegistry(d))
 			az.route(protected, http.MethodPost, "/clusters", accessAdmin, handleCreateCluster(d))
 			// PUT 而非 PATCH：handleUpdateCluster 写整行，请求体没给的字段
@@ -122,10 +144,11 @@ func NewRouter(d Deps) http.Handler {
 			az.route(protected, http.MethodDelete, "/clusters/{clusterID}", accessAdmin, handleDeleteCluster(d))
 			// 绑定是有自己生命周期的资源，因此有自己的地址与动词
 			// （design doc 2026-08-13 §5）。PUT 而非 PATCH，理由与集群
-			// 那条一样：四个字段是绑定的全部可写内容，这里写整行。
+			// 那条一样：repoId 与 policyPath 是绑定的全部可写内容，
+			// 这里写整行。
 			az.route(protected, http.MethodPut, "/clusters/{clusterID}/git-binding",
 				accessAdmin, handleBindGitRepo(d))
-			// DELETE 而非「四个字段全空的一次 PUT」：解绑是一个明确的动作，
+			// DELETE 而非「两个字段全空的一次 PUT」：解绑是一个明确的动作，
 			// 靠一个约定俗成的空值形状表达它，任何一次误发的空请求体都会
 			// 变成一次无声的解绑。
 			az.route(protected, http.MethodDelete, "/clusters/{clusterID}/git-binding",
