@@ -62,7 +62,9 @@ func TestSSHAuthCarriesThePinnedHostKeyCallback(t *testing.T) {
 		t.Fatal("sshAuth() left HostKeyCallback nil: go-git would fall back to its own default")
 	}
 
-	addr := &net.TCPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 22}
+	// 用公网地址：sshAuth 返回的回调外层还包着目的地址判定，内网地址会在
+	// 比对 host key 之前就被拒掉，这条用例要验的不是那一层。
+	addr := &net.TCPAddr{IP: net.IPv4(140, 82, 121, 4), Port: 22}
 	if err := auth.HostKeyCallback("git.elsewhere.example.com:22", addr, pinned); err == nil {
 		t.Error("auth accepted a host that is not in the configured known-hosts data")
 	}

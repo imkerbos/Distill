@@ -53,10 +53,17 @@ func Classify(err error) registry.VerifyResult {
 		errors.Is(err, transport.ErrEmptyRemoteRepository):
 		return registry.VerifyBranchMissing
 
-	// 与 default 同值，但显式列出：这两类是已知的可达性失败，default 是
-	// 未知错误的兜底。将来若改动 default 的去向，不应连带改变这两类。
+	// 与 default 同值，但显式列出：这三类是已知的可达性失败，default 是
+	// 未知错误的兜底。将来若改动 default 的去向，不应连带改变这三类。
 	// 超时按 spec §4 归入 REPO_UNREACHABLE，不单列取值。
+	//
+	// errBlockedDestination 也归这里，且不新增取值：从操作者视角这是一个
+	// 「地址填错了、平台没去到仓库」的配置问题，与 VerifyRepoUnreachable
+	// 的定义（网络或地址问题，未能到达仓库）完全吻合。单列一个取值既要
+	// 同步前端文案映射与统计口径，又等于把「这个地址是内网」这件事告诉
+	// 调用方 —— 那正是 §19 不许外泄的内部网络信息。
 	case errors.Is(err, transport.ErrRepositoryNotFound),
+		errors.Is(err, errBlockedDestination),
 		errors.Is(err, context.DeadlineExceeded):
 		return registry.VerifyRepoUnreachable
 

@@ -135,12 +135,16 @@ func (v *Verifier) Verify(ctx context.Context, b registry.GitBinding) registry.V
 	return registry.VerifyOK
 }
 
-// sshAuth 把私钥字节做成一个已经钉好 host key 的认证方法。
+// sshAuth 把私钥字节做成一个已经钉好 host key、并且带着目的地址判定的
+// 认证方法。
 //
 // 单独摘出来不是为了复用，是为了让「认证方法确实带着固定的 host key
 // 回调」这件事可以被直接断言。测试用的 file:// 传输不协商 SSH，永远
 // 走不到这个回调 —— 把这一行留在 Verify 里面，它被换成
 // InsecureIgnoreHostKey 也不会有任何测试变红。
+//
+// guardDestination 包在外层：出站唯一的拨号发生在这条链路上，而这个回调
+// 是全链路唯一能拿到真实对端地址的位置（见 destination.go）。
 //
 // key 只在本调用栈里存在：解析完就交给 go-git，不落盘、不进日志、
 // 不挂到 Verifier 上（spec §2.5）。
@@ -149,7 +153,7 @@ func (v *Verifier) sshAuth(key []byte) (*gitssh.PublicKeys, error) {
 	if err != nil {
 		return nil, err
 	}
-	auth.HostKeyCallback = v.hostKeys
+	auth.HostKeyCallback = guardDestination(v.hostKeys)
 	return auth, nil
 }
 

@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/pem"
+	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -15,6 +17,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	cryptossh "golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 
 	"github.com/imkerbos/Distill/internal/gitverify"
 	"github.com/imkerbos/Distill/internal/registry"
@@ -196,6 +199,95 @@ func TestVerifyLeavesTheRepositoryUntouched(t *testing.T) {
 	if after := refSnapshot(t, dir); after != before {
 		t.Fatalf("Verify() changed the remote refs:\nbefore %s\nafter  %s", before, after)
 	}
+}
+
+// 目的地址判定必须管住**真实的那次连接**，不能只管 URL 里的字符串。
+//
+// 这条用例在回环地址上起一个真的 SSH 监听，并把它的 host key 钉进
+// known_hosts —— 也就是说 host key 那一层是放行的，此刻唯一还能拦住这次
+// 连接的东西就是目的地址判定。判定失效时客户端会一路走到认证，服务端的
+// 认证回调随即被触发；判定生效时握手在密钥交换阶段就断了，服务端永远等
+// 不到那一步。断言「服务端没被要求认证」因此是对「判定确实跑在了真实
+// 连接上」的证明，而不是对判定函数自身的复述。
+func TestVerifyRefusesToConnectToAnInternalAddress(t *testing.T) {
+	authAttempted := make(chan struct{}, 1)
+	addr, hostKey := startSSHListener(t, authAttempted)
+
+	known := []byte(knownhosts.Normalize(addr) + " " + string(cryptossh.MarshalAuthorizedKey(hostKey)))
+	v, err := gitverify.New(stubResolver{key: privateKeyPEM(t)}, known, 10*time.Second)
+	if err != nil {
+		t.Fatalf("New() = %v", err)
+	}
+
+	binding := registry.GitBinding{
+		RepoURL:    "ssh://git@" + addr + "/policies.git",
+		Branch:     "master",
+		PolicyPath: "policies/prod",
+	}
+	if got := v.Verify(context.Background(), binding); got != registry.VerifyRepoUnreachable {
+		t.Errorf("Verify(loopback) = %q, want %q", got, registry.VerifyRepoUnreachable)
+	}
+
+	select {
+	case <-authAttempted:
+		t.Fatal("the platform authenticated against a loopback address: " +
+			"the destination guard did not govern the real connection")
+	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+// startSSHListener 在回环地址上起一个只做握手的 SSH 服务端，返回它的
+// 地址与 host key。任何一次公钥认证尝试都会往 attempted 里投一个信号。
+func startSSHListener(t *testing.T, attempted chan<- struct{}) (string, cryptossh.PublicKey) {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate host key: %v", err)
+	}
+	signer, err := cryptossh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatalf("wrap host key: %v", err)
+	}
+
+	cfg := &cryptossh.ServerConfig{
+		PublicKeyCallback: func(cryptossh.ConnMetadata, cryptossh.PublicKey) (*cryptossh.Permissions, error) {
+			select {
+			case attempted <- struct{}{}:
+			default:
+			}
+			return nil, errors.New("no")
+		},
+	}
+	cfg.AddHostKey(signer)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = conn.Close() }()
+				sc, chans, reqs, err := cryptossh.NewServerConn(conn, cfg)
+				if err != nil {
+					return
+				}
+				defer func() { _ = sc.Close() }()
+				go cryptossh.DiscardRequests(reqs)
+				for ch := range chans {
+					_ = ch.Reject(cryptossh.Prohibited, "")
+				}
+			}()
+		}
+	}()
+
+	return ln.Addr().String(), signer.PublicKey()
 }
 
 func newVerifier(t *testing.T) *gitverify.Verifier {
