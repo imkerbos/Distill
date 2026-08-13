@@ -168,6 +168,45 @@ func isHexSHA(s string) bool {
 	return true
 }
 
+// ValidateGitRepo 校验一个策略仓库。
+//
+// repoUrl / branch / credentialRef 的规则随字段一起从绑定搬到这里
+// （design doc 2026-08-13 §3.1、§3.2）。搬家不改判定：一个搬家途中丢掉的
+// 校验规则，症状与从来没写过这条规则完全一样，而它曾经存在这件事只留在
+// git 历史里。
+func ValidateGitRepo(r GitRepo) error {
+	if r.ID == "" {
+		return invalid("仓库 ID 不能为空")
+	}
+	if r.URL == "" || r.Branch == "" {
+		return invalid("仓库的 repoUrl 与 branch 必须同时填写")
+	}
+	if !isSSHRepoURL(r.URL) {
+		return invalidf("repoUrl %q 不是 SSH 形态：平台按 per-repo deploy key 访问策略仓库，"+
+			"只支持 ssh://[user@]host[:port]/path 与 git@host:path 两种写法。"+
+			"填 https:// 的后果不是「校验不通过」而是一句假的结论 —— 认证方法与传输对不上，"+
+			"一次拨号都不会发生，失败却会被报成「仓库不可达」", r.URL)
+	}
+	// credentialRef 可以为空：仓库可以先登记下来，凭据稍后再配。非空时
+	// 复用 secrets.ValidateRef，不另写一份字符集校验 —— 两份安全相关的
+	// 字符类定义迟早会走样。
+	if r.CredentialRef != "" {
+		if err := secrets.ValidateRef(r.CredentialRef); err != nil {
+			return wrapInvalid(fmt.Sprintf("credentialRef %q 不是合法的凭据引用", r.CredentialRef), err)
+		}
+	}
+	// 空值按 NOT_VERIFIED 处理：仓库刚登记、还没跑过校验时，
+	// VerifyResult 字段就是零值，这不该被当成非法输入。
+	vr := r.VerifyResult
+	if vr == "" {
+		vr = RepoVerifyNotVerified
+	}
+	if !vr.Valid() {
+		return invalidf("verifyResult %q 不在已登记的取值范围内", r.VerifyResult)
+	}
+	return nil
+}
+
 // ValidateGitBinding 校验一个 Git 绑定，要么完整要么不填。
 //
 // 独立成导出函数、ValidateCluster 不再调用它（design doc 2026-08-13 §6）：
@@ -182,31 +221,21 @@ func isHexSHA(s string) bool {
 // 具体的绑定要校验；「绑定压根不存在」现在由 *GitBinding == nil 或
 // UnbindGitRepo 表达，不是这个函数要处理的一种合法输入。
 //
+// 只管绑定自己的两个字段：repoId 指向的仓库是否存在、是否合法，是
+// 存储层的外键与 ValidateGitRepo 的事，不在这里重复判断 —— 拿一份可能
+// 已经过期的仓库副本在这里再判一次，得到的结论会与仓库页上的不一致。
+//
 // 填一半的绑定会在轮 3 变成一次指向不存在路径的写入尝试，
 // 而报出来的错误只会说「路径不存在」，与真正的配置错误无法区分。
 func ValidateGitBinding(b GitBinding) error {
-	if b.RepoURL == "" || b.Branch == "" || b.PolicyPath == "" {
-		return invalid("Git 绑定的 repoUrl、branch、policyPath 三项必须同时填写")
-	}
-	if !isSSHRepoURL(b.RepoURL) {
-		return invalidf("repoUrl %q 不是 SSH 形态：平台按 per-repo deploy key 访问策略仓库，"+
-			"只支持 ssh://[user@]host[:port]/path 与 git@host:path 两种写法。"+
-			"填 https:// 的后果不是「校验不通过」而是一句假的结论 —— 认证方法与传输对不上，"+
-			"一次拨号都不会发生，失败却会被报成「仓库不可达」", b.RepoURL)
-	}
-	// credentialRef 可以为空：绑定可以先记下来，凭据稍后再配。非空时
-	// 复用 secrets.ValidateRef，不另写一份字符集校验 —— 两份安全相关的
-	// 字符类定义迟早会走样。
-	if b.CredentialRef != "" {
-		if err := secrets.ValidateRef(b.CredentialRef); err != nil {
-			return wrapInvalid(fmt.Sprintf("credentialRef %q 不是合法的凭据引用", b.CredentialRef), err)
-		}
+	if b.RepoID == "" || b.PolicyPath == "" {
+		return invalid("Git 绑定的 repoId 与 policyPath 必须同时填写")
 	}
 	// 空值按 NOT_VERIFIED 处理：绑定刚创建、还没跑过校验时，
 	// VerifyResult 字段就是零值，这不该被当成非法输入。
 	vr := b.VerifyResult
 	if vr == "" {
-		vr = VerifyNotVerified
+		vr = BindingVerifyNotVerified
 	}
 	if !vr.Valid() {
 		return invalidf("verifyResult %q 不在已登记的取值范围内", b.VerifyResult)
