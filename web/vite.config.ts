@@ -5,6 +5,11 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   plugins: [react()],
   server: {
+    // 监听全部接口，便于从同网段的其他设备访问。代理目标仍写
+    // localhost：它在跑 vite 的这台机器上解析，所以从别的设备访问
+    // :4000 时请求照样落到本机的 :10100，浏览器看到的仍是同源，
+    // 会话 Cookie 不受影响。
+    host: '0.0.0.0',
     port: 4000,
     strictPort: true, // 端口被占时直接失败，而不是静默换一个别人在用的端口
     proxy: {
