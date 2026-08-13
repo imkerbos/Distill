@@ -548,3 +548,60 @@ export interface PolicyPreview {
   /** 应用人工决定之后的版本，与默认推荐（本对象其余字段）并列展示。 */
   overridden: OverriddenView
 }
+
+/* ---------------------------------------------------------------------- */
+/* 平台设置                                                                 */
+/* ---------------------------------------------------------------------- */
+
+/**
+ * 凭据解析后端。封闭枚举，与后端 registry.SecretsBackend 逐值对齐。
+ *
+ * 联合而不是 string：这份取值表在设置页上要一一对应到文案与一组字段
+ * 约束，用 string 就等于允许后端某天多一个取值而界面照旧渲染出一个空
+ * 选项——而选中一个界面读不出名字的凭据后端，等于平台去哪里取身份这
+ * 件事没人说得清。
+ */
+export type SecretsBackend = 'NONE' | 'DIR' | 'SECRET_MANAGER'
+
+/**
+ * GET /api/v1/settings 的响应。
+ *
+ * **没有 gitVerifyHostKeys 字段**，这与后端 httpapi.settingView 是同一个
+ * 刻意的形状：host key 原文只入不出，读取端点回的是指纹（design doc §1.3、
+ * 规范 §19/§20）。类型里根本没有承载原文的位置，于是"设置页把 host key
+ * 显示出来了"这件事在前端也写不出来，不靠页面自觉。
+ */
+export interface PlatformSettingView {
+  sessionTtlSeconds: number
+  httpReadTimeoutMs: number
+  httpWriteTimeoutMs: number
+  httpShutdownTimeoutMs: number
+  secretsBackend: SecretsBackend
+  secretsProject: string
+  secretsPrefix: string
+  secretsDir: string
+  gitVerifyTimeoutMs: number
+  /** 当前 host key 原文的 SHA-256 指纹；未配置时为空串。 */
+  gitVerifyHostKeysFingerprint: string
+}
+
+/**
+ * PUT /api/v1/settings 的请求体。
+ *
+ * 全字段必填，理由同 ClusterWrite：服务端写整行，缺省的字段会被写成零值
+ * （internal/mysqlregistry/setting.go UpdateSetting 是一条整行 UPDATE）。
+ * 让类型强制每一项都出现，调用方就不可能"只发一个字段"然后把超时清成 0。
+ */
+export interface PlatformSettingWrite {
+  sessionTtlSeconds: number
+  httpReadTimeoutMs: number
+  httpWriteTimeoutMs: number
+  httpShutdownTimeoutMs: number
+  secretsBackend: SecretsBackend
+  secretsProject: string
+  secretsPrefix: string
+  secretsDir: string
+  gitVerifyTimeoutMs: number
+  /** known_hosts 原文。只入不出：读取端点没有对应字段，无从回显。 */
+  gitVerifyHostKeys: string
+}

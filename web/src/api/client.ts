@@ -1,6 +1,7 @@
 import type {
   ClusterWrite, Decision, Envelope, FlowFilter, FlowPage, GitBindingWrite,
-  Identity, ImportRole, ImportSource, OverrideDecision, PolicyImportItem, PolicyPreview,
+  Identity, ImportRole, ImportSource, OverrideDecision, PlatformSettingView,
+  PlatformSettingWrite, PolicyImportItem, PolicyPreview,
   Quality, RegisteredCluster, SecurityReport, Topology, TopologyLevel, VerifyStatus,
 } from './types'
 
@@ -76,6 +77,24 @@ export const api = {
   logout: () => request<null>('/api/v1/sessions/current', { method: 'DELETE' }),
 
   me: () => request<Identity>('/api/v1/sessions/current'),
+
+  // 平台设置。每次进页面都现读，不在模块里缓存：设置整体是"按需读取"的
+  // （design doc 2026-08-13 §1.1），一份缓存下来的设置会在别处改完之后
+  // 继续显示旧值，而操作者据此做的下一次保存是拿旧值整体覆盖。
+  settings: () => request<PlatformSettingView>('/api/v1/settings'),
+
+  // PUT 而非 PATCH：服务端是一条整行 UPDATE，请求体缺省的字段会被写成
+  // 零值（internal/mysqlregistry/setting.go）。用 PATCH 命名它，早晚有人
+  // 按 PATCH 的语义只发一个字段——落点是超时被清成 0（等于关掉超时保护）
+  // 或 host key 被清空（信任锚消失）。PlatformSettingWrite 全字段必填与
+  // 这条同源。
+  //
+  // 响应仍然只回指纹，不回 host key 原文：保存路径不是回显的旁路。
+  updateSettings: (body: PlatformSettingWrite) =>
+    request<PlatformSettingView>('/api/v1/settings', {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
 
   clusters: () => request<RegisteredCluster[]>('/api/v1/clusters'),
 

@@ -77,6 +77,7 @@ export default function AppShell({ cluster, onClusterChange, children }: Props) 
           { to: '/policy', label: '候选策略' },
           { to: '/quality', label: '数据质量' },
           { to: '/clusters', label: '集群管理' },
+          { to: '/settings', label: '平台设置' },
         ].map((item) => (
           <NavLink
             key={item.to}

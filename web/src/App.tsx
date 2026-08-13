@@ -8,6 +8,7 @@ import LoginPage from './pages/LoginPage'
 import PolicyPage from './pages/PolicyPage'
 import QualityPage from './pages/QualityPage'
 import SecurityPage from './pages/SecurityPage'
+import SettingsPage from './pages/SettingsPage'
 import TopologyPage from './pages/TopologyPage'
 
 function Protected() {
@@ -27,6 +28,8 @@ function Protected() {
         <Route path="/security" element={<SecurityPage cluster={cluster} />} />
         <Route path="/policy" element={<PolicyPage cluster={cluster} />} />
         <Route path="/clusters" element={<ClustersPage />} />
+        {/* 设置是平台自身的配置，不属于任何一个集群，因此不接 cluster。 */}
+        <Route path="/settings" element={<SettingsPage />} />
         <Route path="*" element={<Navigate to="/topology" replace />} />
       </Routes>
     </AppShell>
