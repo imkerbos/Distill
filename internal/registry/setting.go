@@ -1,0 +1,138 @@
+package registry
+
+import "time"
+
+// SecretsBackend 是凭据解析后端的封闭枚举。
+//
+// 与 internal/config 里同名类型的旧形态不同：这里的取值是操作者在设置页
+// 做出的一个明确选择，不是从「填了哪几个字段」反推出来的。反推形态下，
+// project 与 dir 同时留在库里但只有一个在生效，操作者读不出哪个在生效；
+// 显式选择把这件事挪到 ValidatePlatformSetting，让「选了什么」与
+// 「填了什么」必须互相印证，见该函数的注释。
+type SecretsBackend string
+
+const (
+	// SecretsBackendNone 表示不解析凭据，因而也不做 Git 绑定校验。
+	SecretsBackendNone SecretsBackend = "NONE"
+	// SecretsBackendDir 是本地开发用的目录解析器，一个 ref 一个文件。
+	SecretsBackendDir SecretsBackend = "DIR"
+	// SecretsBackendSecretManager 是生产用的 Secret Manager 解析器。
+	SecretsBackendSecretManager SecretsBackend = "SECRET_MANAGER"
+)
+
+// Valid 判断该后端是否已登记。
+//
+// 显式 switch 而非 map/slice 查表：新增一个常量却忘了在这里同步，
+// switch 让这处遗漏在 review 时是看得见的一行；换成表驱动，
+// 遗漏就是一次无声的编译通过（同 VerifyResult.Valid 的取舍）。
+func (b SecretsBackend) Valid() bool {
+	switch b {
+	case SecretsBackendNone, SecretsBackendDir, SecretsBackendSecretManager:
+		return true
+	default:
+		return false
+	}
+}
+
+// PlatformSetting 是落库的运行期配置：会话 TTL、HTTP 超时、凭据后端、
+// Git 校验超时与 SSH host keys（design doc 2026-08-13 §1、§2）。
+//
+// 配置文件只留启动必需项，其余全部是这个类型的字段，按需读取，
+// 不在启动时缓存快照 —— 快照曾经造成过一次事故（轮 2，下线的集群
+// 靠着启动快照继续被服务，直到进程重启才消失）。
+type PlatformSetting struct {
+	// SessionTTL 是会话有效期。
+	SessionTTL time.Duration `json:"sessionTtl"`
+	// HTTPReadTimeout 限制读取请求的时长。
+	HTTPReadTimeout time.Duration `json:"httpReadTimeout"`
+	// HTTPWriteTimeout 限制写出响应的时长。
+	HTTPWriteTimeout time.Duration `json:"httpWriteTimeout"`
+	// HTTPShutdownTimeout 是优雅退出的等待上限。
+	HTTPShutdownTimeout time.Duration `json:"httpShutdownTimeout"`
+	// SecretsBackend 是操作者选中的凭据解析后端。
+	SecretsBackend SecretsBackend `json:"secretsBackend"`
+	// SecretsProject 是 Secret Manager 所在的项目，仅 SECRET_MANAGER 后端使用。
+	SecretsProject string `json:"secretsProject"`
+	// SecretsPrefix 是短名拼进资源路径前的固定前缀，仅 SECRET_MANAGER 后端使用。
+	//
+	// 空前缀仍能拼出合法路径，但围栏就只剩项目一层，任何短名都能指向
+	// 项目里的任意 secret —— 因此 SECRET_MANAGER 后端要求它必须非空。
+	SecretsPrefix string `json:"secretsPrefix"`
+	// SecretsDir 是本地开发用的凭据目录，仅 DIR 后端使用。该目录必须 gitignored。
+	SecretsDir string `json:"secretsDir"`
+	// GitVerifyTimeout 是 Git 绑定只读校验的单次出站超时。
+	GitVerifyTimeout time.Duration `json:"gitVerifyTimeout"`
+	// GitVerifyHostKeys 是 known_hosts 格式的已知主机公钥，Git 校验时的信任锚。
+	//
+	// 为空时 gitverify.New 仍然拒绝构造（既有行为，不在这里重复校验）——
+	// 清空这个字段不会让平台退化成「不校验」，只会让它起不来。
+	GitVerifyHostKeys string `json:"gitVerifyHostKeys"`
+}
+
+// ValidatePlatformSetting 校验一份设置。
+//
+// 两类风险各对应一段检查：
+//
+//   - 后端与其字段必须互相印证（见 validateSecretsBackendFields）。
+//   - 所有超时字段必须为正：SessionTTL 为零会让会话立即过期，
+//     HTTP 超时为零等于关闭超时保护，GitVerifyTimeout 非正会被
+//     gitverify.New 拒绝 —— 与其等下一次校验才暴露，不如保存时就拦下,
+//     让操作者在犯错的那一刻就知道。
+func ValidatePlatformSetting(s PlatformSetting) error {
+	if s.SessionTTL <= 0 {
+		return invalid("sessionTtl 必须为正")
+	}
+	if s.HTTPReadTimeout <= 0 {
+		return invalid("httpReadTimeout 必须为正")
+	}
+	if s.HTTPWriteTimeout <= 0 {
+		return invalid("httpWriteTimeout 必须为正")
+	}
+	if s.HTTPShutdownTimeout <= 0 {
+		return invalid("httpShutdownTimeout 必须为正")
+	}
+	if s.GitVerifyTimeout <= 0 {
+		return invalid("gitVerifyTimeout 必须为正")
+	}
+	if !s.SecretsBackend.Valid() {
+		return invalidf("secretsBackend %q 不在已登记的取值范围内", s.SecretsBackend)
+	}
+	return validateSecretsBackendFields(s)
+}
+
+// validateSecretsBackendFields 检查凭据字段是否与选中的后端互相印证。
+//
+// 三条约束都指向同一件事：设置页上的后端选择必须是唯一真相，字段不能
+// 各说各话。最坏的落法是选了 DIR、project 却还留在库里 —— 进程正常
+// 起来、校验正常出结论，只是身份来源读成了本地目录，没有任何症状会
+// 暴露它（brief 第一条风险）。
+//
+//   - NONE 要求三个字段全空：选了「不解析凭据」却留着字段值，
+//     等于操作者以为自己配置的东西其实从未生效。
+//   - DIR 要求 dir 非空、project 与 prefix 全空。
+//   - SECRET_MANAGER 要求 project 与 prefix 都非空、dir 为空。
+//     空 prefix 仍能拼出合法路径，但围栏就只剩项目一层。
+func validateSecretsBackendFields(s PlatformSetting) error {
+	switch s.SecretsBackend {
+	case SecretsBackendNone:
+		if s.SecretsProject != "" || s.SecretsPrefix != "" || s.SecretsDir != "" {
+			return invalid("secretsBackend 为 NONE 时 secretsProject/secretsPrefix/secretsDir 必须全部为空")
+		}
+	case SecretsBackendDir:
+		if s.SecretsDir == "" {
+			return invalid("secretsBackend 为 DIR 时 secretsDir 不能为空")
+		}
+		if s.SecretsProject != "" || s.SecretsPrefix != "" {
+			return invalid("secretsBackend 为 DIR 时 secretsProject/secretsPrefix 必须为空，" +
+				"否则操作者会以为两套后端都在生效")
+		}
+	case SecretsBackendSecretManager:
+		if s.SecretsProject == "" || s.SecretsPrefix == "" {
+			return invalid("secretsBackend 为 SECRET_MANAGER 时 secretsProject 与 secretsPrefix 都必须非空")
+		}
+		if s.SecretsDir != "" {
+			return invalid("secretsBackend 为 SECRET_MANAGER 时 secretsDir 必须为空")
+		}
+	}
+	return nil
+}
