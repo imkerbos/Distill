@@ -17,6 +17,12 @@ const (
 	CodeSessionExpired Code = 10002
 	// CodeUnauthenticated 表示请求未携带有效会话。
 	CodeUnauthenticated Code = 10003
+	// CodeForbidden 表示会话有效，但该账号的角色不足以执行这次操作。
+	//
+	// 与 10002/10003 分开是必需的，不是细分：前端对「重新登录」与
+	// 「你不能做这件事」的处置完全相反，共用一个码会让一次权限不足
+	// 变成一次退出登录，而重新登录之后结果一模一样。
+	CodeForbidden Code = 10004
 
 	// CodeInvalidParam 表示请求参数校验失败。
 	CodeInvalidParam Code = 20001
@@ -42,6 +48,7 @@ var messages = map[Code]string{
 	CodeInvalidCredentials:    "用户名或密码不正确",
 	CodeSessionExpired:        "会话已过期，请重新登录",
 	CodeUnauthenticated:       "请先登录",
+	CodeForbidden:             "当前账号没有执行该操作的权限",
 	CodeInvalidParam:          "请求参数不合法",
 	CodeNotFound:              "请求的资源不存在",
 	CodeRateLimited:           "请求过于频繁，请稍后再试",
@@ -70,6 +77,7 @@ var registered = []Code{
 	CodeInvalidCredentials,
 	CodeSessionExpired,
 	CodeUnauthenticated,
+	CodeForbidden,
 	CodeInvalidParam,
 	CodeNotFound,
 	CodeRateLimited,

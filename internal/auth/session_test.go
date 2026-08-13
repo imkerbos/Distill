@@ -1,6 +1,7 @@
 package auth_test
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -11,7 +12,7 @@ func TestSessionCreateAndGet(t *testing.T) {
 	now := time.Date(2026, 7, 31, 10, 0, 0, 0, time.UTC)
 	s := auth.NewSessionStore(time.Hour, func() time.Time { return now })
 
-	sess, err := s.Create("demo")
+	sess, err := s.Create("demo", auth.RoleAdmin)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -29,6 +30,45 @@ func TestSessionCreateAndGet(t *testing.T) {
 	if got.Username != "demo" {
 		t.Errorf("Username = %q, want demo", got.Username)
 	}
+	// 角色必须原样存活到读出来那一刻：授权层读的正是这个字段，
+	// 一个在存取之间丢掉的角色会让每次判定都落到零值上。
+	if got.Role != auth.RoleAdmin {
+		t.Errorf("Role = %q, want %q", got.Role, auth.RoleAdmin)
+	}
+}
+
+// 会话的角色由签发方给出，取什么值就存什么值 —— 不会被悄悄提权。
+func TestSessionCreateKeepsTheGivenRole(t *testing.T) {
+	s := auth.NewSessionStore(time.Hour, nil)
+	sess, err := s.Create("readonly", auth.RoleViewer)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if sess.Role != auth.RoleViewer {
+		t.Fatalf("Role = %q, want %q", sess.Role, auth.RoleViewer)
+	}
+	got, ok := s.Get(sess.ID)
+	if !ok {
+		t.Fatal("session must be retrievable")
+	}
+	if got.Role != auth.RoleViewer {
+		t.Errorf("stored Role = %q, want %q — a viewer must not read back as anything else",
+			got.Role, auth.RoleViewer)
+	}
+}
+
+// 签不出没有角色的会话：那样的会话一旦存在，授权层就要为它的零值兜底。
+func TestSessionCreateRejectsAnUnregisteredRole(t *testing.T) {
+	s := auth.NewSessionStore(time.Hour, nil)
+	for _, role := range []auth.Role{"", "SUPERADMIN", "admin"} {
+		sess, err := s.Create("demo", role)
+		if !errors.Is(err, auth.ErrInvalidRole) {
+			t.Errorf("Create with role %q: err = %v, want ErrInvalidRole", role, err)
+		}
+		if sess.ID != "" {
+			t.Errorf("Create with role %q returned a session anyway: %q", role, sess.ID)
+		}
+	}
 }
 
 // 会话 ID 必须不可预测：可猜的 ID 等于把所有人的会话交出去。
@@ -36,7 +76,7 @@ func TestSessionIDsAreUnique(t *testing.T) {
 	s := auth.NewSessionStore(time.Hour, nil)
 	seen := map[string]bool{}
 	for i := 0; i < 200; i++ {
-		sess, err := s.Create("demo")
+		sess, err := s.Create("demo", auth.RoleAdmin)
 		if err != nil {
 			t.Fatalf("Create: %v", err)
 		}
@@ -55,7 +95,7 @@ func TestSessionExpires(t *testing.T) {
 	clock := func() time.Time { return now }
 	s := auth.NewSessionStore(time.Hour, clock)
 
-	sess, err := s.Create("demo")
+	sess, err := s.Create("demo", auth.RoleAdmin)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -73,7 +113,7 @@ func TestSessionExpires(t *testing.T) {
 
 func TestSessionDelete(t *testing.T) {
 	s := auth.NewSessionStore(time.Hour, nil)
-	sess, err := s.Create("demo")
+	sess, err := s.Create("demo", auth.RoleAdmin)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -98,7 +138,7 @@ func TestSessionStoreIsConcurrencySafe(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		go func() {
 			defer func() { done <- struct{}{} }()
-			sess, err := s.Create("demo")
+			sess, err := s.Create("demo", auth.RoleAdmin)
 			if err != nil {
 				return
 			}

@@ -25,13 +25,17 @@ func handleCreateSession(d Deps) http.HandlerFunc {
 			return
 		}
 
-		if !d.Verifier.Verify(req.Username, req.Password) {
+		role, ok := d.Verifier.Verify(req.Username, req.Password)
+		if !ok {
 			// 用户不存在与密码错误返回完全相同的响应，避免账号枚举。
 			response.WriteBusiness(w, response.CodeInvalidCredentials)
 			return
 		}
 
-		sess, err := d.Sessions.Create(req.Username)
+		// 角色来自账号记录，由校验器一并给出 —— 不读请求体里的任何字段
+		// （规范 §9、§34）。Create 会拒绝未登记的角色，因此签不出一个
+		// 「已认证但没有角色」的会话。
+		sess, err := d.Sessions.Create(req.Username, role)
 		if err != nil {
 			d.Logger.Error("create session failed",
 				"request_id", RequestIDFrom(r.Context()), "error", err)
