@@ -1,20 +1,32 @@
+# 这个文件只放启动必需项：没有它就连不上数据库、或者根本起不来进程的那些
+# （design doc 2026-08-13 §1）。
+#
+# 会话 TTL、HTTP 读写与优雅退出超时、凭据后端（project / prefix / dir）、
+# Git 校验超时与 SSH host keys 都在 platform_setting 表里，从设置页改，
+# 改完立即生效 —— 运行期按需读取，不做启动快照（§1.1）。
+#
+# 这些键留在本文件里会让**启动失败**并指出去向（config.relocatedKeys）。
+# 静默忽略的话，操作者改了超时、重启、什么也没发生，且没有任何信号。
+
 server:
   addr: ":10100"
-  read_timeout: 10s
-  write_timeout: 20s
-  shutdown_timeout: 15s
 
 auth:
-  session_ttl: 8h
-  users:
-    # 本地 demo 凭据：admin / admin123。明文只应出现在这条注释和 README 里 ——
-    # 这套账号仅用于 fixture 数据的本地演示，不得随配置进入任何真实环境。
-    - username: admin
-      password_hash: "$2a$10$xoVvLW2pGWd/EStkHBl31OzDnxv9ImRRRPUT5vFSHRDQxiSCoRV1u"
+  # 引导账号：**仅**为让首次登录成为可能而存在（design doc §1.2）。
+  # 账号本该落库，但那样会成环 —— 首次登录需要先有账号，建账号需要先登录。
+  #
+  # 本地 demo 凭据：admin / admin123。明文只应出现在这条注释和 README 里 ——
+  # 这套账号仅用于 fixture 数据的本地演示，不得随配置进入任何真实环境。
+  bootstrap_user:
+    username: admin
+    password_hash: "$2a$10$xoVvLW2pGWd/EStkHBl31OzDnxv9ImRRRPUT5vFSHRDQxiSCoRV1u"
 
 database:
   # 本地 demo 连 compose 网络内的 mysql。真实部署用环境变量
   # DISTILL_DATABASE__DSN 覆盖，凭据不写进仓库。
+  #
+  # DSN 留在文件里而设置在库里，不是矛盾：读设置本身就要先连上库，
+  # 把 DSN 也挪进去就成环了。
   #
   # 这条 DSN 刻意不带 multiStatements=true：那是迁移专用连接的能力
   # （见 mysqlregistry.migrationDSN），运行时连接池开着它只会把任何
@@ -23,27 +35,3 @@ database:
 
 log:
   level: INFO
-
-# secrets / gitverify 两段在 demo 里刻意留空：不解析凭据，也就不做 Git
-# 绑定校验，界面上结论一律是 NOT_VERIFIED。这不是"暂时没开"，而是一个
-# 说得出口的状态 —— 没做过的检查不是通过了的检查。
-#
-# 打开校验需要两段一起配（少一段启动即失败，见 config.validateVerification）。
-# secrets 段选一个后端，**不能两个都写** —— 同时出现启动即失败，因为最坏的
-# 一种落法是生产进程从本地目录读私钥。
-#
-# 生产（Secret Manager，身份走 Workload Identity，没有密钥文件这个选项）：
-#
-# secrets:
-#   project: distill-prod          # secret 所在项目
-#   prefix: distill-git-           # 短名拼进资源路径前的固定前缀；两者都必填
-#
-# 本地开发（目录解析器）：
-#
-# secrets:
-#   dir: /run/secrets/distill      # 一个 ref 一个文件；该目录必须 gitignored
-#
-# gitverify:
-#   timeout: 10s                   # 出站超时，超时归入 REPO_UNREACHABLE
-#   host_keys: |                   # known_hosts 格式；公钥不是机密，与凭据分开存放
-#     gitlab.example.com ssh-ed25519 AAAA...

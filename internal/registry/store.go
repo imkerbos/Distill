@@ -76,4 +76,20 @@ type Store interface {
 	// 写模型里时已经付出的代价之一（design doc 2026-08-13 §1）。
 	SetGitVerifyResult(ctx context.Context, actor Actor, clusterID string,
 		result VerifyResult, at time.Time) error
+
+	// Setting 读当前的平台设置。
+	//
+	// **调用方不得把结果缓存成启动快照**（design doc 2026-08-13 §1.1）。
+	// 轮 2 已经在这件事上出过一次事故：集群注册状态被读成一份内存清单，
+	// 下线一个集群之后接口继续服务它，直到进程重启。设置更甚 —— 改了
+	// host key 或 Git 超时，界面显示保存成功，运行期却纹丝不动，而把它们
+	// 挪进数据库正是为了终结这件事。读取走 internal/settings.Provider。
+	Setting(ctx context.Context) (PlatformSetting, error)
+	// UpdateSetting 整体替换平台设置，同事务写审计。
+	//
+	// 整体替换而非部分更新：设置页保存的就是完整的一份，而部分更新会让
+	// 审计的前后值只描述「这次提交带上了哪几个字段」，追溯时读不出全貌。
+	// host key 是平台连接策略仓库时的信任锚，而它能从后台改（§1.3）——
+	// 那条审计行是事后唯一能回答「信任锚是谁在什么时候换的」的东西。
+	UpdateSetting(ctx context.Context, actor Actor, s PlatformSetting) error
 }
