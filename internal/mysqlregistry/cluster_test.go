@@ -29,7 +29,7 @@ func newTestStore(t *testing.T) (*mysqlregistry.Store, *sql.DB) {
 	// 每个测试从干净状态开始。删除顺序与外键依赖相反。
 	for _, tbl := range []string{
 		"audit_log", "rule_override", "policy_import", "cluster_git_binding",
-		"cluster_health_check_source", "cluster_apiserver", "cluster",
+		"git_repo", "cluster_health_check_source", "cluster_apiserver", "cluster",
 	} {
 		//nolint:gosec // G202: tbl comes from the fixed literal slice above, not external input
 		if _, err := db.Exec("DELETE FROM " + tbl); err != nil {
@@ -262,6 +262,7 @@ func TestClusterSurvivesAFullRoundTripThroughMySQL(t *testing.T) {
 	}
 	// 绑定单独写入，但读模型仍然内嵌它：这一趟往返要覆盖的正是
 	// 「写路径拆开之后，读回来的形状没变」。
+	mustCreateGitRepo(t, s, registry.Actor{Username: "admin"})
 	if err := s.BindGitRepo(ctx, registry.Actor{Username: "admin"}, in.ID,
 		sampleGitBinding()); err != nil {
 		t.Fatalf("BindGitRepo() error = %v", err)
@@ -286,7 +287,7 @@ func TestClusterSurvivesAFullRoundTripThroughMySQL(t *testing.T) {
 	// sampleGitBinding 没填 VerifyResult：Go 零值 "" 不是一个登记过的枚举值，
 	// 写入时被落成 NOT_VERIFIED（gitbinding.go BindGitRepo），读回来
 	// 因此就是 NOT_VERIFIED 而不是空串。
-	want.Git.VerifyResult = registry.VerifyNotVerified
+	want.Git.VerifyResult = registry.BindingVerifyNotVerified
 
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("round-tripped cluster =\n%+v\nwant\n%+v", got, want)
@@ -308,6 +309,7 @@ func TestUnverifiedGitBindingReadsBackAsNilNotZeroTime(t *testing.T) {
 		t.Fatalf("CreateCluster() error = %v", err)
 	}
 	// 绑定不带 VerifiedAt / VerifyResult：刚绑上、还没跑过校验。
+	mustCreateGitRepo(t, s, registry.Actor{Username: "admin"})
 	if err := s.BindGitRepo(ctx, registry.Actor{Username: "admin"}, in.ID,
 		sampleGitBinding()); err != nil {
 		t.Fatalf("BindGitRepo() error = %v", err)
@@ -322,8 +324,8 @@ func TestUnverifiedGitBindingReadsBackAsNilNotZeroTime(t *testing.T) {
 	if got.Git.VerifiedAt != nil {
 		t.Errorf("VerifiedAt = %v, want nil for a never-verified binding", got.Git.VerifiedAt)
 	}
-	if got.Git.VerifyResult != registry.VerifyNotVerified {
-		t.Errorf("VerifyResult = %q, want %q", got.Git.VerifyResult, registry.VerifyNotVerified)
+	if got.Git.VerifyResult != registry.BindingVerifyNotVerified {
+		t.Errorf("VerifyResult = %q, want %q", got.Git.VerifyResult, registry.BindingVerifyNotVerified)
 	}
 }
 
@@ -338,10 +340,11 @@ func TestVerifiedGitBindingRoundTripsResultAndTimestamp(t *testing.T) {
 	if err := s.CreateCluster(ctx, actor, in); err != nil {
 		t.Fatalf("CreateCluster() error = %v", err)
 	}
+	mustCreateGitRepo(t, s, actor)
 	if err := s.BindGitRepo(ctx, actor, in.ID, sampleGitBinding()); err != nil {
 		t.Fatalf("BindGitRepo() error = %v", err)
 	}
-	if err := s.SetGitVerifyResult(ctx, actor, in.ID, registry.VerifyOK, verifiedAt); err != nil {
+	if err := s.SetGitVerifyResult(ctx, actor, in.ID, registry.BindingVerifyOK, verifiedAt); err != nil {
 		t.Fatalf("SetGitVerifyResult() error = %v", err)
 	}
 
@@ -352,8 +355,8 @@ func TestVerifiedGitBindingRoundTripsResultAndTimestamp(t *testing.T) {
 	if got.Git == nil {
 		t.Fatal("Git binding missing after round trip")
 	}
-	if got.Git.VerifyResult != registry.VerifyOK {
-		t.Errorf("VerifyResult = %q, want %q", got.Git.VerifyResult, registry.VerifyOK)
+	if got.Git.VerifyResult != registry.BindingVerifyOK {
+		t.Errorf("VerifyResult = %q, want %q", got.Git.VerifyResult, registry.BindingVerifyOK)
 	}
 	if got.Git.VerifiedAt == nil || !got.Git.VerifiedAt.Equal(verifiedAt) {
 		t.Errorf("VerifiedAt = %v, want %v", got.Git.VerifiedAt, verifiedAt)
