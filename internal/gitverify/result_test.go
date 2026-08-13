@@ -19,24 +19,24 @@ func TestClassifyDistinguishesWhoNeedsToFixIt(t *testing.T) {
 	cases := []struct {
 		name string
 		err  error
-		want registry.VerifyResult
+		want registry.RepoVerifyResult
 	}{
-		{"credential missing", secrets.ErrNotFound, registry.VerifyCredentialUnresolved},
+		{"credential missing", secrets.ErrNotFound, registry.RepoVerifyCredentialUnresolved},
 		// 引用本身不合法（最常见的形态是绑定还没配 credentialRef，
 		// 而空串过不了 ValidateRef）同样是「平台取不到凭据」，不是
 		// 网络问题 —— 归 REPO_UNREACHABLE 会就着一次从未发出的请求
 		// 断言网络有故障（spec §3.2）。
-		{"credential ref unusable", secrets.ErrInvalidRef, registry.VerifyCredentialUnresolved},
-		{"auth rejected", transport.ErrAuthenticationRequired, registry.VerifyAuthFailed},
-		{"auth invalid", transport.ErrAuthorizationFailed, registry.VerifyAuthFailed},
-		{"repo absent", transport.ErrRepositoryNotFound, registry.VerifyRepoUnreachable},
-		{"timeout", context.DeadlineExceeded, registry.VerifyRepoUnreachable},
-		{"branch absent", plumbing.ErrReferenceNotFound, registry.VerifyBranchMissing},
+		{"credential ref unusable", secrets.ErrInvalidRef, registry.RepoVerifyCredentialUnresolved},
+		{"auth rejected", transport.ErrAuthenticationRequired, registry.RepoVerifyAuthFailed},
+		{"auth invalid", transport.ErrAuthorizationFailed, registry.RepoVerifyAuthFailed},
+		{"repo absent", transport.ErrRepositoryNotFound, registry.RepoVerifyRepoUnreachable},
+		{"timeout", context.DeadlineExceeded, registry.RepoVerifyRepoUnreachable},
+		{"branch absent", plumbing.ErrReferenceNotFound, registry.RepoVerifyBranchMissing},
 		// clone 阶段分支不存在给的不是 ErrReferenceNotFound，见 verify.go。
-		{"branch absent from clone", git.NoMatchingRefSpecError{}, registry.VerifyBranchMissing},
-		{"empty remote", transport.ErrEmptyRemoteRepository, registry.VerifyBranchMissing},
-		{"unknown", errors.New("boom"), registry.VerifyRepoUnreachable},
-		{"no error", nil, registry.VerifyOK},
+		{"branch absent from clone", git.NoMatchingRefSpecError{}, registry.RepoVerifyBranchMissing},
+		{"empty remote", transport.ErrEmptyRemoteRepository, registry.RepoVerifyBranchMissing},
+		{"unknown", errors.New("boom"), registry.RepoVerifyRepoUnreachable},
+		{"no error", nil, registry.RepoVerifyOK},
 	}
 	for _, c := range cases {
 		if got := gitverify.Classify(c.err); got != c.want {
@@ -60,7 +60,7 @@ func TestClassifyReturnsOnlyEnumValues(t *testing.T) {
 // 包装过的错误也要认得出来：go-git 与 secrets 都会用 %w 往上裹。
 func TestClassifyLooksThroughWrapping(t *testing.T) {
 	wrapped := errors.Join(errors.New("clone failed"), transport.ErrAuthorizationFailed)
-	if got := gitverify.Classify(wrapped); got != registry.VerifyAuthFailed {
-		t.Fatalf("Classify(wrapped) = %q, want %q", got, registry.VerifyAuthFailed)
+	if got := gitverify.Classify(wrapped); got != registry.RepoVerifyAuthFailed {
+		t.Fatalf("Classify(wrapped) = %q, want %q", got, registry.RepoVerifyAuthFailed)
 	}
 }

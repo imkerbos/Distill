@@ -68,64 +68,121 @@ func TestNewRefusesUnusableConfiguration(t *testing.T) {
 
 // 走真实的 clone 代码路径：仓库在 t.TempDir() 里，用 file:// 传输到达。
 // SSH 认证与 host key 校验在这条传输上不参与，但 New 仍然是生产构造，
-// 分支解析、tree 查找与错误映射都是真的。
-func TestVerifyReachesARealRepository(t *testing.T) {
-	repo := newBareTestRepo(t)
+// 分支解析与错误映射都是真的。
+func TestVerifyRepoReachesARealRepository(t *testing.T) {
+	present := newBareTestRepo(t)
 	empty := newEmptyBareRepo(t)
 	missing := "file://" + filepath.Join(t.TempDir(), "nowhere")
 
 	cases := []struct {
-		name    string
-		binding registry.GitBinding
-		want    registry.VerifyResult
+		name string
+		repo registry.GitRepo
+		want registry.RepoVerifyResult
 	}{
 		{
-			name:    "branch and path both present",
-			binding: registry.GitBinding{RepoURL: repo, Branch: "master", PolicyPath: "policies/prod"},
-			want:    registry.VerifyOK,
+			name: "repository answers and the branch exists",
+			repo: registry.GitRepo{URL: present, Branch: "master"},
+			want: registry.RepoVerifyOK,
 		},
 		{
-			name:    "path is a file",
-			binding: registry.GitBinding{RepoURL: repo, Branch: "master", PolicyPath: "policies/prod/np.yaml"},
-			want:    registry.VerifyOK,
+			name: "branch does not exist",
+			repo: registry.GitRepo{URL: present, Branch: "release-2026"},
+			want: registry.RepoVerifyBranchMissing,
 		},
 		{
-			name:    "path written with surrounding slashes",
-			binding: registry.GitBinding{RepoURL: repo, Branch: "master", PolicyPath: "/policies/prod/"},
-			want:    registry.VerifyOK,
+			name: "repository has no branches at all",
+			repo: registry.GitRepo{URL: empty, Branch: "master"},
+			want: registry.RepoVerifyBranchMissing,
 		},
 		{
-			name:    "branch does not exist",
-			binding: registry.GitBinding{RepoURL: repo, Branch: "release-2026", PolicyPath: "policies/prod"},
-			want:    registry.VerifyBranchMissing,
-		},
-		{
-			name:    "repository has no branches at all",
-			binding: registry.GitBinding{RepoURL: empty, Branch: "master", PolicyPath: "policies/prod"},
-			want:    registry.VerifyBranchMissing,
-		},
-		{
-			name:    "path absent under an existing directory",
-			binding: registry.GitBinding{RepoURL: repo, Branch: "master", PolicyPath: "policies/staging"},
-			want:    registry.VerifyPathMissing,
-		},
-		{
-			name:    "path absent at the top level",
-			binding: registry.GitBinding{RepoURL: repo, Branch: "master", PolicyPath: "manifests"},
-			want:    registry.VerifyPathMissing,
-		},
-		{
-			name:    "repository is not there",
-			binding: registry.GitBinding{RepoURL: missing, Branch: "master", PolicyPath: "policies/prod"},
-			want:    registry.VerifyRepoUnreachable,
+			name: "repository is not there",
+			repo: registry.GitRepo{URL: missing, Branch: "master"},
+			want: registry.RepoVerifyRepoUnreachable,
 		},
 	}
 
 	v := newVerifier(t)
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := v.Verify(context.Background(), c.binding); got != c.want {
-				t.Errorf("Verify() = %q, want %q", got, c.want)
+			got, at := v.VerifyRepo(context.Background(), c.repo)
+			if got != c.want {
+				t.Errorf("VerifyRepo() = %q, want %q", got, c.want)
+			}
+			// 无论结论是哪一个，这次校验都实际发生过，那个时刻是历史事实。
+			if at == nil {
+				t.Error("VerifyRepo() left verifiedAt nil after actually running a check")
+			}
+		})
+	}
+}
+
+// 路径级只回答一个问题：policyPath 在不在那个分支上。
+func TestVerifyPathReachesARealRepository(t *testing.T) {
+	repo := registry.GitRepo{URL: newBareTestRepo(t), Branch: "master"}
+
+	cases := []struct {
+		name       string
+		policyPath string
+		want       registry.BindingVerifyResult
+	}{
+		{"directory is present", "policies/prod", registry.BindingVerifyOK},
+		{"path is a file", "policies/prod/np.yaml", registry.BindingVerifyOK},
+		{"path written with surrounding slashes", "/policies/prod/", registry.BindingVerifyOK},
+		{"path absent under an existing directory", "policies/staging", registry.BindingVerifyPathMissing},
+		{"path absent at the top level", "manifests", registry.BindingVerifyPathMissing},
+	}
+
+	v := newVerifier(t)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, at := v.VerifyPath(context.Background(), repo, registry.RepoVerifyOK, c.policyPath)
+			if got != c.want {
+				t.Errorf("VerifyPath() = %q, want %q", got, c.want)
+			}
+			if at == nil {
+				t.Error("VerifyPath() left verifiedAt nil after actually looking the path up")
+			}
+		})
+	}
+}
+
+// 仓库级没通过时，路径级不得给出 PATH_MISSING：
+// 仓库都连不上还说路径不存在，是一句没有依据的结论。
+//
+// 前两个用例的仓库是**真的、可达的**，路径也真的缺或真的在 —— 也就是说
+// 一旦 VerifyPath 不看传进来的仓库级结论，它会当场查出 PATH_MISSING 与
+// OK 来。这两个用例因此是对「前提确实被遵守」的证明，而不是对一次本来
+// 就查不成的调用的复述。第三个用例才是仓库真的不可达的形态。
+func TestPathVerdictIsNotVerifiedWhenTheRepoItselfFailed(t *testing.T) {
+	reachable := registry.GitRepo{URL: newBareTestRepo(t), Branch: "master"}
+	unreachable := registry.GitRepo{URL: "file://" + filepath.Join(t.TempDir(), "nowhere"), Branch: "master"}
+
+	cases := []struct {
+		name       string
+		repo       registry.GitRepo
+		repoResult registry.RepoVerifyResult
+		policyPath string
+	}{
+		{"path is absent but the repo verdict is auth failed", reachable,
+			registry.RepoVerifyAuthFailed, "policies/staging"},
+		{"path is present but the repo was never verified", reachable,
+			registry.RepoVerifyNotVerified, "policies/prod"},
+		{"repository never answered", unreachable,
+			registry.RepoVerifyRepoUnreachable, "policies/prod"},
+	}
+
+	v := newVerifier(t)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, at := v.VerifyPath(context.Background(), c.repo, c.repoResult, c.policyPath)
+			if got != registry.BindingVerifyNotVerified {
+				t.Errorf("VerifyPath(repo verdict %q) = %q, want %q",
+					c.repoResult, got, registry.BindingVerifyNotVerified)
+			}
+			// 路径级校验没有发生过，就没有那个时刻 —— 带时间戳的
+			// NOT_VERIFIED 会在界面上显示成一次从未发生的校验。
+			if at != nil {
+				t.Errorf("VerifyPath() stamped verifiedAt %v for a check that never happened", *at)
 			}
 		})
 	}
@@ -138,9 +195,9 @@ func TestVerifyReportsUnresolvableCredentialWithoutReachingOut(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() = %v", err)
 	}
-	binding := registry.GitBinding{RepoURL: newBareTestRepo(t), Branch: "master", PolicyPath: "policies/prod"}
-	if got := v.Verify(context.Background(), binding); got != registry.VerifyCredentialUnresolved {
-		t.Fatalf("Verify() = %q, want %q", got, registry.VerifyCredentialUnresolved)
+	repo := registry.GitRepo{URL: newBareTestRepo(t), Branch: "master"}
+	if got, _ := v.VerifyRepo(context.Background(), repo); got != registry.RepoVerifyCredentialUnresolved {
+		t.Fatalf("VerifyRepo() = %q, want %q", got, registry.RepoVerifyCredentialUnresolved)
 	}
 }
 
@@ -160,12 +217,9 @@ func TestVerifyReportsAMissingCredentialRefAsUnresolved(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() = %v", err)
 	}
-	binding := registry.GitBinding{
-		RepoURL: newBareTestRepo(t), Branch: "master", PolicyPath: "policies/prod",
-		CredentialRef: "",
-	}
-	if got := v.Verify(context.Background(), binding); got != registry.VerifyCredentialUnresolved {
-		t.Fatalf("Verify(empty credentialRef) = %q, want %q", got, registry.VerifyCredentialUnresolved)
+	repo := registry.GitRepo{URL: newBareTestRepo(t), Branch: "master", CredentialRef: ""}
+	if got, _ := v.VerifyRepo(context.Background(), repo); got != registry.RepoVerifyCredentialUnresolved {
+		t.Fatalf("VerifyRepo(empty credentialRef) = %q, want %q", got, registry.RepoVerifyCredentialUnresolved)
 	}
 }
 
@@ -175,29 +229,32 @@ func TestVerifyReportsUnusableCredential(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() = %v", err)
 	}
-	binding := registry.GitBinding{RepoURL: newBareTestRepo(t), Branch: "master", PolicyPath: "policies/prod"}
-	if got := v.Verify(context.Background(), binding); got != registry.VerifyCredentialUnresolved {
-		t.Fatalf("Verify() = %q, want %q", got, registry.VerifyCredentialUnresolved)
+	repo := registry.GitRepo{URL: newBareTestRepo(t), Branch: "master"}
+	if got, _ := v.VerifyRepo(context.Background(), repo); got != registry.RepoVerifyCredentialUnresolved {
+		t.Fatalf("VerifyRepo() = %q, want %q", got, registry.RepoVerifyCredentialUnresolved)
 	}
 }
 
-// 校验只读：跑完之后远端的引用与 commit 必须一个字节都没变。
+// 校验只读：两个入口跑完之后，远端的引用与 commit 必须一个字节都没变。
 func TestVerifyLeavesTheRepositoryUntouched(t *testing.T) {
 	url := newBareTestRepo(t)
 	dir := strings.TrimPrefix(url, "file://")
 	before := refSnapshot(t, dir)
 
 	v := newVerifier(t)
-	for _, b := range []registry.GitBinding{
-		{RepoURL: url, Branch: "master", PolicyPath: "policies/prod"},
-		{RepoURL: url, Branch: "release-2026", PolicyPath: "policies/prod"},
-		{RepoURL: url, Branch: "master", PolicyPath: "policies/staging"},
+	for _, r := range []registry.GitRepo{
+		{URL: url, Branch: "master"},
+		{URL: url, Branch: "release-2026"},
 	} {
-		v.Verify(context.Background(), b)
+		v.VerifyRepo(context.Background(), r)
+	}
+	for _, p := range []string{"policies/prod", "policies/staging"} {
+		v.VerifyPath(context.Background(), registry.GitRepo{URL: url, Branch: "master"},
+			registry.RepoVerifyOK, p)
 	}
 
 	if after := refSnapshot(t, dir); after != before {
-		t.Fatalf("Verify() changed the remote refs:\nbefore %s\nafter  %s", before, after)
+		t.Fatalf("verification changed the remote refs:\nbefore %s\nafter  %s", before, after)
 	}
 }
 
@@ -219,13 +276,16 @@ func TestVerifyRefusesToConnectToAnInternalAddress(t *testing.T) {
 		t.Fatalf("New() = %v", err)
 	}
 
-	binding := registry.GitBinding{
-		RepoURL:    "ssh://git@" + addr + "/policies.git",
-		Branch:     "master",
-		PolicyPath: "policies/prod",
+	repo := registry.GitRepo{URL: "ssh://git@" + addr + "/policies.git", Branch: "master"}
+	if got, _ := v.VerifyRepo(context.Background(), repo); got != registry.RepoVerifyRepoUnreachable {
+		t.Errorf("VerifyRepo(loopback) = %q, want %q", got, registry.RepoVerifyRepoUnreachable)
 	}
-	if got := v.Verify(context.Background(), binding); got != registry.VerifyRepoUnreachable {
-		t.Errorf("Verify(loopback) = %q, want %q", got, registry.VerifyRepoUnreachable)
+
+	// 路径级也会拨号，走的是同一条出站链路。它单独跑一次：光证明仓库级
+	// 那个入口被判定管住了，不等于路径级那个入口也经由同一条链路出站。
+	// 传 RepoVerifyOK 是为了让它真的走到拨号那一步。
+	if got, _ := v.VerifyPath(context.Background(), repo, registry.RepoVerifyOK, "policies/prod"); got != registry.BindingVerifyNotVerified {
+		t.Errorf("VerifyPath(loopback) = %q, want %q", got, registry.BindingVerifyNotVerified)
 	}
 
 	select {

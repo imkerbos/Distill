@@ -110,13 +110,13 @@ func TestCheckDestinationRefusesUnrecognizableAddresses(t *testing.T) {
 // 被拒绝的目的地址必须落在封闭枚举的 REPO_UNREACHABLE 上，且结论里不得
 // 带任何地址信息（§19、§22）。
 func TestClassifyMapsBlockedDestinationToRepoUnreachable(t *testing.T) {
-	if got := Classify(errBlockedDestination); got != registry.VerifyRepoUnreachable {
-		t.Errorf("Classify(errBlockedDestination) = %q, want %q", got, registry.VerifyRepoUnreachable)
+	if got := Classify(errBlockedDestination); got != registry.RepoVerifyRepoUnreachable {
+		t.Errorf("Classify(errBlockedDestination) = %q, want %q", got, registry.RepoVerifyRepoUnreachable)
 	}
 	// x/crypto/ssh 与 go-git 都会在外面包一层，包完仍要落在同一档。
 	wrapped := fmt.Errorf("ssh: handshake failed: %w", errBlockedDestination)
-	if got := Classify(wrapped); got != registry.VerifyRepoUnreachable {
-		t.Errorf("Classify(wrapped) = %q, want %q", got, registry.VerifyRepoUnreachable)
+	if got := Classify(wrapped); got != registry.RepoVerifyRepoUnreachable {
+		t.Errorf("Classify(wrapped) = %q, want %q", got, registry.RepoVerifyRepoUnreachable)
 	}
 }
 
