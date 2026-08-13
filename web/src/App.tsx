@@ -4,6 +4,7 @@ import AppShell from './components/AppShell'
 import { SessionProvider, useSession } from './auth/SessionContext'
 import ClustersPage from './pages/ClustersPage'
 import FlowsPage from './pages/FlowsPage'
+import GitReposPage from './pages/GitReposPage'
 import LoginPage from './pages/LoginPage'
 import PolicyPage from './pages/PolicyPage'
 import QualityPage from './pages/QualityPage'
@@ -28,6 +29,8 @@ function Protected() {
         <Route path="/security" element={<SecurityPage cluster={cluster} />} />
         <Route path="/policy" element={<PolicyPage cluster={cluster} />} />
         <Route path="/clusters" element={<ClustersPage />} />
+        {/* 策略仓库独立于集群存在，因此与设置页同理，不接 cluster。 */}
+        <Route path="/git-repos" element={<GitReposPage />} />
         {/* 设置是平台自身的配置，不属于任何一个集群，因此不接 cluster。 */}
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="*" element={<Navigate to="/topology" replace />} />

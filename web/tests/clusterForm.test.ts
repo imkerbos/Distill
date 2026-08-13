@@ -3,22 +3,22 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  ALL_VERIFY_RESULTS, blankFormValues, blankGitValues, buildClusterWrite, describeVerifyOutcome,
-  describeVerifyStatus, formatUtcTime, formValuesOf, gitFormValuesOf, resolveGitBinding,
+  ALL_PATH_VERIFY_RESULTS, blankFormValues, blankGitValues, buildClusterWrite,
+  describePathVerifyOutcome, describePathVerifyStatus, formValuesOf, gitFormValuesOf,
+  resolveGitBinding,
 } from '../src/pages/clusterForm.ts'
-import type { GitBinding, RegisteredCluster, VerifyResult } from '../src/api/types.ts'
+import { formatUtcTime } from '../src/pages/verifyView.ts'
+import type { GitBinding, PathVerifyResult, RegisteredCluster } from '../src/api/types.ts'
 
 const binding: GitBinding = {
-  repoUrl: 'ssh://git@gitlab.example.com/net/policies.git',
-  branch: 'main',
+  repoId: 'repo-prod-asia-1',
   policyPath: 'clusters/prod-asia-1',
-  credentialRef: 'git-token',
   lastWrittenCommit: '0123456789abcdef0123456789abcdef01234567',
   verifyResult: 'NOT_VERIFIED',
 }
 
 /** 造一个只在校验两列上不同的绑定，其余字段与 binding 相同。 */
-function verified(result: VerifyResult, at?: string): GitBinding {
+function verified(result: PathVerifyResult, at?: string): GitBinding {
   return { ...binding, verifyResult: result, verifiedAt: at }
 }
 
@@ -200,69 +200,74 @@ test('apiserver 半填的行按界面序号报错', () => {
 /* 3. 绑定提交体                                                            */
 /* ---------------------------------------------------------------------- */
 
-/** 播种只取四个可写字段：平台自产的三项一旦进了表单，下一个人就会提交它们。 */
-test('绑定表单只播种四个可写字段', () => {
+/** 播种只取两个可写字段：平台自产的三项一旦进了表单，下一个人就会提交它们。 */
+test('绑定表单只播种两个可写字段', () => {
   assert.deepEqual(gitFormValuesOf(binding), {
-    repoUrl: 'ssh://git@gitlab.example.com/net/policies.git',
-    branch: 'main',
+    repoId: 'repo-prod-asia-1',
     policyPath: 'clusters/prod-asia-1',
-    credentialRef: 'git-token',
   })
   // 未绑定集群（prod-eu-1 的真实形态）给一份空值，而不是抛错或留 undefined。
   assert.deepEqual(gitFormValuesOf(unbound().git), blankGitValues())
 })
 
 /**
- * 提交体里只有四个字段：没有 lastWrittenCommit，也没有校验结论。
+ * 提交体里只有两个字段：没有 lastWrittenCommit、没有校验结论，也**没有
+ * 仓库的地址、分支与凭据**。
  *
- * lastWrittenCommit 是平台对「我最近一次往这个仓库写了什么」的断言，漂移
- * 检测拿它与 Git 现状比对；verifyResult / verifiedAt 是平台对绑定可信度的
- * 判断。三者但凡有一个能由客户端提供，对应的那句话就再也无法被证伪。
+ * 前三者是平台自产的东西，但凡有一个能由客户端提供，对应的那句话就再也
+ * 无法被证伪。后三者是另一回事：它们属于仓库，服务端的 gitBindingPayload
+ * 根本不收它们（internal/httpapi/gitbinding_handler.go）—— 带上去请求照样
+ * 成功，界面显示保存生效，而平台真正会去连的地址原封不动。
  *
  * 断言整个键集合而不是逐个 `hasOwn(...) === false`：逐个断言只挡住已经
- * 想到的那三个拼法。
+ * 想到的那几个拼法，`repo` / `gitRepo` 换个名字照样溜进去。
  */
-test('绑定提交体只有四个可写字段', () => {
+test('绑定提交体只有 repoId 与 policyPath', () => {
   const resolved = resolveGitBinding(gitFormValuesOf(binding))
   assert.equal(resolved.ok, true)
   if (!resolved.ok) return
-  assert.deepEqual(Object.keys(resolved.binding).sort(),
-    ['branch', 'credentialRef', 'policyPath', 'repoUrl'],
-    '绑定提交体多出了字段：平台自产的结论与基准一旦能被客户端设定，就无法被证伪')
-  assert.equal(resolved.binding.repoUrl, 'ssh://git@gitlab.example.com/net/policies.git')
-  assert.equal(resolved.binding.credentialRef, 'git-token')
+  assert.deepEqual(Object.keys(resolved.binding).sort(), ['policyPath', 'repoId'],
+    '绑定提交体多出了字段：仓库属性走仓库端点，平台自产的结论与基准根本不该由客户端给')
+  assert.equal(resolved.binding.repoId, 'repo-prod-asia-1')
+  assert.equal(resolved.binding.policyPath, 'clusters/prod-asia-1')
 })
 
 /**
- * credentialRef 单独填写同样触发三项必填。它是唯一一个不在必填清单里
- * 的字段，若不由「任意一项非空」触发检查，它录入的值会被静默丢弃。
+ * 两项各自缺席都要被拦住，且报错点名缺的是哪一项。
+ *
+ * 双向跑：只填 repoId 与只填 policyPath 都是「填了一半的绑定」。只测一个
+ * 方向，一个「只检查 repoId」的实现同样是绿的 —— 而那会让一次少填路径的
+ * 保存被服务端按空 policyPath 落库，此后策略写去仓库根目录。
  */
-test('只填 credentialRef 也要求 repoUrl / branch / policyPath', () => {
-  const values = blankGitValues()
-  values.credentialRef = 'git-token'
+test('repoId 与 policyPath 缺任意一项都被拦住，且点名缺的那一项', () => {
+  const onlyRepo = blankGitValues()
+  onlyRepo.repoId = 'repo-prod-asia-1'
+  const a = resolveGitBinding(onlyRepo)
+  assert.equal(a.ok, false)
+  if (a.ok) return
+  assert.match(a.error, /policyPath/)
 
-  const resolved = resolveGitBinding(values)
-  assert.equal(resolved.ok, false)
-  if (resolved.ok) return
-  assert.match(resolved.error, /repoUrl/)
-  assert.match(resolved.error, /branch/)
-  assert.match(resolved.error, /policyPath/)
+  const onlyPath = blankGitValues()
+  onlyPath.policyPath = 'clusters/prod-eu-1'
+  const b = resolveGitBinding(onlyPath)
+  assert.equal(b.ok, false)
+  if (b.ok) return
+  assert.match(b.error, /repoId/)
 })
 
 /** 未绑定集群补上绑定：这是本轮的动机场景，prod-eu-1 的真实形态。 */
-test('未绑定集群可以补上绑定', () => {
+test('未绑定集群可以绑到一个已登记的仓库', () => {
   const values = gitFormValuesOf(unbound().git)
-  values.repoUrl = 'ssh://git@gitlab.example.com/net/policies.git'
-  values.branch = 'main'
+  values.repoId = 'repo-prod-asia-1'
   values.policyPath = 'clusters/prod-eu-1'
 
   const resolved = resolveGitBinding(values)
   assert.equal(resolved.ok, true)
   if (!resolved.ok) return
+  assert.equal(resolved.binding.repoId, 'repo-prod-asia-1')
   assert.equal(resolved.binding.policyPath, 'clusters/prod-eu-1')
-  // credentialRef 可选：不填就是空串，不是「缺一项」。
-  assert.equal(resolved.binding.credentialRef, '')
   assert.match(resolved.summary, /clusters\/prod-eu-1/)
+  assert.match(resolved.summary, /repo-prod-asia-1/)
 })
 
 /* ---------------------------------------------------------------------- */
@@ -279,7 +284,7 @@ test('未绑定集群可以补上绑定', () => {
  * 一个自己会变回去的界面，比一个说「什么都没发生」的界面更难被信任。
  */
 test('无时间戳的响应读作「这次没有发生校验」，不当成新结论', () => {
-  const outcome = describeVerifyOutcome({ verifyResult: 'NOT_VERIFIED' })
+  const outcome = describePathVerifyOutcome({ verifyResult: 'NOT_VERIFIED' })
   assert.equal(outcome.happened, false)
   assert.notEqual(outcome.message.trim(), '', '什么都不说，操作者只能猜是按钮坏了')
   assert.match(outcome.message, /没有发生校验/)
@@ -289,13 +294,13 @@ test('无时间戳的响应读作「这次没有发生校验」，不当成新�
   assert.equal(outcome.tone, 'unverified')
 
   // verifiedAt 显式为 null（后端 omitempty 之外的另一种可能）同样处理。
-  assert.equal(describeVerifyOutcome({ verifyResult: 'OK', verifiedAt: null }).happened, false,
+  assert.equal(describePathVerifyOutcome({ verifyResult: 'OK', verifiedAt: null }).happened, false,
     '带着 OK 却没有时刻的响应被当成了一次真的校验：那个 OK 没有发生过')
 })
 
 /** 真的发生了校验时，回执点名结论与时刻，且读得出是刚刚那一次。 */
 test('带时间戳的响应读作一次真实发生的校验', () => {
-  const outcome = describeVerifyOutcome({
+  const outcome = describePathVerifyOutcome({
     verifyResult: 'PATH_MISSING', verifiedAt: '2026-08-13T09:30:00Z',
   })
   assert.equal(outcome.happened, true)
@@ -303,16 +308,18 @@ test('带时间戳的响应读作一次真实发生的校验', () => {
   assert.match(outcome.message, /路径不存在/)
   assert.equal(outcome.tone, 'bad')
 
-  const ok = describeVerifyOutcome({ verifyResult: 'OK', verifiedAt: '2026-08-13T09:30:00Z' })
+  const ok = describePathVerifyOutcome({ verifyResult: 'OK', verifiedAt: '2026-08-13T09:30:00Z' })
   assert.equal(ok.tone, 'ok')
   assert.notEqual(ok.message, outcome.message)
 })
 
 /** 回执与徽章共用同一套文案表：两处对同一个结论说不同的话，读者只能挑一个信。 */
 test('回执文案与列表徽章同源，不各写一套', () => {
-  for (const result of ALL_VERIFY_RESULTS) {
-    const badge = describeVerifyStatus(verified(result, '2026-08-13T09:30:00Z'))
-    const outcome = describeVerifyOutcome({ verifyResult: result, verifiedAt: '2026-08-13T09:30:00Z' })
+  for (const result of ALL_PATH_VERIFY_RESULTS) {
+    const badge = describePathVerifyStatus(verified(result, '2026-08-13T09:30:00Z'))
+    const outcome = describePathVerifyOutcome({
+      verifyResult: result, verifiedAt: '2026-08-13T09:30:00Z',
+    })
     assert.equal(outcome.message.includes(badge.label), true,
       `${result} 的回执没有用列表那一套文案`)
     assert.equal(outcome.tone, badge.tone, `${result} 的回执与徽章语气不一致`)
@@ -322,28 +329,32 @@ test('回执文案与列表徽章同源，不各写一套', () => {
 })
 
 /* ---------------------------------------------------------------------- */
-/* 5. 校验结论的展示形态                                                     */
+/* 5. 路径级校验结论的展示形态                                                */
 /* ---------------------------------------------------------------------- */
 
 /**
- * 七个取值必须各有非空文案。
+ * 三个取值必须各有非空文案。
  *
- * ALL_VERIFY_RESULTS 从 `Record<VerifyResult, string>` 的键推导，所以
- * 后端新增第八个取值时 `tsc` 先报错；这条测试守的是另一半 —— 已登记的
- * 取值不许有人把文案改空。一格空白在这张表里会被读成「这个绑定没问题」。
+ * ALL_PATH_VERIFY_RESULTS 从 `Record<PathVerifyResult, string>` 的键推导，
+ * 所以后端在这一层新增第四个取值时 `tsc` 先报错；这条测试守的是另一半 ——
+ * 已登记的取值不许有人把文案改空。一格空白在这张表里会被读成「这条路径
+ * 没问题」。
+ *
+ * 数字写死成 3 也是一条断言：仓库级那四个失败取值不属于这一层，谁把
+ * AUTH_FAILED 之类塞进这张表，这一行会红（design doc §3.3）。
  */
-test('七个校验结论各有非空文案，且互不相同', () => {
-  assert.equal(ALL_VERIFY_RESULTS.length, 7)
+test('三个路径级结论各有非空文案，且互不相同', () => {
+  assert.equal(ALL_PATH_VERIFY_RESULTS.length, 3)
 
   const labels = new Set<string>()
-  for (const result of ALL_VERIFY_RESULTS) {
-    const view = describeVerifyStatus(verified(result))
+  for (const result of ALL_PATH_VERIFY_RESULTS) {
+    const view = describePathVerifyStatus(verified(result))
     assert.notEqual(view.label.trim(), '', `${result} 的结论文案为空`)
     assert.notEqual(view.detail.trim(), '', `${result} 的说明文案为空`)
     assert.notEqual(view.label, result, `${result} 直接把枚举原样显示了`)
     labels.add(view.label)
   }
-  assert.equal(labels.size, 7, '有两个结论共用了同一句文案，界面上分不开')
+  assert.equal(labels.size, 3, '有两个结论共用了同一句文案，界面上分不开')
 })
 
 /**
@@ -353,8 +364,8 @@ test('七个校验结论各有非空文案，且互不相同', () => {
  * 标签配同一种画法，扫一眼表格时仍然分不出来。
  */
 test('NOT_VERIFIED 与 OK 在文案与语气上都可分，且都不是空白', () => {
-  const notVerified = describeVerifyStatus(verified('NOT_VERIFIED'))
-  const ok = describeVerifyStatus(verified('OK', '2026-08-12T15:20:15Z'))
+  const notVerified = describePathVerifyStatus(verified('NOT_VERIFIED'))
+  const ok = describePathVerifyStatus(verified('OK', '2026-08-12T15:20:15Z'))
 
   assert.notEqual(notVerified.label.trim(), '')
   assert.notEqual(notVerified.label, ok.label)
@@ -370,7 +381,7 @@ test('NOT_VERIFIED 与 OK 在文案与语气上都可分，且都不是空白', 
  * 它给不出「不可写入」这个结论（design doc §3.1）。
  */
 test('PATH_MISSING 的文案说路径不存在', () => {
-  const view = describeVerifyStatus(verified('PATH_MISSING'))
+  const view = describePathVerifyStatus(verified('PATH_MISSING'))
   assert.equal(view.label, '路径不存在')
 })
 
@@ -382,30 +393,29 @@ test('PATH_MISSING 的文案说路径不存在', () => {
  * 都不该出现。逐字禁用比逐句 review 可靠 —— 「可写」「能写入」「不可
  * 写」是同一个错误的三种拼法，禁字把三种一起挡住。
  *
- * 覆盖面要说清楚：这条只管 describeVerifyStatus 返回的文案。组件里
- * 另写的字符串不在它的射程内，那部分由下面那条源码断言兜一层。
+ * 覆盖面要说清楚：这条只管路径级这一张表。仓库级那一张由
+ * gitRepoForm 的同名测试守，两层各守各的 —— 一条测试只跑一个枚举，
+ * 另一层的文案改坏了它不会红。
  */
-test('校验文案里不出现「写」——只读校验得不出与写有关的结论', () => {
-  for (const result of ALL_VERIFY_RESULTS) {
-    const view = describeVerifyStatus(verified(result))
+test('路径级文案里不出现「写」——只读校验得不出与写有关的结论', () => {
+  for (const result of ALL_PATH_VERIFY_RESULTS) {
+    const view = describePathVerifyStatus(verified(result))
     assert.equal(view.label.includes('写'), false, `${result} 的结论文案谈到了写`)
     assert.equal(view.detail.includes('写'), false, `${result} 的说明文案谈到了写`)
   }
 })
 
 /**
- * 平台侧配置错与仓库侧权限错要送不同的人去修不同的系统，文案必须让人
- * 一眼看出该找谁（design doc §3.2）。
+ * 路径级的 NOT_VERIFIED 必须把「仓库那一层没通过」也说到。
+ *
+ * 路径级以仓库级为前提：仓库都没到达过时，这一层只会是 NOT_VERIFIED
+ * （design doc §3.3）。文案若只说「从未校验过」，操作者会以为是自己忘了
+ * 点按钮，然后反复点一个永远不会变的按钮 —— 该修的东西在仓库页。
  */
-test('CREDENTIAL_UNRESOLVED 与 AUTH_FAILED 分别点名平台侧与仓库侧', () => {
-  const unresolved = describeVerifyStatus(verified('CREDENTIAL_UNRESOLVED'))
-  const authFailed = describeVerifyStatus(verified('AUTH_FAILED'))
-
-  assert.notEqual(unresolved.label, authFailed.label)
-  assert.match(unresolved.detail, /平台/)
-  assert.match(authFailed.detail, /仓库/)
-  assert.equal(unresolved.detail.includes('仓库'), false,
-    '说明里同时提到两侧，读者仍然不知道该找谁')
+test('路径级 NOT_VERIFIED 说明里点出「仓库那一层」这条前提', () => {
+  const view = describePathVerifyStatus(verified('NOT_VERIFIED'))
+  assert.match(view.detail, /仓库/)
+  assert.match(view.detail, /前提/)
 })
 
 /**
@@ -416,12 +426,12 @@ test('CREDENTIAL_UNRESOLVED 与 AUTH_FAILED 分别点名平台侧与仓库侧', 
  * §3.4 禁止的那件事。
  */
 test('verifiedAt 明示为历史时刻，缺失时也不留空', () => {
-  const checked = describeVerifyStatus(verified('OK', '2026-08-09T01:02:03Z'))
+  const checked = describePathVerifyStatus(verified('OK', '2026-08-09T01:02:03Z'))
   assert.match(checked.checkedAt, /2026-08-09 01:02:03 UTC/)
   assert.match(checked.checkedAt, /上次校验/)
   assert.match(checked.checkedAt, /不代表此刻的状态/)
 
-  const never = describeVerifyStatus(verified('NOT_VERIFIED'))
+  const never = describePathVerifyStatus(verified('NOT_VERIFIED'))
   assert.notEqual(never.checkedAt.trim(), '')
   assert.match(never.checkedAt, /从未校验/)
 })
@@ -429,22 +439,30 @@ test('verifiedAt 明示为历史时刻，缺失时也不留空', () => {
 /**
  * 界面还不认识的取值一律按未校验处置，不透出原始码、不留空。
  *
- * 失败方向朝「未确认」关，不朝「可信」开 —— 与后端 VerifyResult.Valid
- * 的收窄同一条纪律。`as VerifyResult` 是刻意的：这里模拟的正是运行时
- * 收到一个类型系统没预料到的值。
+ * 失败方向朝「未确认」关，不朝「可信」开 —— 与后端 BindingVerifyResult.Valid
+ * 的收窄同一条纪律。`as PathVerifyResult` 是刻意的：这里模拟的正是运行时
+ * 收到一个类型系统没预料到的值，**包括仓库级那四个取值被错发到这一层**。
  */
 test('未登记的结论收窄成未校验，不显示成空白或裸枚举', () => {
-  const view = describeVerifyStatus(verified('PROBABLY_FINE' as VerifyResult))
-  const ok = describeVerifyStatus(verified('OK'))
+  const view = describePathVerifyStatus(verified('PROBABLY_FINE' as PathVerifyResult))
+  const ok = describePathVerifyStatus(verified('OK'))
 
   assert.notEqual(view.label.trim(), '')
   assert.notEqual(view.label, 'PROBABLY_FINE')
   assert.notEqual(view.label, ok.label)
   assert.equal(view.tone, 'unverified')
 
+  // 仓库级的失败取值落到这一层同样收窄，不会借着「两层共用一套文案」
+  // 混过去 —— 一个显示在 policyPath 旁边的「认证被拒绝」会把人送去改
+  // 一个根本没问题的路径。
+  const repoLevel = describePathVerifyStatus(verified('AUTH_FAILED' as PathVerifyResult))
+  assert.equal(repoLevel.tone, 'unverified')
+  assert.equal(repoLevel.label.includes('认证'), false,
+    '仓库级结论在路径级这一层被照原样念了出来')
+
   // 回执走同一条收窄：一个界面还不认识的结论不是通过了的结论。
-  const outcome = describeVerifyOutcome({
-    verifyResult: 'PROBABLY_FINE' as VerifyResult, verifiedAt: '2026-08-13T09:30:00Z',
+  const outcome = describePathVerifyOutcome({
+    verifyResult: 'PROBABLY_FINE' as PathVerifyResult, verifiedAt: '2026-08-13T09:30:00Z',
   })
   assert.equal(outcome.tone, 'unverified')
   assert.equal(outcome.message.includes('PROBABLY_FINE'), false)
@@ -488,7 +506,7 @@ function componentSource(name: string): string {
  * helper 里」，也抓不住「调用了但把结果渲染到看不见的地方」。这个局限是
  * 真的，`tsc` / lint / build 三道门禁一道都覆盖不到它，不该假装它们能。
  */
-test('绑定表单只打绑定端点，不顺手重写集群', () => {
+test('绑定表单只打绑定端点，不顺手重写集群、也不顺手改仓库', () => {
   const src = componentSource('GitBindingForm')
 
   assert.match(src, /api\.bindGitRepo\(/, '绑定表单没有调用绑定端点')
@@ -499,16 +517,24 @@ test('绑定表单只打绑定端点，不顺手重写集群', () => {
     '绑定表单顺带发了一次集群 PUT：改绑定不该重写集群，被重写的字段没有一个是这张表单播种过的')
   assert.equal(src.includes('api.createCluster'), false, '绑定表单调用了集群创建端点')
   assert.equal(src.includes('buildClusterWrite'), false, '绑定表单折算了一份集群提交体')
+  // 同一条纪律的另一半：仓库是一个可能还被别的集群绑着的共享资源，从这张
+  // 表单改它，操作者以为自己只动了这一个集群（design doc §3.2、§5）。
+  for (const call of ['api.updateGitRepo', 'api.createGitRepo', 'api.deleteGitRepo']) {
+    assert.equal(src.includes(call), false,
+      `绑定表单调用了 ${call}：仓库属性只在仓库页改，这里是只读展示`)
+  }
+  assert.equal(src.includes('resolveGitRepo'), false, '绑定表单折算了一份仓库提交体')
 })
 
-/** 反向：集群表单只打集群端点，不顺手改绑定。 */
-test('集群表单只打集群端点，不顺手改绑定', () => {
+/** 反向：集群表单只打集群端点，不顺手改绑定、也不顺手改仓库。 */
+test('集群表单只打集群端点，不顺手改绑定或仓库', () => {
   for (const name of ['EditClusterForm', 'RegisterSection']) {
     const src = componentSource(name)
     assert.match(src, /buildClusterWrite\(/, `${name} 没有走集群提交体的折算`)
     assert.equal(src.includes('api.bindGitRepo'), false, `${name} 顺带写了一次绑定`)
     assert.equal(src.includes('api.unbindGitRepo'), false, `${name} 顺带解了一次绑`)
     assert.equal(src.includes('resolveGitBinding'), false, `${name} 折算了一份绑定提交体`)
+    assert.equal(src.includes('api.updateGitRepo'), false, `${name} 顺带改了一次仓库`)
   }
 })
 
@@ -519,14 +545,40 @@ test('「解除 Git 绑定」勾选框已删除，DELETE 是唯一解绑路径',
   assert.equal(PAGE_SRC.includes('解除 Git 绑定（'), false, '解绑勾选框还在界面上')
 })
 
+/**
+ * 整个集群页只渲染路径级结论，一处仓库级都没有。
+ *
+ * 这一条守的是本轮最容易出的那个错：仓库对象在这一页是在作用域里的
+ * （绑定那一格要只读展示它的地址与分支），所以把 describeRepoVerifyStatus
+ * 换到那一格上**类型是通的**，`tsc` / lint / build 三道门禁一道都不会红。
+ * 后果是一个「认证被拒绝」显示在 policyPath 旁边，读的人去改一个根本没
+ * 问题的路径（design doc §3.3）。
+ *
+ * **这是文本级的绑定，不是渲染级的**：它抓得住「这一页 import 了仓库级
+ * 的折算函数」，抓不住「把那次调用挪进一个本页调用的 helper 里」。这个
+ * 局限是真的，不该假装编译器覆盖得到它。
+ */
+test('集群页不渲染任何仓库级结论', () => {
+  assert.equal(PAGE_SRC.includes('describeRepoVerify'), false,
+    '集群页调用了仓库级的折算函数：仓库级结论摆在 policyPath 旁边会被读成关于路径的判断')
+  assert.equal(PAGE_SRC.includes('gitRepoForm'), false,
+    '集群页 import 了仓库级的文案模块：两层结论必须各自留在各自的页面上')
+})
+
 /** 列表与回执确实经由这一套纯函数渲染，且 ccnpPresent 两侧都没被顺手删掉。 */
 test('集群列表与校验回执确实经由这些纯函数渲染', () => {
-  assert.match(PAGE_SRC, /describeVerifyStatus\(/,
-    '这一格没有调用 describeVerifyStatus，上面那一整组文案断言就管不到界面')
-  assert.match(PAGE_SRC, /describeVerifyOutcome\(/,
-    '没有调用 describeVerifyOutcome：响应与刷新的不一致会被界面当成一个新结论')
+  assert.match(PAGE_SRC, /describePathVerifyStatus\(/,
+    '这一格没有调用 describePathVerifyStatus，上面那一整组文案断言就管不到界面')
+  assert.match(PAGE_SRC, /describePathVerifyOutcome\(/,
+    '没有调用 describePathVerifyOutcome：响应与刷新的不一致会被界面当成一个新结论')
   assert.match(PAGE_SRC, /<GitBindingCell\b/)
   assert.match(PAGE_SRC, /<GitBindingForm\b/, '绑定表单没有被挂上去，界面上根本改不了绑定')
+  // 绑定只存一个 repoId，仓库地址要从仓库清单里查出来只读展示。不拉这份
+  // 清单，界面就只剩一个光秃秃的 ID，操作者无从确认自己绑的是哪个仓库。
+  assert.match(PAGE_SRC, /api\.gitRepos\(/,
+    '集群页没有拉仓库清单：绑定那一格显示不出仓库地址，选仓库的下拉也是空的')
+  assert.match(PAGE_SRC, /repo\.repoUrl/,
+    '仓库地址没有被只读展示：只显示 repoId 时，选错仓库的后果是策略下发到别处')
   // 表单与列表都必须碰到 ccnpPresent：看不见的降级理由，操作者既解释不了
   // 眼前的判定，也察觉不到一次编辑把它清掉了。
   assert.match(PAGE_SRC, /values\.ccnpPresent/,
