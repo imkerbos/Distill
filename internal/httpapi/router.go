@@ -94,8 +94,8 @@ func NewRouter(d Deps) http.Handler {
 	})
 
 	// 每条受保护路由都在注册的同一行里声明所需权限；没有声明的路由会被
-	// 拒绝，而不是放行（见 authorizer）。
-	az := newAuthorizer(apiPrefix)
+	// 拒绝，而不是放行（见 authorizer）。角色由校验器在每次请求上现读。
+	az := newAuthorizer(apiPrefix, d.Verifier, d.Logger)
 
 	r.Route(apiPrefix, func(api chi.Router) {
 		// 登录是唯一无需会话的端点，也因此是唯一挂了限流的那个。
@@ -111,6 +111,34 @@ func NewRouter(d Deps) http.Handler {
 			// 都成立，与角色无关。
 			az.route(protected, http.MethodDelete, "/sessions/current", accessSession, handleDeleteSession(d))
 			az.route(protected, http.MethodGet, "/sessions/current", accessSession, handleCurrentSession())
+
+			// 改自己的密码对任何角色都成立，与账号管理无关，因此挂在
+			// /me 下而不是 /accounts 下：目标取自会话，路径里没有用户名
+			// 可写，也就没有"改别人的密码"这条形状（design doc §6）。
+			az.route(protected, http.MethodPost, "/me/password", accessSession, handleChangeOwnPassword(d))
+
+			// 账号管理整组按管理员算：建号、改角色、停用、删除都是权限
+			// 变更（规范 §7、§28）。列表也是管理员 —— 它回传的是平台上
+			// 都有谁、谁是管理员，那是一份攻击者最想先拿到的名单，而只读
+			// 账号的用途是看拓扑与流量。
+			az.route(protected, http.MethodGet, "/accounts", accessAdmin, handleListAccounts(d))
+			az.route(protected, http.MethodPost, "/accounts", accessAdmin, handleCreateAccount(d))
+			// PUT 而非 PATCH：这里写的是角色这一个字段的全部内容。
+			az.route(protected, http.MethodPut, "/accounts/{username}/role",
+				accessAdmin, handleUpdateAccountRole(d))
+			// 停用与启用是两个动作，不是同一个端点的两个取值：一个约定
+			// 俗成的布尔会让任何一次误发的请求体变成一次无声的启用，而
+			// 启用一个被停掉的管理员是把权限还回去。
+			az.route(protected, http.MethodPost, "/accounts/{username}/disable",
+				accessAdmin, handleDisableAccount(d))
+			az.route(protected, http.MethodPost, "/accounts/{username}/enable",
+				accessAdmin, handleEnableAccount(d))
+			az.route(protected, http.MethodDelete, "/accounts/{username}", accessAdmin, handleDeleteAccount(d))
+			// POST 而非 PUT：重置密码不是把某个资源写成给定的样子，它是
+			// 一次动作，且不该被浏览器或前端的重试逻辑当成可以随手重放的
+			// 东西 —— 与两个 verify 端点同一处置。
+			az.route(protected, http.MethodPost, "/accounts/{username}/password",
+				accessAdmin, handleResetAccountPassword(d))
 
 			// 平台设置：读与写都按管理员算。写是显然的（改 host key 就是
 			// 改平台连接策略仓库时的信任锚，design doc §1.3）；读之所以也是

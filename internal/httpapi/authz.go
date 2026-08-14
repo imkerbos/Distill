@@ -1,6 +1,8 @@
 package httpapi
 
 import (
+	"context"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -45,6 +47,35 @@ func (a access) permits(role registry.Role) bool {
 	}
 }
 
+// roleResolver 按用户名现读角色。*auth.Verifier 满足它。
+//
+// 收窄成一个方法而不是直接依赖 *auth.Verifier：授权层要问的只有
+// "这个账号此刻是什么角色"，而校验器还带着登录与用户名校验。
+//
+// 每次判定都调一次，结果不进会话：会话在签发时抄一份角色的话，一个刚被
+// 降权或停用的账号会继续拿着原权限直到会话过期，默认 8 小时
+// （design doc 2026-08-14 §4）。
+type roleResolver interface {
+	// RoleOf 返回 username 此刻生效的角色。账号不存在、已停用、已软删除，
+	// 或角色不在封闭枚举内时，第二个返回值为 false。
+	RoleOf(ctx context.Context, username string) (registry.Role, bool, error)
+}
+
+// withRole 把本次请求现读出来的角色放进 context。
+//
+// 供 handler 回答"我是什么角色"（GET /sessions/current，design doc §6）。
+// 只有 enforce 调它，值只可能来自 roleResolver —— 请求体、请求头、Cookie
+// 与查询串里出现的任何 role 字段都到不了这里（规范 §9、§34）。
+func withRole(ctx context.Context, role registry.Role) context.Context {
+	return context.WithValue(ctx, ctxKeyRole, role)
+}
+
+// roleFrom 取出本次请求已判定的角色，缺失时第二个返回值为 false。
+func roleFrom(ctx context.Context) (registry.Role, bool) {
+	role, ok := ctx.Value(ctxKeyRole).(registry.Role)
+	return role, ok
+}
+
 // authorizer 持有每条受保护路由的权限声明，并在请求时执行它。
 //
 // 声明在注册路由的同一次调用里写下（见 route），因此路由表与权限表不可能
@@ -52,9 +83,8 @@ func (a access) permits(role registry.Role) bool {
 // 是另一种忘记：绕过 route 直接往 chi 上挂一条路由。那条路由不在声明表里，
 // 于是 enforce 拒绝它（见 enforce 的默认分支）。
 //
-// **这层今天挡不住任何人。** 平台只有一个账号，它是管理员，因此每一次真实
-// 调用都满足声明。它现在就存在，是为了第二个身份出现时不必回头补声明，
-// 以及让漏声明的新端点以拒绝而不是放行的方式失败（见 registry.Role 的说明）。
+// 账号落库之后这层开始挡人：角色不再是配置文件里那个恒为管理员的取值，
+// 而是每次请求从账号记录现读出来的（见 roleResolver）。
 type authorizer struct {
 	// prefix 是这些路由挂载点的路径前缀。
 	//
@@ -63,11 +93,21 @@ type authorizer struct {
 	prefix string
 	// declared 是「方法 + 完整路由模式」到权限要求的映射。
 	declared map[string]access
+	// roles 现读角色。
+	roles roleResolver
+	// logger 只用于记角色读不出来时的原因：那是一次依赖失败，调用方看到的
+	// 是一句固定文案，真实原因带 request_id 进日志（规范 §22）。
+	logger *slog.Logger
 }
 
 // newAuthorizer 构造一个授权器，prefix 是受保护路由的挂载前缀。
-func newAuthorizer(prefix string) *authorizer {
-	return &authorizer{prefix: prefix, declared: make(map[string]access)}
+func newAuthorizer(prefix string, roles roleResolver, logger *slog.Logger) *authorizer {
+	return &authorizer{
+		prefix:   prefix,
+		declared: make(map[string]access),
+		roles:    roles,
+		logger:   logger,
+	}
 }
 
 // routeKey 是声明表的键：方法与路由模式的组合。
@@ -93,22 +133,17 @@ func (a *authorizer) route(r chi.Router, method, pattern string, acc access, h h
 // 用 route 注册，症状是这个端点谁都调不通 —— 一次刺眼的失败，而不是一个
 // 谁都能调的管理接口（规范 §2 Fail Secure、§5.1）。
 //
-// 必须装在 RequireSession 之后：它读的是会话里的角色，而角色只可能来自
-// 服务端签发会话时写下的那一份（规范 §9、§34）。请求里出现的任何 role 字段
-// 在这条路径上不会被读到。
+// 必须装在 RequireSession 之后：它要先知道调用方是谁，才谈得上现读那个
+// 账号此刻的角色。角色只来自账号记录（规范 §9、§34）——请求体、请求头、
+// Cookie 与查询串里出现的任何 role 字段在这条路径上不会被读到。
 //
 // 403 而非 401：调用方持有有效会话，重新登录不会改变结果。前端要靠这一点
 // 区分「去登录」与「你不能做这件事」。
 //
 // 拒绝本身不另起一条日志：RequestLogger 已经为每个请求记下
-// method / path / status / code，一次 403 + 10004 在日志里就是一条可聚合的
-// 拒绝记录（规范 §43）。
-//
-// 那条日志里**没有账号名**：RequestLogger 装在路由根部，而会话是
-// RequireSession 往下游请求的 context 里放的，上游的 r 看不见它。今天这不
-// 影响什么（只有一个账号），但第二个身份出现时，「谁被拒了」是审计必须
-// 回答的问题。修它要动 RequestLogger 的取值方式，不属于本次改动，已在
-// 报告里单列。
+// method / path / status / code **与账号名**，一次 403 + 10004 在日志里
+// 就是一条可聚合、且答得出"谁"的拒绝记录（design doc 2026-08-14 §7，
+// 规范 §43）。账号名的回填见 requestActor。
 func (a *authorizer) enforce(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sess, ok := SessionFrom(r.Context())
@@ -119,12 +154,37 @@ func (a *authorizer) enforce(next http.Handler) http.Handler {
 			return
 		}
 
+		role, resolved, err := a.roles.RoleOf(r.Context(), sess.Username)
+		if err != nil {
+			// 读不出角色不是"没有限制"：一次数据库抖动不该变成一次放行
+			// （规范 §49）。也不是 403 —— 我们并没有判定这个账号权限不足，
+			// 而是根本没能判定，把依赖故障说成权限不足会让操作者去找管理员
+			// 要权限，而问题在别处。
+			a.logger.Error("cannot resolve the role for this session",
+				"err", err, "request_id", RequestIDFrom(r.Context()), "user", sess.Username)
+			response.WriteSystem(w, http.StatusInternalServerError, response.CodeInternal)
+			return
+		}
+		if !resolved {
+			// 账号被停用、被软删除，或它的角色不在封闭枚举里：这张会话
+			// 此刻不对应任何一个能做事的身份，因此立即失效，不必等它过期，
+			// 也不必有谁记得去逐个撤销（design doc 2026-08-14 §4）。
+			//
+			// 401 + 会话过期码而不是 403：这不是"你不能做这件事"，是
+			// "你这张会话不再代表任何人"，前端的处置是回登录页。
+			response.WriteSystem(w, http.StatusUnauthorized, response.CodeSessionExpired)
+			return
+		}
+
 		acc, declared := a.declared[routeKey(r.Method, chi.RouteContext(r.Context()).RoutePattern())]
-		if !declared || !acc.permits(sess.Role) {
+		if !declared || !acc.permits(role) {
 			response.WriteSystem(w, http.StatusForbidden, response.CodeForbidden)
 			return
 		}
 
-		next.ServeHTTP(w, r)
+		// 角色顺着 context 往下游走：handler 要回答"我是什么角色"时
+		// （GET /sessions/current）就不必再读一次账号表，也不可能读出与
+		// 这次判定不一致的另一个值。
+		next.ServeHTTP(w, r.WithContext(withRole(r.Context(), role)))
 	})
 }

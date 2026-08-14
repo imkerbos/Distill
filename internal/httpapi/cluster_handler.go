@@ -205,6 +205,16 @@ func writeRegistryError(w http.ResponseWriter, r *http.Request, d Deps, err erro
 		// 只读我们自己写的文字（规范 §19、§22，同 InvalidError 那一支的
 		// 处置）。少掉的那一半信息（是哪个集群绑着）在集群页上看得到。
 		response.WriteInvalid(w, "该仓库仍被某个集群绑定，请先解除绑定再删除")
+	case errors.Is(err, registry.ErrLastAdmin):
+		// 与 ErrRepoInUse 同一处置：这是一个调用方能据以行动的业务失败
+		// （先提一个管理员上来，再动这一个），不是服务故障。走 500 会让
+		// 「不得把自己锁在门外」这条保护在界面上显示成一句"服务内部错误"，
+		// 操作者只会以为平台坏了，然后重试 —— 而重试永远得到同一个结果
+		// （design doc 2026-08-14 §5）。
+		//
+		// 文案固定，不回传 err.Error()：那串文本由 mysqlregistry 拼出，
+		// 带着用户名。
+		response.WriteInvalid(w, "这是最后一个启用中的管理员，停用、删除或降级它之后就没有人能管理平台了")
 	default:
 		d.Logger.Error("registry operation failed",
 			"err", err, "request_id", RequestIDFrom(r.Context()))
