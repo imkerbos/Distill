@@ -2,6 +2,9 @@
 package auth
 
 import (
+	"context"
+	"fmt"
+
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/imkerbos/Distill/internal/config"
@@ -14,54 +17,160 @@ import (
 // 响应耗时的差异足以让攻击者枚举出哪些账号真实存在。
 var dummyHash = []byte("$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy")
 
-// account 是一条本地账号记录：密码哈希，以及它的角色。
+// AccountSource 是账号记录的读取来源。registry.Store 满足它。
 //
-// 角色跟着账号记录走，而不是跟着请求走 —— 会话在签发时从这里取它
-// （见 Session.Role）。
-type account struct {
-	hash []byte
-	role registry.Role
+// 收窄成两个读方法而不是直接依赖 registry.Store：认证只需要知道「这个
+// 账号此刻是什么状态」，而 registry.Store 还带着建号、改角色、停用、
+// 软删除的全部写方法 —— 让登录这条路径在类型上具备改写账号表的能力，
+// 没有任何理由（与 settings.Source 同一处置）。
+type AccountSource interface {
+	// Accounts 返回全部未删除的账号。
+	Accounts(ctx context.Context) ([]registry.Account, error)
+	// Account 按用户名查一个未删除的账号。不存在时第二个返回值为 false。
+	Account(ctx context.Context, username string) (registry.Account, bool, error)
 }
 
-// Verifier 校验本地账号。
+// Verifier 校验登录凭证，并在每次授权判定时现读账号的角色。
+//
+// **它不缓存任何账号状态。** 角色、停用与软删除都从 accounts 现读：把角色
+// 在签发会话时抄进内存，等于让降权与停用等到那张会话过期（默认 8 小时）
+// 才生效（design doc 2026-08-14 §4）。
 type Verifier struct {
-	accounts map[string]account
+	// bootstrapUser 是配置里的引导账号名。空串表示没有配置引导账号。
+	bootstrapUser string
+	// bootstrapHash 是引导账号的密码哈希，来自配置文件。
+	bootstrapHash []byte
+	// accounts 是库里的账号记录。
+	accounts AccountSource
 }
 
-// NewVerifier 用配置中的账号列表构造校验器。
+// NewVerifier 用配置里的引导账号与账号表构造校验器。
 //
-// 文件里的账号一律是管理员。这不是「所有人都是管理员」这条策略，而是
-// 对当前形态的如实描述：config.AuthConfig 只有 BootstrapUser 一个字段，
-// 文件里因此只可能有一个账号，而它按定义就是管理员 —— 平台的第一次登录
-// 只能是它，此后的一切也只能由它来做。
+// 这里不再给账号赋角色 —— 原先那段「文件里的账号一律是管理员」的注释
+// 已经预告了这一天：账号落库之后，角色随每条账号记录走（见 RoleOf）。
 //
-// **第二个账号出现时，角色必须随账号一起来，不能继续在这里赋值。** 那时
-// 账号在库里，每条记录自带角色；如果有人先给配置文件加出第二个账号，
-// 这一行会静默地把它也变成管理员 —— 这正是把这段话写在这里的原因。
-func NewVerifier(users []config.User) *Verifier {
-	m := make(map[string]account, len(users))
-	for _, u := range users {
-		m[u.Username] = account{hash: []byte(u.PasswordHash), role: registry.RoleAdmin}
+// 参数从 []config.User 收成单个 config.User，是因为文件里本就只可能有
+// 引导账号这一个（config.AuthConfig 只有 BootstrapUser 一个字段）。留着
+// 切片的形状，等于给「配置文件里再加几个账号」留了一个入口，而那些账号
+// 既不在审计里、也不受第 5 节「不得把自己锁在门外」的保护。
+func NewVerifier(bootstrap config.User, accounts AccountSource) *Verifier {
+	return &Verifier{
+		bootstrapUser: bootstrap.Username,
+		bootstrapHash: []byte(bootstrap.PasswordHash),
+		accounts:      accounts,
 	}
-	return &Verifier{accounts: m}
 }
 
-// Verify 校验用户名与密码是否匹配，并返回该账号的角色。
+// Verify 校验用户名与密码。凭证不可用时返回 false，账号表读不出来时返回错误。
 //
-// 无论用户是否存在都执行一次哈希比对，调用方无法从耗时或返回值
-// 区分"用户不存在"与"密码错误"。
+// 无论用户是否存在都执行一次哈希比对，调用方无法从耗时或返回值区分
+// "用户不存在"与"密码错误"。
 //
-// 角色与校验结果一并返回，而不是让调用方通过后再查一次：会话必须带着
-// 角色签发（见 SessionStore.Create），两次查找之间的缝隙正是「认证过了、
-// 角色却是零值」的来源。校验失败时返回空角色，它不是任何一个合法取值。
-func (v *Verifier) Verify(username, password string) (registry.Role, bool) {
-	acct, ok := v.accounts[username]
-	if !ok {
+// 引导账号**只在库里没有任何启用中的管理员时**才可能通过：首次启动时它是
+// 唯一的入口，第一个库内管理员建出来之后它自己失效，不需要谁记得去关掉
+// 它；而全部管理员被停用或删除之后它又自己回来，否则平台就被永久锁死了
+// （design doc 2026-08-14 §2）。
+//
+// 读不到账号表时返回 (false, err)：读失败不是"没有限制"，一次数据库抖动
+// 不该变成一次放行（规范 §49）。
+func (v *Verifier) Verify(ctx context.Context, username, password string) (bool, error) {
+	if !v.isBootstrap(username) {
+		// 库里的账号今天登不进来：账号的读路径刻意不把 password_hash 取出
+		// 连接（见 mysqlregistry.accountColumns），因此还没有一条能拿到
+		// 哈希的单点路径。在它出现之前，这里唯一正确的行为是拒绝 —— 而
+		// 拒绝也要走完哈希比对，否则耗时会泄露账号是否存在。
 		_ = bcrypt.CompareHashAndPassword(dummyHash, []byte(password))
-		return "", false
+		return false, nil
 	}
-	if bcrypt.CompareHashAndPassword(acct.hash, []byte(password)) != nil {
-		return "", false
+
+	available, err := v.bootstrapAvailable(ctx)
+	if err != nil {
+		return false, err
 	}
-	return acct.role, true
+	if !available {
+		_ = bcrypt.CompareHashAndPassword(dummyHash, []byte(password))
+		return false, nil
+	}
+	// 密码不匹配返回 (false, nil)：那是一次业务级失败，不是系统错误。
+	// 错误位只留给"账号表读不出来"这类调用方无从自行处置的情况。
+	if bcrypt.CompareHashAndPassword(v.bootstrapHash, []byte(password)) == nil {
+		return true, nil
+	}
+	return false, nil
+}
+
+// RoleOf 返回 username 此刻生效的角色。账号不存在、已停用、已软删除，或者
+// 记录里的角色不在封闭枚举内时，第二个返回值为 false。
+//
+// **每一次授权判定都要调它一次，结果不得被缓存进会话。** 会话只携带身份
+// （见 Session），角色现读 —— 降权与停用因此在下一次请求就生效，而不是等
+// 那张最长 8 小时的会话过期（design doc 2026-08-14 §4）。
+//
+// 不采用「变更权限时顺手撤销会话」作为替代：那要求每一条会改变权限的代码
+// 路径都记得去撤销，漏掉一条就是一个不会报错的提权窗口；现读则是结构上
+// 漏不掉的。
+//
+// 代价是每个已认证请求多一次单行主键读，与设置的按需读取同量级
+// （design doc 2026-08-14 §10）。
+func (v *Verifier) RoleOf(ctx context.Context, username string) (registry.Role, bool, error) {
+	if v.isBootstrap(username) {
+		// 引导账号的角色同样是现读的：它手里那张会话必须在第一个库内
+		// 管理员建出来的下一次请求就失去管理员身份，而不是继续管理平台
+		// 到过期为止。
+		available, err := v.bootstrapAvailable(ctx)
+		if err != nil {
+			return "", false, err
+		}
+		if !available {
+			return "", false, nil
+		}
+		return registry.RoleAdmin, true, nil
+	}
+
+	a, found, err := v.accounts.Account(ctx, username)
+	if err != nil {
+		return "", false, fmt.Errorf("read account: %w", err)
+	}
+	// 不存在与已软删除在这里是同一件事：Account 只返回未删除的行，而
+	// 一张指向已经不存在的账号的会话本就不该还能做任何事。
+	if !found {
+		return "", false, nil
+	}
+	// 停用是可逆的暂停，但在它生效期间与"没有这个账号"等价。
+	if a.DisabledAt != nil {
+		return "", false, nil
+	}
+	// 库里的角色未必经过 ValidateAccount：迁移、手工 SQL 都绕得开写入时的
+	// 校验。认不出的角色只能拒绝 —— 给它兜一个默认角色就是一次凭空授权。
+	if !a.Role.Valid() {
+		return "", false, nil
+	}
+	return a.Role, true, nil
+}
+
+// isBootstrap 判断 username 是不是配置里的引导账号。
+//
+// 没有配置引导账号时（空串）恒为假：否则一个空用户名会走进引导分支，
+// 而一次装配失误就成了一条管理员通道（规范 §49）。
+func (v *Verifier) isBootstrap(username string) bool {
+	return v.bootstrapUser != "" && username == v.bootstrapUser
+}
+
+// bootstrapAvailable 判断引导账号此刻是否可用：库里没有任何一个启用中的
+// 管理员。
+//
+// 判定只看"启用中的管理员"这一件事。只读账号再多、被停用的管理员再多，
+// 都没有人能管理这个平台，逃生口必须还在（design doc 2026-08-14 §2）。
+// 软删除的账号不在 Accounts 的返回里，因此不必在这里再判一次。
+func (v *Verifier) bootstrapAvailable(ctx context.Context) (bool, error) {
+	accounts, err := v.accounts.Accounts(ctx)
+	if err != nil {
+		return false, fmt.Errorf("read accounts: %w", err)
+	}
+	for _, a := range accounts {
+		if a.Role == registry.RoleAdmin && a.DisabledAt == nil {
+			return false, nil
+		}
+	}
+	return true, nil
 }

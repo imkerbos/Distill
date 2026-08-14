@@ -96,9 +96,11 @@ func run(configPath string) error {
 	r.Mount("/healthz", newHealthHandler())
 	r.Mount("/", httpapi.NewRouter(httpapi.Deps{
 		Sessions: auth.NewSessionStore(bootSetting.SessionTTL, nil),
-		// 引导账号是文件里唯一的账号，也是首次登录的唯一入口
-		// （design doc §1.2）。
-		Verifier:    auth.NewVerifier([]config.User{cfg.Auth.BootstrapUser}),
+		// 引导账号是文件里唯一的账号，也是首次登录的入口；账号表跟着一起
+		// 传进去，因为角色要在每次判定时从账号记录现读，而引导账号本身
+		// 也只在库里没有启用中的管理员时才可用
+		// （design doc 2026-08-14 §2、§4）。
+		Verifier:    auth.NewVerifier(cfg.Auth.BootstrapUser, reg),
 		Logger:      logger,
 		Reader:      reader,
 		Registry:    reg,
