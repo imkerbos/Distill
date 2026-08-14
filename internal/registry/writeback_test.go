@@ -30,6 +30,8 @@ func samplePlan() registry.WritebackPlan {
 			predict.ChangeUnchanged:  41,
 			predict.ChangeUnknown:    3,
 		},
+		CommitMessage: "policy writeback for prod-asia-1\n\nwindow: 2026-08-07..2026-08-14\n" +
+			"WOULD_BREAK: 0\nrequested by: alice\n",
 		Extraneous: []string{"clusters/prod-asia-1/legacy.yaml"},
 	}
 }
@@ -75,6 +77,13 @@ func TestFingerprintChangesWithEveryFieldItMustCover(t *testing.T) {
 		},
 		"branch": func(p *registry.WritebackPlan) {
 			p.Branch = "distill/prod-asia-1-20260814T110000Z"
+		},
+		// 提交信息是评审人在合并请求上唯一会读的那句话。不进指纹，它就能在
+		// 确认与推送之间换掉 —— 文件与分支都对得上，评审人读到的理由却不是
+		// 操作者批准的那个，而它会永久留在仓库历史上。
+		"commit message": func(p *registry.WritebackPlan) {
+			p.CommitMessage = "policy writeback for prod-asia-1\n\nwindow: 2026-08-07..2026-08-14\n" +
+				"WOULD_BREAK: 0\nrequested by: mallory\n"
 		},
 	}
 	// 四类计数逐个改：把 WOULD_BREAK 单独测掉、其余三类不管，等于让
