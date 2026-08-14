@@ -2,15 +2,20 @@ import { useState, type CSSProperties, type ReactNode } from 'react'
 import { api, ApiError } from '../api/client'
 import {
   RISK_CATEGORY_LABEL,
-  type CandidatePolicy, type CandidateRule, type ExcludedWorkload,
+  type CandidatePolicy, type CandidateRule, type ChangeKind, type ExcludedWorkload,
   type Kind, type MissingBaseline, type OverrideDecision,
   type RuleOrigin, type RuleOverride, type StaleOverride,
   type UngeneratableItem, type UngeneratableReason, type WorkloadExclusionReason,
+  type WritebackPlanResult, type WritebackPushResult,
 } from '../api/types'
 import { useResource } from '../api/useResource'
 import { DryRunDetail } from './DryRunDetail'
 import { dryRunView, type DryRunView } from './dryRunView'
 import { policyExportView, type PolicyExportView } from './policyExportView'
+import {
+  writebackCountDrift, writebackPushBody, writebackView,
+  type WritebackPushBody, type WritebackView,
+} from './writebackView'
 import { Card, Chip, EmptyState, Notice, PageHeader, ScrollTableCard, Section, StickyHead, StatTile, TableCard } from '../components/ui'
 
 /**
@@ -87,6 +92,12 @@ export default function PolicyPage({ cluster }: { cluster: string }) {
         // 导出入口与 dry-run 同屏，取数同样只来自这一个 pv 对象：文件对应的
         // 时间窗与上面那四个数字来自同一次预览响应（design doc §2、§6）。
         exportView={policyExportView(pv)}
+        writeback={writebackView(pv)}
+        // 比对写回计划里那套重算后的计数时，页面这一侧必须是 overridden——
+        // 服务端算计划用的正是它（writebackCounts 取 Overridden.Prediction）。
+        // 拿默认推荐那一套去比，会在"人工决定改变了预测"时报出一个与集群
+        // 无关的假差异，而假差异重复几次之后，真的那次也不会有人看。
+        pageCounts={pv.overridden.prediction.counts}
       />
       <CandidateSection candidates={pv.candidates} overrides={overrides} cluster={cluster} onChanged={onChanged} />
       <PendingSection candidates={pv.candidates} overrides={overrides} cluster={cluster} onChanged={onChanged} />
@@ -143,10 +154,12 @@ function NoTrafficNotice() {
  * Apply 对空覆盖列表是恒等变换——此时只显示一组数：否则每个集群第一次
  * 打开都要看一堆 `→ 0`，噪声掩盖了真正有覆盖时该看的差值。
  */
-function DryRunSection({ view, overrideCount, exportView }: {
+function DryRunSection({ view, overrideCount, exportView, writeback, pageCounts }: {
   view: DryRunView
   overrideCount: number
   exportView: PolicyExportView
+  writeback: WritebackView
+  pageCounts: Record<ChangeKind, number>
 }) {
   // 这个组件拿不到两套预测，只拿得到 dryRunView 选定后的视图：tile 的
   // 两端与明细区因此不可能来自不同的预测。C1 那条缺陷（清单列 81 行、
@@ -204,6 +217,11 @@ function DryRunSection({ view, overrideCount, exportView }: {
       {/* 导出入口紧跟四个 tile，不放页面底部：操作者刚读完"会拦断 81 条"，
           文件与它对应的那个结论要在视觉上绑在一起（design doc §6）。 */}
       <ExportControl view={exportView} />
+
+      {/* 写回入口紧挨导出：推进仓库的内容与刚下载的那份文件逐字节相同
+          （服务端 planWriteback 与导出共用同一段渲染），两个出口放在一起，
+          操作者才看得出它们是同一份东西的两条去路（design doc §7）。 */}
+      <WritebackControl view={writeback} pageCounts={pageCounts} />
 
       {showDelta && (
         <p style={{
@@ -381,6 +399,241 @@ function ExportControl({ view }: { view: PolicyExportView }) {
         </p>
       )}
     </Card>
+  )
+}
+
+/**
+ * 把已确认的策略写回策略仓库的一条新分支。
+ *
+ * **两步，且第二步的控件在第一步完成之前根本不存在**：先出计划——将要新增
+ * 或更新的文件、目标分支、写回前重算的四类计数、仓库里多余文件的清单，以及
+ * 那段会永久留在仓库历史里、评审人唯一会读的提交信息——操作者看过之后，
+ * 推送按钮才出现（design doc 2026-08-14 §4、§5）。
+ *
+ * **界面上少画一个按钮不是保护。** 服务端独立判定管理员权限、拒绝不带指纹的
+ * 推送、拒绝指纹对不上的推送、拒绝仓库级校验结论不是 OK 的绑定，那几道判定
+ * 是权威的（规范 §26、§34）。这里的两步存在的理由只有一个：让操作者在按下去
+ * 之前真的读过他要推的那份东西。
+ *
+ * 计划里的每一项都原样来自服务端：文件清单、分支、提交信息、四类计数，前端
+ * 一样都不重新推导（design doc §4）。**文件内容不展示**——要看内容走导出，
+ * 推进仓库的与导出下载的是同一段渲染的产物（规范 §20）。
+ */
+function WritebackControl({ view, pageCounts }: {
+  view: WritebackView
+  pageCounts: Record<ChangeKind, number>
+}) {
+  const [plan, setPlan] = useState<WritebackPlanResult | null>(null)
+  const [pushed, setPushed] = useState<WritebackPushResult | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  // 推送按钮的存在条件。计划为 null 时它恒为 null，因此"没出计划就能推"
+  // 在这个组件里写不出来（见 writebackPushBody）。
+  const pushBody = writebackPushBody(plan?.plan ?? null)
+  const drift = plan === null ? null : writebackCountDrift(pageCounts, plan.plan.counts)
+
+  async function loadPlan() {
+    setBusy(true)
+    setError('')
+    setPushed(null)
+    try {
+      setPlan(await api.policyWritebackPlan(view.planPath))
+    } catch (err) {
+      // 出计划失败时把上一份计划丢掉：留着它意味着推送按钮还在，而它对应的
+      // 是一次操作者已经在试图刷新的、可能已经过期的计划。
+      setPlan(null)
+      // 服务端的拒绝原样展示（仓库地址不是 SSH 形态、绑定未通过校验、
+      // 没有启用中的规则各自是一句写给操作者看的完整理由），不收窄成
+      // 一句"出计划失败"——三种情况的下一步动作完全不同。
+      setError(err instanceof ApiError ? err.msg : '出计划失败，请稍后重试')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function push(body: WritebackPushBody) {
+    setBusy(true)
+    setError('')
+    try {
+      setPushed(await api.policyWritebackPush(view.pushPath, body))
+      // 一份计划只用一次：推成功之后它描述的事已经发生，留着它就等于允许
+      // 对着同一个指纹再推一次。
+      setPlan(null)
+    } catch (err) {
+      // 指纹失效（writebackStaleMsg）说的是"计划变了，你得重新看一遍"，
+      // 因此连同计划一起丢掉，逼回第一步——把这条消息吞成通用失败、或者
+      // 把按钮留在原地让人再点一次，都是在教操作者忽略它。
+      setPlan(null)
+      setError(err instanceof ApiError ? err.msg : '推送失败，请稍后重试')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Card style={{ padding: 'var(--space-3)', marginBottom: 'var(--space-4)' }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 'var(--space-3)', flexWrap: 'wrap',
+      }}>
+        <button
+          type="button"
+          onClick={loadPlan}
+          disabled={!view.available || busy}
+          style={{
+            ...smallButtonStyle,
+            opacity: !view.available || busy ? 0.5 : 1,
+            cursor: !view.available || busy ? 'default' : 'pointer',
+          }}
+        >
+          {busy ? '处理中…' : '生成写回计划'}
+        </button>
+        {/* 不可用的原因与按钮同屏，理由同导出：它是一条处置指引，不是补充
+            说明。理由为空的禁用等于"按钮坏了"。 */}
+        {!view.available && (
+          <span style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', flex: 1, minWidth: 280 }}>
+            {view.unavailableReason}
+          </span>
+        )}
+      </div>
+      <p style={{
+        margin: 'var(--space-2) 0 0', fontSize: 'var(--text-xs)', color: 'var(--text-muted)',
+      }}>
+        {view.note}
+      </p>
+
+      {error && (
+        <p role="alert" style={{
+          margin: 'var(--space-2) 0 0', fontSize: 'var(--text-xs)', color: 'var(--verdict-deny)',
+        }}>
+          {error}
+        </p>
+      )}
+
+      {plan && drift && (
+        <div style={{ marginTop: 'var(--space-3)' }}>
+          {/* 计数不一致时这条必须显著、必须在计划正文之前：把新数字悄悄
+              渲染在旧数字的位置上，等于让人批准一个他从没考虑过的爆炸半径
+              （design doc §4）。 */}
+          {drift.drifted && (
+            <div role="alert" style={{
+              padding: 'var(--space-3)', marginBottom: 'var(--space-3)',
+              background: 'var(--verdict-deny-bg)', border: '1px solid var(--verdict-deny)',
+              borderRadius: 'var(--radius)', color: 'var(--verdict-deny)',
+              fontSize: 'var(--text-sm)', fontWeight: 500,
+            }}>
+              {drift.warning}
+            </div>
+          )}
+
+          {/* 目标仓库与目标分支一起给：仓库进指纹（design doc §4），而进
+              指纹的东西必须是操作者屏幕上看得到的东西 —— 否则他确认的是一个
+              自己没读过的落点。这里给的是仓库标识，不是仓库地址：地址是内部
+              地址，不进任何会被读到的地方。 */}
+          <PlanRow label="目标仓库">{plan.plan.repoId}</PlanRow>
+          <PlanRow label="目标分支">{plan.plan.branch}</PlanRow>
+          <PlanRow label="写回前重新校验">
+            仓库级 {plan.repoVerifyResult} · 路径级 {plan.bindingVerifyResult}
+          </PlanRow>
+          <PlanRow label="将要新增/更新的文件">
+            {plan.plan.files.length === 0
+              ? '（无）'
+              : plan.plan.files.map((f) => <div key={f.path}>{f.path}</div>)}
+          </PlanRow>
+          {/* 这两份清单都来自平台出计划时**真的枚举过一次仓库**（design doc
+              §2、§3）：枚举失败时后端整次不出计划，因此这里渲染的"（无）"是一个
+              空集，不是一句没人算过的话。 */}
+          <PlanRow label="仓库里多余的文件">
+            {(plan.plan.extraneous ?? []).length === 0
+              ? '（无）平台从不删除仓库里的文件，多余的文件只列出来交人工处置。'
+              : (plan.plan.extraneous ?? []).map((p) => <div key={p}>{p}</div>)}
+          </PlanRow>
+          {/* 攒着几条没人合的 distill 分支，说明这个流程没在运转（§2）——
+              这是唯一能看见"人工合并那道门是否真的有人在走"的信号。
+              **合并状态平台没有判断**，必须照实写：判断合并与否要拉全量历史，
+              而写回全程只做浅克隆。 */}
+          <PlanRow label="仓库上已存在的 distill 分支">
+            {(plan.plan.existingBranches ?? []).length === 0
+              ? '（无）'
+              : (plan.plan.existingBranches ?? []).map((b) => <div key={b}>{b}</div>)}
+            <div style={{ color: 'var(--text-muted)' }}>
+              平台只列出这些分支存在，不判断它们是否已被合并。攒着几条没人合的分支，
+              说明这条流程没在运转。
+            </div>
+          </PlanRow>
+
+          <PlanRow label="重算后的四类计数">
+            <table style={{ fontSize: 'var(--text-xs)' }}>
+              <thead>
+                <tr><th>类别</th><th>本页正在显示</th><th>计划重算</th></tr>
+              </thead>
+              <tbody>
+                {drift.rows.map((r) => (
+                  <tr key={r.kind} style={{ color: r.changed ? 'var(--verdict-deny)' : undefined }}>
+                    <td>{r.kind}</td>
+                    <td style={{ fontVariantNumeric: 'tabular-nums' }}>{r.pageText}</td>
+                    <td style={{
+                      fontVariantNumeric: 'tabular-nums', fontWeight: r.changed ? 600 : undefined,
+                    }}>
+                      {r.planText}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </PlanRow>
+
+          {/* 提交信息必须在推送之前被读到：它是合并请求上的评审人唯一会读
+              的那句话，据此决定合不合（design doc §7）。原文展示，不截断、
+              不重排。 */}
+          <PlanRow label="提交信息（会永久留在仓库历史里）">
+            <pre style={{
+              margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+              fontSize: 'var(--text-xs)', color: 'var(--text-secondary)',
+            }}>
+              {plan.plan.commitMessage}
+            </pre>
+          </PlanRow>
+
+          {/* 推送按钮只在有计划时存在。pushBody 由计划产出，指纹原样回带——
+              页面不拼请求体，也无从拼出一个指纹。 */}
+          {pushBody && (
+            <button
+              type="button"
+              onClick={() => push(pushBody)}
+              disabled={busy}
+              style={{
+                ...smallButtonStyle, marginTop: 'var(--space-2)',
+                opacity: busy ? 0.5 : 1, cursor: busy ? 'default' : 'pointer',
+              }}
+            >
+              {busy ? '推送中…' : '推送这份计划到新分支'}
+            </button>
+          )}
+        </div>
+      )}
+
+      {pushed && (
+        <div style={{ marginTop: 'var(--space-3)', fontSize: 'var(--text-sm)' }}>
+          <PlanRow label="已推送到分支">{pushed.branch}</PlanRow>
+          <PlanRow label="平台推上去的 commit">{pushed.commit}</PlanRow>
+          <PlanRow label="这一步之后">
+            仓库里多了一条分支，集群上什么都还没变。需要有人在合并请求上审完并合并，
+            Config Sync 才会应用它（design doc §2、§8）。
+          </PlanRow>
+        </div>
+      )}
+    </Card>
+  )
+}
+
+/** 计划里的一项：左侧标签、右侧原样来自服务端的内容。 */
+function PlanRow({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div style={{ marginBottom: 'var(--space-2)' }}>
+      <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>{label}</div>
+      <div style={{ fontSize: 'var(--text-sm)', wordBreak: 'break-all' }}>{children}</div>
+    </div>
   )
 }
 

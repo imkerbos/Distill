@@ -78,6 +78,15 @@ type memRegistry struct {
 	// 断言。记的是整条记录而不是一个计数 —— 一条只数次数的断言，对一次
 	// 把命名空间或时间窗记错的导出照样是绿的。
 	policyExports []registry.PolicyExport
+	// writebackPlans 与 writebackPushes 分别记下 PLAN_POLICY_WRITEBACK 与
+	// PUSH_POLICY_WRITEBACK 两个动作各自写下的审计内容。
+	//
+	// 分成两个切片而不是一个带动作名的列表：「出计划与推送是两个动作」
+	// 这条（design doc 2026-08-14 §9）只有在两者分得开时才断言得了，
+	// 而一个共用的列表会让把两者写成同一个动作的实现照样通过。
+	// 方法本身在 writeback_handler_test.go 里。
+	writebackPlans  []memWriteback
+	writebackPushes []memWriteback
 }
 
 // memAccount 是替身里的一行账号，比 registry.Account 多一个哈希。

@@ -664,6 +664,98 @@ export interface PolicyPreview {
 }
 
 /* ---------------------------------------------------------------------- */
+/* Git 写回                                                                 */
+/* ---------------------------------------------------------------------- */
+
+/**
+ * 计划里的一个待写文件，对应 registry.WritebackFile。
+ *
+ * content 是整份渲染好的文件，不是补丁：写回只新增与更新整份文件
+ * （design doc 2026-08-14 §3）。界面**不展示也不解析它**——文件必须逐字节
+ * 是服务端产出的那一份，要看内容走导出（规范 §20：只展示需要的那部分）。
+ */
+export interface WritebackFile {
+  path: string
+  content: string
+}
+
+/**
+ * 一次写回的完整计划，对应 registry.WritebackPlan。
+ *
+ * 它是操作者二次确认的对象，因此界面上的每一项都必须原样来自这里：文件
+ * 清单、目标分支、提交信息、重算后的四类计数，一样都不在前端重新推导
+ * （design doc §4）。指纹覆盖以上全部内容，推送时原样回带。
+ */
+export interface WritebackPlan {
+  /**
+   * 这次写回要写到的那个策略仓库的标识（§4）。
+   *
+   * 它**进指纹**，因此必须展示：进指纹的东西是操作者确认的对象，不展示就
+   * 等于让他批准一个自己没读过的落点。给的是标识不是地址 —— 仓库地址是内部
+   * 地址，不进任何会被读到的地方。
+   */
+  repoId: string
+  /** 将要新增或更新的文件。平台从不删除仓库里的文件。 */
+  files: WritebackFile[]
+  /** 目标分支，永远是新建的 distill/* 分支，不是绑定里那条部署分支（§2）。 */
+  branch: string
+  /**
+   * 提交信息。**合并请求上的评审人唯一会读的那句话**（§7），因此必须在
+   * 推送之前展示给操作者：它会永久留在仓库历史里。
+   */
+  commitMessage: string
+  /** 写回这一刻重新跑出来的四类计数（§4）。 */
+  counts: Record<ChangeKind, number>
+  /**
+   * 仓库路径下已有、但本次候选集不包含的文件，交人工处置（§3）。
+   *
+   * 带 `| null`：后端用 `[]string` 收集，零条时序列化成 `null` 而不是 `[]`
+   * （同 PolicyPreview.overrides 的理由）。
+   */
+  extraneous: string[] | null
+  /**
+   * 仓库上已存在的 `distill/*` 分支（§2）。
+   *
+   * 报的是**存在**，不是"未合并"：判断合并与否要拉全量历史，而写回全程只做
+   * 浅克隆，因此界面上必须写明合并状态平台没有判断。攒着几条没人合的分支，
+   * 说明这条流程没在运转 —— 这是唯一能看见人工合并那道门有没有人走的信号。
+   *
+   * 带 `| null`：零条时序列化成 `null` 而不是 `[]`，同 extraneous。
+   */
+  existingBranches: string[] | null
+  /** 这份计划的内容指纹，推送时原样回带。前端不重算，也无从重算。 */
+  fingerprint: string
+}
+
+/**
+ * 出计划端点的响应。
+ *
+ * 两层校验结论与计划一起回：计划是操作者二次确认的对象，而"平台刚刚重新
+ * 校验过、结论是什么"正是他决定确不确认的依据之一（design doc §4）。
+ * 两个结论各自是封闭枚举、各自一个字段，与后端 writebackPlanView 同形状——
+ * 合成一个字段就等于允许把仓库级的 AUTH_FAILED 当成路径级的结论渲染出去。
+ */
+export interface WritebackPlanResult {
+  plan: WritebackPlan
+  repoVerifyResult: RepoVerifyResult
+  bindingVerifyResult: PathVerifyResult
+}
+
+/**
+ * 推送端点的响应。
+ *
+ * commit 是平台推上去的那个，**不是合并后的**（design doc §8）：合并由人做，
+ * 平台不知道也不该假装知道。counts 是写之前重算的那一套，即真正随这次提交
+ * 落进仓库的那几个数。
+ */
+export interface WritebackPushResult {
+  branch: string
+  commit: string
+  files: number
+  counts: Record<ChangeKind, number>
+}
+
+/* ---------------------------------------------------------------------- */
 /* 平台设置                                                                 */
 /* ---------------------------------------------------------------------- */
 

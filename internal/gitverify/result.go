@@ -9,6 +9,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 
+	"github.com/imkerbos/Distill/internal/gitssh"
 	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/secrets"
 )
@@ -40,11 +41,11 @@ func Classify(err error) registry.RepoVerifyResult {
 	// 把操作者送去查网络，而实际要做的是补一个 credential_ref
 	// （spec §3.2：这两类混起来会把排查引向错误的方向）。
 	//
-	// errUnusableCredential 同归这一类：取到了内容但它不是一把可用的私钥，
-	// 仍然是平台侧的凭据问题，不是仓库侧拒绝。
+	// gitssh.ErrUnusableCredential 同归这一类：取到了内容但它不是一把可用的
+	// 私钥，仍然是平台侧的凭据问题，不是仓库侧拒绝。
 	case errors.Is(err, secrets.ErrNotFound),
 		errors.Is(err, secrets.ErrInvalidRef),
-		errors.Is(err, errUnusableCredential):
+		errors.Is(err, gitssh.ErrUnusableCredential):
 		return registry.RepoVerifyCredentialUnresolved
 
 	case errors.Is(err, transport.ErrAuthenticationRequired),
@@ -65,13 +66,13 @@ func Classify(err error) registry.RepoVerifyResult {
 	// 未知错误的兜底。将来若改动 default 的去向，不应连带改变这三类。
 	// 超时按 spec §4 归入 REPO_UNREACHABLE，不单列取值。
 	//
-	// errBlockedDestination 也归这里，且不新增取值：从操作者视角这是一个
+	// gitssh.ErrBlockedDestination 也归这里，且不新增取值：从操作者视角这是一个
 	// 「地址填错了、平台没去到仓库」的配置问题，与 RepoVerifyRepoUnreachable
 	// 的定义（网络或地址问题，未能到达仓库）完全吻合。单列一个取值既要
 	// 同步前端文案映射与统计口径，又等于把「这个地址是内网」这件事告诉
 	// 调用方 —— 那正是 §19 不许外泄的内部网络信息。
 	case errors.Is(err, transport.ErrRepositoryNotFound),
-		errors.Is(err, errBlockedDestination),
+		errors.Is(err, gitssh.ErrBlockedDestination),
 		errors.Is(err, context.DeadlineExceeded):
 		return registry.RepoVerifyRepoUnreachable
 

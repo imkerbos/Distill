@@ -20,6 +20,7 @@ import (
 	"github.com/imkerbos/Distill/internal/config"
 	"github.com/imkerbos/Distill/internal/fixture"
 	"github.com/imkerbos/Distill/internal/gitverify"
+	"github.com/imkerbos/Distill/internal/gitwrite"
 	"github.com/imkerbos/Distill/internal/httpapi"
 	applog "github.com/imkerbos/Distill/internal/log"
 	"github.com/imkerbos/Distill/internal/mysqlregistry"
@@ -105,6 +106,11 @@ func run(configPath string) error {
 		Reader:      reader,
 		Registry:    reg,
 		GitVerifier: newSettingsGitVerifier(settingsProvider, logger),
+		// 写回的两条持久化路径与写入器。同一个 *mysqlregistry.Store 同时
+		// 满足 registry.Store 与 registry.WritebackStore —— 收窄成两个接口
+		// 是为了让边界层只拿到它真正需要的那几个方法，不是为了换实现。
+		Writeback:    reg,
+		PolicyWriter: newSettingsPolicyWriter(settingsProvider, logger),
 		// demo 的默认时间窗取 fixture 数据的实际范围。任何"最近 N 天"
 		// 的取值都会随真实时间推移而在某天返回 0 条 —— demo 会在没有
 		// 人改动代码的情况下自己坏掉。接真实存储时这里换成有界窗口。
@@ -215,6 +221,101 @@ func (v *settingsGitVerifier) current(ctx context.Context) (httpapi.GitVerifier,
 	}
 	return gv, true
 }
+
+// ErrPolicyWriterUnavailable 表示按当前设置装不出一个写入器。
+//
+// 单列一个哨兵而不是把底层错误往上传：它会一路走到 httpapi 的结论映射，
+// 而那里的 default 分支既不回传也不记录错误文本 —— 装配失败的原因（读不到
+// 设置、host key 解析不了、超时非正）留在本层的日志里，那是唯一该看见它的
+// 地方（规范 §19、§22）。
+//
+// 导出而不是包内私有：httpapi.PolicyWriter 只承诺返回 error，调用方要区分
+// 「这次没能装出写入器」与「远端拒绝了这次推送」时，得有一个认得出的目标。
+var ErrPolicyWriterUnavailable = errors.New("policy writer unavailable for the current setting")
+
+// settingsPolicyWriter 在**每一次推送**上按当前设置现装一个写入器。
+//
+// 与 settingsGitVerifier 完全同形，理由也一样：凭据后端、Git 超时与 SSH
+// host key 都从设置页改，装一次就等于「保存成功、毫无变化，直到重启」
+// （design doc 2026-08-13 §1.1）。写路径上这件事更重 —— 信任锚换了却不
+// 生效，而这条链路行使的是 deploy key 的**写**权限。
+//
+// 每次推送多一次单行主键命中与一次解析器构造。推送本身是一次浅克隆加一次
+// 出站推送，这点开销在它面前可忽略。出计划时的那次只读枚举同理。
+type settingsPolicyWriter struct {
+	settings *settings.Provider
+	logger   *slog.Logger
+}
+
+// newSettingsPolicyWriter 构造一个按当前设置现装写入器的 PolicyWriter。
+func newSettingsPolicyWriter(p *settings.Provider, logger *slog.Logger) *settingsPolicyWriter {
+	return &settingsPolicyWriter{settings: p, logger: logger}
+}
+
+// Push 用当前设置装一个写入器并把计划推出去。
+//
+// **装不出来时返回错误，绝不静默地当作成功。** 读不到设置、后端选了 NONE、
+// host key 为空、超时非正 —— 每一种都是「这次推不了」，而返回一个空 SHA 加
+// nil 会让调用方把它当成推成了，随后写下一个不存在的 last_written_commit
+// （规范 §49，失败方向朝关）。
+func (v *settingsPolicyWriter) Push(
+	ctx context.Context, repo registry.GitRepo, plan registry.WritebackPlan,
+) (string, error) {
+	writer, err := v.writer(ctx)
+	if err != nil {
+		return "", err
+	}
+	return writer.Push(ctx, repo, plan)
+}
+
+// List 用当前设置装一个写入器，只读地枚举一次策略仓库。
+//
+// 与 Push 共用同一段装配，因此也共用同一条受守卫的出站链路：**这里只读**，
+// 装出来的是同一个对象不代表这次调用会写（gitwrite.Writer.List 的契约）。
+func (v *settingsPolicyWriter) List(
+	ctx context.Context, repo registry.GitRepo, policyPath string,
+) (gitwrite.RepoListing, error) {
+	writer, err := v.writer(ctx)
+	if err != nil {
+		return gitwrite.RepoListing{}, err
+	}
+	return writer.List(ctx, repo, policyPath)
+}
+
+// writer 按**此刻**的设置装一个 gitwrite.Writer。
+//
+// 摘出来给 Push 与 List 共用：两条路径必须用同一份 host key、同一个凭据后端
+// 与同一个超时装出来，各写一遍就会出现「枚举走旧信任锚、推送走新的」这类
+// 只在设置刚改过的那一小段时间里才显形的差异。
+func (v *settingsPolicyWriter) writer(ctx context.Context) (*gitwrite.Writer, error) {
+	s, err := v.settings.Current(ctx)
+	if err != nil {
+		v.logger.Error("cannot read the platform setting for the policy write-back", "error", err)
+		return nil, ErrPolicyWriterUnavailable
+	}
+	resolver, err := newSecretResolver(ctx, s)
+	if err != nil {
+		v.logger.Error("cannot build a secret resolver for the policy write-back", "error", err)
+		return nil, ErrPolicyWriterUnavailable
+	}
+	if resolver == nil {
+		// 后端是 NONE：操作者明确选了「不解析凭据」，于是也就没有写回。
+		return nil, ErrPolicyWriterUnavailable
+	}
+	// timeout 与 host keys 显式传给 gitwrite.New：它经由 gitssh.New 拒绝
+	// 非正超时、也拒绝空 host key 集合。**没有 host key 就构造失败**，
+	// 不存在「未配置就不校验」的分支 —— 写路径与读路径共用那一份判定。
+	writer, err := gitwrite.New(resolver, []byte(s.GitVerifyHostKeys), s.GitVerifyTimeout)
+	if err != nil {
+		v.logger.Error("cannot build a policy writer from the current setting", "error", err)
+		return nil, ErrPolicyWriterUnavailable
+	}
+	return writer, nil
+}
+
+// 编译期确认它满足边界层要的形状。放在这里而非测试里：接口对不上应当在
+// 构建时失败，而不是等到装配时才发现。
+var _ httpapi.PolicyWriter = (*settingsPolicyWriter)(nil)
 
 // newGitVerifier 按一份设置装配 Git 绑定校验器。
 //
