@@ -104,7 +104,7 @@ func newTestRouterWithLog(
 ) (http.Handler, *auth.SessionStore, *http.Cookie, *bytes.Buffer) {
 	t.Helper()
 	var buf bytes.Buffer
-	h, sessions, cookie := buildTestRouterWithLog(t, nil, reg, store.TimeWindow{}, nil, "INFO", &buf)
+	h, sessions, cookie := buildTestRouterWithLog(t, nil, reg, store.TimeWindow{}, nil, nil, "INFO", &buf)
 	return h, sessions, cookie, &buf
 }
 
@@ -114,13 +114,16 @@ func buildTestRouter(
 	window store.TimeWindow, gv httpapi.GitVerifier,
 ) (http.Handler, *auth.SessionStore, *http.Cookie) {
 	t.Helper()
-	return buildTestRouterWithLog(t, reader, reg, window, gv, "ERROR", io.Discard)
+	// 写入器为 nil：绝大多数用例装配的是"没有写回这条路径"的形态，也是
+	// 部署上真实存在的一种。写回用例走 newTestRouterForWriteback。
+	return buildTestRouterWithLog(t, reader, reg, window, gv, nil, "ERROR", io.Discard)
 }
 
 // buildTestRouterWithLog 是 buildTestRouter 多带一个日志去处的版本。
 func buildTestRouterWithLog(
 	t *testing.T, reader store.Reader, reg registry.Store,
-	window store.TimeWindow, gv httpapi.GitVerifier, level string, logOut io.Writer,
+	window store.TimeWindow, gv httpapi.GitVerifier, pw httpapi.PolicyWriter,
+	level string, logOut io.Writer,
 ) (http.Handler, *auth.SessionStore, *http.Cookie) {
 	t.Helper()
 
@@ -145,6 +148,11 @@ func buildTestRouterWithLog(
 		Reader:      reader,
 		Registry:    reg,
 		GitVerifier: gv,
+		// 写回的持久化去处跟着注册表走：同一个替身同时满足两个接口，与
+		// mysqlregistry.Store 一样。断言不成立时留 nil —— 那正是"没有审计
+		// 去处"的形态，而写回在那种形态下必须拒绝。
+		Writeback:    writebackStoreOf(reg),
+		PolicyWriter: pw,
 		// 流量查询的时间窗是必填的；测试装配方与 cmd 一样注入覆盖
 		// 全量数据的窗口，使不关心时间维的用例无须逐个传 from/to。
 		DefaultWindow: window,

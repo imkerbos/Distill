@@ -109,6 +109,11 @@ func adminRoutes() []struct{ method, path string } {
 		// 导出比它渲染的那份预览更严：交出去的是一份完整的网络策略文档，
 		// 等同于集群网络结构的说明书（design doc 2026-08-14 §5）。
 		{http.MethodGet, "/api/v1/clusters/prod-asia-1/policy-export"},
+		// 写回两条都是管理员（design doc 2026-08-14 §9）。出计划也在内：
+		// 它回传的是将要写进策略仓库的完整文件内容与目标分支，比导出多带
+		// 一份"平台打算往哪里写"。
+		{http.MethodPost, "/api/v1/clusters/prod-asia-1/policy-writeback/plan"},
+		{http.MethodPost, "/api/v1/clusters/prod-asia-1/policy-writeback/push"},
 		{http.MethodPost, "/api/v1/clusters/prod-asia-1/rule-overrides"},
 		{http.MethodDelete, "/api/v1/clusters/prod-asia-1/rule-overrides"},
 	}

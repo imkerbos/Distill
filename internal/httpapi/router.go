@@ -28,6 +28,19 @@ type Deps struct {
 	Reader store.Reader
 	// Registry 提供集群注册与策略导入的持久化。
 	Registry registry.Store
+	// Writeback 提供写回所需的两条持久化路径：记一次计划，与记一次推送并
+	// 落 commit。
+	//
+	// 与 Registry 分开而不是合成一个（同 registry.WritebackStore 的注释）：
+	// 写回只需要那两个方法，而 Store 带着集群、账号、设置的全部写方法。
+	// 允许为 nil —— 此时写回两个端点都拒绝，因为一次留不下痕迹的写回，
+	// 事后没有任何东西能回答"谁把它推了出去"。
+	Writeback registry.WritebackStore
+	// PolicyWriter 把已确认的写回计划推进策略仓库。
+	//
+	// 允许为 nil：未配置 secrets 的部署没有写回这回事。nil 表示"没有这条
+	// 路径"，**不是**"随便谁都能推"——见 handlePolicyWritebackPush。
+	PolicyWriter PolicyWriter
 	// GitVerifier 对 Git 绑定做只读校验。
 	//
 	// 允许为 nil：未配置 secrets 的部署（比如 demo）不做校验，结论一律是
@@ -209,6 +222,19 @@ func NewRouter(d Deps) http.Handler {
 			// （design doc 2026-08-14 §5）。它也是本组里唯一写审计的读端点。
 			az.route(protected, http.MethodGet, "/clusters/{clusterID}/policy-export",
 				accessAdmin, handlePolicyExport(d))
+			// 写回两个端点都按管理员算（design doc 2026-08-14 §9）。出计划
+			// 也是管理员：它回传的是将要写进策略仓库的完整文件内容与目标
+			// 分支，比导出多带一份"平台打算往哪里写"，而只读账号的用途是
+			// 看拓扑与流量。
+			//
+			// 两条地址而不是一个端点带 dryRun 参数：一个约定俗成的布尔会让
+			// 任何一次误发的请求体变成一次真的推送，而推送是往生产下发链路
+			// 上写。分成两条之后，"出计划"与"真的推"在路由表、审计动作与
+			// 权限声明三处都是两件事（§5、§9）。
+			az.route(protected, http.MethodPost, "/clusters/{clusterID}/policy-writeback/plan",
+				accessAdmin, handlePolicyWritebackPlan(d))
+			az.route(protected, http.MethodPost, "/clusters/{clusterID}/policy-writeback/push",
+				accessAdmin, handlePolicyWritebackPush(d))
 			az.route(protected, http.MethodPost, "/clusters/{clusterID}/rule-overrides",
 				accessAdmin, handleCreateOverride(d))
 			az.route(protected, http.MethodDelete, "/clusters/{clusterID}/rule-overrides",
