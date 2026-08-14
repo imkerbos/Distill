@@ -67,6 +67,29 @@ function query(filter: FlowFilter): string {
   return s ? `?${s}` : ''
 }
 
+/** 一次导出下载：服务端产出的字节，与它自带的文件名。 */
+export interface PolicyExportFile {
+  /** 响应体原样。前端不重建 YAML，也不重建注释头（design doc 2026-08-14 §2、§3）。 */
+  readonly blob: Blob
+  readonly filename: string
+}
+
+/**
+ * 从 Content-Disposition 取文件名，取不到时退回一个固定名。
+ *
+ * 逐字符过滤而不是原样使用：这个取值来自响应头，而它会被当作
+ * `<a download>` 的文件名落到操作者的磁盘上——路径分隔符与控制字符
+ * 在那一步不是显示问题（规范 §26）。退回的名字只是名字，文件内容
+ * 始终是服务端那一份。
+ */
+function exportFilename(header: string | null): string {
+  const fallback = 'distill-policy-export.yaml'
+  const m = header?.match(/filename="?([^";]+)"?/)
+  if (!m) return fallback
+  const safe = m[1].replace(/[^A-Za-z0-9._-]/g, '-')
+  return safe === '' ? fallback : safe
+}
+
 export const api = {
   login: (username: string, password: string) =>
     request<Identity>('/api/v1/sessions', {
@@ -309,6 +332,49 @@ export const api = {
     return request<PolicyPreview>(
       `/api/v1/clusters/${encodeURIComponent(cluster)}/policy-preview${q ? `?${q}` : ''}`,
     )
+  },
+
+  /**
+   * 下载一次已确认策略导出。
+   *
+   * 收一个已经拼好的路径而不是自己再拼一次：路径必须来自
+   * `policyExportPath`，且时间窗必须是页面此刻正在显示的那一个
+   * （见 pages/policyExportView.ts）。在这里重拼就又多了一个可以与
+   * 页面分歧的取数点，而分歧的后果是文件与操作者刚读过的四个数字
+   * 描述两次不同的计算（design doc 2026-08-14 §2）。
+   *
+   * 响应体原样带回，不解析、不重排、不重建注释头：文件必须是服务端
+   * 产出的那一份，逐字节相同，否则"它与预测同源"这个保证就没了。
+   */
+  policyExport: async (path: string): Promise<PolicyExportFile> => {
+    // 只接受本平台自己的 API 路径。取值目前恒来自 policyExportPath，
+    // 这一行是纵深防御：一个能指向任意 URL 的下载函数，早晚会被某次
+    // 改动接上一个来自响应体的地址。
+    if (!path.startsWith('/api/v1/')) {
+      throw new ApiError(-1, '导出路径不合法', 0)
+    }
+
+    const res = await fetch(path, { headers: { Accept: 'text/yaml' } })
+    if (res.status === 401) {
+      onUnauthorizedCb?.()
+    }
+
+    // 失败一律是 JSON 包络（response.write 固定 application/json），
+    // 成功是 text/yaml。**服务端的拒绝是权威的**：界面上那两处禁用只是
+    // 提前把原因说出来，不是这条判断的替代（规范 §34）。
+    if ((res.headers.get('Content-Type') ?? '').includes('application/json')) {
+      let body: Envelope<null>
+      try {
+        body = await res.json()
+      } catch {
+        throw new ApiError(-1, '服务无响应', res.status)
+      }
+      throw new ApiError(body.code, body.msg || '导出失败', res.status)
+    }
+    if (!res.ok) {
+      throw new ApiError(-1, '导出失败', res.status)
+    }
+    return { blob: await res.blob(), filename: exportFilename(res.headers.get('Content-Disposition')) }
   },
 
   createOverride: (
