@@ -162,8 +162,39 @@ func (s *Store) RecordBootstrapLogin(ctx context.Context, actor registry.Actor) 
 		accountTarget(actor.Username), nil, nil, func(*sql.Tx) error { return nil })
 }
 
+// canonicalUsername 把调用方给的用户名换成 platform_account 里那一份写法。
+// 账号不存在（或已软删除）时返回 ("", false, nil)。
+//
+// **库与 Go 对「同一个用户名」的判定不是同一件事。** platform_account 的
+// 排序规则是 utf8mb4_0900_ai_ci —— 大小写不敏感、重音不敏感，
+// `WHERE username = ?` 因此认得出 "ALICE"、"alicé" 说的都是 "alice" 那一行，
+// 而 Go 的 == 一个都认不出。两套相等性并排放着，写在守卫里的每一次比较都要
+// 重新做一次选择，选错的那一次不会报错：requireAdminRemains 曾经因此放行过
+// 「停用/降级/删除最后一个启用中的管理员」—— 守卫拿 URL 里的 "ALICE" 与库里
+// 的 "alice" 比，判定为"动的不是那一个"，紧接着的 UPDATE 走 SQL 比较，动的
+// 恰恰就是那一个（design doc 2026-08-14 §5，规范 §7、§25）。
+//
+// 因此写路径一律先把用户名换成库认的那一份，此后 Go 里的 == 与 SQL 里的 =
+// 指的是同一件事。就地改用 strings.EqualFold 不够：它只补上大小写那一半，
+// 重音那一半仍然对不上。改列的排序规则是另一件事 —— 那会改变
+// `WHERE username = ?` 的匹配范围（今天用别的大小写登得进来的人会登不进来），
+// 而本方法在任何排序规则下都成立：它问的是库自己认哪一行。
+func (s *Store) canonicalUsername(ctx context.Context, username string) (string, bool, error) {
+	a, ok, err := s.Account(ctx, username)
+	if err != nil {
+		return "", false, err
+	}
+	if !ok {
+		return "", false, nil
+	}
+	return a.Username, true, nil
+}
+
 // requireAdminRemains 在事务内断言：这次操作做完之后，库里仍然有至少
 // 一个启用中的管理员（design doc 2026-08-14 §5）。
+//
+// 传进来的 username 必须已经是库里那一份写法（见 canonicalUsername），
+// 否则下面这次 == 会与库的比较分岔，而分岔的方向恰好是放行。
 //
 // **判定必须在事务内、对候选行加锁完成，不能先查后改**（规范 §25）。
 // 两个管理员同时把对方降级，先查后改会双双读到"还有两个"、双双通过，
@@ -293,6 +324,8 @@ func (s *Store) UpdateAccountRole(
 	if !ok {
 		return fmt.Errorf("%w: account %s", ErrNotFound, username)
 	}
+	// 之后的判定、写入与审计一律用库里那一份用户名写法，见 canonicalUsername。
+	username = before.Username
 	after := before
 	after.Role = role
 	after.UpdatedAt = s.now()
@@ -328,6 +361,8 @@ func (s *Store) DisableAccount(ctx context.Context, actor registry.Actor, userna
 	if !ok {
 		return fmt.Errorf("%w: account %s", ErrNotFound, username)
 	}
+	// 之后的判定、写入与审计一律用库里那一份用户名写法，见 canonicalUsername。
+	username = before.Username
 	at := s.now()
 	after := before
 	after.DisabledAt = &at
@@ -362,6 +397,8 @@ func (s *Store) EnableAccount(ctx context.Context, actor registry.Actor, usernam
 	if !ok {
 		return fmt.Errorf("%w: account %s", ErrNotFound, username)
 	}
+	// 之后的写入与审计一律用库里那一份用户名写法，见 canonicalUsername。
+	username = before.Username
 	after := before
 	after.DisabledAt = nil
 	after.UpdatedAt = s.now()
@@ -393,6 +430,8 @@ func (s *Store) SoftDeleteAccount(ctx context.Context, actor registry.Actor, use
 	if !ok {
 		return fmt.Errorf("%w: account %s", ErrNotFound, username)
 	}
+	// 之后的判定、写入与审计一律用库里那一份用户名写法，见 canonicalUsername。
+	username = before.Username
 	at := s.now()
 	return s.mutate(ctx, actor, accountClusterID, actionDeleteAccount, accountTarget(username),
 		before, nil, func(tx *sql.Tx) error {
@@ -427,15 +466,27 @@ func (s *Store) SetAccountPassword(
 	if passwordHash == "" {
 		return registry.NewInvalidError("密码哈希不能为空")
 	}
-	_, ok, err := s.Account(ctx, username)
+	canonical, ok, err := s.canonicalUsername(ctx, username)
 	if err != nil {
 		return err
 	}
 	if !ok {
 		return fmt.Errorf("%w: account %s", ErrNotFound, username)
 	}
+	// 之后的写入与审计一律用库里那一份写法，见 canonicalUsername。
+	username = canonical
+	// 「是不是本人改自己的密码」同样只能在库认的写法上判：actor.Username 来自
+	// 会话（登录时打的那一份），username 来自路由，两者可能只差大小写，而库把
+	// 它们当成同一行。按调用方给的写法比，一次自助改密会被记成「管理员重置了
+	// 别人的密码」—— 审计从此答错了「谁对谁做了什么」（规范 §43）。
+	// 引导账号在库里查不到（ok 为 false），因此落在 RESET_PASSWORD 一侧：
+	// 它本来就不是任何一行账号的本人。
 	action := actionResetPassword
-	if actor.Username == username {
+	actorName, actorFound, err := s.canonicalUsername(ctx, actor.Username)
+	if err != nil {
+		return err
+	}
+	if actorFound && actorName == username {
 		action = actionChangeOwnPassword
 	}
 	// 前值为 NULL、后值只有一个布尔：审计记录密码变过，不记录变成了什么，

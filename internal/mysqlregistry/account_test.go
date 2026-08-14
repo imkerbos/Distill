@@ -374,6 +374,220 @@ func TestConcurrentMutualDemotionLeavesOneAdmin(t *testing.T) {
 	}
 }
 
+// 换一个大小写不能绕过「最后一个启用中的管理员」的保护（design doc §5）。
+//
+// 库与 Go 对「同一个用户名」的判定不是同一件事：platform_account 的排序规则
+// 是 utf8mb4_0900_ai_ci，`WHERE username = ?` 认得出 "ALICE" 就是 "alice"
+// 那一行，Go 的 == 认不出。守卫拿两边直接比，就会判定为"动的不是最后那一个
+// 管理员"而放行，紧接着的 UPDATE 走 SQL 比较，动的恰恰就是它。上面那三条
+// 用例（停用/降级/删除）全部只用同一个大小写调用，一条都拦不住这个形状。
+//
+// 断言分两层：返回 ErrLastAdmin，以及**库里仍然有那一个启用中的管理员** ——
+// 后者才是真正要守的东西。没有配置引导账号的部署一旦落到零个启用中的管理员，
+// 就只能改数据库救。
+func TestUsernameCaseDoesNotWalkPastTheLastAdminGuard(t *testing.T) {
+	s, db := newAccountStore(t)
+	ctx := context.Background()
+	actor := registry.Actor{Username: "bootstrap"}
+
+	mustCreateAccount(t, s, actor, "alice", registry.RoleAdmin)
+
+	// 这条用例的前提是库把 "ALICE" 与 "alice" 当成同一行。前提不成立时
+	// 下面的期望本身就变了（那时这三次调用应当是 ErrNotFound），与其让断言
+	// 报一个看不懂的错，不如在这里把话说清楚。
+	var matched int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM platform_account WHERE username = 'ALICE'`).Scan(&matched); err != nil {
+		t.Fatalf("count rows matching 'ALICE': %v", err)
+	}
+	if matched != 1 {
+		t.Fatalf("'ALICE' 匹配到 %d 行，本用例的前提是 1 —— platform_account 的排序规则"+
+			"不再是大小写不敏感的那一种，这条用例要跟着重写", matched)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		action string
+		call   func() error
+	}{
+		{"disable", "DISABLE_ACCOUNT", func() error { return s.DisableAccount(ctx, actor, "ALICE") }},
+		{"demote", "UPDATE_ACCOUNT_ROLE", func() error {
+			return s.UpdateAccountRole(ctx, actor, "ALICE", registry.RoleViewer)
+		}},
+		{"delete", "DELETE_ACCOUNT", func() error { return s.SoftDeleteAccount(ctx, actor, "ALICE") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.call(); !errors.Is(err, registry.ErrLastAdmin) {
+				t.Errorf("%s of the last enabled admin spelled 'ALICE' err = %v, want ErrLastAdmin",
+					tc.name, err)
+			}
+			if got := enabledAdmins(t, db); len(got) != 1 || got[0] != "alice" {
+				t.Fatalf("enabled admins after a case-varied %s = %v, want [alice] —— "+
+					"改一下大小写就把平台落地成零个启用中的管理员了", tc.name, got)
+			}
+			if n := auditCount(t, db, tc.action); n != 0 {
+				t.Errorf("%s audit rows after a refused %s = %d, want 0", tc.action, tc.name, n)
+			}
+		})
+	}
+}
+
+// 改密的审计动作按**库认的那一份用户名**判，不按调用方打的那一份。
+//
+// actor 来自会话（登录时打的写法），目标来自路由，两者可能只差大小写，而库
+// 把它们当成同一行。按调用方给的写法比，一次自助改密会被记成
+// RESET_PASSWORD ——「管理员重置了别人的密码」，审计从此答错了「谁对谁做了
+// 什么」（design doc §6、§7，规范 §43）。
+func TestPasswordChangeAuditFollowsTheStoredUsername(t *testing.T) {
+	s, db := newAccountStore(t)
+	ctx := context.Background()
+
+	mustCreateAccount(t, s, registry.Actor{Username: "bootstrap"}, "carol", registry.RoleAdmin)
+
+	// carol 用 "CAROL" 这个写法登进来，改的是自己的密码。
+	if err := s.SetAccountPassword(ctx, registry.Actor{Username: "CAROL"}, "carol", testNewHash); err != nil {
+		t.Fatalf("SetAccountPassword() error = %v", err)
+	}
+	if n := auditCount(t, db, "CHANGE_OWN_PASSWORD"); n != 1 {
+		t.Errorf("CHANGE_OWN_PASSWORD audit rows = %d, want 1 —— 这是一次自助改密", n)
+	}
+	if n := auditCount(t, db, "RESET_PASSWORD"); n != 0 {
+		t.Errorf("RESET_PASSWORD audit rows = %d, want 0 —— "+
+			"一次自助改密被记成了「管理员重置了别人的密码」", n)
+	}
+
+	// 审计的 target 也用库里那一份写法，否则同一个账号会在 audit_log 里
+	// 留下两种写法，聚合不到一起。
+	var target string
+	if err := db.QueryRow(
+		`SELECT target FROM audit_log WHERE action = 'CHANGE_OWN_PASSWORD'`).Scan(&target); err != nil {
+		t.Fatalf("query CHANGE_OWN_PASSWORD audit row: %v", err)
+	}
+	if target != "account/carol" {
+		t.Errorf("CHANGE_OWN_PASSWORD target = %q, want account/carol", target)
+	}
+
+	// 反方向：真的重置别人的密码仍然记 RESET_PASSWORD，别让上面那条被一份
+	// 「恒为 CHANGE_OWN_PASSWORD」的实现蒙混过去。
+	mustCreateAccount(t, s, registry.Actor{Username: "carol"}, "dave", registry.RoleViewer)
+	if err := s.SetAccountPassword(ctx, registry.Actor{Username: "CAROL"}, "dave", testNewHash); err != nil {
+		t.Fatalf("SetAccountPassword() on another account error = %v", err)
+	}
+	if n := auditCount(t, db, "RESET_PASSWORD"); n != 1 {
+		t.Errorf("RESET_PASSWORD audit rows = %d, want 1 —— 管理员重置他人密码", n)
+	}
+}
+
+// 事务外的存在性预检与事务内的写入之间有一段窗口，别的事务可以在其中把这一行
+// 软删除掉。requireLiveAccount 的加锁读把这段窗口关掉 —— 没有它，写入会落进
+// 一条已经删除的行，还留下一条说这件事发生过的审计（规范 §25、§43）。
+//
+// **五个调用点逐个走一遍，而不是只测函数本身。** 守卫写对了不等于调用方还在
+// 调它：把某一处的调用删掉，只覆盖别处的用例照样绿，而那正是这个平台反复出现
+// 的形状。这条用例的每个子用例只盯一个调用点，删掉哪一个就红哪一个。
+//
+// 并发是真的造出来的，办法与 TestConcurrentMutualDemotionLeavesOneAdmin 同源：
+// 测试自己开一个事务把目标行软删除但不提交，被测的写入因此堵在那一行的锁上；
+// 等到 MySQL 自己报告确实有事务在等这把锁（不是 sleep 一个猜出来的时长）再
+// 提交，此时那次写入已经越过了事务外的预检。两种实现在这里分岔：
+//
+//   - 有 requireLiveAccount：拿到锁之后那次 SELECT ... FOR UPDATE 是当前读，
+//     看见 deleted_at 已经落上，返回 ErrNotFound，什么都没写。
+//   - 没有 requireLiveAccount：各条 UPDATE 的谓词里都没有 deleted_at，锁一
+//     放开就把改动写进那条已删除的行并提交，两条断言同时转红。
+func TestConcurrentSoftDeleteStopsEveryAccountWrite(t *testing.T) {
+	const victim = "viewer-1"
+	actor := registry.Actor{Username: "admin-a"}
+
+	for _, tc := range []struct {
+		name string
+		// action 是这条路径成功时会留下的审计动作。它必须一条都没有 ——
+		// 一条留下来的审计行会说一件没发生过的事。
+		action string
+		// disabledFirst 让目标先被停用，启用那条路径才有东西可启用。
+		disabledFirst bool
+		call          func(ctx context.Context, s *mysqlregistry.Store) error
+	}{
+		{"update-role", "UPDATE_ACCOUNT_ROLE", false,
+			func(ctx context.Context, s *mysqlregistry.Store) error {
+				return s.UpdateAccountRole(ctx, actor, victim, registry.RoleAdmin)
+			}},
+		{"disable", "DISABLE_ACCOUNT", false,
+			func(ctx context.Context, s *mysqlregistry.Store) error {
+				return s.DisableAccount(ctx, actor, victim)
+			}},
+		{"enable", "ENABLE_ACCOUNT", true,
+			func(ctx context.Context, s *mysqlregistry.Store) error {
+				return s.EnableAccount(ctx, actor, victim)
+			}},
+		{"soft-delete", "DELETE_ACCOUNT", false,
+			func(ctx context.Context, s *mysqlregistry.Store) error {
+				return s.SoftDeleteAccount(ctx, actor, victim)
+			}},
+		{"set-password", "RESET_PASSWORD", false,
+			func(ctx context.Context, s *mysqlregistry.Store) error {
+				return s.SetAccountPassword(ctx, actor, victim, testNewHash)
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, db := newAccountStore(t)
+			ctx := context.Background()
+			// 留一个启用中的管理员，下面这些操作才不会撞上最后管理员判定 ——
+			// 那条守卫先返回，本用例就测不到 requireLiveAccount 了。
+			mustCreateAccount(t, s, registry.Actor{Username: "bootstrap"}, "admin-a", registry.RoleAdmin)
+			mustCreateAccount(t, s, actor, victim, registry.RoleViewer)
+			if tc.disabledFirst {
+				if err := s.DisableAccount(ctx, actor, victim); err != nil {
+					t.Fatalf("DisableAccount() setup error = %v", err)
+				}
+			}
+
+			deleter, err := db.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatalf("BeginTx() error = %v", err)
+			}
+			// 出错路径上也要放锁，否则后续测试会跟着一起卡住。
+			defer func() { _ = deleter.Rollback() }()
+			at := time.Now().UTC()
+			if _, err := deleter.ExecContext(ctx,
+				`UPDATE platform_account SET deleted_at = ?, updated_at = ? WHERE username = ?`,
+				at, at, victim); err != nil {
+				t.Fatalf("soft delete %s in the blocking tx: %v", victim, err)
+			}
+
+			done := make(chan error, 1)
+			go func() { done <- tc.call(ctx, s) }()
+
+			// 等那次写入真的停在目标行的锁上再提交删除。少了这一步，删除可能
+			// 在事务外的预检之前就提交完，那时预检自己就会返回 ErrNotFound ——
+			// 用例照样绿，却与 requireLiveAccount 在不在毫无关系。
+			waitForRowLockWaiters(t, db, 1)
+			if err := deleter.Commit(); err != nil {
+				t.Fatalf("Commit() of the deleting tx error = %v", err)
+			}
+
+			if err := <-done; !errors.Is(err, mysqlregistry.ErrNotFound) {
+				t.Errorf("%s racing a soft delete err = %v, want ErrNotFound", tc.name, err)
+			}
+			if n := auditCount(t, db, tc.action); n != 0 {
+				t.Errorf("%s audit rows = %d, want 0 —— 这次写入没有发生", tc.action, n)
+			}
+			// 已删除的行上不得留下新哈希：那条行不再是一个身份，而一份能验过
+			// 新口令的哈希会在它被恢复的那一天成为一条谁也不记得的登录路径。
+			var stored string
+			if err := db.QueryRow(
+				`SELECT password_hash FROM platform_account WHERE username = ?`,
+				victim).Scan(&stored); err != nil {
+				t.Fatalf("query password_hash: %v", err)
+			}
+			if stored != testHash {
+				t.Errorf("password_hash of the soft-deleted account changed —— " +
+					"新哈希被写进了一条已删除的行")
+			}
+		})
+	}
+}
+
 // lockEnabledAdminRows 在给定事务里锁住全部启用中的管理员行。
 //
 // 谓词与实现里那条判定一致：锁的是同一批行，两条并发写路径因此一定撞上。
