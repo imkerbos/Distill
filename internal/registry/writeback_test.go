@@ -39,7 +39,14 @@ func samplePlan() registry.WritebackPlan {
 // mustPlan 走构造函数，因此拿到的指纹与生产路径上的是同一条。
 func mustPlan(t *testing.T, p registry.WritebackPlan) registry.WritebackPlan {
 	t.Helper()
-	got, err := registry.NewWritebackPlan(writebackBinding(), p)
+	return mustPlanFor(t, writebackBinding(), p)
+}
+
+// mustPlanFor 是换一个绑定的版本：仓库标识由绑定决定，因此"换个仓库"这件事
+// 只有换绑定才表达得出来。
+func mustPlanFor(t *testing.T, b registry.GitBinding, p registry.WritebackPlan) registry.WritebackPlan {
+	t.Helper()
+	got, err := registry.NewWritebackPlan(b, p)
 	if err != nil {
 		t.Fatalf("NewWritebackPlan() error = %v, want nil", err)
 	}
@@ -105,6 +112,61 @@ func TestFingerprintChangesWithEveryFieldItMustCover(t *testing.T) {
 					"操作者确认的会是他没看过的那一份", name, got.Fingerprint)
 			}
 		})
+	}
+}
+
+// 指纹必须覆盖**推到哪个仓库**（design doc §4，2026-08-15 修订）。
+//
+// 单列一条而不是并进上面那张表：仓库标识来自绑定，不是计划上可以改的字段，
+// 因此"换个仓库"只有换绑定才表达得出来。不覆盖它的后果是：在出计划与推送
+// 之间把绑定改指到另一个仓库，操作者读过的每一句话都还成立、指纹照样对得上，
+// 推送却落到了另一个仓库。
+func TestFingerprintChangesWithTheTargetRepository(t *testing.T) {
+	base := mustPlan(t, samplePlan())
+
+	other := writebackBinding()
+	other.RepoID = "repo-somewhere-else"
+	got := mustPlanFor(t, other, samplePlan())
+
+	if got.RepoID != other.RepoID {
+		t.Errorf("plan repoID = %q, want the binding's %q —— 计划没有说出它要写到哪儿",
+			got.RepoID, other.RepoID)
+	}
+	if got.Fingerprint == base.Fingerprint {
+		t.Errorf("fingerprint unchanged after the target repository changed: %s —— "+
+			"操作者批准的内容原封不动地落到了另一个仓库", got.Fingerprint)
+	}
+}
+
+// 仓库标识不读调用方传进来的那一份：读了的话，一个自带 repoID 的调用方就能
+// 让指纹对着一个仓库算、推送落到另一个仓库，与根本不覆盖它等价。
+func TestNewWritebackPlanTakesTheRepositoryFromTheBinding(t *testing.T) {
+	forged := samplePlan()
+	forged.RepoID = "repo-somewhere-else"
+
+	got := mustPlan(t, forged)
+	if got.RepoID != writebackBinding().RepoID {
+		t.Errorf("plan repoID = %q, want the binding's %q", got.RepoID, writebackBinding().RepoID)
+	}
+	if got.Fingerprint != mustPlan(t, samplePlan()).Fingerprint {
+		t.Error("自带的 repoID 影响了算出来的指纹 —— 指纹里那一维成了调用方可控的值")
+	}
+}
+
+// 多余文件清单与现存分支清单**不**进指纹：它们描述的是仓库里平台不会碰的
+// 东西，不是这次要写出去的内容。进了指纹，别人往策略目录里放一个无关文件、
+// 或另一个集群建了一条 distill/* 分支，就会让一份已确认的计划作废，而那次
+// 推送本身没有任何变化。
+func TestFingerprintIgnoresTheRepositorySurvey(t *testing.T) {
+	base := mustPlan(t, samplePlan())
+
+	surveyed := samplePlan()
+	surveyed.Extraneous = []string{"clusters/prod-asia-1/legacy.yaml", "clusters/prod-asia-1/old.yaml"}
+	surveyed.ExistingBranches = []string{"distill/prod-asia-1-20260801T090000Z"}
+
+	if got := mustPlan(t, surveyed); got.Fingerprint != base.Fingerprint {
+		t.Errorf("fingerprint changed with the repository survey: %s vs %s —— "+
+			"一次与本次推送无关的仓库变化让已确认的计划作废了", got.Fingerprint, base.Fingerprint)
 	}
 }
 

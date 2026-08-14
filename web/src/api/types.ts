@@ -687,6 +687,14 @@ export interface WritebackFile {
  * （design doc §4）。指纹覆盖以上全部内容，推送时原样回带。
  */
 export interface WritebackPlan {
+  /**
+   * 这次写回要写到的那个策略仓库的标识（§4）。
+   *
+   * 它**进指纹**，因此必须展示：进指纹的东西是操作者确认的对象，不展示就
+   * 等于让他批准一个自己没读过的落点。给的是标识不是地址 —— 仓库地址是内部
+   * 地址，不进任何会被读到的地方。
+   */
+  repoId: string
   /** 将要新增或更新的文件。平台从不删除仓库里的文件。 */
   files: WritebackFile[]
   /** 目标分支，永远是新建的 distill/* 分支，不是绑定里那条部署分支（§2）。 */
@@ -705,6 +713,16 @@ export interface WritebackPlan {
    * （同 PolicyPreview.overrides 的理由）。
    */
   extraneous: string[] | null
+  /**
+   * 仓库上已存在的 `distill/*` 分支（§2）。
+   *
+   * 报的是**存在**，不是"未合并"：判断合并与否要拉全量历史，而写回全程只做
+   * 浅克隆，因此界面上必须写明合并状态平台没有判断。攒着几条没人合的分支，
+   * 说明这条流程没在运转 —— 这是唯一能看见人工合并那道门有没有人走的信号。
+   *
+   * 带 `| null`：零条时序列化成 `null` 而不是 `[]`，同 extraneous。
+   */
+  existingBranches: string[] | null
   /** 这份计划的内容指纹，推送时原样回带。前端不重算，也无从重算。 */
   fingerprint: string
 }

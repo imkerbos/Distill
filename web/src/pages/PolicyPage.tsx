@@ -526,6 +526,11 @@ function WritebackControl({ view, pageCounts }: {
             </div>
           )}
 
+          {/* 目标仓库与目标分支一起给：仓库进指纹（design doc §4），而进
+              指纹的东西必须是操作者屏幕上看得到的东西 —— 否则他确认的是一个
+              自己没读过的落点。这里给的是仓库标识，不是仓库地址：地址是内部
+              地址，不进任何会被读到的地方。 */}
+          <PlanRow label="目标仓库">{plan.plan.repoId}</PlanRow>
           <PlanRow label="目标分支">{plan.plan.branch}</PlanRow>
           <PlanRow label="写回前重新校验">
             仓库级 {plan.repoVerifyResult} · 路径级 {plan.bindingVerifyResult}
@@ -535,10 +540,26 @@ function WritebackControl({ view, pageCounts }: {
               ? '（无）'
               : plan.plan.files.map((f) => <div key={f.path}>{f.path}</div>)}
           </PlanRow>
+          {/* 这两份清单都来自平台出计划时**真的枚举过一次仓库**（design doc
+              §2、§3）：枚举失败时后端整次不出计划，因此这里渲染的"（无）"是一个
+              空集，不是一句没人算过的话。 */}
           <PlanRow label="仓库里多余的文件">
             {(plan.plan.extraneous ?? []).length === 0
               ? '（无）平台从不删除仓库里的文件，多余的文件只列出来交人工处置。'
               : (plan.plan.extraneous ?? []).map((p) => <div key={p}>{p}</div>)}
+          </PlanRow>
+          {/* 攒着几条没人合的 distill 分支，说明这个流程没在运转（§2）——
+              这是唯一能看见"人工合并那道门是否真的有人在走"的信号。
+              **合并状态平台没有判断**，必须照实写：判断合并与否要拉全量历史，
+              而写回全程只做浅克隆。 */}
+          <PlanRow label="仓库上已存在的 distill 分支">
+            {(plan.plan.existingBranches ?? []).length === 0
+              ? '（无）'
+              : (plan.plan.existingBranches ?? []).map((b) => <div key={b}>{b}</div>)}
+            <div style={{ color: 'var(--text-muted)' }}>
+              平台只列出这些分支存在，不判断它们是否已被合并。攒着几条没人合的分支，
+              说明这条流程没在运转。
+            </div>
           </PlanRow>
 
           <PlanRow label="重算后的四类计数">

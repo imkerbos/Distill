@@ -34,6 +34,15 @@ import (
 // 日志 —— go-git 的报错里带着仓库路径、主机名与传输细节（规范 §19、§22）。
 type PolicyWriter interface {
 	Push(ctx context.Context, repo registry.GitRepo, plan registry.WritebackPlan) (string, error)
+	// List 只读地枚举策略仓库：policyPath 下已有的文件，与现存的 distill/*
+	// 分支。计划里那两份「平台不会碰、交人工处置」的清单由它填
+	// （design doc §2、§3）。
+	//
+	// 与 Push 同一个接口、同一个装配开关，不另开一个字段：两者是同一条受
+	// 守卫的出站链路，而"装了写入器却没装枚举器"这种半装配形态一旦表达得出来，
+	// 就会有人在那种形态下出计划 —— 出来的计划会向操作者断言仓库里没有多余
+	// 文件，而平台从没看过。
+	List(ctx context.Context, repo registry.GitRepo, policyPath string) (gitwrite.RepoListing, error)
 }
 
 // writebackFileName 是写回落在 policyPath 下的文件名。
@@ -69,6 +78,12 @@ const (
 		"集群、时间窗或别人的确认在你确认之后发生了变化。请重新出一次计划并核对四类计数。"
 	writebackNoFingerprintMsg = "推送必须携带你确认过的那份计划的指纹。" +
 		"不带指纹的请求只出计划，不写任何东西。"
+	// 枚举失败时整次不出计划，而不是给一份把两份清单留空的计划：空清单在
+	// 界面上读起来是"仓库里没有多余文件"，那是一句平台从没算过的断言，
+	// 且偏在让人放心的方向（design doc §4）。
+	writebackSurveyMsg = "平台没能列出这个仓库当前的内容，因此这次不出计划。" +
+		"一份不知道仓库里已有什么的计划，会把「没有多余文件」当成结论说给你听，" +
+		"而那句话平台并没有算过。请稍后重试；持续失败请检查仓库绑定。"
 )
 
 // writebackUnverifiedMsg 说明为什么一次校验结论不是 OK 的绑定不能写。
@@ -304,6 +319,13 @@ func planWriteback(
 		return plannedWriteback{}, false
 	}
 
+	// 枚举一次仓库，拿到计划里那两份交人工处置的清单（design doc §2、§3）。
+	// 排在预测之前：失败就整次不出计划，早一步失败省掉一次整集群预测。
+	listing, ok := surveyRepo(w, r, d, repo, c.Git.PolicyPath)
+	if !ok {
+		return plannedWriteback{}, false
+	}
+
 	pv, err := d.Reader.PolicyPreview(r.Context(), clusterID, "", window)
 	if err != nil {
 		writeReaderError(w, r, d, err)
@@ -328,14 +350,19 @@ func planWriteback(
 	}
 
 	counts := writebackCounts(pv)
+	files := []registry.WritebackFile{{
+		Path:    path.Join(strings.Trim(c.Git.PolicyPath, "/"), writebackFileName),
+		Content: string(body),
+	}}
 	plan, err := registry.NewWritebackPlan(*c.Git, registry.WritebackPlan{
-		Files: []registry.WritebackFile{{
-			Path:    path.Join(strings.Trim(c.Git.PolicyPath, "/"), writebackFileName),
-			Content: string(body),
-		}},
+		Files:         files,
 		Branch:        writebackBranch(clusterID, at),
 		CommitMessage: writebackCommitMessage(clusterID, actor.Username, pv.Window, counts),
 		Counts:        counts,
+		// 两份清单来自刚才那次枚举，不是留空：留空的那一份在界面上是一句
+		// 断言，而不是一个空集（design doc §4）。
+		Extraneous:       extraneousFiles(listing.Files, files),
+		ExistingBranches: listing.Branches,
 	})
 	if err != nil {
 		// 构造函数是唯一一条能拿到指纹的路径，它同时判「每条路径都落在
@@ -345,6 +372,61 @@ func planWriteback(
 		return plannedWriteback{}, false
 	}
 	return plannedWriteback{repo: repo, plan: plan, repoResult: repoResult, pathResult: pathResult}, true
+}
+
+// surveyRepo 枚举一次策略仓库，拿到计划里那两份交人工处置的清单。
+//
+// 失败一律不出计划（design doc §4）：一份枚举失败、清单留空的计划，在界面上
+// 读起来是"仓库里没有多余文件"，而那是一句没有人算过的断言 —— 失败方向必须
+// 朝关。这与"重校验结论不是 OK 就不写"是同一条纪律。
+//
+// 错误不进响应也不进日志正文：go-git 的报错带着仓库路径、主机名与传输细节
+// （规范 §19、§21、§22），而日志会被转发到 Cloud Logging。要定位是哪一次，
+// 看 request_id。
+//
+// 出错时已经写好响应，返回 false。
+func surveyRepo(
+	w http.ResponseWriter, r *http.Request, d Deps, repo registry.GitRepo, policyPath string,
+) (gitwrite.RepoListing, bool) {
+	clusterID := chi.URLParam(r, "clusterID")
+	if d.PolicyWriter == nil {
+		// 没装配写回这条路径时同样不出计划：计划是推送的前一步，出一份推不出去
+		// 的计划只会让操作者以为他离一次写回还差一次点击。
+		d.Logger.Error("policy write-back plan has no writer configured",
+			"request_id", RequestIDFrom(r.Context()), "cluster", clusterID)
+		response.WriteSystem(w, http.StatusInternalServerError, response.CodeDependencyUnavailable)
+		return gitwrite.RepoListing{}, false
+	}
+	listing, err := d.PolicyWriter.List(r.Context(), repo, policyPath)
+	if err != nil {
+		d.Logger.Error("policy write-back repository listing failed",
+			"request_id", RequestIDFrom(r.Context()), "cluster", clusterID)
+		response.WriteInvalid(w, writebackSurveyMsg)
+		return gitwrite.RepoListing{}, false
+	}
+	return listing, true
+}
+
+// extraneousFiles 挑出仓库里已有、但本次候选集不包含的文件（design doc §3）。
+//
+// 平台从不删除它们，只列出来交人工处置：判断一个文件"多余"需要知道集群现在
+// 真实跑着什么，平台今天看不到 —— 所以这份清单是给人看的，不是给平台执行的。
+//
+// 逐条按路径判等，不做任何归一化：枚举出的路径与计划里的路径都由平台产出，
+// 一个"顺手规范一下"的比较会让两条不同的路径被当成同一条，而那正是让一个
+// 真正多余的文件从清单里消失的方向。
+func extraneousFiles(existing []string, files []registry.WritebackFile) []string {
+	planned := make(map[string]struct{}, len(files))
+	for _, f := range files {
+		planned[f.Path] = struct{}{}
+	}
+	var extraneous []string
+	for _, p := range existing {
+		if _, ok := planned[p]; !ok {
+			extraneous = append(extraneous, p)
+		}
+	}
+	return extraneous
 }
 
 // writebackCounts 取写回这一刻重算出的四类计数。
@@ -511,6 +593,9 @@ func writeGitWriteError(w http.ResponseWriter, r *http.Request, d Deps, clusterI
 		response.WriteInvalid(w, "目标分支就是绑定里配置的那条部署分支，平台永不推它。请检查该仓库的分支配置。")
 	case errors.Is(err, gitwrite.ErrInvalidTargetBranch):
 		response.WriteInvalid(w, writebackBranchMsg)
+	case errors.Is(err, gitwrite.ErrPlanRepoMismatch):
+		response.WriteInvalid(w, "这份计划批准的是另一个仓库，平台不会把它写到别处。"+
+			"绑定在你确认之后被改过，请重新出一次计划。")
 	case errors.Is(err, gitwrite.ErrNoCommitMessage):
 		response.WriteInvalid(w, "这份计划没有提交信息，因此没有可供评审的依据。请重新出一次计划。")
 	default:

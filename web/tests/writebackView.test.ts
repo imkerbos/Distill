@@ -28,11 +28,13 @@ function preview(opts: { namespace?: string; window?: TimeWindow }): PolicyPrevi
 
 function plan(opts: Partial<WritebackPlan> = {}): WritebackPlan {
   return {
+    repoId: 'repo-policies',
     files: [{ path: 'clusters/prod-asia-1/distill-policy.yaml', content: '# ...' }],
     branch: 'distill/prod-asia-1-20260814T101500Z',
     commitMessage: 'policy: distill 写回 prod-asia-1',
     counts: PAGE_COUNTS,
     extraneous: null,
+    existingBranches: null,
     fingerprint: 'a'.repeat(64),
     ...opts,
   }
@@ -286,6 +288,13 @@ test('计划里的文件、分支、提交信息、多余文件都渲染出来',
     ['{plan.plan.commitMessage}', '提交信息没有展示：评审人唯一会读的那句话没有经过操作者'],
     ['plan.plan.files.map', '将要新增/更新的文件清单没有逐条展示'],
     ['plan.plan.extraneous', '仓库里多余文件的清单没有展示（design doc §3）'],
+    // 落点与"仓库上攒了几条分支"这两项都是本轮补上的：前者进指纹，因此
+    // 必须被操作者读到；后者是唯一能看见人工合并那道门有没有人走的信号。
+    ['{plan.plan.repoId}', '目标仓库没有展示：它进了指纹，操作者却没读到自己批准的落点'],
+    ['plan.plan.existingBranches', '仓库上已存在的 distill 分支没有展示（design doc §2）'],
+    ['不判断它们是否已被合并',
+      '分支清单旁边没有写明合并状态平台没有判断：那会让"存在"被读成"未合并"，'
+      + '而后者平台从没算过'],
   ] as const) {
     assert.equal(PAGE_SOURCE.includes(needle), true, why)
   }

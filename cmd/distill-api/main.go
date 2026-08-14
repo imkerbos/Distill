@@ -241,7 +241,7 @@ var ErrPolicyWriterUnavailable = errors.New("policy writer unavailable for the c
 // 生效，而这条链路行使的是 deploy key 的**写**权限。
 //
 // 每次推送多一次单行主键命中与一次解析器构造。推送本身是一次浅克隆加一次
-// 出站推送，这点开销在它面前可忽略。
+// 出站推送，这点开销在它面前可忽略。出计划时的那次只读枚举同理。
 type settingsPolicyWriter struct {
 	settings *settings.Provider
 	logger   *slog.Logger
@@ -261,19 +261,46 @@ func newSettingsPolicyWriter(p *settings.Provider, logger *slog.Logger) *setting
 func (v *settingsPolicyWriter) Push(
 	ctx context.Context, repo registry.GitRepo, plan registry.WritebackPlan,
 ) (string, error) {
+	writer, err := v.writer(ctx)
+	if err != nil {
+		return "", err
+	}
+	return writer.Push(ctx, repo, plan)
+}
+
+// List 用当前设置装一个写入器，只读地枚举一次策略仓库。
+//
+// 与 Push 共用同一段装配，因此也共用同一条受守卫的出站链路：**这里只读**，
+// 装出来的是同一个对象不代表这次调用会写（gitwrite.Writer.List 的契约）。
+func (v *settingsPolicyWriter) List(
+	ctx context.Context, repo registry.GitRepo, policyPath string,
+) (gitwrite.RepoListing, error) {
+	writer, err := v.writer(ctx)
+	if err != nil {
+		return gitwrite.RepoListing{}, err
+	}
+	return writer.List(ctx, repo, policyPath)
+}
+
+// writer 按**此刻**的设置装一个 gitwrite.Writer。
+//
+// 摘出来给 Push 与 List 共用：两条路径必须用同一份 host key、同一个凭据后端
+// 与同一个超时装出来，各写一遍就会出现「枚举走旧信任锚、推送走新的」这类
+// 只在设置刚改过的那一小段时间里才显形的差异。
+func (v *settingsPolicyWriter) writer(ctx context.Context) (*gitwrite.Writer, error) {
 	s, err := v.settings.Current(ctx)
 	if err != nil {
 		v.logger.Error("cannot read the platform setting for the policy write-back", "error", err)
-		return "", ErrPolicyWriterUnavailable
+		return nil, ErrPolicyWriterUnavailable
 	}
 	resolver, err := newSecretResolver(ctx, s)
 	if err != nil {
 		v.logger.Error("cannot build a secret resolver for the policy write-back", "error", err)
-		return "", ErrPolicyWriterUnavailable
+		return nil, ErrPolicyWriterUnavailable
 	}
 	if resolver == nil {
 		// 后端是 NONE：操作者明确选了「不解析凭据」，于是也就没有写回。
-		return "", ErrPolicyWriterUnavailable
+		return nil, ErrPolicyWriterUnavailable
 	}
 	// timeout 与 host keys 显式传给 gitwrite.New：它经由 gitssh.New 拒绝
 	// 非正超时、也拒绝空 host key 集合。**没有 host key 就构造失败**，
@@ -281,9 +308,9 @@ func (v *settingsPolicyWriter) Push(
 	writer, err := gitwrite.New(resolver, []byte(s.GitVerifyHostKeys), s.GitVerifyTimeout)
 	if err != nil {
 		v.logger.Error("cannot build a policy writer from the current setting", "error", err)
-		return "", ErrPolicyWriterUnavailable
+		return nil, ErrPolicyWriterUnavailable
 	}
-	return writer.Push(ctx, repo, plan)
+	return writer, nil
 }
 
 // 编译期确认它满足边界层要的形状。放在这里而非测试里：接口对不上应当在

@@ -91,6 +91,11 @@ func (w *Writer) Push(ctx context.Context, repo registry.GitRepo, plan registry.
 	if err != nil {
 		return "", err
 	}
+	// 计划批准的是哪个仓库，就只能写到哪个仓库（design doc §4）。空的
+	// RepoID 一律拒绝：一份没说清落点的计划，它的指纹里也就没有落点这一维。
+	if plan.RepoID == "" || plan.RepoID != repo.ID {
+		return "", ErrPlanRepoMismatch
+	}
 	if len(plan.Files) == 0 {
 		// 一份不写任何文件的计划推出去只会是一个空提交（§6）。
 		return "", ErrNothingToPush
@@ -105,9 +110,13 @@ func (w *Writer) Push(ctx context.Context, repo registry.GitRepo, plan registry.
 	defer cancel()
 
 	// 认证只有这一条来路。**不得在这里内联构造 gogitssh.NewPublicKeys** ——
-	// 那样会绕开钉死的 host key 与目的地址判定，而绕开之后 file:// 的测试
-	// 一个都不会变红（file:// 根本不建 SSH 认证）。读路径上出过一次这个
+	// 那样会绕开钉死的 host key 与目的地址判定，而绕开之后走 file:// 的那些
+	// 用例一个都不会变红（file:// 根本不建 SSH 认证）。读路径上出过一次这个
 	// 缺陷，写路径行使的是写权限，重蹈的代价更大。
+	//
+	// 绑住它的是两条：TestPushAuthenticatesThroughTheGuardedTransport（认证
+	// 对象出自 Transport.Auth）与 TestPushRefusesToConnectToAnInternalAddress
+	// （回环地址上一次**真实的 SSH 握手**，证明目的地址判定跑在了真实拨号上）。
 	auth, err := w.transport.Auth(ctx, repo.CredentialRef)
 	if err != nil {
 		return "", err

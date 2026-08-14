@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/imkerbos/Distill/internal/fixture"
+	"github.com/imkerbos/Distill/internal/gitwrite"
 	"github.com/imkerbos/Distill/internal/predict"
 	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/store"
@@ -26,6 +27,10 @@ const (
 	// pushedCommitSHA 是替身写入器报出来的 commit。四十位十六进制 ——
 	// registry.ValidateCommitSHA 不接受缩写。
 	pushedCommitSHA = "0123456789abcdef0123456789abcdef01234567"
+	// writebackFilePath 是这次写回的落点。写成字面量而不是引用 handler 里
+	// 那个常量（包外测试也引用不到）：多余文件的判定要拿它与仓库现状比，
+	// 而"平台要写的那个文件不算多余"这条，靠的正是两边说的是同一条路径。
+	writebackFilePath = writebackPolicyPath + "/distill-policy.yaml"
 )
 
 // 替身必须同时满足两个接口，与 mysqlregistry.Store 一样。编译期断言而不是
@@ -127,6 +132,31 @@ type fakePolicyWriter struct {
 	seenPlan registry.WritebackPlan
 	// err 非 nil 时这次推送失败，且**不**记入 calls 之外的任何状态。
 	err error
+
+	// listing 是替身报出来的仓库现状：策略路径下已有的文件与现存的
+	// distill/* 分支。计划里那两份清单必须原样来自它 —— 由 handler 自己
+	// 编一份，界面上那句"（无）多余文件"就又成了没有人算过的断言。
+	listing gitwrite.RepoListing
+	// listErr 非 nil 时枚举失败。此时**不得**出计划：清单留空在界面上读
+	// 起来是"仓库里没有多余文件"。
+	listErr error
+	// listCalls 数枚举被调过几次，listedRepo/listedPath 记它被问的是哪个
+	// 仓库的哪条策略路径。
+	listCalls  int
+	listedRepo registry.GitRepo
+	listedPath string
+}
+
+func (f *fakePolicyWriter) List(
+	_ context.Context, repo registry.GitRepo, policyPath string,
+) (gitwrite.RepoListing, error) {
+	f.listCalls++
+	f.listedRepo = repo
+	f.listedPath = policyPath
+	if f.listErr != nil {
+		return gitwrite.RepoListing{}, f.listErr
+	}
+	return f.listing, nil
 }
 
 func (f *fakePolicyWriter) Push(
@@ -174,7 +204,16 @@ func newWritebackFixture(t *testing.T) *writebackFixture {
 
 	reader := store.NewFixtureReader(fixture.Load(), reg)
 	gv := &stubGitVerifier{result: registry.BindingVerifyOK}
-	writer := &fakePolicyWriter{}
+	// 仓库现状默认非空：策略目录下已经有一个平台不会碰的文件，仓库上还攒着
+	// 一条没人合的 distill 分支。两份清单都为空的话，"计划是否真的报出了它们"
+	// 根本区分不出来 —— 一个恒返回空清单的实现照样绿。
+	writer := &fakePolicyWriter{listing: gitwrite.RepoListing{
+		Files: []string{
+			writebackPolicyPath + "/legacy.yaml",
+			writebackFilePath,
+		},
+		Branches: []string{"distill/prod-asia-1-20260801T090000Z"},
+	}}
 	var logs bytes.Buffer
 	h, _, cookie := buildTestRouterWithLog(t, reader, reg,
 		fixtureWindow(reader), gv, writer, "ERROR", &logs)
@@ -196,11 +235,13 @@ type planView struct {
 			Path    string `json:"path"`
 			Content string `json:"content"`
 		} `json:"files"`
-		Branch        string         `json:"branch"`
-		CommitMessage string         `json:"commitMessage"`
-		Counts        map[string]int `json:"counts"`
-		Extraneous    []string       `json:"extraneous"`
-		Fingerprint   string         `json:"fingerprint"`
+		RepoID           string         `json:"repoId"`
+		Branch           string         `json:"branch"`
+		CommitMessage    string         `json:"commitMessage"`
+		Counts           map[string]int `json:"counts"`
+		Extraneous       []string       `json:"extraneous"`
+		ExistingBranches []string       `json:"existingBranches"`
+		Fingerprint      string         `json:"fingerprint"`
 	} `json:"plan"`
 	RepoVerifyResult    string `json:"repoVerifyResult"`
 	BindingVerifyResult string `json:"bindingVerifyResult"`
@@ -522,6 +563,143 @@ func TestWritebackPlanNeverReachesTheRepository(t *testing.T) {
 	}
 	if plan.Plan.Branch == boundRepo().Branch {
 		t.Errorf("branch = %q — that is the branch Config Sync applies", plan.Plan.Branch)
+	}
+}
+
+// 计划必须报出仓库里多余的文件与现存的 distill/* 分支，且两份都来自平台
+// **真的枚举过一次仓库**（design doc §2、§3、§4）。
+//
+// 界面无条件渲染这两份清单：一份恒为空的清单在屏幕上不是"空集"，是一句
+// "仓库里没有多余文件、也没有攒着的分支"的事实陈述 —— 而没有枚举的话，
+// 平台从没算过这件事，且偏在让人放心的方向。
+//
+// 正反两向都钉：多余的那个文件要在，平台自己这次要写的那个文件不能在
+// （它不是多余的），而"这次枚举问的是这个仓库的这条策略路径"同样断言到 ——
+// 一份问错路径的枚举会报出一整个目录的假多余文件。
+func TestPlanReportsWhatTheRepositoryAlreadyHas(t *testing.T) {
+	f := newWritebackFixture(t)
+	plan := fetchPlan(t, f)
+
+	if f.writer.listCalls == 0 {
+		t.Fatal("planning never enumerated the repository —— 计划里那两份清单没有出处")
+	}
+	if f.writer.listedPath != writebackPolicyPath {
+		t.Errorf("listing asked for policy path %q, want %q", f.writer.listedPath, writebackPolicyPath)
+	}
+	if f.writer.listedRepo.ID != boundRepo().ID {
+		t.Errorf("listing asked repo %q, want the bound repo %q", f.writer.listedRepo.ID, boundRepo().ID)
+	}
+
+	if want := []string{writebackPolicyPath + "/legacy.yaml"}; !reflect.DeepEqual(
+		plan.Plan.Extraneous, want) {
+		t.Errorf("plan extraneous = %v, want %v —— 多余文件的清单不是这次枚举的结果",
+			plan.Plan.Extraneous, want)
+	}
+	// 平台这次要写的那个文件不是"多余"的：把它列进去，操作者会去删掉一份
+	// 平台正要更新的策略。
+	for _, p := range plan.Plan.Extraneous {
+		if p == writebackFilePath {
+			t.Errorf("the file this write-back is about (%q) was listed as extraneous", p)
+		}
+	}
+	if want := []string{"distill/prod-asia-1-20260801T090000Z"}; !reflect.DeepEqual(
+		plan.Plan.ExistingBranches, want) {
+		t.Errorf("plan existingBranches = %v, want %v —— 攒着没人合的分支这个信号没有报出来",
+			plan.Plan.ExistingBranches, want)
+	}
+}
+
+// 枚举失败时整次不出计划（design doc §4）。
+//
+// 失败方向必须朝关：一份清单留空的计划在界面上会说"仓库里没有多余文件"，
+// 而那句话平台并没有算过。这条同时断言错误正文不进响应也不进日志 ——
+// go-git 的报错带着仓库路径、主机名与传输细节（规范 §19、§21、§22）。
+func TestPlanIsRefusedWhenTheRepositoryCannotBeListed(t *testing.T) {
+	f := newWritebackFixture(t)
+	const raw = "ssh: handshake failed for git@gitlab.internal.example:2222/net/policies.git"
+	f.writer.listErr = fmt.Errorf("list: %s", raw)
+
+	rec := authedPostJSON(t, f.h, f.cookie, writebackPlanPath, map[string]any{})
+	body := bodyOf(t, rec)
+	if got := body["code"]; got != float64(20001) {
+		t.Fatalf("code = %v, want 20001 (%s)", got, rec.Body.String())
+	}
+	if msg, _ := body["msg"].(string); !strings.Contains(msg, "没能列出") {
+		t.Errorf("msg = %q, want the reason the plan was withheld", msg)
+	}
+	if strings.Contains(rec.Body.String(), "distill/") {
+		t.Errorf("a plan was served despite the listing failing: %s", rec.Body.String())
+	}
+	for _, leak := range []string{"gitlab.internal.example", "handshake", "2222", raw} {
+		if strings.Contains(rec.Body.String(), leak) {
+			t.Errorf("the response leaked %q: %s", leak, rec.Body.String())
+		}
+		if strings.Contains(f.logs.String(), leak) {
+			t.Errorf("the log leaked %q: %s", leak, f.logs.String())
+		}
+	}
+	if len(f.reg.writebackPlans) != 0 {
+		t.Errorf("a withheld plan wrote %d audit rows", len(f.reg.writebackPlans))
+	}
+
+	// 枚举恢复之后计划照出：拒绝的是"没枚举成"，不是"出计划"这件事。
+	f.writer.listErr = nil
+	fetchPlan(t, f)
+}
+
+// 计划必须说出它要写到**哪个仓库**，而那一维要进指纹（design doc §4，
+// 2026-08-15 修订）。
+//
+// 不绑定的话，在出计划与推送之间把绑定改指到另一个仓库，操作者读过的每一句
+// 话都还成立、指纹照样对得上，推送却落到了另一个仓库 —— 那是他唯一没有明示
+// 批准过的一维。这里让绑定在两次调用之间改指，断言旧计划当场作废。
+func TestPushRefusesAPlanAfterTheBindingIsPointedAtAnotherRepository(t *testing.T) {
+	f := newWritebackFixture(t)
+	plan := fetchPlan(t, f)
+	if plan.Plan.RepoID != gitRepoID {
+		t.Fatalf("plan repoId = %q, want the bound repository %q —— 计划没有说出它要写到哪儿",
+			plan.Plan.RepoID, gitRepoID)
+	}
+
+	// 另一个仓库，其余一切照旧：文件、分支、计数、提交信息都不会变。
+	const otherRepoID = "repo-somewhere-else"
+	other := boundRepo()
+	other.ID = otherRepoID
+	f.reg.repos[otherRepoID] = other
+	c := f.reg.clusters["prod-asia-1"]
+	g := *c.Git
+	g.RepoID = otherRepoID
+	c.Git = &g
+	f.reg.clusters["prod-asia-1"] = c
+
+	rec := authedPostJSON(t, f.h, f.cookie, writebackPushPath,
+		map[string]any{"branch": plan.Plan.Branch, "fingerprint": plan.Plan.Fingerprint})
+	if got := bodyOf(t, rec)["code"]; got != float64(20001) {
+		t.Fatalf("code = %v, want 20001 —— 一份批准给另一个仓库的计划被放行了 (%s)",
+			got, rec.Body.String())
+	}
+	if f.writer.calls != 0 {
+		t.Errorf("a redirected push reached the writer %d times", f.writer.calls)
+	}
+	if len(f.reg.writebackPushes) != 0 {
+		t.Errorf("a redirected push wrote %d audit rows", len(f.reg.writebackPushes))
+	}
+
+	// 对着新仓库重新出一次计划就推得出去：拒绝的是"改了落点"，不是"推送"。
+	fresh := fetchPlan(t, f)
+	if fresh.Plan.RepoID != otherRepoID {
+		t.Fatalf("fresh plan repoId = %q, want %q", fresh.Plan.RepoID, otherRepoID)
+	}
+	if fresh.Plan.Fingerprint == plan.Plan.Fingerprint {
+		t.Error("换了仓库之后指纹没变 —— 内容原封不动地落到另一个仓库也照样通过")
+	}
+	ok := authedPostJSON(t, f.h, f.cookie, writebackPushPath,
+		map[string]any{"branch": fresh.Plan.Branch, "fingerprint": fresh.Plan.Fingerprint})
+	if got := bodyOf(t, ok)["code"]; got != float64(0) {
+		t.Fatalf("the freshly planned push was refused: %s", ok.Body.String())
+	}
+	if f.writer.seenPlan.RepoID != otherRepoID {
+		t.Errorf("the writer was handed a plan for %q, want %q", f.writer.seenPlan.RepoID, otherRepoID)
 	}
 }
 

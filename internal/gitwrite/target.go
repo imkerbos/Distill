@@ -28,6 +28,14 @@ const branchPrefix = "distill/"
 // 平台的任何缺陷都直达集群，中间没有一道人能看见的门（design doc §2）。
 var ErrTargetIsDeployBranch = errors.New("gitwrite: refusing to push the branch configured on the binding")
 
+// ErrPlanRepoMismatch 表示计划批准的仓库不是这次要写的那个仓库。
+//
+// 仓库标识进指纹（design doc §4，2026-08-15 修订），因此计划上那个 RepoID 是
+// 操作者确认过的落点。这道判断紧贴发起写的那一步，理由与 ErrTargetIsDeployBranch
+// 同源：上层可以重算、可以比指纹，但真正把内容送出去的是这里，而"送到哪个
+// 仓库"必须由这里再确认一次。
+var ErrPlanRepoMismatch = errors.New("gitwrite: plan was approved for a different repository")
+
 // ErrTargetBranchExists 表示目标分支在远端已经存在。
 //
 // 分支名带 UTC 时间戳，天然不冲突；真撞上了说明某个假设破了，而假设破了时
@@ -115,9 +123,14 @@ func checkTargetAbsent(
 //
 // 单独摘出来是为了让「这条推送永不强制」可以被直接断言：Force、
 // ForceWithLease 与 refspec 前面那个 + 都只在这里出现，别处不构造
-// PushOptions。留在调用点的内联字面量里，它被加上一个 Force: true 也不会有
-// 任何测试变红 —— 远端已存在的分支在本包里先被 checkTargetAbsent 挡下了，
-// 强制与否在行为上看不出来。
+// PushOptions。
+//
+// **摘出来还不够，调用点也必须被绑住。** 一份内联的 Force: true 曾经不会让
+// 任何用例变红 —— 远端已存在的分支先被 checkTargetAbsent 挡下了，推送那一层
+// 永远见不到冲突，于是两层里只有一层被证明在岗。现在由
+// TestPushNeverForcesWhenTheExistenceCheckCannotSeeTheBranch 让推送单独承压：
+// 远端把 distill/* 藏出 ls-remote 的通告（uploadpack.hideRefs），存在性判断
+// 因此看不见那条分支，拦住覆盖的只剩这里的 Force: false。
 //
 // RefSpecs 显式写成 <target>:<target>，不依赖默认 refspec：默认会推
 // refs/heads/*，那会把基底分支一起推出去。

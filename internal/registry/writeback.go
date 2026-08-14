@@ -30,6 +30,16 @@ type WritebackFile struct {
 // 计划是操作者二次确认的对象，因此它必须是自足的 —— 屏幕上那份计划之外
 // 的任何东西都不该影响推送出去的结果。
 type WritebackPlan struct {
+	// RepoID 是这次写回要写到的那个策略仓库（design doc §4）。
+	//
+	// 由 NewWritebackPlan 从绑定里取，入参里的取值一律丢弃：它是**进指纹**
+	// 的东西，读调用方给的那一份就等于让调用方自己声明写到哪儿。
+	//
+	// 不进指纹的话，在出计划与推送之间把绑定改指到另一个仓库，操作者读过的
+	// 每一句话都还成立、指纹照样对得上，推送却落到了另一个仓库 —— 而"推到
+	// 哪里"正是他没有明示批准过的那一维。仓库地址本身不进计划：它是内部
+	// 地址，标识足以判等（§7 不含内部地址那条同源）。
+	RepoID string `json:"repoId"`
 	// Files 是将要新增或更新的文件。平台从不删除仓库里的文件（§3）。
 	Files []WritebackFile `json:"files"`
 	// Branch 是目标分支，永远是新建的 distill/* 分支，不是绑定里那条（§2）。
@@ -50,7 +60,16 @@ type WritebackPlan struct {
 	// 写回的时刻之间，集群、流量窗口、别人的确认都可能变了。
 	Counts map[predict.ChangeKind]int `json:"counts"`
 	// Extraneous 是仓库路径下已有、但本次候选集不包含的文件，交人工处置。
+	//
+	// 它必须来自平台真的枚举过一次仓库：留空在界面上读起来是"没有多余文件"，
+	// 而那是一句没有人算过的断言，且偏在让人放心的方向（§4）。
 	Extraneous []string `json:"extraneous"`
+	// ExistingBranches 是仓库上现存的 distill/* 分支（§2）。
+	//
+	// 报的是"存在"，不是"未合并"：判断合并与否要在部署分支的历史里找它的
+	// tip，而写回全程只做 Depth 1 的浅克隆。攒着几条分支这个信号仍然给得出，
+	// 但不冒充平台没算过的结论 —— 界面上同样要写明这一点。
+	ExistingBranches []string `json:"existingBranches"`
 	// Fingerprint 是这份计划的内容指纹，由 NewWritebackPlan 填。
 	//
 	// 推送必须由操作者对着它二次确认（§4）：确认的必须是他真正看过的
@@ -115,6 +134,10 @@ func NewWritebackPlan(b GitBinding, p WritebackPlan) (WritebackPlan, error) {
 		return WritebackPlan{}, err
 	}
 
+	// 仓库标识来自绑定，不来自入参：与 Fingerprint 同一条理由，一个能自带
+	// 仓库标识的调用方等于自己指定写到哪儿，而那正是指纹要钉住的那一维。
+	p.RepoID = b.RepoID
+
 	seen := make(map[string]struct{}, len(p.Files))
 	for i, f := range p.Files {
 		if err := checkWithinPolicyPath(root, f.Path); err != nil {
@@ -134,15 +157,16 @@ func NewWritebackPlan(b GitBinding, p WritebackPlan) (WritebackPlan, error) {
 
 // FingerprintOf 计算一份写回计划的内容指纹。
 //
-// 覆盖全部待写文件的路径与内容、目标分支、提交信息、重算后的四类计数
-// （design doc 2026-08-14 §4）。少覆盖任何一项，操作者屏幕上看过的那份
-// 计划就能在确认与推送之间悄悄换掉 —— 他确认的是一份自己从没读过的计划。
-// 路径与内容必须同时进：只覆盖内容的话，同一份 YAML 换个落点就能写到
+// 覆盖目标仓库、全部待写文件的路径与内容、目标分支、提交信息、重算后的
+// 四类计数（design doc 2026-08-14 §4）。少覆盖任何一项，操作者屏幕上看过
+// 的那份计划就能在确认与推送之间悄悄换掉 —— 他确认的是一份自己从没读过的
+// 计划。路径与内容必须同时进：只覆盖内容的话，同一份 YAML 换个落点就能写到
 // 另一个文件上；只覆盖路径的话，文件里写什么都无所谓。
 //
-// **Extraneous 不进指纹**：它描述的是仓库里平台不会碰的文件，交人工处置
-// （§3），不是这次要写出去的内容。把它算进来，别人往策略目录里加一个无关
-// 文件就会让一份已确认的计划作废，而那次推送本身没有任何变化。
+// **Extraneous 与 ExistingBranches 不进指纹**：它们描述的是仓库里平台不会
+// 碰的东西，交人工处置（§2、§3），不是这次要写出去的内容。把它们算进来，
+// 别人往策略目录里加一个无关文件、或另一个集群建了一条 distill/* 分支，就会
+// 让一份已确认的计划作废，而那次推送本身没有任何变化。
 //
 // 文件按 (路径, 内容) 排序后再哈希：文件次序不是内容，同一批文件换个遍历
 // 次序仍是同一份要写进仓库的东西，而"内容相同则指纹相同"正是"没有变化就
@@ -159,6 +183,9 @@ func FingerprintOf(p WritebackPlan) string {
 		_, _ = h.Write([]byte(s))
 	}
 
+	// 仓库标识排在最前：它回答的是"推到哪儿"，而其余各项回答的是"推什么"。
+	// 不覆盖它，一份内容与分支都对得上的计划可以落到另一个仓库。
+	write(p.RepoID)
 	write(p.Branch)
 	// 提交信息必须进指纹：它是这份计划里唯一会**永久落进仓库历史**、又被
 	// 合并请求上的评审人当作判断依据的一段文字。不覆盖它，一份已确认的计划
