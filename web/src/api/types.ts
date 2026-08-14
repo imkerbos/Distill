@@ -429,9 +429,12 @@ export interface RegisteredCluster {
  * 每一次判定。因此每一项都是必填——少给一项要在编译期就是错误，不能
  * 留给运行时。
  *
- * git 用 `GitBindingWrite | null` 而非可选：null 是一句明确的"没有绑定"，
- * 而"字段不存在"读起来像"这次不谈这件事"，在整体替换语义下这两者
- * 结果相同、意图不同，含糊的那一种不该出现在写路径上。
+ * **git 不在这里**：绑定是有自己生命周期的资源，走自己的两条路由
+ * （PUT / DELETE /clusters/{id}/git-binding）与自己的审计动作
+ * （design doc 2026-08-13 §5、§7）。服务端的 clusterPayload 已经不再
+ * 接受它，留一个字段在这一侧不是多一个没用的键 —— 而是操作者填了仓库
+ * 地址、请求返回成功、绑定却从未写下，直到某天有人发现这个集群的策略
+ * 一直没有下发。
  *
  * state 不在这里：接入状态由服务端根据实际采集到的数据推进，请求体
  * 里提供它就等于允许调用方把"还没有数据"标成"可以出推荐了"。
@@ -455,25 +458,31 @@ export interface ClusterWrite {
   ccnpPresent: boolean
   apiServers: APIServer[]
   healthCheckSources: string[]
-  git: GitBindingWrite | null
 }
 
 /**
- * 写入体里的 Git 绑定：没有 lastWrittenCommit，也没有校验结论。
+ * Git 绑定写入体：PUT /clusters/{id}/git-binding 的请求体，独立于 ClusterWrite。
+ *
+ * 四个字段就是绑定的全部可写内容（design doc 2026-08-13 §5），共同点是
+ * 都由操作者提供、平台自己产生不了。凡是平台自己产生的东西都不在这里：
  *
  * lastWrittenCommit 是平台对"我最近一次往这个仓库写了什么"的断言，漂移
  * 检测拿它与 Git 现状比对。它由服务端从库里的现值推导，请求体带上去也
- * 不会被采纳（见 internal/httpapi 的 gitPayload）——所以这里根本不给它
- * 位置：一个永远不会被采纳的字段留在类型里，只会让下一个调用方以为
- * 它有用。
+ * 不会被采纳（见 internal/httpapi 的 gitBindingPayload）——所以这里根本
+ * 不给它位置：一个永远不会被采纳的字段留在类型里，只会让下一个调用方
+ * 以为它有用。
  *
  * verifyResult / verifiedAt 出于同一条理由被排除，且理由更硬：它们是
  * 平台对绑定可信度的判断，由服务端在保存时自己校验后写入。一个能由
  * 调用方提交的结论可以被填成 OK，于是"已校验通过"这句话再也无法被
  * 证伪——这正是 verdict 与 confidence 必须分列的同一条纪律。
+ *
+ * 用 Pick 而不是 Omit：白名单只放行点名的四项，读模型将来多一个平台
+ * 自产的字段时它不会漏进写路径；黑名单则要靠每次新增字段的人记得回来
+ * 补一笔，漏掉了没有任何东西会提醒他。
  */
 export type GitBindingWrite =
-  Omit<GitBinding, 'lastWrittenCommit' | 'verifyResult' | 'verifiedAt'>
+  Pick<GitBinding, 'repoUrl' | 'branch' | 'policyPath' | 'credentialRef'>
 
 export interface PolicyImportItem {
   clusterId: string

@@ -116,7 +116,7 @@ func ValidateCluster(c Cluster) error {
 			return err
 		}
 	}
-	return validateGit(c.Git)
+	return nil
 }
 
 // gitCommitSHALength 是一个完整 Git commit SHA-1 的十六进制长度。
@@ -168,39 +168,48 @@ func isHexSHA(s string) bool {
 	return true
 }
 
-// validateGit 要求绑定要么完整要么不填。
+// ValidateGitBinding 校验一个 Git 绑定，要么完整要么不填。
+//
+// 独立成导出函数、ValidateCluster 不再调用它（design doc 2026-08-13 §6）：
+// 绑定已经从集群写模型里摘出来，成了有自己生命周期的资源，它的合法性
+// 不该与集群其余字段的合法性互相牵连。一个 podCidr 写错的集群，其绑定
+// 仍然应当能被独立校验、独立写下结论；反过来，一个非法的绑定也不该
+// 挡住集群其余字段的校验或让重新校验的结论无法落库——这正是拆分之前
+// 已经在代码里付出的代价。
+//
+// 参数是值而非指针：走到这里的调用方（BindGitRepo 的请求体、
+// handleVerifyGitBinding 重新校验时读到的库内记录）手上总已经有一个
+// 具体的绑定要校验；「绑定压根不存在」现在由 *GitBinding == nil 或
+// UnbindGitRepo 表达，不是这个函数要处理的一种合法输入。
 //
 // 填一半的绑定会在轮 3 变成一次指向不存在路径的写入尝试，
 // 而报出来的错误只会说「路径不存在」，与真正的配置错误无法区分。
-func validateGit(g *GitBinding) error {
-	if g == nil {
-		return nil
-	}
-	if g.RepoURL == "" || g.Branch == "" || g.PolicyPath == "" {
+func ValidateGitBinding(b GitBinding) error {
+	if b.RepoURL == "" || b.Branch == "" || b.PolicyPath == "" {
 		return invalid("Git 绑定的 repoUrl、branch、policyPath 三项必须同时填写")
 	}
-	if !isSSHRepoURL(g.RepoURL) {
+	if !isSSHRepoURL(b.RepoURL) {
 		return invalidf("repoUrl %q 不是 SSH 形态：平台按 per-repo deploy key 访问策略仓库，"+
 			"只支持 ssh://[user@]host[:port]/path 与 git@host:path 两种写法。"+
 			"填 https:// 的后果不是「校验不通过」而是一句假的结论 —— 认证方法与传输对不上，"+
-			"一次拨号都不会发生，失败却会被报成「仓库不可达」", g.RepoURL)
+			"一次拨号都不会发生，失败却会被报成「仓库不可达」", b.RepoURL)
 	}
 	// credentialRef 可以为空：绑定可以先记下来，凭据稍后再配。非空时
 	// 复用 secrets.ValidateRef，不另写一份字符集校验 —— 两份安全相关的
 	// 字符类定义迟早会走样。
-	if g.CredentialRef != "" {
-		if err := secrets.ValidateRef(g.CredentialRef); err != nil {
-			return wrapInvalid(fmt.Sprintf("credentialRef %q 不是合法的凭据引用", g.CredentialRef), err)
+	if b.CredentialRef != "" {
+		if err := secrets.ValidateRef(b.CredentialRef); err != nil {
+			return wrapInvalid(fmt.Sprintf("credentialRef %q 不是合法的凭据引用", b.CredentialRef), err)
 		}
 	}
 	// 空值按 NOT_VERIFIED 处理：绑定刚创建、还没跑过校验时，
 	// VerifyResult 字段就是零值，这不该被当成非法输入。
-	vr := g.VerifyResult
+	vr := b.VerifyResult
 	if vr == "" {
 		vr = VerifyNotVerified
 	}
 	if !vr.Valid() {
-		return invalidf("verifyResult %q 不在已登记的取值范围内", g.VerifyResult)
+		return invalidf("verifyResult %q 不在已登记的取值范围内", b.VerifyResult)
 	}
 	return nil
 }

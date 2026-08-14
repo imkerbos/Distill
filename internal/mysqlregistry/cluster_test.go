@@ -40,6 +40,8 @@ func newTestStore(t *testing.T) (*mysqlregistry.Store, *sql.DB) {
 	return mysqlregistry.New(db), db
 }
 
+// sampleCluster 不带 Git 绑定：绑定由 BindGitRepo 单独写入
+// （design doc 2026-08-13 §2），需要绑定的测试自己调它。
 func sampleCluster() registry.Cluster {
 	return registry.Cluster{
 		ID: "prod-asia-1", DisplayName: "Asia Prod",
@@ -47,10 +49,6 @@ func sampleCluster() registry.Cluster {
 		CCNPPresent: false, State: registry.StateRegistered,
 		APIServers:         []registry.APIServer{{Host: "10.9.0.2", CIDR: "10.9.0.0/28", Port: 443}},
 		HealthCheckSources: []string{"35.191.0.0/16", "130.211.0.0/22"},
-		Git: &registry.GitBinding{
-			RepoURL: "ssh://git@gitlab.example.com/net/policies.git",
-			Branch:  "main", PolicyPath: "clusters/prod-asia-1",
-		},
 	}
 }
 
@@ -74,9 +72,6 @@ func TestCreateAndReadBackCluster(t *testing.T) {
 	}
 	if len(got.HealthCheckSources) != 2 {
 		t.Errorf("HealthCheckSources = %v, want 2 entries", got.HealthCheckSources)
-	}
-	if got.Git == nil || got.Git.PolicyPath != "clusters/prod-asia-1" {
-		t.Errorf("Git = %+v, want the registered binding", got.Git)
 	}
 }
 
@@ -265,6 +260,14 @@ func TestClusterSurvivesAFullRoundTripThroughMySQL(t *testing.T) {
 	if err := s.CreateCluster(ctx, registry.Actor{Username: "admin"}, in); err != nil {
 		t.Fatalf("CreateCluster() error = %v", err)
 	}
+	// 绑定单独写入，但读模型仍然内嵌它：这一趟往返要覆盖的正是
+	// 「写路径拆开之后，读回来的形状没变」。
+	if err := s.BindGitRepo(ctx, registry.Actor{Username: "admin"}, in.ID,
+		sampleGitBinding()); err != nil {
+		t.Fatalf("BindGitRepo() error = %v", err)
+	}
+	bound := sampleGitBinding()
+	in.Git = &bound
 	got, ok, err := s.Cluster(ctx, in.ID)
 	if err != nil || !ok {
 		t.Fatalf("Cluster() = %+v, %v, %v", got, ok, err)
@@ -280,8 +283,8 @@ func TestClusterSurvivesAFullRoundTripThroughMySQL(t *testing.T) {
 		{Host: "10.9.0.3", CIDR: "10.9.0.16/28", Port: 6443},
 	}
 	want.HealthCheckSources = []string{"130.211.0.0/22", "35.191.0.0/16"}
-	// sampleCluster 没填 VerifyResult：Go 零值 "" 不是一个登记过的枚举值，
-	// 写入时被落成 NOT_VERIFIED（cluster.go insertChildren），读回来
+	// sampleGitBinding 没填 VerifyResult：Go 零值 "" 不是一个登记过的枚举值，
+	// 写入时被落成 NOT_VERIFIED（gitbinding.go BindGitRepo），读回来
 	// 因此就是 NOT_VERIFIED 而不是空串。
 	want.Git.VerifyResult = registry.VerifyNotVerified
 
@@ -300,9 +303,14 @@ func TestUnverifiedGitBindingReadsBackAsNilNotZeroTime(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()
 
-	in := sampleCluster() // Git 绑定不带 VerifiedAt / VerifyResult
+	in := sampleCluster()
 	if err := s.CreateCluster(ctx, registry.Actor{Username: "admin"}, in); err != nil {
 		t.Fatalf("CreateCluster() error = %v", err)
+	}
+	// 绑定不带 VerifiedAt / VerifyResult：刚绑上、还没跑过校验。
+	if err := s.BindGitRepo(ctx, registry.Actor{Username: "admin"}, in.ID,
+		sampleGitBinding()); err != nil {
+		t.Fatalf("BindGitRepo() error = %v", err)
 	}
 	got, ok, err := s.Cluster(ctx, in.ID)
 	if err != nil || !ok {
@@ -325,11 +333,16 @@ func TestVerifiedGitBindingRoundTripsResultAndTimestamp(t *testing.T) {
 	ctx := context.Background()
 
 	verifiedAt := time.Date(2026, 8, 1, 12, 30, 0, 0, time.UTC)
+	actor := registry.Actor{Username: "admin"}
 	in := sampleCluster()
-	in.Git.VerifyResult = registry.VerifyOK
-	in.Git.VerifiedAt = &verifiedAt
-	if err := s.CreateCluster(ctx, registry.Actor{Username: "admin"}, in); err != nil {
+	if err := s.CreateCluster(ctx, actor, in); err != nil {
 		t.Fatalf("CreateCluster() error = %v", err)
+	}
+	if err := s.BindGitRepo(ctx, actor, in.ID, sampleGitBinding()); err != nil {
+		t.Fatalf("BindGitRepo() error = %v", err)
+	}
+	if err := s.SetGitVerifyResult(ctx, actor, in.ID, registry.VerifyOK, verifiedAt); err != nil {
+		t.Fatalf("SetGitVerifyResult() error = %v", err)
 	}
 
 	got, ok, err := s.Cluster(ctx, in.ID)

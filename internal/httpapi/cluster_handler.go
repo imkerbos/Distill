@@ -15,6 +15,12 @@ import (
 //
 // 与 registry.Cluster 分开：接口形状属于边界层，直接复用领域类型会让
 // 一次内部字段重命名变成一次不兼容的 API 变更。
+//
+// **不含 git**：绑定是有自己生命周期的资源，走自己的两条路由与自己的
+// 审计动作（design doc 2026-08-13 §5，见 gitbinding_handler.go）。留一个
+// 收下再忽略的 git 字段在这里，后果不是多一个没用的字段 —— 而是调用方
+// 填了仓库地址、请求返回成功、绑定却从未写下，直到某天有人发现这个集群
+// 的策略一直没有下发。
 type clusterPayload struct {
 	ID                 string               `json:"id"`
 	DisplayName        string               `json:"displayName"`
@@ -24,45 +30,6 @@ type clusterPayload struct {
 	State              string               `json:"state"`
 	APIServers         []registry.APIServer `json:"apiServers"`
 	HealthCheckSources []string             `json:"healthCheckSources"`
-	Git                *gitPayload          `json:"git"`
-}
-
-// gitPayload 是 Git 绑定的请求体形状。
-//
-// 刻意**不含** lastWrittenCommit，而不是收下再忽略：策略存在 Git 里的
-// 理由是双重审计 —— Git 保存记录，这个字段是平台对那份记录的声明，
-// 漂移检测拿两者比对。允许调用方设置它，等于允许调用方让平台的说法与
-// 仓库现状对上：基准从此无法被证伪，而平台会带着信心报告「无漂移」，
-// 比根本没有基准更糟。
-//
-// 一个永远不会被采纳的字段留在请求形状里，只会让下一个调用方以为它有用；
-// 它的值由 handleUpdateCluster 从库里的现值推导（见 carryDriftBaseline）。
-//
-// credentialRef 不在此列：它是 Secret Manager 里的引用，是操作者填写的
-// 配置，不是平台对外部世界的断言 —— 由调用方提供正是它的设计意图。
-//
-// verifyResult 与 verifiedAt 同样**不在**请求形状里，理由与
-// lastWrittenCommit 完全一样：结论是平台自己校验出来的事实，一个能被
-// 请求体设置的 OK 就是一句无法被证伪的「可以下发」。它们由保存路径从
-// verifyBinding 的返回值填入（见 applyVerdict）。
-type gitPayload struct {
-	RepoURL       string `json:"repoUrl"`
-	Branch        string `json:"branch"`
-	PolicyPath    string `json:"policyPath"`
-	CredentialRef string `json:"credentialRef"`
-}
-
-// toBinding 把 Git 请求体转成领域对象，LastWrittenCommit 一律留空。
-func (g *gitPayload) toBinding() *registry.GitBinding {
-	if g == nil {
-		return nil
-	}
-	return &registry.GitBinding{
-		RepoURL:       g.RepoURL,
-		Branch:        g.Branch,
-		PolicyPath:    g.PolicyPath,
-		CredentialRef: g.CredentialRef,
-	}
 }
 
 // toCluster 把请求体转成领域对象。
@@ -72,8 +39,9 @@ func (g *gitPayload) toBinding() *registry.GitBinding {
 // 等于允许把「还没有数据」标成「可以出推荐了」。创建一律从 REGISTERED 起步，
 // 修改时保留库里已有的状态（见 handleUpdateCluster）。
 //
-// 漂移基准 lastWrittenCommit 同理：创建一律为空（平台还没往那个仓库写过
-// 任何东西），修改时从库里的现值推导。
+// Git 一律留空：集群写路径不碰绑定，registry.Store 的两个集群写方法也不会
+// 落它。这条纪律在两侧各有一道，缺一侧都会让绑定多出一条绕开
+// BIND_GIT_REPO 审计的写路径。
 func (p clusterPayload) toCluster() registry.Cluster {
 	return registry.Cluster{
 		State:              registry.StateRegistered,
@@ -84,41 +52,7 @@ func (p clusterPayload) toCluster() registry.Cluster {
 		CCNPPresent:        p.CCNPPresent,
 		APIServers:         p.APIServers,
 		HealthCheckSources: p.HealthCheckSources,
-		Git:                p.Git.toBinding(),
 	}
-}
-
-// carryDriftBaseline 用库里的现值填回漂移基准。
-//
-// 绑定仍指向同一仓库同一分支时沿用：那个 commit 仍然描述平台最近一次
-// 往这个目标写了什么。改指向或解除绑定时归零 —— 旧 SHA 指向的历史与新
-// 目标无关，留着它会让漂移检测拿一个不相干的 commit 当基准，得出的
-// 「有漂移／无漂移」两种结论都不成立。
-func carryDriftBaseline(next, existing *registry.GitBinding) {
-	if next == nil || existing == nil {
-		return
-	}
-	if next.RepoURL == existing.RepoURL && next.Branch == existing.Branch {
-		next.LastWrittenCommit = existing.LastWrittenCommit
-	}
-}
-
-// validatedBeforeVerifying 在发出站之前先跑一遍领域校验，报告是否可以继续。
-//
-// 落库那一步的 registry.Store 仍然会自己校验一次，那才是不可绕过的关卡；
-// 这里这道是**时序**上的，不是安全上的：verifyOnSave 会为一个注定要被
-// 拒绝的请求体做一次带秒级超时的 SSH 握手。最刺眼的形态是 repoUrl 不是
-// SSH 地址 —— 那种绑定在保存这一步就会被指名拒绝，可要是先校验，操作者
-// 得先等一个超时，才等到一句和超时无关的报错。
-//
-// 顺序不能反过来靠「把校验挪进事务」解决：校验必须在事务之外（见
-// gitverify_handler.go），所以先校验一道请求体是唯一不改变事务边界的做法。
-func validatedBeforeVerifying(w http.ResponseWriter, r *http.Request, d Deps, c registry.Cluster) bool {
-	if err := registry.ValidateCluster(c); err != nil {
-		writeRegistryError(w, r, d, err)
-		return false
-	}
-	return true
 }
 
 // decodeClusterPayload 解析请求体。
@@ -153,9 +87,8 @@ func handleListClustersFromRegistry(d Deps) http.HandlerFunc {
 
 // handleCreateCluster 注册一个集群。
 //
-// 带绑定注册时同样先校验一次（spec §3.3「保存绑定时自动触发一次」）：
-// 一个只在修改时校验的实现，会让「注册时就填好绑定」这条最常见的路径
-// 永远停在 NOT_VERIFIED 上。
+// 不发任何出站请求：绑定不在这条路径上，注册完成后由
+// PUT /clusters/{id}/git-binding 单独绑定并校验。
 func handleCreateCluster(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		p, ok := decodeClusterPayload(w, r)
@@ -163,10 +96,6 @@ func handleCreateCluster(d Deps) http.HandlerFunc {
 			return
 		}
 		c := p.toCluster()
-		if !validatedBeforeVerifying(w, r, d, c) {
-			return
-		}
-		verifyOnSave(r, d, c.Git)
 		if err := d.Registry.CreateCluster(r.Context(), actorOf(r), c); err != nil {
 			writeRegistryError(w, r, d, err)
 			return
@@ -202,13 +131,6 @@ func handleUpdateCluster(d Deps) http.HandlerFunc {
 			return
 		}
 		c.State = existing.State
-		// 同一条纪律的第二处应用：漂移基准是平台自己的断言，只能从库里
-		// 已有的值推导，不能由请求体携带。
-		carryDriftBaseline(c.Git, existing.Git)
-		if !validatedBeforeVerifying(w, r, d, c) {
-			return
-		}
-		verifyOnSave(r, d, c.Git)
 		if err := d.Registry.UpdateCluster(r.Context(), actorOf(r), c); err != nil {
 			writeRegistryError(w, r, d, err)
 			return

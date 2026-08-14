@@ -185,10 +185,12 @@ func (s *Store) UpdateCluster(ctx context.Context, actor registry.Actor, c regis
 				// 从未发生过的操作的记录。
 				return fmt.Errorf("%w: cluster %s", ErrNotFound, c.ID)
 			}
+			// 绑定不在清单里：它有自己的生命周期与自己的写入
+			// （design doc 2026-08-13 §2）。改一次网段顺手解绑，
+			// 是嵌在集群写模型里时才会发生的事。
 			for _, stmt := range []string{
 				`DELETE FROM cluster_apiserver WHERE cluster_id = ?`,
 				`DELETE FROM cluster_health_check_source WHERE cluster_id = ?`,
-				`DELETE FROM cluster_git_binding WHERE cluster_id = ?`,
 			} {
 				if _, err := tx.ExecContext(ctx, stmt, c.ID); err != nil {
 					return fmt.Errorf("clear children: %w", err)
@@ -230,7 +232,11 @@ func (s *Store) SoftDeleteCluster(ctx context.Context, actor registry.Actor, id 
 		})
 }
 
-// insertChildren 写入端点、健康检查网段与 Git 绑定。
+// insertChildren 写入端点与健康检查网段。
+//
+// 不含 Git 绑定：绑定是被绑定的资源，由 BindGitRepo 写入并写自己的审计行
+// （design doc 2026-08-13 §2、§4）。集群对象上即便带着 Git 也不落库 ——
+// 一条能绕开 BIND_GIT_REPO 的绑定写路径，会让审计答不出仓库地址是谁改的。
 func insertChildren(ctx context.Context, tx *sql.Tx, c registry.Cluster) error {
 	for _, a := range c.APIServers {
 		if _, err := tx.ExecContext(ctx,
@@ -248,26 +254,6 @@ func insertChildren(ctx context.Context, tx *sql.Tx, c registry.Cluster) error {
 		); err != nil {
 			return writeFailure("insert health check source",
 				fmt.Sprintf("健康检查网段 %q 在本集群下重复", cidr), "", err)
-		}
-	}
-	if c.Git != nil {
-		// 空值按 NOT_VERIFIED 落库，不落空串：空串不是登记过的枚举值，
-		// 会让「从未校验」在数据库里以一个不合法的值存在（registry.validateGit
-		// 对零值做的是同一种归一化，但那处只影响校验、不改写调用方的结构体）。
-		verifyResult := c.Git.VerifyResult
-		if verifyResult == "" {
-			verifyResult = registry.VerifyNotVerified
-		}
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO cluster_git_binding
-			   (cluster_id, repo_url, branch, policy_path, credential_ref, last_written_commit,
-			    verified_at, verify_result)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			c.ID, c.Git.RepoURL, c.Git.Branch, c.Git.PolicyPath,
-			nullIfEmpty(c.Git.CredentialRef), nullIfEmpty(c.Git.LastWrittenCommit),
-			nullTimeIfNil(c.Git.VerifiedAt), string(verifyResult),
-		); err != nil {
-			return fmt.Errorf("insert git binding: %w", err)
 		}
 	}
 	return nil

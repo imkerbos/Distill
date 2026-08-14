@@ -67,58 +67,77 @@ func TestValidateClusterRejectsUnregisteredState(t *testing.T) {
 	}
 }
 
+// 绑定的合法性必须与集群其余字段无关：一个 podCidr 写错的集群，
+// 其绑定仍然应当能被独立校验。这条正是拆分要买到的东西。
+func TestValidateGitBindingIsIndependentOfTheCluster(t *testing.T) {
+	b := registry.GitBinding{
+		RepoURL:    "ssh://git@example.com/net/policies.git",
+		Branch:     "main",
+		PolicyPath: "clusters/prod-asia-1",
+	}
+	if err := registry.ValidateGitBinding(b); err != nil {
+		t.Fatalf("ValidateGitBinding() = %v, want nil", err)
+	}
+}
+
+// ValidateCluster 不得再看绑定：集群字段全对时，一个非法绑定
+// 不应该让集群校验失败——它已经不是集群的一部分了。
+func TestValidateClusterNoLongerJudgesTheBinding(t *testing.T) {
+	c := validCluster()
+	c.Git = &registry.GitBinding{RepoURL: "https://nope"} // 非法：不是 SSH 形态
+	if err := registry.ValidateCluster(c); err != nil {
+		t.Fatalf("ValidateCluster() = %v, want nil", err)
+	}
+}
+
 // Git 绑定要么完整，要么不填。填一半的绑定在轮 3 会变成一次
 // 指向不存在路径的写入尝试，而错误信息只会说「路径不存在」。
-func TestValidateClusterRejectsPartialGitBinding(t *testing.T) {
-	c := validCluster()
-	c.Git = &registry.GitBinding{RepoURL: "ssh://git@gitlab.example.com/net/policies.git"}
-	if err := registry.ValidateCluster(c); !errors.Is(err, registry.ErrInvalid) {
+func TestValidateGitBindingRejectsPartialBinding(t *testing.T) {
+	b := registry.GitBinding{RepoURL: "ssh://git@gitlab.example.com/net/policies.git"}
+	if err := registry.ValidateGitBinding(b); !errors.Is(err, registry.ErrInvalid) {
 		t.Errorf("err = %v, want ErrInvalid for a git binding missing branch and path", err)
 	}
 }
 
-func TestValidateClusterAcceptsCompleteGitBinding(t *testing.T) {
-	c := validCluster()
-	c.Git = &registry.GitBinding{
+func TestValidateGitBindingAcceptsACompleteBinding(t *testing.T) {
+	b := registry.GitBinding{
 		RepoURL: "ssh://git@gitlab.example.com/net/policies.git",
 		Branch:  "main", PolicyPath: "clusters/prod-asia-1",
 	}
-	if err := registry.ValidateCluster(c); err != nil {
-		t.Errorf("ValidateCluster() error = %v, want nil", err)
+	if err := registry.ValidateGitBinding(b); err != nil {
+		t.Errorf("ValidateGitBinding() error = %v, want nil", err)
 	}
 }
 
-// validClusterWithGit 是一个完整的、已通过校验的 Git 绑定，供只需要
+// validGitBinding 是一个完整的、能通过校验的 Git 绑定，供只需要
 // 改动绑定里单个字段的用例复用。
-func validClusterWithGit() registry.Cluster {
-	c := validCluster()
-	c.Git = &registry.GitBinding{ //nolint:gosec // G101 false positive: CredentialRef holds a Secret Manager name, not a credential.
+func validGitBinding() registry.GitBinding {
+	return registry.GitBinding{ //nolint:gosec // G101 false positive: CredentialRef holds a Secret Manager name, not a credential.
 		RepoURL:       "ssh://git@gitlab.example.com/net/policies.git",
 		Branch:        "main",
 		PolicyPath:    "clusters/prod-asia-1",
 		CredentialRef: "prod-asia-1-git",
 	}
-	return c
 }
 
 // verifyResult 是封闭枚举：一个未登记的取值不能悄悄存进去，否则前端
 // 文案映射与统计口径都对不上号。
-func TestValidateClusterRejectsUnknownVerifyResult(t *testing.T) {
-	c := validClusterWithGit()
-	c.Git.VerifyResult = "PROBABLY_FINE"
-	if err := registry.ValidateCluster(c); !errors.Is(err, registry.ErrInvalid) {
-		t.Fatalf("ValidateCluster() = %v, want ErrInvalid", err)
+func TestValidateGitBindingRejectsUnknownVerifyResult(t *testing.T) {
+	b := validGitBinding()
+	b.VerifyResult = "PROBABLY_FINE"
+	if err := registry.ValidateGitBinding(b); !errors.Is(err, registry.ErrInvalid) {
+		t.Fatalf("ValidateGitBinding() = %v, want ErrInvalid", err)
 	}
 }
 
 // credentialRef 复用 secrets.ValidateRef 而不是另写一份字符集校验，
 // 这条用例锁住这个复用关系：路径穿越式的引用必须在这里就被拦下。
-func TestValidateClusterRejectsMalformedCredentialRef(t *testing.T) {
-	c := validClusterWithGit()
-	c.Git.CredentialRef = "../escape"
-	err := registry.ValidateCluster(c)
+func TestValidateGitBindingRejectsMalformedCredentialRef(t *testing.T) {
+	b := validGitBinding()
+	b.CredentialRef = "../escape"
+	err := registry.ValidateGitBinding(b)
 	if !errors.Is(err, registry.ErrInvalid) {
-		t.Fatalf("ValidateCluster() = %v, want ErrInvalid", err)
+		t.Fatalf("ValidateGitBinding() = %v, want ErrInvalid", err)
 	}
 	if !strings.Contains(err.Error(), "credentialRef") {
 		t.Errorf("error %q does not name the offending field", err)
@@ -126,11 +145,11 @@ func TestValidateClusterRejectsMalformedCredentialRef(t *testing.T) {
 }
 
 // credentialRef 可以为空：绑定可以先记下来，凭据稍后再配。
-func TestValidateClusterAllowsEmptyCredentialRef(t *testing.T) {
-	c := validClusterWithGit()
-	c.Git.CredentialRef = ""
-	if err := registry.ValidateCluster(c); err != nil {
-		t.Fatalf("ValidateCluster() = %v, want nil", err)
+func TestValidateGitBindingAllowsEmptyCredentialRef(t *testing.T) {
+	b := validGitBinding()
+	b.CredentialRef = ""
+	if err := registry.ValidateGitBinding(b); err != nil {
+		t.Fatalf("ValidateGitBinding() = %v, want nil", err)
 	}
 }
 
@@ -205,7 +224,7 @@ func TestValidGitImportReportsItselfVerified(t *testing.T) {
 // 从未被碰过，操作者会被送去查一道不存在的防火墙（spec §2.2）。
 //
 // 报错文本要指名真正的原因：只说「地址不合法」等于把配置错误说成打字错。
-func TestValidateClusterRejectsNonSSHRepoURL(t *testing.T) {
+func TestValidateGitBindingRejectsNonSSHRepoURL(t *testing.T) {
 	for _, url := range []string{
 		"https://gitlab.example.com/net/policies.git",
 		"http://gitlab.example.com/net/policies.git",
@@ -216,11 +235,11 @@ func TestValidateClusterRejectsNonSSHRepoURL(t *testing.T) {
 		"ssh://",
 		"",
 	} {
-		c := validClusterWithGit()
-		c.Git.RepoURL = url
-		err := registry.ValidateCluster(c)
+		b := validGitBinding()
+		b.RepoURL = url
+		err := registry.ValidateGitBinding(b)
 		if !errors.Is(err, registry.ErrInvalid) {
-			t.Errorf("ValidateCluster(repoUrl=%q) = %v, want ErrInvalid", url, err)
+			t.Errorf("ValidateGitBinding(repoUrl=%q) = %v, want ErrInvalid", url, err)
 			continue
 		}
 		if url == "" {
@@ -229,7 +248,7 @@ func TestValidateClusterRejectsNonSSHRepoURL(t *testing.T) {
 		}
 		var ie *registry.InvalidError
 		if !errors.As(err, &ie) || !strings.Contains(ie.Detail, "SSH") {
-			t.Errorf("ValidateCluster(repoUrl=%q) detail = %q, want it to name SSH as the real reason",
+			t.Errorf("ValidateGitBinding(repoUrl=%q) detail = %q, want it to name SSH as the real reason",
 				url, ie.Detail)
 		}
 	}
@@ -239,7 +258,7 @@ func TestValidateClusterRejectsNonSSHRepoURL(t *testing.T) {
 //
 // 只认其中一种的话，另一种会被报成配置错误 —— 而它是对的地址，操作者
 // 会去改一个没有错的东西。
-func TestValidateClusterAcceptsTheSSHFormsThePlatformDials(t *testing.T) {
+func TestValidateGitBindingAcceptsTheSSHFormsThePlatformDials(t *testing.T) {
 	for _, url := range []string{
 		"ssh://git@gitlab.example.com/net/policies.git",
 		"ssh://gitlab.example.com/net/policies.git",
@@ -247,10 +266,10 @@ func TestValidateClusterAcceptsTheSSHFormsThePlatformDials(t *testing.T) {
 		"SSH://git@gitlab.example.com/net/policies.git",
 		"git@gitlab.example.com:net/policies.git",
 	} {
-		c := validClusterWithGit()
-		c.Git.RepoURL = url
-		if err := registry.ValidateCluster(c); err != nil {
-			t.Errorf("ValidateCluster(repoUrl=%q) = %v, want nil", url, err)
+		b := validGitBinding()
+		b.RepoURL = url
+		if err := registry.ValidateGitBinding(b); err != nil {
+			t.Errorf("ValidateGitBinding(repoUrl=%q) = %v, want nil", url, err)
 		}
 	}
 }

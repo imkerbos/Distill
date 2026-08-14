@@ -1,15 +1,19 @@
 import type {
-  APIServer, ClusterWrite, GitBinding, GitBindingWrite, RegisteredCluster, VerifyResult,
+  APIServer, ClusterWrite, GitBinding, GitBindingWrite, RegisteredCluster,
+  VerifyResult, VerifyStatus,
 } from '../api/types'
 
 /**
- * 集群表单的纯逻辑层：从已注册集群播种表单、把表单折算成一份写入体。
+ * 集群表单与 Git 绑定表单的纯逻辑层：从已注册集群播种表单、把表单折算
+ * 成写入体、把服务端的校验结论折算成可渲染的形态。
  *
  * 单独成文件而不是留在 ClustersPage.tsx 里，是因为注册与编辑用的是
- * 同一套规则（Git 绑定全有或全无、apiserver 每行全有或全无），而两份
- * 拷贝一定会漂移——漂移的落点是策略下发路径：一个只在注册表单拦得住
- * 的半截绑定，会在编辑表单被放进库里，然后在轮 3 变成一次指向不存在
- * 路径的写入。这里不 import 任何 React，测试可以直接跑它。
+ * 同一套规则（apiserver 每行全有或全无），而两份拷贝一定会漂移——漂移
+ * 的落点是策略下发路径。这里不 import 任何 React，测试可以直接跑它。
+ *
+ * 两份表单折算成两份互不相干的写入体，对应两个端点：集群写路径不碰
+ * 绑定，绑定写路径不碰集群。这条分界在类型上就成立（ClusterWrite 没有
+ * git 的位置），不靠调用点自觉。
  */
 
 /**
@@ -23,6 +27,7 @@ export interface ApiServerRow { host: string; cidr: string; port: string }
 export const emptyApiServerRow = (): ApiServerRow => ({ host: '', cidr: '', port: '' })
 const REQUIRED_APISERVER_FIELDS: readonly ['host', 'cidr', 'port'] = ['host', 'cidr', 'port']
 
+/** Git 绑定表单的可编辑值。四项与 GitBindingWrite 一一对应，不多不少。 */
 export interface GitFormValues {
   repoUrl: string
   branch: string
@@ -31,15 +36,22 @@ export interface GitFormValues {
 }
 
 /**
- * Git 绑定四个字段在表单里的合法组合只有两种：全空，或 repoUrl/branch/
- * policyPath 三项全填（credentialRef 可选，但只要它非空就已经表达了
- * "这是一处真实绑定"的意图，此时同样要求三项必填齐全）——否则
- * credentialRef 会在三项检查之外被静默丢弃，成为唯一录入了值却从不
- * 出现在提交请求里的字段。
+ * repoUrl / branch / policyPath 三项必填，credentialRef 可选。
+ *
+ * 绑定表单只有一个动作（提交 = 绑定或改绑），所以这里不再有"全空"这个
+ * 合法组合：想解除绑定按「解除绑定」，那是一次 DELETE。上一轮为了在
+ * 整体替换下区分"我清空了字段"与"我要解绑"而设的那套消歧义逻辑，随它
+ * 的成因一起消失（design doc 2026-08-13 §7）。
  */
 const REQUIRED_GIT_FIELDS: readonly ['repoUrl', 'branch', 'policyPath'] = ['repoUrl', 'branch', 'policyPath']
 
-/** 表单的全部可编辑值。编辑与注册共用一套形状，只在 mode 上分叉。 */
+/**
+ * 集群表单的全部可编辑值。编辑与注册共用一套形状，只在 mode 上分叉。
+ *
+ * **不含 Git 绑定**：绑定由 GitFormValues 独立承载、独立提交。两者混在
+ * 一份表单状态里，就等于一次保存同时写两个资源——而服务端已经不再从
+ * 集群写路径接受绑定，混着的那一半会静默落空。
+ */
 export interface ClusterFormValues {
   id: string
   displayName: string
@@ -57,19 +69,17 @@ export interface ClusterFormValues {
   apiServerRows: ApiServerRow[]
   /** 健康检查网段，每行一个 CIDR。 */
   healthChecks: string
-  git: GitFormValues
-  /** 操作者显式要求解除 Git 绑定；见 resolveGitBinding 的注释。 */
-  clearGit: boolean
 }
 
-const emptyGitValues = (): GitFormValues => ({ repoUrl: '', branch: '', policyPath: '', credentialRef: '' })
+/** 绑定表单的初始值：全空，对应"这个集群还没有绑定"。 */
+export const blankGitValues = (): GitFormValues =>
+  ({ repoUrl: '', branch: '', policyPath: '', credentialRef: '' })
 
 /** 注册表单的初始值：全空。 */
 export function blankFormValues(): ClusterFormValues {
   return {
     id: '', displayName: '', podCidr: '', nodeCidr: '', ccnpPresent: false,
     apiServerRows: [emptyApiServerRow()], healthChecks: '',
-    git: emptyGitValues(), clearGit: false,
   }
 }
 
@@ -97,59 +107,48 @@ export function formValuesOf(c: RegisteredCluster): ClusterFormValues {
     // 至少留一行空行，否则界面上没有任何可填的输入框，"添加"按钮成了唯一入口。
     apiServerRows: rows.length > 0 ? rows : [emptyApiServerRow()],
     healthChecks: (c.healthCheckSources ?? []).join('\n'),
-    git: c.git
-      ? {
-        repoUrl: c.git.repoUrl, branch: c.git.branch,
-        policyPath: c.git.policyPath, credentialRef: c.git.credentialRef,
-      }
-      : emptyGitValues(),
-    clearGit: false,
+  }
+}
+
+/**
+ * 用现有绑定播种绑定表单；未绑定时给一份空值。
+ *
+ * 只播种四个可写字段：verifyResult / verifiedAt / lastWrittenCommit 是
+ * 平台自己产生的东西，一旦进了表单状态，下一个人就会顺手把它们提交上去。
+ */
+export function gitFormValuesOf(git: GitBinding | null | undefined): GitFormValues {
+  if (!git) return blankGitValues()
+  return {
+    repoUrl: git.repoUrl, branch: git.branch,
+    policyPath: git.policyPath, credentialRef: git.credentialRef,
   }
 }
 
 export type GitResolution =
-  | { ok: true; git: GitBindingWrite | null; summary: string }
+  | { ok: true; binding: GitBindingWrite; summary: string }
   | { ok: false; error: string }
 
 /**
- * 把 Git 表单折算成提交用的绑定，或给出拒绝理由。
+ * 把 Git 表单折算成一份绑定写入体，或给出拒绝理由。
  *
- * 编辑路径上多出一个注册路径没有的问题："四个字段都空着"到底是
- * "本来就没绑定"还是"我要解除绑定"。在整体替换的语义下这两者提交
- * 结果相同，但意图完全不同——把清空字段直接当成解除，等于让一次
- * 误删输入框内容静默切断集群与策略仓库的关联，而界面上不会有任何
- * 一步要求确认。因此解除必须由 clearRequested 这个显式动作表达；
- * 已有绑定却把字段清空又没勾选，是一个要求操作者澄清的错误，不是
- * 一个可以替他猜的默认值。
+ * 这里只有一个去向：绑定或改绑。解除不由它表达 —— 那是 DELETE
+ * /clusters/{id}/git-binding，界面上是一个单独的按钮
+ * （design doc 2026-08-13 §5、§7）。因此本函数不再需要知道"当前绑定
+ * 是什么"，"四个字段都空着"也不再有歧义：它就是三项必填没填。
+ *
+ * 三项必填在填了任意一项（含 credentialRef）时才报"缺少"，一项都没填
+ * 时报"请填写"：前者说的是一份填了一半的绑定，credentialRef 单独填写
+ * 同样触发，否则它录入的值会在三项检查之外被静默丢弃。
  */
-export function resolveGitBinding(
-  values: GitFormValues,
-  ctx: { current: GitBinding | null; clearRequested: boolean },
-): GitResolution {
-  if (ctx.clearRequested) {
-    return {
-      ok: true,
-      git: null,
-      summary: ctx.current
-        ? `提交后：解除 Git 绑定（当前为 ${ctx.current.repoUrl}@${ctx.current.branch}）`
-        : '提交后：不绑定 Git 仓库',
-    }
-  }
-
-  const anyFilled = Object.values(values).some((v) => v.trim() !== '')
-  if (!anyFilled) {
-    if (ctx.current) {
-      return {
-        ok: false,
-        error: '要解除 Git 绑定请勾选「解除 Git 绑定」——把四个字段清空不等于'
-          + '解除：整体替换下两者提交结果相同，但一次误删输入框内容会因此'
-          + '静默切断集群与策略仓库的关联。',
-      }
-    }
-    return { ok: true, git: null, summary: '提交后：不绑定 Git 仓库' }
-  }
-
+export function resolveGitBinding(values: GitFormValues): GitResolution {
   const missing = REQUIRED_GIT_FIELDS.filter((k) => values[k].trim() === '')
+  if (missing.length === REQUIRED_GIT_FIELDS.length && values.credentialRef.trim() === '') {
+    return {
+      ok: false,
+      error: '请填写 repoUrl / branch / policyPath。要解除这个集群的 Git 绑定，'
+        + '请用「解除绑定」——把输入框清空不会解除任何东西。',
+    }
+  }
   if (missing.length > 0) {
     return {
       ok: false,
@@ -167,7 +166,7 @@ export function resolveGitBinding(
   // 一致，于是"无漂移"这句话再也无法被证伪。
   return {
     ok: true,
-    git: {
+    binding: {
       repoUrl, branch, policyPath,
       credentialRef: values.credentialRef.trim(),
     },
@@ -359,30 +358,27 @@ export type BuildResult =
   | { ok: false; error: string }
 
 /**
- * 把表单折算成一份完整的写入体。
+ * 把集群表单折算成一份完整的写入体。
  *
- * current 是编辑目标当前的 Git 绑定（注册时为 null），只用于回答
- * "把字段清空是不是要解除绑定"这一个问题，以及据此写出提交前的结果
- * 预告。它不参与任何服务端会自行推导的字段。
+ * **提交体里没有 git**：绑定是一个有自己生命周期的资源，由绑定表单
+ * 独立提交（design doc 2026-08-13 §5、§7）。服务端的 clusterPayload
+ * 已经不再接受它 —— 在这里塞一个 git 字段，请求照样返回成功，绑定却
+ * 原封不动，而界面会显示这次保存生效了。
  *
- * 接入状态与漂移基准 lastWrittenCommit 都不在这里出现也不接受输入：
- * 前者由服务端根据实际采集到的数据推进，后者是平台对 Git 仓库现状的
- * 断言 —— 表单能提交它们，就等于允许把"还没有数据"标成"可以出推荐了"、
- * 把"无漂移"变成一句无法被证伪的话。
+ * 接入状态同样不在这里出现也不接受输入：它由服务端根据实际采集到的
+ * 数据推进，表单能提交它就等于允许把"还没有数据"标成"可以出推荐了"。
+ *
+ * ccnpPresent 相反，必须在这里且必须原样带上：它是操作者声明的一个
+ * 事实，没有任何自动探测在维护它，而 PUT 是整体替换 —— 漏带一次，
+ * 一个本该整体降级为 DEGRADED 的集群就会给出笃定的判定。
  */
-export function buildClusterWrite(
-  values: ClusterFormValues,
-  current: GitBinding | null,
-): BuildResult {
-  const git = resolveGitBinding(values.git, { current, clearRequested: values.clearGit })
-  if (!git.ok) return { ok: false, error: git.error }
-
+export function buildClusterWrite(values: ClusterFormValues): BuildResult {
   const servers = resolveApiServers(values.apiServerRows)
   if (!servers.ok) return { ok: false, error: servers.error }
 
   return {
     ok: true,
-    summary: git.summary,
+    summary: `提交后：整体替换 ${values.id.trim()} 的登记信息（不含 Git 绑定）`,
     body: {
       id: values.id.trim(),
       displayName: values.displayName.trim(),
@@ -391,7 +387,61 @@ export function buildClusterWrite(
       ccnpPresent: values.ccnpPresent,
       apiServers: servers.apiServers,
       healthCheckSources: values.healthChecks.split('\n').map((s) => s.trim()).filter(Boolean),
-      git: git.git,
     },
+  }
+}
+
+/* ---------------------------------------------------------------------- */
+/* 一次校验请求的回执                                                        */
+/* ---------------------------------------------------------------------- */
+
+export interface VerifyOutcomeView {
+  /** 这次请求是否真的发生了一次校验。 */
+  happened: boolean
+  /** 给操作者看的一句话回执，一律非空。 */
+  message: string
+  tone: VerifyTone
+}
+
+/**
+ * 把保存/重校验端点的响应折算成一句回执。
+ *
+ * 要处理的是一个会让人读错的形状：未配置校验器时，服务端返回
+ * `NOT_VERIFIED` 且 `verifiedAt` 缺席，并且**刻意什么都不落库** ——
+ * 写一个时间戳就等于宣称某时某刻校验过一次，而那件事没有发生
+ * （internal/httpapi/gitverify_handler.go）。
+ *
+ * 于是响应会与重新加载后看到的东西不一致：响应说"从未校验"，库里那行
+ * 却还留着更早的结论。两者都没错，它们回答的是不同的问题 —— 响应说的是
+ * "这一次发生了什么"，列表说的是"库里现在记着什么"。
+ *
+ * 处置：`verifiedAt` 缺席一律读作"这次没有发生校验"，回执明说这一点，
+ * 且**不把 NOT_VERIFIED 当成一个新结论贴到界面上**。把它渲染成一个崭新的
+ * 「未校验」，操作者会以为自己刚刚把结论刷掉了，而下一次刷新页面它又变
+ * 回旧结论 —— 一个自己会变回去的界面，比一个说"什么都没发生"的界面更
+ * 难被信任。列表那一格照旧由服务端的读模型驱动，不受这条回执影响。
+ */
+export function describeVerifyOutcome(status: VerifyStatus): VerifyOutcomeView {
+  if (!status.verifiedAt) {
+    return {
+      happened: false,
+      // 措辞要同时对两种情形成立：库里已有一个更早的结论（重校验），以及
+      // 库里本来就没有结论（刚绑上）。说成「仍是上一次校验的结论」在后者
+      // 是假的——那里从来没有过一次校验。
+      message: '这次没有发生校验：平台未配置校验器（或校验器给出了未登记的结论），'
+        + '服务端因此没有记下任何结论——列表里那一格是库里原有的结论，不是刚刚得出的。',
+      tone: 'unverified',
+    }
+  }
+  const label = Object.hasOwn(VERIFY_RESULT_LABEL, status.verifyResult)
+    ? VERIFY_RESULT_LABEL[status.verifyResult]
+    : '结论无法识别'
+  const tone = Object.hasOwn(VERIFY_RESULT_TONE, status.verifyResult)
+    ? VERIFY_RESULT_TONE[status.verifyResult]
+    : 'unverified'
+  return {
+    happened: true,
+    message: `校验于 ${formatUtcTime(status.verifiedAt)} 完成：${label}。`,
+    tone,
   }
 }

@@ -7,9 +7,10 @@ import {
 } from '../api/types'
 import { useResource } from '../api/useResource'
 import {
-  blankFormValues, buildClusterWrite, describeVerifyStatus, emptyApiServerRow, formatUtcTime,
-  formValuesOf, resolveGitBinding,
-  type ApiServerRow, type ClusterFormValues, type VerifyStatusView, type VerifyTone,
+  blankFormValues, blankGitValues, buildClusterWrite, describeVerifyOutcome, describeVerifyStatus,
+  emptyApiServerRow, formatUtcTime, formValuesOf, gitFormValuesOf, resolveGitBinding,
+  type ApiServerRow, type ClusterFormValues, type GitFormValues,
+  type VerifyOutcomeView, type VerifyStatusView, type VerifyTone,
 } from './clusterForm'
 import { Card, Chip, EmptyState, Field, PageHeader, Section, Select, TableCard } from '../components/ui'
 
@@ -73,7 +74,7 @@ function ClusterListSection({ clusters, error, loading, onChanged }: {
   return (
     <Section
       title="已注册集群"
-      description="Git 绑定为空时显式写「未绑定」——空单元格会被读成「加载中」或「未知」，两者都不是这里想表达的事实；同一条理由，没校验过的绑定写「未校验」而不是留白。校验只做只读查询：它能确认仓库可达、认证通过、分支与路径存在，但它从不向仓库提交任何内容，因此证明不了平台能往那个路径提交——那要等真正提交一次才知道。「编辑」在行内展开，用于补上或改动登记信息（含 Git 绑定）；保存是整体替换，表单已按现值预填。"
+      description="Git 绑定为空时显式写「未绑定」——空单元格会被读成「加载中」或「未知」，两者都不是这里想表达的事实；同一条理由，没校验过的绑定写「未校验」而不是留白。校验只做只读查询：它能确认仓库可达、认证通过、分支与路径存在，但它从不向仓库提交任何内容，因此证明不了平台能往那个路径提交——那要等真正提交一次才知道。「编辑」在行内展开成两份各自提交的表单：登记信息一份、Git 绑定一份。绑定是一个有自己生命周期的资源，改集群不会碰它，改绑定也不会重写集群。"
       meta={clusters ? `${clusters.length} 个` : undefined}
     >
       {error ? (
@@ -152,6 +153,17 @@ function ClusterListSection({ clusters, error, loading, onChanged }: {
                         onCancel={() => setEditingId(null)}
                         onSaved={() => { setEditingId(null); onChanged() }}
                       />
+                      {/*
+                        绑定表单与集群表单并列，各自是一个 <form>、各自
+                        提交、各自报错。挤进同一个 form 就等于一次保存
+                        写两个资源——而服务端的集群写路径已经不收 git，
+                        混着的那一半会静默落空。
+
+                        它刻意不在保存成功后收起：绑定保存会顺带跑一次
+                        只读校验，那句回执正是操作者点保存最想知道的东西，
+                        面板一收起就没地方显示它了。
+                      */}
+                      <GitBindingForm cluster={c} onChanged={onChanged} />
                     </td>
                   </tr>
                 )}
@@ -180,19 +192,27 @@ function GitBindingCell({ clusterId, git, onChanged }: {
   onChanged: () => void
 }) {
   const [busy, setBusy] = useState(false)
+  const [outcome, setOutcome] = useState<VerifyOutcomeView | null>(null)
   const view = describeVerifyStatus(git)
 
   async function reverify() {
     setBusy(true)
+    setOutcome(null)
     try {
-      await api.verifyGitBinding(clusterId)
-      // 响应里的结论不就地贴进这一行：服务端是唯一真相源，重新拉一次
-      // 列表（同本页 refreshKey 的纪律）。就地拼接会让这一行显示出一份
-      // 由前端合成、没人能核对的状态。
+      const status = await api.verifyGitBinding(clusterId)
+      // 上面那个徽章始终由服务端读模型驱动，响应里的结论不就地贴进去：
+      // 服务端是唯一真相源，重新拉一次列表（同本页 refreshKey 的纪律）。
+      //
+      // 但「这一次发生了什么」必须单独说出来，否则未配置校验器时点一下
+      // 「重新校验」界面毫无反应，操作者只能猜是按钮坏了还是结论没变。
+      // describeVerifyOutcome 的注释里写了这条回执与徽章为什么会不一致。
+      setOutcome(describeVerifyOutcome(status))
       onChanged()
     } catch (err) {
       // 未绑定的集群这个端点回 404，但这一格只在已绑定时渲染，所以真正
-      // 会撞上的是校验本身出错。原样展示后端的 msg，不收窄成一句「失败」。
+      // 会撞上的是绑定本身不合今天的规则（比如库里存着的 https:// 地址，
+      // 服务端会指名 SSH 形态作为理由）。原样展示后端的 msg，不收窄成
+      // 一句「失败」——收窄掉的正是操作者据以行动的那句话。
       window.alert(err instanceof ApiError ? err.msg : '重新校验失败，请稍后重试')
     } finally {
       setBusy(false)
@@ -222,7 +242,27 @@ function GitBindingCell({ clusterId, git, onChanged }: {
       >
         {busy ? '校验中…' : '重新校验（只读）'}
       </button>
+      {outcome && <VerifyOutcomeNote outcome={outcome} />}
     </div>
+  )
+}
+
+/**
+ * 一次校验请求的回执。
+ *
+ * 与上方的徽章分开显示，且措辞上分得开：徽章说的是「库里现在记着什么」，
+ * 这句说的是「刚才那一下发生了什么」。合成一个会逼出一个选择——要么把
+ * 一次没发生的校验渲染成崭新的「未校验」（刷新后自己变回旧结论），要么
+ * 干脆什么都不说（操作者以为按钮坏了）。两个都不行，所以分成两处。
+ */
+function VerifyOutcomeNote({ outcome }: { outcome: VerifyOutcomeView }) {
+  return (
+    <p role="status" style={{
+      margin: 'var(--space-1) 0 0', fontSize: 'var(--text-xs)',
+      color: outcome.happened ? 'var(--text-secondary)' : 'var(--verdict-unknown)',
+    }}>
+      {outcome.message}
+    </p>
   )
 }
 
@@ -270,19 +310,21 @@ function VerifyBadge({ view }: { view: VerifyStatusView }) {
  *
  * 注册与编辑共用同一份字段与同一套校验（见 clusterForm.ts）：两份拷贝
  * 一定会漂移，而漂移的落点是策略下发路径——一个只在注册表单拦得住的
- * 半截 Git 绑定，会在编辑表单被放进库里。
+ * 半截 apiserver 清单，会在编辑表单被放进库里。
  *
- * mode 只影响两处：集群 ID 在编辑时只读（它是全平台的身份主键，改它
- * 不是改这个集群而是指向另一个集群），以及「解除 Git 绑定」只在编辑
- * 已绑定集群时出现。接入状态两种模式下都没有控件：它由服务端根据
- * 实际采集到的数据推进，表单能提交它就等于允许把「还没有数据」标成
- * 「可以出推荐了」。
+ * **这里没有 Git 绑定的输入框**：绑定是一个有自己生命周期的资源，由
+ * GitBindingForm 独立提交（design doc 2026-08-13 §7）。放回来的后果不是
+ * 多几个输入框，而是服务端根本不收它——请求成功返回，绑定原封不动。
+ *
+ * mode 只影响一处：集群 ID 在编辑时只读（它是全平台的身份主键，改它
+ * 不是改这个集群而是指向另一个集群）。接入状态两种模式下都没有控件：
+ * 它由服务端根据实际采集到的数据推进，表单能提交它就等于允许把
+ * 「还没有数据」标成「可以出推荐了」。
  */
-function ClusterFields({ values, patch, mode, current }: {
+function ClusterFields({ values, patch, mode }: {
   values: ClusterFormValues
   patch: (p: Partial<ClusterFormValues>) => void
   mode: 'create' | 'edit'
-  current: GitBinding | null
 }) {
   function updateApiServerRow(i: number, rowPatch: Partial<ApiServerRow>) {
     patch({
@@ -395,65 +437,164 @@ function ClusterFields({ values, patch, mode, current }: {
         />
       </div>
 
-      <div style={{ marginTop: 'var(--space-3)' }}>
+    </>
+  )
+}
+
+/* ---------------------------------------------------------------------- */
+/* 2b. Git 绑定表单：独立资源，独立提交                                       */
+/* ---------------------------------------------------------------------- */
+
+/**
+ * 一个集群的 Git 绑定：绑定 / 改绑 / 解绑。
+ *
+ * 与集群表单彻底分开，两条路径互不相干（design doc 2026-08-13 §5、§7）：
+ * 保存这里只发 PUT /clusters/{id}/git-binding，不发集群 PUT。顺手补一次
+ * 集群写入不会报错、`tsc` 与 lint 也不会有意见 —— 它的后果是把集群表单里
+ * **没有播种过**的一份状态写进库，比如把 ccnpPresent 清成 false，让一个
+ * 本该降级的集群给出笃定的判定。
+ *
+ * 解绑是一个按钮（DELETE），不是「把四个字段清空后保存」。上一轮那个
+ * 「解除 Git 绑定」勾选框存在的唯一理由是：整体替换下「我清空了字段」与
+ * 「我要解绑」提交结果相同、意图不同。现在解绑有了自己的动词，这个歧义
+ * 不存在了，勾选框也就跟着消失。
+ */
+function GitBindingForm({ cluster, onChanged }: {
+  cluster: RegisteredCluster
+  onChanged: () => void
+}) {
+  const current = cluster.git ?? null
+  const [values, setValues] = useState<GitFormValues>(() => gitFormValuesOf(current))
+  const [error, setError] = useState('')
+  const [outcome, setOutcome] = useState<VerifyOutcomeView | null>(null)
+  const [saved, setSaved] = useState(false)
+  const [busy, setBusy] = useState<'' | 'save' | 'unbind'>('')
+
+  const patch = (p: Partial<GitFormValues>) => setValues((v) => ({ ...v, ...p }))
+
+  async function submit(e: FormEvent) {
+    e.preventDefault()
+    setError('')
+    setOutcome(null)
+    setSaved(false)
+
+    const resolved = resolveGitBinding(values)
+    if (!resolved.ok) {
+      setError(resolved.error)
+      return
+    }
+
+    setBusy('save')
+    try {
+      const status = await api.bindGitRepo(cluster.id, resolved.binding)
+      // 「已保存」与校验回执分两句说：保存成功而校验没发生是完全正常的一种
+      // 结果（校验失败也不阻止保存），只显示后者会让一次成功的保存读起来
+      // 像失败了。存下来和可信是两件事，界面上也得是两句话。
+      setSaved(true)
+      // 保存会顺带跑一次只读校验，这句回执说的是那一次校验；上面列表里的
+      // 徽章仍然由服务端读模型驱动。两者可能不一致，理由见
+      // describeVerifyOutcome 的注释。
+      setOutcome(describeVerifyOutcome(status))
+      onChanged()
+    } catch (err) {
+      // 后端把拒绝的具体理由写进 msg（库里存着的 https:// 地址会被指名
+      // 「不是 SSH 形态」）。原样展示，不收窄成一句「绑定失败」——收窄掉的
+      // 正是操作者据以行动的那句话，而这恰好是 prod-asia-1 的现状。
+      setError(err instanceof ApiError ? err.msg : '绑定失败，请稍后重试')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function unbind() {
+    if (!window.confirm(
+      `确认解除 ${cluster.id} 的 Git 绑定？该集群将不再有策略仓库，平台不会再向它下发策略。`,
+    )) return
+    setError('')
+    setOutcome(null)
+    setSaved(false)
+    setBusy('unbind')
+    try {
+      await api.unbindGitRepo(cluster.id)
+      // 输入框跟着清空：解绑之后留着上一处仓库地址，界面会同时显示
+      // 「未绑定」和一个填着地址的表单，读起来像是还绑着。
+      setValues(blankGitValues())
+      onChanged()
+    } catch (err) {
+      setError(err instanceof ApiError ? err.msg : '解绑失败，请稍后重试')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  return (
+    <Card style={{ padding: 'var(--space-4)', margin: 'var(--space-3) 0' }}>
+      <form onSubmit={submit}>
         <SubHeading>
-          Git 绑定（可选；一旦填写任意一项——含 credentialRef——repoUrl / branch / policyPath 三项均为必填）。
+          {cluster.id} 的 Git 绑定 —— 这是一次独立提交，不会改动上面的登记信息。
+          repoUrl / branch / policyPath 三项必填，credentialRef 可选。
           repoUrl 必须是 SSH 形态（ssh://git@host/path 或 git@host:path）：平台按仓库发放 deploy key，
           https:// 地址连拨号都不会发生，服务端会在保存时直接拒绝。
+          保存会顺带做一次只读校验，校验不通过不影响保存 —— 存下来和可信是两件事。
         </SubHeading>
-        {/*
-          「解除绑定」是一个勾选动作，不是「把四个字段清空」的推断：整体
-          替换下两者提交结果相同，但一次误删输入框内容不该静默切断集群与
-          策略仓库的关联。勾上后四个输入框禁用——留着可编辑会让界面同时
-          显示「仓库地址」与「将解除绑定」两句互相矛盾的话。
-        */}
-        {mode === 'edit' && current && (
-          <label style={{
-            display: 'flex', alignItems: 'center', gap: 'var(--space-2)',
-            fontSize: 'var(--text-sm)', marginBottom: 'var(--space-2)',
-          }}>
-            <input
-              type="checkbox"
-              checked={values.clearGit}
-              onChange={(e) => patch({ clearGit: e.target.checked })}
-            />
-            解除 Git 绑定（该集群将不再有策略仓库，平台不会再向它写策略）
-          </label>
-        )}
         <FormGrid>
           <TextField
-            label="repoUrl" value={values.git.repoUrl} mono disabled={values.clearGit}
+            label="repoUrl" value={values.repoUrl} mono
             placeholder="ssh://git@gitlab.example.com/net/policies.git"
-            onChange={(v) => patch({ git: { ...values.git, repoUrl: v } })}
+            onChange={(v) => patch({ repoUrl: v })}
           />
           <TextField
-            label="branch" value={values.git.branch} mono disabled={values.clearGit}
-            onChange={(v) => patch({ git: { ...values.git, branch: v } })}
+            label="branch" value={values.branch} mono
+            onChange={(v) => patch({ branch: v })}
           />
           <TextField
-            label="policyPath" value={values.git.policyPath} mono disabled={values.clearGit}
-            onChange={(v) => patch({ git: { ...values.git, policyPath: v } })}
+            label="policyPath" value={values.policyPath} mono
+            onChange={(v) => patch({ policyPath: v })}
           />
           <TextField
-            label="credentialRef" value={values.git.credentialRef} mono disabled={values.clearGit}
-            onChange={(v) => patch({ git: { ...values.git, credentialRef: v } })}
+            label="credentialRef" value={values.credentialRef} mono
+            onChange={(v) => patch({ credentialRef: v })}
           />
         </FormGrid>
-        <GitOutcome values={values} current={current} />
-      </div>
-    </>
+        <GitOutcome values={values} />
+
+        {error && <FormError>{error}</FormError>}
+        {saved && (
+          <p role="status" style={{
+            margin: 'var(--space-2) 0 0', fontSize: 'var(--text-xs)', color: 'var(--text-secondary)',
+          }}>
+            绑定已保存。保存与校验是两件事，下面这句说的是保存时那次只读校验。
+          </p>
+        )}
+        {outcome && <VerifyOutcomeNote outcome={outcome} />}
+
+        <div style={{ display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-3)' }}>
+          <button type="submit" disabled={busy !== ''} style={buttonStyle}>
+            {busy === 'save' ? '保存中…' : current ? '保存绑定' : '绑定仓库'}
+          </button>
+          {/*
+            未绑定时不渲染解绑按钮：一个点了会报 404 的按钮，读起来像是
+            「这里本来有东西可以解除」。
+          */}
+          {current && (
+            <button type="button" onClick={unbind} disabled={busy !== ''} style={secondaryButtonStyle}>
+              {busy === 'unbind' ? '解绑中…' : '解除绑定'}
+            </button>
+          )}
+        </div>
+      </form>
+    </Card>
   )
 }
 
 /**
  * 提交前把「这一次会把绑定改成什么」写出来。
  *
- * 绑定的三种去向（保持、改指向、解除）在表单上长得很像——都是四个
- * 输入框的不同填法。让结果只在提交后从列表里的一行文字体现，等于把
- * 「我以为我只是清空了一个字段」留到已经写进库之后才被发现。
+ * 四个输入框的不同填法长得都一样，让结果只在提交后从列表里的一行文字
+ * 体现，等于把「我以为我只改了路径」留到已经写进库之后才被发现。
  */
-function GitOutcome({ values, current }: { values: ClusterFormValues; current: GitBinding | null }) {
-  const resolution = resolveGitBinding(values.git, { current, clearRequested: values.clearGit })
+function GitOutcome({ values }: { values: GitFormValues }) {
+  const resolution = resolveGitBinding(values)
   return (
     <p style={{
       margin: 'var(--space-2) 0 0', fontSize: 'var(--text-xs)',
@@ -475,8 +616,9 @@ function RegisterSection({ onCreated }: { onCreated: () => void }) {
     e.preventDefault()
     setError('')
 
-    // 注册时没有「当前绑定」，传 null：清空即未绑定，不存在「解除」这件事。
-    const built = buildClusterWrite(values, null)
+    // 注册只写集群。绑定要等集群存在之后才能挂上去（PUT /git-binding 会先
+    // 断言集群存在），所以它不在这张表单里——注册时还不知道仓库路径本就是常态。
+    const built = buildClusterWrite(values)
     if (!built.ok) {
       setError(built.error)
       return
@@ -500,11 +642,11 @@ function RegisterSection({ onCreated }: { onCreated: () => void }) {
   return (
     <Section
       title="注册新集群"
-      description="仅登记元数据；接入状态从「已登记」起步，不受本表单任何字段影响，包括你在这里可能填的任何值。Git 绑定可以留到之后在上方列表里补，注册时不知道仓库路径是常态。"
+      description="仅登记元数据；接入状态从「已登记」起步，不受本表单任何字段影响，包括你在这里可能填的任何值。Git 绑定不在这里：它是一个独立资源，集群注册完成后在上方列表里展开「编辑」单独绑定——注册时不知道仓库路径是常态。"
     >
       <Card style={{ padding: 'var(--space-4)' }}>
         <form onSubmit={submit}>
-          <ClusterFields values={values} patch={patch} mode="create" current={null} />
+          <ClusterFields values={values} patch={patch} mode="create" />
 
           {error && <FormError>{error}</FormError>}
 
@@ -525,6 +667,10 @@ function RegisterSection({ onCreated }: { onCreated: () => void }) {
  * apiserver 清单——那少掉的是一条 control-plane 放行规则，事后表现为
  * 生产阻断，而不是提交时报错。
  *
+ * 这条路径**不碰 Git 绑定**：绑定在下方的 GitBindingForm 里独立提交。
+ * 服务端的集群写路径已经不接受 git，在这里带上它请求照样成功，绑定却
+ * 原封不动 —— 界面显示保存生效，库里没有那回事。
+ *
  * 已知限制：整体替换 + 无版本号意味着两个人同时编辑同一个集群时后写
  * 覆盖先写，且双方都不会收到提示。乐观锁需要在存储层引入版本列，不在
  * 本轮范围。
@@ -538,14 +684,13 @@ function EditClusterForm({ cluster, onSaved, onCancel }: {
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
-  const current = cluster.git ?? null
   const patch = (p: Partial<ClusterFormValues>) => setValues((v) => ({ ...v, ...p }))
 
   async function submit(e: FormEvent) {
     e.preventDefault()
     setError('')
 
-    const built = buildClusterWrite(values, current)
+    const built = buildClusterWrite(values)
     if (!built.ok) {
       setError(built.error)
       return
@@ -568,9 +713,9 @@ function EditClusterForm({ cluster, onSaved, onCancel }: {
         <SubHeading>
           编辑 {cluster.id}：提交会整体替换该集群的登记信息，表单里的每一项都会被写入，
           因此下面的值已按当前登记内容预填——清空一项就是把它从库里清空。
-          接入状态不在此列，它由服务端推进。
+          接入状态不在此列，它由服务端推进；Git 绑定也不在此列，它在下面单独提交。
         </SubHeading>
-        <ClusterFields values={values} patch={patch} mode="edit" current={current} />
+        <ClusterFields values={values} patch={patch} mode="edit" />
 
         {error && <FormError>{error}</FormError>}
 
