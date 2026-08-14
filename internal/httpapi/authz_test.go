@@ -106,6 +106,9 @@ func adminRoutes() []struct{ method, path string } {
 		{http.MethodGet, "/api/v1/clusters/prod-asia-1/policy-imports"},
 		{http.MethodPost, "/api/v1/clusters/prod-asia-1/policy-imports"},
 		{http.MethodDelete, "/api/v1/clusters/prod-asia-1/policy-imports/1"},
+		// 导出比它渲染的那份预览更严：交出去的是一份完整的网络策略文档，
+		// 等同于集群网络结构的说明书（design doc 2026-08-14 §5）。
+		{http.MethodGet, "/api/v1/clusters/prod-asia-1/policy-export"},
 		{http.MethodPost, "/api/v1/clusters/prod-asia-1/rule-overrides"},
 		{http.MethodDelete, "/api/v1/clusters/prod-asia-1/rule-overrides"},
 	}
