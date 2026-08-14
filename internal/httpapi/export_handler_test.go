@@ -16,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
 
+	"github.com/imkerbos/Distill/internal/fixture"
 	"github.com/imkerbos/Distill/internal/policygen"
 	"github.com/imkerbos/Distill/internal/predict"
 	"github.com/imkerbos/Distill/internal/registry"
@@ -30,9 +31,15 @@ const exportPath = "/api/v1/clusters/prod-asia-1/policy-export"
 // **线上真的传给了前端的那份 JSON**，与导出文件对不对得上。拿被测类型
 // 自己去解自己的输出，一个字段被改成不序列化也照样绿。
 type previewView struct {
-	Cluster    string           `json:"cluster"`
-	Namespace  string           `json:"namespace"`
-	Window     store.TimeWindow `json:"window"`
+	Cluster   string           `json:"cluster"`
+	Namespace string           `json:"namespace"`
+	Window    store.TimeWindow `json:"window"`
+	// Candidates 与 Prediction 是**默认（覆盖前）**那一套，导出永远不该
+	// 用它们。读进来是为了先决地证明两套计算确实不同 —— 两者相等的状态
+	// 下，任何"导出用了哪一套"的断言都无法失败。
+	Candidates []policygen.CandidatePolicy `json:"candidates"`
+	Prediction predict.Report              `json:"prediction"`
+	Overrides  []registry.RuleOverride     `json:"overrides"`
 	Overridden struct {
 		Candidates []policygen.CandidatePolicy `json:"candidates"`
 		Prediction predict.Report              `json:"prediction"`
@@ -225,6 +232,126 @@ func assertDocsMatchCandidates(
 		t.Errorf("the file does not correspond to the candidate set the preview returned:\nfile    %+v\npreview %+v",
 			fromDocs, fromPreview)
 	}
+}
+
+// 文件与注释头必须**同时**来自操作者读过的那次"应用人工决定之后"的计算
+// （design doc 2026-08-14 §2）。
+//
+// 有两个独立的选择点：文件渲染自哪一套候选集（store 里 Overridden.Enabled
+// 的来源），以及注释头取哪一套四类计数。任一处换成默认（覆盖前）那一套，
+// 操作者拿到的文件就与他确认过的决定分了家，而屏幕上没有任何迹象 ——
+// 轮 3 出过同一形状的 Critical，四道门禁全绿。
+//
+// 这条用例是本包里唯一一个**看得见人工决定**的：其余用例走 fixtureReader()，
+// 它的覆盖来源与 handler 写入的注册表是两个不同的 memRegistry，两套计算于是
+// 恒等，把任一选择点换成覆盖前都测不出来。这里让 Reader 与 handler 共用
+// 同一个注册表，先决地钉住两套计算确实不同，断言才可能红。
+//
+// 数字与内容两头都断言：同一个窗口下换一套规则集，四类计数未必跟着变，
+// 只断其中一头会因为错误的理由通过。
+func TestPolicyExportCarriesTheConfirmedOverrideIntoBothFileAndHeader(t *testing.T) {
+	reg := fixtureSource()
+	reader := store.NewFixtureReader(fixture.Load(), reg)
+	h, _, cookie := newTestRouterWithRegistry(t, reader, reg)
+
+	ns, wl, fp := singleSidedDisabledRule(t, fetchPreview(t, h, cookie, ""))
+
+	create := authedPostJSON(t, h, cookie, "/api/v1/clusters/prod-asia-1/rule-overrides",
+		map[string]any{"namespace": ns, "workload": wl, "fingerprint": fp,
+			"decision": "ENABLE", "reason": "导出必须带上这条确认"})
+	if got := bodyOf(t, create)["code"]; got != float64(0) {
+		t.Fatalf("create override code = %v, want 0 (%s)", got, create.Body.String())
+	}
+
+	// 操作者屏幕上的那一份 —— 确认之后重新读到的报告。
+	pv := fetchPreview(t, h, cookie, "")
+	if len(pv.Overrides) == 0 {
+		t.Fatal("the preview reports no override — the reader and the registry are not the same source")
+	}
+
+	// 先决条件一：两套计数确实不同，否则注释头那条断言无法失败。
+	if reflect.DeepEqual(pv.Prediction.Counts, pv.Overridden.Prediction.Counts) {
+		t.Fatalf("both computations report the same counts %v — this test cannot tell them apart",
+			pv.Prediction.Counts)
+	}
+	// 先决条件二：目标 workload 的启用规则集确实不同，否则文件那条断言
+	// 无法失败 —— 计数变了而内容没变的状态下，只有数字能被区分。
+	before := enabledRuleCount(pv.Candidates, ns, wl)
+	after := enabledRuleCount(pv.Overridden.Candidates, ns, wl)
+	if after != before+1 {
+		t.Fatalf("%s/%s enabled rules: default = %d, overridden = %d, want overridden = default+1",
+			ns, wl, before, after)
+	}
+
+	header, docs := exportDocs(t, authedGet(t, h, cookie, exportPath))
+
+	// 断言一：文件里那份文档带着这条确认，不是覆盖前的规则集。
+	if got := docRuleCount(t, docs, ns, wl); got != after {
+		t.Errorf("exported document %s/candidate-%s has %d rules, the report the operator read says %d "+
+			"(%d before the override) — the file was rendered from a computation he never saw",
+			ns, wl, got, after, before)
+	}
+	// 断言二：整份文件逐个 workload 对应覆盖后的候选集，不只是那一条。
+	assertDocsMatchCandidates(t, docs, pv.Overridden.Candidates)
+	// 断言三：注释头里的四类计数是覆盖后的那一套。
+	for _, k := range predict.AllChangeKinds() {
+		want := fmt.Sprintf("# dry-run %s: %d", k, pv.Overridden.Prediction.Counts[k])
+		if !strings.Contains(header, want) {
+			t.Errorf("header missing %q — 头里的数字来自操作者没读过的那次计算:\n%s", want, header)
+		}
+	}
+}
+
+// singleSidedDisabledRule 取一条默认禁用、且对端在本集群候选策略集之外的
+// LEARNED 规则。
+//
+// 限定 INTERNET_EGRESS / CROSS_CLUSTER：集群内的一条连接在两侧各生成一条
+// 独立规则（源端 egress、目的端 ingress），NetworkPolicy 要两侧都放行才算
+// 放行，只启用其中一条不会翻转任何判定 —— 覆盖生效了，四类计数却纹丝不动，
+// 上面那条先决条件就会把用例判死。这两类的对端是公网 IP 或另一个集群，
+// 启用一条就足以让判定改变。
+func singleSidedDisabledRule(t *testing.T, pv previewView) (string, string, string) {
+	t.Helper()
+	for _, p := range pv.Candidates {
+		for _, r := range p.Rules {
+			outside := r.Evidence == policygen.EvidenceInternetEgress ||
+				r.Evidence == policygen.EvidenceCrossCluster
+			if r.Origin == policygen.OriginLearned && !r.Enabled && outside {
+				return p.Namespace, p.Workload, r.Fingerprint
+			}
+		}
+	}
+	t.Fatal("fixture produced no disabled learned rule whose peer is outside this cluster's candidate set")
+	return "", "", ""
+}
+
+// enabledRuleCount 数候选集里某个 workload 下的启用规则条数。
+func enabledRuleCount(candidates []policygen.CandidatePolicy, ns, wl string) int {
+	n := 0
+	for _, c := range candidates {
+		if c.Namespace != ns || c.Workload != wl {
+			continue
+		}
+		for _, r := range c.Rules {
+			if r.Enabled {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// docRuleCount 数导出文件里某个 workload 那份文档的规则条数。找不到即失败：
+// 一份少了整份文档的文件，与一份少了一条规则的文件是同一类问题。
+func docRuleCount(t *testing.T, docs []networkingv1.NetworkPolicy, ns, wl string) int {
+	t.Helper()
+	for _, d := range docs {
+		if d.Namespace == ns && d.Name == "candidate-"+wl {
+			return len(d.Spec.Ingress) + len(d.Spec.Egress)
+		}
+	}
+	t.Fatalf("exported file has no document for %s/candidate-%s", ns, wl)
+	return 0
 }
 
 // 注释头必须自述，且**只**有这几行：文件会脱离平台独自存在，那段话是
