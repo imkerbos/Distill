@@ -1,4 +1,4 @@
-package auth
+package registry
 
 // Role 是账号的角色，封闭枚举。
 //
@@ -12,6 +12,13 @@ package auth
 //     internal/httpapi 的路由授权表）。
 //
 // 不要因为这里有一套角色，就以为已经有人被挡在门外了。
+//
+// 定义在 internal/registry 而不是 internal/auth：角色是账号的一个属性，
+// 账号记录本身就落在这个包里（见 Account），internal/auth 管的是"证明
+// 你是谁"，不是"你能做什么"。这条依赖方向也是硬约束——internal/auth
+// 校验密码之后要从账号记录里取角色，若 Role 定义在 internal/auth，
+// internal/registry 反过来 import 它就会与 internal/auth 未来 import
+// internal/registry 的需要形成循环（Go 不允许包循环 import）。
 type Role string
 
 const (

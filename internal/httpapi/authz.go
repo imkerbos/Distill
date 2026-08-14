@@ -5,13 +5,13 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/imkerbos/Distill/internal/auth"
+	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/response"
 )
 
 // access 是一条受保护路由要求的权限，封闭枚举。
 //
-// 与 auth.Role 分开而不是直接把角色写进路由表：路由要表达的是「谁可以调它」，
+// 与 registry.Role 分开而不是直接把角色写进路由表：路由要表达的是「谁可以调它」，
 // 而 accessSession 这条要求（任何有效会话都可以，与角色无关）不是任何一个
 // 角色的名字。把它塞成「最低那个角色」会在加进第三个角色的那天悄悄变味 ——
 // 会话自身的读取与销毁本来就不该随角色的增减改变。
@@ -32,14 +32,14 @@ const (
 //
 // default 分支返回 false：走到那里说明加了 access 取值却没加分支，
 // 而一个「没人想过它是什么意思」的权限要求只能按拒绝处理。
-func (a access) permits(role auth.Role) bool {
+func (a access) permits(role registry.Role) bool {
 	switch a {
 	case accessSession:
 		return role.Valid()
 	case accessViewer:
-		return role.Permits(auth.RoleViewer)
+		return role.Permits(registry.RoleViewer)
 	case accessAdmin:
-		return role.Permits(auth.RoleAdmin)
+		return role.Permits(registry.RoleAdmin)
 	default:
 		return false
 	}
@@ -54,7 +54,7 @@ func (a access) permits(role auth.Role) bool {
 //
 // **这层今天挡不住任何人。** 平台只有一个账号，它是管理员，因此每一次真实
 // 调用都满足声明。它现在就存在，是为了第二个身份出现时不必回头补声明，
-// 以及让漏声明的新端点以拒绝而不是放行的方式失败（见 auth.Role 的说明）。
+// 以及让漏声明的新端点以拒绝而不是放行的方式失败（见 registry.Role 的说明）。
 type authorizer struct {
 	// prefix 是这些路由挂载点的路径前缀。
 	//

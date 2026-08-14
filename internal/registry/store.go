@@ -129,4 +129,47 @@ type Store interface {
 	// host key 是平台连接策略仓库时的信任锚，而它能从后台改（§1.3）——
 	// 那条审计行是事后唯一能回答「信任锚是谁在什么时候换的」的东西。
 	UpdateSetting(ctx context.Context, actor Actor, s PlatformSetting) error
+
+	// Accounts 返回全部未删除的账号。
+	Accounts(ctx context.Context) ([]Account, error)
+	// Account 按用户名查一个未删除的账号。不存在时第二个返回值为 false。
+	Account(ctx context.Context, username string) (Account, bool, error)
+	// CreateAccount 新建一个账号，同事务写审计。
+	//
+	// passwordHash 单独传入，不挂在 Account 上（见 Account 的注释）——
+	// 调用方在到达这里之前已经完成了明文到哈希的转换，本方法只管落库。
+	CreateAccount(ctx context.Context, actor Actor, a Account, passwordHash string) error
+	// UpdateAccountRole 修改一个账号的角色，同事务写审计。
+	//
+	// 账号不存在时返回 ErrNotFound；这次修改会导致库中不再有任何一个
+	// 启用中的管理员时返回 ErrLastAdmin——判定必须在同一事务内完成，
+	// 见 ErrLastAdmin 的注释。
+	UpdateAccountRole(ctx context.Context, actor Actor, username string, role Role) error
+	// DisableAccount 停用一个账号，同事务写审计。
+	//
+	// 账号不存在时返回 ErrNotFound；这次停用会导致库中不再有任何一个
+	// 启用中的管理员时返回 ErrLastAdmin。
+	//
+	// 停用是本方法唯一要做的事：它不撤销该账号已签发的会话——会话本身
+	// 不缓存角色，权限在每次请求时现读账号记录，停用在下一次请求就会
+	// 生效，不需要一条额外的撤销路径（design doc 2026-08-14 §4）。
+	DisableAccount(ctx context.Context, actor Actor, username string) error
+	// EnableAccount 重新启用一个账号，同事务写审计。
+	//
+	// 账号不存在时返回 ErrNotFound。
+	EnableAccount(ctx context.Context, actor Actor, username string) error
+	// SoftDeleteAccount 软删除一个账号，同事务写审计。
+	//
+	// 账号不存在时返回 ErrNotFound；这次删除会导致库中不再有任何一个
+	// 启用中的管理员时返回 ErrLastAdmin。用户名不复用——软删除的行仍
+	// 占着主键，新账号不会继承旧账号在审计里的身份（design doc
+	// 2026-08-14 §3）。
+	SoftDeleteAccount(ctx context.Context, actor Actor, username string) error
+	// SetAccountPassword 写入一个账号的新密码哈希，同事务写审计。
+	//
+	// 账号不存在时返回 ErrNotFound。管理员重置他人密码与本人改自己的
+	// 密码走同一个方法——两者的区别（是否需要先校验当前密码）是调用方
+	// 的职责，本方法只管把新哈希落库（design doc 2026-08-14 §6）。
+	// 审计前后值只记"密码已变更"这一事实，不含哈希本身。
+	SetAccountPassword(ctx context.Context, actor Actor, username string, passwordHash string) error
 }

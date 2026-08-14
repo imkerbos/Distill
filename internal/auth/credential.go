@@ -5,6 +5,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/imkerbos/Distill/internal/config"
+	"github.com/imkerbos/Distill/internal/registry"
 )
 
 // dummyHash 是一个真实的 bcrypt 哈希，用于在用户不存在时仍走一次比对。
@@ -19,7 +20,7 @@ var dummyHash = []byte("$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17
 // （见 Session.Role）。
 type account struct {
 	hash []byte
-	role Role
+	role registry.Role
 }
 
 // Verifier 校验本地账号。
@@ -40,7 +41,7 @@ type Verifier struct {
 func NewVerifier(users []config.User) *Verifier {
 	m := make(map[string]account, len(users))
 	for _, u := range users {
-		m[u.Username] = account{hash: []byte(u.PasswordHash), role: RoleAdmin}
+		m[u.Username] = account{hash: []byte(u.PasswordHash), role: registry.RoleAdmin}
 	}
 	return &Verifier{accounts: m}
 }
@@ -53,7 +54,7 @@ func NewVerifier(users []config.User) *Verifier {
 // 角色与校验结果一并返回，而不是让调用方通过后再查一次：会话必须带着
 // 角色签发（见 SessionStore.Create），两次查找之间的缝隙正是「认证过了、
 // 角色却是零值」的来源。校验失败时返回空角色，它不是任何一个合法取值。
-func (v *Verifier) Verify(username, password string) (Role, bool) {
+func (v *Verifier) Verify(username, password string) (registry.Role, bool) {
 	acct, ok := v.accounts[username]
 	if !ok {
 		_ = bcrypt.CompareHashAndPassword(dummyHash, []byte(password))

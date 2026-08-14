@@ -10,6 +10,7 @@ import (
 
 	"github.com/imkerbos/Distill/internal/auth"
 	"github.com/imkerbos/Distill/internal/httpapi"
+	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/response"
 )
 
@@ -21,7 +22,7 @@ import (
 //
 // 不走登录接口：今天没有任何一条登录路径能产出只读会话（见上）。这不是
 // 绕过认证 —— 会话仍然由服务端签发，角色仍然只存在于服务端状态里。
-func sessionCookie(t *testing.T, sessions *auth.SessionStore, user string, role auth.Role) *http.Cookie {
+func sessionCookie(t *testing.T, sessions *auth.SessionStore, user string, role registry.Role) *http.Cookie {
 	t.Helper()
 	sess, err := sessions.Create(user, role)
 	if err != nil {
@@ -100,7 +101,7 @@ func viewerRoutes() []struct{ method, path string } {
 
 func TestViewerIsRefusedOnAdminRoutes(t *testing.T) {
 	h, sessions, _ := newTestRouterWithRegistry(t, fixtureReader(), fixtureSource())
-	cookie := sessionCookie(t, sessions, "readonly", auth.RoleViewer)
+	cookie := sessionCookie(t, sessions, "readonly", registry.RoleViewer)
 
 	for _, rt := range adminRoutes() {
 		t.Run(rt.method+" "+rt.path, func(t *testing.T) {
@@ -117,7 +118,7 @@ func TestViewerIsRefusedOnAdminRoutes(t *testing.T) {
 
 func TestViewerReachesReadRoutes(t *testing.T) {
 	h, sessions, _ := newTestRouterWithRegistry(t, fixtureReader(), fixtureSource())
-	cookie := sessionCookie(t, sessions, "readonly", auth.RoleViewer)
+	cookie := sessionCookie(t, sessions, "readonly", registry.RoleViewer)
 
 	for _, rt := range viewerRoutes() {
 		t.Run(rt.method+" "+rt.path, func(t *testing.T) {
@@ -167,7 +168,7 @@ func TestAdminReachesEveryRegisteredRoute(t *testing.T) {
 		// 每条路由用一个新签的会话：被走到的路由里有一条会销毁自己的会话，
 		// 之后的请求就会变成 401 —— 而 401 不等于 403，这条断言会安静地
 		// 不再检查任何东西。
-		cookie := sessionCookie(t, sessions, "demo", auth.RoleAdmin)
+		cookie := sessionCookie(t, sessions, "demo", registry.RoleAdmin)
 		rec := callWith(t, h, method, path, cookie)
 		if rec.Code == http.StatusForbidden {
 			t.Errorf("%s %s refused an administrator (%s) — the route is most likely missing its declaration",
@@ -198,7 +199,7 @@ func TestRefusalIsDistinguishableFromUnauthenticated(t *testing.T) {
 	}
 
 	viewer := callWith(t, h, http.MethodPost, "/api/v1/clusters",
-		sessionCookie(t, sessions, "readonly", auth.RoleViewer))
+		sessionCookie(t, sessions, "readonly", registry.RoleViewer))
 	if viewer.Code != http.StatusForbidden {
 		t.Fatalf("viewer status = %d, want 403", viewer.Code)
 	}
@@ -218,7 +219,7 @@ func TestRefusedWriteNeverReachesTheHandler(t *testing.T) {
 	h, sessions, _ := newTestRouterWithRegistry(t, fixtureReader(), reg)
 
 	rec := callWith(t, h, http.MethodPost, "/api/v1/clusters",
-		sessionCookie(t, sessions, "readonly", auth.RoleViewer))
+		sessionCookie(t, sessions, "readonly", registry.RoleViewer))
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", rec.Code)
 	}
@@ -231,7 +232,7 @@ func TestRefusedWriteNeverReachesTheHandler(t *testing.T) {
 // 也要能登出。
 func TestSessionEndpointsOnlyNeedAValidSession(t *testing.T) {
 	h, sessions, _ := newTestRouterWithRegistry(t, fixtureReader(), fixtureSource())
-	cookie := sessionCookie(t, sessions, "readonly", auth.RoleViewer)
+	cookie := sessionCookie(t, sessions, "readonly", registry.RoleViewer)
 
 	read := callWith(t, h, http.MethodGet, "/api/v1/sessions/current", cookie)
 	if read.Code != http.StatusOK {
@@ -259,9 +260,9 @@ func TestLoginIssuesASessionCarryingTheAccountRole(t *testing.T) {
 	if !ok {
 		t.Fatal("the login cookie does not resolve to a session")
 	}
-	if sess.Role != auth.RoleAdmin {
+	if sess.Role != registry.RoleAdmin {
 		t.Fatalf("session role = %q, want %q — the bootstrap account is the administrator",
-			sess.Role, auth.RoleAdmin)
+			sess.Role, registry.RoleAdmin)
 	}
 
 	// 而且它确实够得着管理员路由。
@@ -274,7 +275,7 @@ func TestLoginIssuesASessionCarryingTheAccountRole(t *testing.T) {
 // 请求体、请求头与查询串里的 role 一律不参与判定（规范 §9、§34）。
 func TestRoleClaimsInTheRequestAreIgnored(t *testing.T) {
 	h, sessions, _ := newTestRouterWithRegistry(t, fixtureReader(), fixtureSource())
-	cookie := sessionCookie(t, sessions, "readonly", auth.RoleViewer)
+	cookie := sessionCookie(t, sessions, "readonly", registry.RoleViewer)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/clusters?role=ADMIN&is_admin=true",
 		strings.NewReader(`{"role":"ADMIN","isAdmin":true,"id":"x"}`))

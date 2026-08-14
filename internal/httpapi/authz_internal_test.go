@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/imkerbos/Distill/internal/auth"
+	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/response"
 )
 
@@ -20,7 +21,7 @@ import (
 // 谁都调不通的失败暴露出来，而不是变成一个谁都能调的管理接口。
 func TestUndeclaredRouteIsRefused(t *testing.T) {
 	sessions := auth.NewSessionStore(time.Hour, nil)
-	admin := mustSession(t, sessions, "demo", auth.RoleAdmin)
+	admin := mustSession(t, sessions, "demo", registry.RoleAdmin)
 
 	var declaredRan, undeclaredRan bool
 	az := newAuthorizer(apiPrefix)
@@ -72,7 +73,7 @@ func TestUndeclaredRouteIsRefused(t *testing.T) {
 // 给一个方法开的口子不能顺带把另一个方法也放开。
 func TestDeclarationIsPerMethod(t *testing.T) {
 	sessions := auth.NewSessionStore(time.Hour, nil)
-	admin := mustSession(t, sessions, "demo", auth.RoleAdmin)
+	admin := mustSession(t, sessions, "demo", registry.RoleAdmin)
 
 	az := newAuthorizer(apiPrefix)
 	r := chi.NewRouter()
@@ -116,18 +117,18 @@ func TestAccessPermits(t *testing.T) {
 	cases := []struct {
 		name string
 		acc  access
-		role auth.Role
+		role registry.Role
 		want bool
 	}{
-		{"session accepts an admin", accessSession, auth.RoleAdmin, true},
-		{"session accepts a viewer", accessSession, auth.RoleViewer, true},
-		{"session refuses a roleless session", accessSession, auth.Role(""), false},
-		{"viewer accepts a viewer", accessViewer, auth.RoleViewer, true},
-		{"viewer accepts an admin", accessViewer, auth.RoleAdmin, true},
-		{"admin refuses a viewer", accessAdmin, auth.RoleViewer, false},
-		{"admin accepts an admin", accessAdmin, auth.RoleAdmin, true},
-		{"an unregistered requirement refuses everyone", access(0), auth.RoleAdmin, false},
-		{"an unregistered requirement refuses viewers too", access(99), auth.RoleViewer, false},
+		{"session accepts an admin", accessSession, registry.RoleAdmin, true},
+		{"session accepts a viewer", accessSession, registry.RoleViewer, true},
+		{"session refuses a roleless session", accessSession, registry.Role(""), false},
+		{"viewer accepts a viewer", accessViewer, registry.RoleViewer, true},
+		{"viewer accepts an admin", accessViewer, registry.RoleAdmin, true},
+		{"admin refuses a viewer", accessAdmin, registry.RoleViewer, false},
+		{"admin accepts an admin", accessAdmin, registry.RoleAdmin, true},
+		{"an unregistered requirement refuses everyone", access(0), registry.RoleAdmin, false},
+		{"an unregistered requirement refuses viewers too", access(99), registry.RoleViewer, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -139,7 +140,7 @@ func TestAccessPermits(t *testing.T) {
 }
 
 // mustSession 签发一个会话并返回它的 Cookie。
-func mustSession(t *testing.T, sessions *auth.SessionStore, user string, role auth.Role) *http.Cookie {
+func mustSession(t *testing.T, sessions *auth.SessionStore, user string, role registry.Role) *http.Cookie {
 	t.Helper()
 	sess, err := sessions.Create(user, role)
 	if err != nil {

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/imkerbos/Distill/internal/registry"
 )
 
 // sessionIDBytes 是会话 ID 的随机字节数。
@@ -28,7 +30,7 @@ type Session struct {
 	// 只在服务端内存里流动 —— 请求体、请求头、Cookie 与查询串里出现的
 	// 任何 role/is_admin 字段都与它无关，也永远不会被读（规范 §9、§34）。
 	// 会话本身就是那份可信状态。
-	Role Role
+	Role registry.Role
 	// ExpiresAt 是过期时刻。
 	ExpiresAt time.Time
 }
@@ -61,7 +63,7 @@ func NewSessionStore(ttl time.Duration, now func() time.Time) *SessionStore {
 // role 是必填参数而不是一个可以事后补上的字段：签不出一个没有角色的会话，
 // 「忘了设角色」这条路径就不存在。未登记的角色（含零值）一律拒绝签发 ——
 // 退一步给它一个默认角色，等于让一次装配失误变成一次静默的授权。
-func (s *SessionStore) Create(username string, role Role) (Session, error) {
+func (s *SessionStore) Create(username string, role registry.Role) (Session, error) {
 	if !role.Valid() {
 		return Session{}, fmt.Errorf("%w: %q", ErrInvalidRole, role)
 	}

@@ -7,6 +7,7 @@ import (
 
 	"github.com/imkerbos/Distill/internal/auth"
 	"github.com/imkerbos/Distill/internal/config"
+	"github.com/imkerbos/Distill/internal/registry"
 )
 
 func hashOf(t *testing.T, plain string) string {
@@ -44,8 +45,8 @@ func TestVerifyReturnsTheAccountRole(t *testing.T) {
 	if !ok {
 		t.Fatal("correct credentials must verify")
 	}
-	if role != auth.RoleAdmin {
-		t.Errorf("role = %q, want %q — the bootstrap account is the administrator", role, auth.RoleAdmin)
+	if role != registry.RoleAdmin {
+		t.Errorf("role = %q, want %q — the bootstrap account is the administrator", role, registry.RoleAdmin)
 	}
 }
 

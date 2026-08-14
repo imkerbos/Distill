@@ -6,13 +6,14 @@ import (
 	"time"
 
 	"github.com/imkerbos/Distill/internal/auth"
+	"github.com/imkerbos/Distill/internal/registry"
 )
 
 func TestSessionCreateAndGet(t *testing.T) {
 	now := time.Date(2026, 7, 31, 10, 0, 0, 0, time.UTC)
 	s := auth.NewSessionStore(time.Hour, func() time.Time { return now })
 
-	sess, err := s.Create("demo", auth.RoleAdmin)
+	sess, err := s.Create("demo", registry.RoleAdmin)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -32,35 +33,35 @@ func TestSessionCreateAndGet(t *testing.T) {
 	}
 	// 角色必须原样存活到读出来那一刻：授权层读的正是这个字段，
 	// 一个在存取之间丢掉的角色会让每次判定都落到零值上。
-	if got.Role != auth.RoleAdmin {
-		t.Errorf("Role = %q, want %q", got.Role, auth.RoleAdmin)
+	if got.Role != registry.RoleAdmin {
+		t.Errorf("Role = %q, want %q", got.Role, registry.RoleAdmin)
 	}
 }
 
 // 会话的角色由签发方给出，取什么值就存什么值 —— 不会被悄悄提权。
 func TestSessionCreateKeepsTheGivenRole(t *testing.T) {
 	s := auth.NewSessionStore(time.Hour, nil)
-	sess, err := s.Create("readonly", auth.RoleViewer)
+	sess, err := s.Create("readonly", registry.RoleViewer)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if sess.Role != auth.RoleViewer {
-		t.Fatalf("Role = %q, want %q", sess.Role, auth.RoleViewer)
+	if sess.Role != registry.RoleViewer {
+		t.Fatalf("Role = %q, want %q", sess.Role, registry.RoleViewer)
 	}
 	got, ok := s.Get(sess.ID)
 	if !ok {
 		t.Fatal("session must be retrievable")
 	}
-	if got.Role != auth.RoleViewer {
+	if got.Role != registry.RoleViewer {
 		t.Errorf("stored Role = %q, want %q — a viewer must not read back as anything else",
-			got.Role, auth.RoleViewer)
+			got.Role, registry.RoleViewer)
 	}
 }
 
 // 签不出没有角色的会话：那样的会话一旦存在，授权层就要为它的零值兜底。
 func TestSessionCreateRejectsAnUnregisteredRole(t *testing.T) {
 	s := auth.NewSessionStore(time.Hour, nil)
-	for _, role := range []auth.Role{"", "SUPERADMIN", "admin"} {
+	for _, role := range []registry.Role{"", "SUPERADMIN", "admin"} {
 		sess, err := s.Create("demo", role)
 		if !errors.Is(err, auth.ErrInvalidRole) {
 			t.Errorf("Create with role %q: err = %v, want ErrInvalidRole", role, err)
@@ -76,7 +77,7 @@ func TestSessionIDsAreUnique(t *testing.T) {
 	s := auth.NewSessionStore(time.Hour, nil)
 	seen := map[string]bool{}
 	for i := 0; i < 200; i++ {
-		sess, err := s.Create("demo", auth.RoleAdmin)
+		sess, err := s.Create("demo", registry.RoleAdmin)
 		if err != nil {
 			t.Fatalf("Create: %v", err)
 		}
@@ -95,7 +96,7 @@ func TestSessionExpires(t *testing.T) {
 	clock := func() time.Time { return now }
 	s := auth.NewSessionStore(time.Hour, clock)
 
-	sess, err := s.Create("demo", auth.RoleAdmin)
+	sess, err := s.Create("demo", registry.RoleAdmin)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -113,7 +114,7 @@ func TestSessionExpires(t *testing.T) {
 
 func TestSessionDelete(t *testing.T) {
 	s := auth.NewSessionStore(time.Hour, nil)
-	sess, err := s.Create("demo", auth.RoleAdmin)
+	sess, err := s.Create("demo", registry.RoleAdmin)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -138,7 +139,7 @@ func TestSessionStoreIsConcurrencySafe(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		go func() {
 			defer func() { done <- struct{}{} }()
-			sess, err := s.Create("demo", auth.RoleAdmin)
+			sess, err := s.Create("demo", registry.RoleAdmin)
 			if err != nil {
 				return
 			}
