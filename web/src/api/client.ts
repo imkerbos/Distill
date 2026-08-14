@@ -3,6 +3,7 @@ import type {
   GitRepo, GitRepoWrite, Identity, ImportRole, ImportSource, OverrideDecision,
   PathVerifyStatus, PlatformSettingView, PlatformSettingWrite, PolicyImportItem, PolicyPreview,
   Quality, RegisteredCluster, RepoVerifyStatus, Role, SecurityReport, Topology, TopologyLevel,
+  WritebackPlanResult, WritebackPushResult,
 } from './types'
 
 /** ApiError 同时携带 HTTP 状态与业务码，调用方两者都可能需要判断。 */
@@ -88,6 +89,21 @@ function exportFilename(header: string | null): string {
   if (!m) return fallback
   const safe = m[1].replace(/[^A-Za-z0-9._-]/g, '-')
   return safe === '' ? fallback : safe
+}
+
+/**
+ * 只接受本平台自己的 API 路径。
+ *
+ * 取值目前恒来自 pages/writebackView.ts，这一行是纵深防御：一个收路径的
+ * 请求函数早晚会被某次改动接上一个来自响应体的地址，而写回那两个端点是
+ * 会改仓库的（规范 §13、§30）。抛而不是静默改写——被改写过的路径会让
+ * 调用方以为自己请求的是另一个东西。
+ */
+function assertApiPath(path: string): string {
+  if (!path.startsWith('/api/v1/')) {
+    throw new ApiError(-1, '请求路径不合法', 0)
+  }
+  return path
 }
 
 export const api = {
@@ -376,6 +392,36 @@ export const api = {
     }
     return { blob: await res.blob(), filename: exportFilename(res.headers.get('Content-Disposition')) }
   },
+
+  /**
+   * 出一份写回计划。**写不了任何东西**：这个端点是写回的 dry-run，也是它的
+   * 默认形态（design doc 2026-08-14 §5）。
+   *
+   * 收一个已经拼好的路径，理由同 policyExport：路径必须来自
+   * `writebackView`，且时间窗必须是页面此刻正在显示的那一段。在这里重拼就
+   * 又多了一个可以与页面分歧的取数点，而这里分歧的后果比导出更硬——推送时
+   * 服务端会拿请求里的时间窗重算整份计划再比指纹。
+   */
+  policyWritebackPlan: (path: string) =>
+    request<WritebackPlanResult>(assertApiPath(path), { method: 'POST' }),
+
+  /**
+   * 把操作者确认过的那份计划推到一条新分支上。
+   *
+   * 请求体原样收 `writebackPushBody` 的产出，**这一层不拼、不补、不改**：
+   * 里面只有分支名与指纹两项，且都必须逐字来自操作者刚看过的那份计划。
+   * 在这里补一个字段（哪怕是"顺手带上计数"）就等于让写回请求自述影响面，
+   * 而影响面必须由平台在写前重算（§4）。
+   *
+   * 服务端的拒绝是权威的：不带指纹拒、指纹对不上拒、仓库级校验不是 OK 拒、
+   * 非管理员拒（规范 §34）。调用方要做的是把 msg 原样展示，不收窄成一句
+   * "推送失败"——"这份计划过期了"与"服务出错了"的下一步动作完全相反。
+   */
+  policyWritebackPush: (path: string, body: { branch: string; fingerprint: string }) =>
+    request<WritebackPushResult>(assertApiPath(path), {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
 
   createOverride: (
     cluster: string,
