@@ -1,0 +1,546 @@
+package mysqlregistry_test
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"reflect"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/imkerbos/Distill/internal/mysqlregistry"
+	"github.com/imkerbos/Distill/internal/registry"
+)
+
+// testHash 是一个 bcrypt 形状的假哈希，只在本文件里当作「不该出现在别处
+// 的那串字符」使用。
+//
+// 不用真实口令跑一次 bcrypt：这一层不做哈希，它只负责把调用方给的串落库
+// 与不落到别处，而一个字面量在断言失败时能被一眼认出来。
+const (
+	testHash    = "$2a$10$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	testNewHash = "$2a$10$BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+)
+
+// newAccountStore 返回一个 platform_account 也被清空的 Store。
+//
+// newTestStore 的清理清单是集群那一侧的表，账号表不在其中：账号跨全部集群
+// 存在，硬塞进那份清单会让每个集群测试也去动一张与它无关的表。清理放在
+// 这里，账号测试之间的隔离因此不依赖别处的清单有没有被跟着改。
+func newAccountStore(t *testing.T) (*mysqlregistry.Store, *sql.DB) {
+	t.Helper()
+	s, db := newTestStore(t)
+	if _, err := db.Exec(`DELETE FROM platform_account`); err != nil {
+		t.Fatalf("clean platform_account: %v", err)
+	}
+	return s, db
+}
+
+// mustCreateAccount 建一个账号，失败即终止 —— 后面的断言都以它存在为前提。
+func mustCreateAccount(
+	t *testing.T, s *mysqlregistry.Store, actor registry.Actor,
+	username string, role registry.Role,
+) registry.Account {
+	t.Helper()
+	a := registry.Account{Username: username, Role: role}
+	if err := s.CreateAccount(context.Background(), actor, a, testHash); err != nil {
+		t.Fatalf("CreateAccount(%s) error = %v", username, err)
+	}
+	return a
+}
+
+// enabledAdmins 返回当前启用中的管理员用户名。
+//
+// 直接查库而不是走 Accounts()：这些断言要守的是**库里的事实**，
+// 用同一层的读方法去证明同一层的写方法，两边一起错时断言照样绿。
+func enabledAdmins(t *testing.T, db *sql.DB) []string {
+	t.Helper()
+	rows, err := db.Query(
+		`SELECT username FROM platform_account
+		  WHERE role = 'ADMIN' AND disabled_at IS NULL AND deleted_at IS NULL
+		  ORDER BY username`)
+	if err != nil {
+		t.Fatalf("query enabled admins: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var u string
+		if err := rows.Scan(&u); err != nil {
+			t.Fatalf("scan enabled admin: %v", err)
+		}
+		out = append(out, u)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate enabled admins: %v", err)
+	}
+	return out
+}
+
+// auditCount 数某个动作留下了多少条审计行。
+func auditCount(t *testing.T, db *sql.DB, action string) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM audit_log WHERE action = ?`, action).Scan(&n); err != nil {
+		t.Fatalf("count %s audit rows: %v", action, err)
+	}
+	return n
+}
+
+// 账号登记之后读得回来，并带着自己的审计动作与 target。
+//
+// 这一条在的意义是让下面几条「必须拒绝」的用例不能靠一份恒为拒绝的实现
+// 全部通过。
+func TestCreateAndReadBackAccount(t *testing.T) {
+	s, db := newAccountStore(t)
+	ctx := context.Background()
+	actor := registry.Actor{Username: "bootstrap"}
+
+	in := mustCreateAccount(t, s, actor, "alice", registry.RoleAdmin)
+
+	got, ok, err := s.Account(ctx, in.Username)
+	if err != nil || !ok {
+		t.Fatalf("Account() = %+v, %v, %v", got, ok, err)
+	}
+	if got.Username != in.Username || got.Role != registry.RoleAdmin {
+		t.Errorf("round-tripped account = %+v, want %s/%s", got, in.Username, registry.RoleAdmin)
+	}
+	// 新账号是启用的：DisabledAt 落成零值 time.Time 而不是 nil，会让
+	// 「这个账号停用了吗」在 1970 年那个真实时刻上答成"是"。
+	if got.DisabledAt != nil {
+		t.Errorf("DisabledAt = %v, want nil for a freshly created account", got.DisabledAt)
+	}
+	if got.CreatedAt.IsZero() || got.UpdatedAt.IsZero() {
+		t.Errorf("timestamps = %v/%v, want them filled by the store", got.CreatedAt, got.UpdatedAt)
+	}
+
+	list, err := s.Accounts(ctx)
+	if err != nil {
+		t.Fatalf("Accounts() error = %v", err)
+	}
+	if len(list) != 1 || list[0].Username != in.Username {
+		t.Errorf("Accounts() = %+v, want exactly the one created account", list)
+	}
+
+	var target, clusterID string
+	if err := db.QueryRow(
+		`SELECT target, cluster_id FROM audit_log WHERE action = 'CREATE_ACCOUNT'`,
+	).Scan(&target, &clusterID); err != nil {
+		t.Fatalf("query CREATE_ACCOUNT audit row: %v", err)
+	}
+	if target != "account/"+in.Username {
+		t.Errorf("CREATE_ACCOUNT target = %q, want %q", target, "account/"+in.Username)
+	}
+	// 账号不属于任何集群：审计行的 cluster_id 必须是那个撞不上真实集群的
+	// 空串，否则它会与某个集群的审计混在 idx_cluster_time 上读不开。
+	if clusterID != "" {
+		t.Errorf("CREATE_ACCOUNT cluster_id = %q, want empty —— 账号不属于任何集群", clusterID)
+	}
+
+	// 用户名不复用：软删除的行仍占着主键，重登记必须被拒绝而不是让新账号
+	// 继承旧账号在审计里的身份（design doc 2026-08-14 §3）。
+	if err := s.CreateAccount(ctx, actor,
+		registry.Account{Username: in.Username, Role: registry.RoleViewer}, testHash,
+	); !errors.Is(err, registry.ErrInvalid) {
+		t.Errorf("CreateAccount() with a taken username err = %v, want ErrInvalid", err)
+	}
+}
+
+// 停用最后一个启用中的管理员，执行完就没有人能再管理平台
+// （design doc 2026-08-14 §5）。
+func TestCannotDisableTheLastEnabledAdmin(t *testing.T) {
+	s, db := newAccountStore(t)
+	ctx := context.Background()
+	actor := registry.Actor{Username: "bootstrap"}
+
+	mustCreateAccount(t, s, actor, "admin-a", registry.RoleAdmin)
+	mustCreateAccount(t, s, actor, "viewer-1", registry.RoleViewer)
+
+	if err := s.DisableAccount(ctx, actor, "admin-a"); !errors.Is(err, registry.ErrLastAdmin) {
+		t.Fatalf("DisableAccount() on the last enabled admin err = %v, want ErrLastAdmin", err)
+	}
+	// 拒绝之后账号必须原封不动。少了这条，一个「先停用再返回 ErrLastAdmin」
+	// 的实现照样让上面那行绿。
+	if got := enabledAdmins(t, db); len(got) != 1 || got[0] != "admin-a" {
+		t.Errorf("enabled admins after a refused disable = %v, want [admin-a]", got)
+	}
+	// 被拒绝的操作不得留下审计行：审计里的一条 DISABLE_ACCOUNT 会说一件
+	// 没发生过的事。
+	if n := auditCount(t, db, "DISABLE_ACCOUNT"); n != 0 {
+		t.Errorf("DISABLE_ACCOUNT audit rows after a refused disable = %d, want 0", n)
+	}
+
+	// 只读账号不在保护范围内：拒绝的是「最后一个管理员」，不是「停用」本身。
+	if err := s.DisableAccount(ctx, actor, "viewer-1"); err != nil {
+		t.Fatalf("DisableAccount() on a viewer error = %v", err)
+	}
+
+	// 第二个管理员到位之后停得掉。
+	mustCreateAccount(t, s, actor, "admin-b", registry.RoleAdmin)
+	if err := s.DisableAccount(ctx, actor, "admin-a"); err != nil {
+		t.Fatalf("DisableAccount() with a second admin present error = %v", err)
+	}
+	if got := enabledAdmins(t, db); len(got) != 1 || got[0] != "admin-b" {
+		t.Fatalf("enabled admins = %v, want [admin-b]", got)
+	}
+	// 停用中的管理员不算数：admin-a 还在库里，但它已经管不了平台，
+	// 拿它当"还有第二个管理员"就等于允许把最后一个也关掉。
+	if err := s.DisableAccount(ctx, actor, "admin-b"); !errors.Is(err, registry.ErrLastAdmin) {
+		t.Errorf("DisableAccount() with only a disabled admin left err = %v, want ErrLastAdmin", err)
+	}
+
+	// 启用不受判定影响：它只会让管理员变多。
+	if err := s.EnableAccount(ctx, actor, "admin-a"); err != nil {
+		t.Fatalf("EnableAccount() error = %v", err)
+	}
+	if got := enabledAdmins(t, db); len(got) != 2 {
+		t.Errorf("enabled admins after re-enabling = %v, want both", got)
+	}
+
+	if err := s.DisableAccount(ctx, actor, "nobody"); !errors.Is(err, mysqlregistry.ErrNotFound) {
+		t.Errorf("DisableAccount() on a missing account err = %v, want ErrNotFound", err)
+	}
+}
+
+// 降级最后一个启用中的管理员，与停用它是同一件事的另一条路径。
+func TestCannotDemoteTheLastEnabledAdmin(t *testing.T) {
+	s, db := newAccountStore(t)
+	ctx := context.Background()
+	actor := registry.Actor{Username: "bootstrap"}
+
+	mustCreateAccount(t, s, actor, "admin-a", registry.RoleAdmin)
+	mustCreateAccount(t, s, actor, "viewer-1", registry.RoleViewer)
+
+	if err := s.UpdateAccountRole(ctx, actor, "admin-a", registry.RoleViewer); !errors.Is(err, registry.ErrLastAdmin) {
+		t.Fatalf("UpdateAccountRole() demoting the last enabled admin err = %v, want ErrLastAdmin", err)
+	}
+	if got := enabledAdmins(t, db); len(got) != 1 || got[0] != "admin-a" {
+		t.Errorf("enabled admins after a refused demotion = %v, want [admin-a]", got)
+	}
+	if n := auditCount(t, db, "UPDATE_ACCOUNT_ROLE"); n != 0 {
+		t.Errorf("UPDATE_ACCOUNT_ROLE audit rows after a refused demotion = %d, want 0", n)
+	}
+
+	// 把最后一个管理员的角色原样再设一次不该被拒绝：这次写入不会让
+	// 管理员变少，而一个"凡是碰到最后一个管理员就拒绝"的实现会挡下它。
+	if err := s.UpdateAccountRole(ctx, actor, "admin-a", registry.RoleAdmin); err != nil {
+		t.Errorf("UpdateAccountRole() setting the last admin's role to ADMIN again error = %v", err)
+	}
+
+	// 提权不受判定影响，提完之后降级就通得过。
+	if err := s.UpdateAccountRole(ctx, actor, "viewer-1", registry.RoleAdmin); err != nil {
+		t.Fatalf("UpdateAccountRole() promoting a viewer error = %v", err)
+	}
+	if err := s.UpdateAccountRole(ctx, actor, "admin-a", registry.RoleViewer); err != nil {
+		t.Fatalf("UpdateAccountRole() with a second admin present error = %v", err)
+	}
+	if got := enabledAdmins(t, db); len(got) != 1 || got[0] != "viewer-1" {
+		t.Fatalf("enabled admins = %v, want [viewer-1]", got)
+	}
+	if err := s.UpdateAccountRole(ctx, actor, "viewer-1", registry.RoleViewer); !errors.Is(err, registry.ErrLastAdmin) {
+		t.Errorf("UpdateAccountRole() demoting the remaining admin err = %v, want ErrLastAdmin", err)
+	}
+
+	// 封闭枚举：一个不在枚举里的角色在 Permits 下什么都做不了，
+	// 而操作者以为自己改成了某个角色。
+	if err := s.UpdateAccountRole(ctx, actor, "admin-a", registry.Role("SUPERADMIN")); !errors.Is(err, registry.ErrInvalid) {
+		t.Errorf("UpdateAccountRole() with an unregistered role err = %v, want ErrInvalid", err)
+	}
+	if err := s.UpdateAccountRole(ctx, actor, "nobody", registry.RoleViewer); !errors.Is(err, mysqlregistry.ErrNotFound) {
+		t.Errorf("UpdateAccountRole() on a missing account err = %v, want ErrNotFound", err)
+	}
+}
+
+// 软删除最后一个启用中的管理员，与停用、降级它是同一件事的第三条路径。
+func TestCannotSoftDeleteTheLastEnabledAdmin(t *testing.T) {
+	s, db := newAccountStore(t)
+	ctx := context.Background()
+	actor := registry.Actor{Username: "bootstrap"}
+
+	mustCreateAccount(t, s, actor, "admin-a", registry.RoleAdmin)
+
+	if err := s.SoftDeleteAccount(ctx, actor, "admin-a"); !errors.Is(err, registry.ErrLastAdmin) {
+		t.Fatalf("SoftDeleteAccount() on the last enabled admin err = %v, want ErrLastAdmin", err)
+	}
+	if _, ok, err := s.Account(ctx, "admin-a"); err != nil || !ok {
+		t.Errorf("Account() after a refused delete = %v, %v; want it still live", ok, err)
+	}
+	if n := auditCount(t, db, "DELETE_ACCOUNT"); n != 0 {
+		t.Errorf("DELETE_ACCOUNT audit rows after a refused delete = %d, want 0", n)
+	}
+
+	mustCreateAccount(t, s, actor, "admin-b", registry.RoleAdmin)
+	if err := s.SoftDeleteAccount(ctx, actor, "admin-a"); err != nil {
+		t.Fatalf("SoftDeleteAccount() with a second admin present error = %v", err)
+	}
+	if _, ok, err := s.Account(ctx, "admin-a"); err != nil || ok {
+		t.Errorf("Account() after delete = %v, %v; want it gone", ok, err)
+	}
+	// 删掉的管理员不算数，否则最后一个也删得掉。
+	if err := s.SoftDeleteAccount(ctx, actor, "admin-b"); !errors.Is(err, registry.ErrLastAdmin) {
+		t.Errorf("SoftDeleteAccount() on the remaining admin err = %v, want ErrLastAdmin", err)
+	}
+	// 软删除的行仍占着主键，因此对它的后续操作是「不存在」而不是「成功」。
+	if err := s.DisableAccount(ctx, actor, "admin-a"); !errors.Is(err, mysqlregistry.ErrNotFound) {
+		t.Errorf("DisableAccount() on a soft-deleted account err = %v, want ErrNotFound", err)
+	}
+}
+
+// 两个管理员同时把对方降级：先查后改会双双通过，平台落地成零个管理员，
+// 没有人能把它改回来（design doc §5，规范 §25）。
+//
+// 这条用例真的制造并发，而不是把两次调用先后跑一遍 —— 后者对「先查后改」
+// 的实现同样是绿的，因为第二次调用查到的已经是第一次写完的状态。
+// 造并发的办法是让测试自己持有一把锁，把两个降级都堵在同一个点上：
+//
+//   - 测试开一个事务，对全部启用中的管理员行做 SELECT ... FOR UPDATE；
+//   - 两个降级并发发起，各自撞上这把锁而停住；
+//   - 等到确实有两个事务处于 LOCK WAIT（不是 sleep 一个猜出来的时长）
+//     才释放，此时两边都已经越过了各自的"判定"那一步；
+//   - 释放之后两边继续跑完。
+//
+// 两种实现在这里分岔，而这正是本用例要能分辨的事：
+//
+//   - 判定在事务内、对候选行加锁：两个降级都被堵在**判定之前**，释放后
+//     一个先拿到锁、降级成功并提交，另一个拿到锁时读到的是当前状态
+//     （FOR UPDATE 是当前读），只剩一个管理员，于是返回 ErrLastAdmin。
+//   - 判定在事务外（先查后改）：两个降级的判定发生在锁释放**之前**，
+//     双双读到"还有两个管理员"而通过，堵住的是它们的 UPDATE；释放之后
+//     两条 UPDATE 都落地，库里一个启用中的管理员都不剩，本用例转红。
+func TestConcurrentMutualDemotionLeavesOneAdmin(t *testing.T) {
+	s, db := newAccountStore(t)
+	ctx := context.Background()
+	actor := registry.Actor{Username: "bootstrap"}
+
+	mustCreateAccount(t, s, actor, "admin-a", registry.RoleAdmin)
+	mustCreateAccount(t, s, actor, "admin-b", registry.RoleAdmin)
+
+	blocker, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx() error = %v", err)
+	}
+	// 出错路径上也要放锁，否则后续测试会跟着一起卡住。
+	defer func() { _ = blocker.Rollback() }()
+	lockEnabledAdminRows(t, blocker)
+
+	var wg sync.WaitGroup
+	results := make(chan error, 2)
+	for _, victim := range []string{"admin-a", "admin-b"} {
+		wg.Add(1)
+		go func(username string) {
+			defer wg.Done()
+			results <- s.UpdateAccountRole(ctx, actor, username, registry.RoleViewer)
+		}(victim)
+	}
+
+	// 等两个降级都真的停在锁上再放行。少了这一步，两次调用可能一前一后
+	// 跑完，而那不是并发 —— 那正是这条用例要避免的形状。
+	waitForRowLockWaiters(t, db, 2)
+	if err := blocker.Rollback(); err != nil {
+		t.Fatalf("Rollback() of the blocking tx error = %v", err)
+	}
+
+	wg.Wait()
+	close(results)
+	var succeeded, refused int
+	for err := range results {
+		switch {
+		case err == nil:
+			succeeded++
+		case errors.Is(err, registry.ErrLastAdmin):
+			refused++
+		default:
+			t.Fatalf("concurrent UpdateAccountRole() err = %v, want nil or ErrLastAdmin", err)
+		}
+	}
+	if succeeded != 1 || refused != 1 {
+		t.Errorf("concurrent mutual demotion: %d succeeded, %d refused; want exactly one of each",
+			succeeded, refused)
+	}
+	// 这一行才是真正要守的东西：无论哪一边先跑完，平台都必须还有人能管。
+	if got := enabledAdmins(t, db); len(got) != 1 {
+		t.Fatalf("enabled admins after a concurrent mutual demotion = %v, want exactly one —— "+
+			"两个管理员同时把对方降级把平台锁死了", got)
+	}
+	// 被拒绝的那一次不得留下审计行。
+	if n := auditCount(t, db, "UPDATE_ACCOUNT_ROLE"); n != 1 {
+		t.Errorf("UPDATE_ACCOUNT_ROLE audit rows = %d, want exactly 1 (the demotion that went through)", n)
+	}
+}
+
+// lockEnabledAdminRows 在给定事务里锁住全部启用中的管理员行。
+//
+// 谓词与实现里那条判定一致：锁的是同一批行，两条并发写路径因此一定撞上。
+func lockEnabledAdminRows(t *testing.T, tx *sql.Tx) {
+	t.Helper()
+	rows, err := tx.Query(
+		`SELECT username FROM platform_account
+		  WHERE role = 'ADMIN' AND disabled_at IS NULL AND deleted_at IS NULL
+		  ORDER BY username FOR UPDATE`)
+	if err != nil {
+		t.Fatalf("lock enabled admin rows: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var n int
+	for rows.Next() {
+		var u string
+		if err := rows.Scan(&u); err != nil {
+			t.Fatalf("scan locked admin: %v", err)
+		}
+		n++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate locked admins: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("locked %d enabled admin rows, want 2 —— 这条用例的前提是两个管理员都在", n)
+	}
+}
+
+// waitForRowLockWaiters 等到至少 want 个事务正在等 platform_account 上的行锁。
+//
+// 用 MySQL 自己报告的锁等待关系而不是 sleep 一个猜出来的时长：sleep 太短
+// 会让两个降级实际上一前一后跑完，而那种"并发"对先查后改的实现同样是
+// 绿的 —— 一条分辨不出两种实现的并发用例，比没有更糟，因为它看起来像
+// 已经守住了。等不到就直接失败，不带着一个没成立的前提往下跑。
+//
+// 判据取自 performance_schema.data_lock_waits，不是
+// information_schema.innodb_trx.trx_state = 'LOCK WAIT'：本机这套 MySQL 8.4
+// 上，两个事务确实卡在行锁上等着（data_lock_waits 有它们的等待关系），
+// trx_state 却一直是 RUNNING，照 trx_state 判会永远等不到而误报"没有并发"。
+// data_lock_waits 描述的是"谁在等谁的哪把锁"这件事本身，与状态字段怎么
+// 刷新无关。按库名与表名收窄，别处的锁等待不会被算进来。
+func waitForRowLockWaiters(t *testing.T, db *sql.DB, want int) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		var n int
+		if err := db.QueryRow(
+			`SELECT COUNT(DISTINCT w.REQUESTING_ENGINE_TRANSACTION_ID)
+			   FROM performance_schema.data_lock_waits w
+			   JOIN performance_schema.data_locks l
+			     ON l.ENGINE_LOCK_ID = w.REQUESTING_ENGINE_LOCK_ID
+			  WHERE l.OBJECT_SCHEMA = DATABASE() AND l.OBJECT_NAME = 'platform_account'`,
+		).Scan(&n); err != nil {
+			t.Fatalf("query data_lock_waits: %v", err)
+		}
+		if n >= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d transactions were waiting on platform_account row locks within "+
+				"the deadline, want %d —— 没等到真正的并发，这条用例无法分辨事务内判定与先查后改",
+				n, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// 密码哈希不得出现在读模型、审计行或错误里（design doc §3、§6，
+// 规范 §19、§21、§43）。
+//
+// 三个方向一起断言：
+//
+//   - 读模型：类型上就没有这个字段，序列化整条记录也带不出它；
+//   - 审计：CREATE_ACCOUNT 与改密的前后值只说"密码变过"，不说变成了什么；
+//   - 反过来的一条 —— 哈希确实落进了 password_hash 列。少了它，一个根本
+//     没保存哈希的实现也能让上面两条绿，而那时"没泄漏"只是因为没有东西
+//     可泄漏。
+func TestAccountReadsCarryNoHash(t *testing.T) {
+	s, db := newAccountStore(t)
+	ctx := context.Background()
+	actor := registry.Actor{Username: "bootstrap"}
+
+	mustCreateAccount(t, s, actor, "alice", registry.RoleAdmin)
+
+	// 读模型的类型上不该有任何与密码有关的字段：这一条守的是「将来有人
+	// 为了省一次查询把哈希挂上来」，那之后每一条返回账号的路径都会默默
+	// 把它带出去。
+	rt := reflect.TypeOf(registry.Account{})
+	for i := range rt.NumField() {
+		name := strings.ToLower(rt.Field(i).Name)
+		if strings.Contains(name, "hash") || strings.Contains(name, "password") {
+			t.Errorf("registry.Account has field %q; 读模型不得携带密码字段",
+				rt.Field(i).Name)
+		}
+	}
+
+	got, ok, err := s.Account(ctx, "alice")
+	if err != nil || !ok {
+		t.Fatalf("Account() = %+v, %v, %v", got, ok, err)
+	}
+	list, err := s.Accounts(ctx)
+	if err != nil {
+		t.Fatalf("Accounts() error = %v", err)
+	}
+	for _, v := range []any{got, list} {
+		blob, err := json.Marshal(v)
+		if err != nil {
+			t.Fatalf("marshal read model: %v", err)
+		}
+		if strings.Contains(string(blob), testHash) {
+			t.Errorf("read model %s carries the password hash", blob)
+		}
+	}
+
+	// 改密：管理员重置他人密码与本人改自己的密码走同一条写路径，
+	// 区别只在审计动作。
+	if err := s.SetAccountPassword(ctx, actor, "alice", testNewHash); err != nil {
+		t.Fatalf("SetAccountPassword() error = %v", err)
+	}
+	if n := auditCount(t, db, "RESET_PASSWORD"); n != 1 {
+		t.Errorf("RESET_PASSWORD audit rows = %d, want 1 —— 管理员重置他人密码", n)
+	}
+	if err := s.SetAccountPassword(ctx, registry.Actor{Username: "alice"}, "alice", testHash); err != nil {
+		t.Fatalf("SetAccountPassword() by the account itself error = %v", err)
+	}
+	if n := auditCount(t, db, "CHANGE_OWN_PASSWORD"); n != 1 {
+		t.Errorf("CHANGE_OWN_PASSWORD audit rows = %d, want 1 —— 本人改自己的密码", n)
+	}
+
+	// 审计只记「密码变过」这个事实。哈希落进审计等于把一份离线爆破材料
+	// 复制进一张为了长期留存的表里。
+	_, after := auditPayload(t, db, "CHANGE_OWN_PASSWORD")
+	if changed, _ := after["passwordChanged"].(bool); !changed {
+		t.Errorf("CHANGE_OWN_PASSWORD after_val = %v, want it to state that the password changed", after)
+	}
+
+	// 一条也不放过：扫全表，任何审计行的前后值都不得含任一个哈希。
+	rows, err := db.Query(`SELECT action, COALESCE(before_val, ''), COALESCE(after_val, '') FROM audit_log`)
+	if err != nil {
+		t.Fatalf("query audit rows: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var action, before, afterVal string
+		if err := rows.Scan(&action, &before, &afterVal); err != nil {
+			t.Fatalf("scan audit row: %v", err)
+		}
+		for _, h := range []string{testHash, testNewHash} {
+			if strings.Contains(before, h) || strings.Contains(afterVal, h) {
+				t.Errorf("audit row %s carries the password hash", action)
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate audit rows: %v", err)
+	}
+
+	// 反方向：哈希确实被保存了，只是没有被读出来过。
+	var stored string
+	if err := db.QueryRow(
+		`SELECT password_hash FROM platform_account WHERE username = 'alice'`).Scan(&stored); err != nil {
+		t.Fatalf("query password_hash: %v", err)
+	}
+	if stored != testHash {
+		t.Errorf("stored password_hash = %q, want the latest hash written", stored)
+	}
+
+	if err := s.SetAccountPassword(ctx, actor, "nobody", testHash); !errors.Is(err, mysqlregistry.ErrNotFound) {
+		t.Errorf("SetAccountPassword() on a missing account err = %v, want ErrNotFound", err)
+	}
+}
