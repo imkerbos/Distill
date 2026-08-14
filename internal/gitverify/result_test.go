@@ -3,6 +3,7 @@ package gitverify_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 
+	"github.com/imkerbos/Distill/internal/gitssh"
 	"github.com/imkerbos/Distill/internal/gitverify"
 	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/secrets"
@@ -62,5 +64,21 @@ func TestClassifyLooksThroughWrapping(t *testing.T) {
 	wrapped := errors.Join(errors.New("clone failed"), transport.ErrAuthorizationFailed)
 	if got := gitverify.Classify(wrapped); got != registry.RepoVerifyAuthFailed {
 		t.Fatalf("Classify(wrapped) = %q, want %q", got, registry.RepoVerifyAuthFailed)
+	}
+}
+
+// 被拒绝的目的地址必须落在封闭枚举的 REPO_UNREACHABLE 上，且结论里不得
+// 带任何地址信息（§19、§22）。
+//
+// 判定本身搬进了 gitssh，这条映射没有 —— 哪个错误落在哪一档是 gitverify
+// 的职责，跟着守卫一起搬走会让「拒绝了但归错档」无人看守。
+func TestClassifyMapsBlockedDestinationToRepoUnreachable(t *testing.T) {
+	if got := gitverify.Classify(gitssh.ErrBlockedDestination); got != registry.RepoVerifyRepoUnreachable {
+		t.Errorf("Classify(ErrBlockedDestination) = %q, want %q", got, registry.RepoVerifyRepoUnreachable)
+	}
+	// x/crypto/ssh 与 go-git 都会在外面包一层，包完仍要落在同一档。
+	wrapped := fmt.Errorf("ssh: handshake failed: %w", gitssh.ErrBlockedDestination)
+	if got := gitverify.Classify(wrapped); got != registry.RepoVerifyRepoUnreachable {
+		t.Errorf("Classify(wrapped) = %q, want %q", got, registry.RepoVerifyRepoUnreachable)
 	}
 }

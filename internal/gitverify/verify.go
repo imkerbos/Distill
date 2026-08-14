@@ -1,79 +1,46 @@
 package gitverify
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"io"
-	"net"
 	"strings"
 	"time"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
-	gitssh "github.com/go-git/go-git/v5/plumbing/transport/ssh"
 	"github.com/go-git/go-git/v5/storage/memory"
-	cryptossh "golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/knownhosts"
 
+	"github.com/imkerbos/Distill/internal/gitssh"
 	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/secrets"
 )
 
-// sshUser 是 deploy key 认证时的用户名。Git 托管方一律用 git 这个账号，
-// 真正的身份在密钥里，不在用户名里。
-const sshUser = "git"
-
-// ErrNoHostKeys 表示构造时没有拿到任何可用的已知 host key。
-var ErrNoHostKeys = errors.New("gitverify: no usable host keys configured")
-
-// errUnknownHostKey 是 host key 不在配置清单里时的拒绝原因。
-//
-// 刻意不带主机名或 key 指纹：这个错误会一路冒泡到 Classify，而结论是
-// 封闭枚举，任何自由文本都不应该有机会跟着走到 API 边界。
-var errUnknownHostKey = errors.New("gitverify: host key not in the configured set")
-
-// errUnusableCredential 表示解析器给出了内容，但它不是一把可用的私钥。
-//
-// 单列一个哨兵而不是把底层错误往上传：go-git 的私钥解析错误可能带着密钥
-// 内容片段，而错误会一路冒泡到 Classify（spec §2.5）。它归
-// CREDENTIAL_UNRESOLVED —— 仍然是平台侧的凭据问题，不是仓库侧拒绝，
-// 归错了就会把排查引向错误的负责人。
-var errUnusableCredential = errors.New("gitverify: credential is not a usable private key")
-
 // Verifier 对策略仓库与绑定的策略路径做只读校验。
 //
-// 它持有解析器、已固定的 host key 校验回调与出站超时；**不持有私钥**
-// —— 私钥每次校验时现取，只在该次调用栈里存在（spec §2.5）。
+// 认证、钉死的 host key 与目的地址判定都在 transport 里，与将来的写路径
+// 共用同一份实现 —— 出站的守卫只能有一处，两条链路各建一条就会出现只有
+// 一边被守住的情况。**共用传输不等于共用能力**：本类型发起的每一次 Git
+// 操作都是只读的（见 cloneBranch）。
+//
+// 它**不持有私钥** —— 私钥每次校验时由 transport 现取，只在该次调用栈里
+// 存在（spec §2.5）。
 type Verifier struct {
-	resolver secrets.Resolver
-	hostKeys cryptossh.HostKeyCallback
-	timeout  time.Duration
+	transport *gitssh.Transport
 }
 
 // New 构造一个 Verifier。
 //
-// hostKeys 是 known_hosts 格式的已知主机公钥，来自配置 —— 它不是机密，
-// 与凭据分开存放（spec §2.2）。**没有 host key 就构造失败**，不存在
+// 参数原样交给 gitssh.New，构造期的拒绝（解析器为空、超时非正、没有一把
+// 可用的 host key）都在那里做。**没有 host key 就构造失败**，不存在
 // 「未配置就不校验」的分支：回退等于接受任意中间人，而这条链路的终点
 // 是生产集群的策略集合。
-//
-// timeout 必须为正。出站挂在操作者的保存动作上，一个没有超时的出站
-// 请求会把界面永久挂住（spec §4）；宁可在启动时拒绝配置，也不要在
-// 运行时才发现没有超时。
 func New(r secrets.Resolver, hostKeys []byte, timeout time.Duration) (*Verifier, error) {
-	if r == nil {
-		return nil, errors.New("gitverify: nil secrets resolver")
-	}
-	if timeout <= 0 {
-		return nil, errors.New("gitverify: outbound timeout must be positive")
-	}
-	cb, err := hostKeyCallback(hostKeys)
+	t, err := gitssh.New(r, hostKeys, timeout)
 	if err != nil {
 		return nil, err
 	}
-	return &Verifier{resolver: r, hostKeys: cb, timeout: timeout}, nil
+	return &Verifier{transport: t}, nil
 }
 
 // VerifyRepo 对一个仓库做一次只读校验，返回封闭枚举的结论与这次校验
@@ -90,7 +57,7 @@ func New(r secrets.Resolver, hostKeys []byte, timeout time.Duration) (*Verifier,
 // 时刻总是非 nil：无论结论是哪一个，这次校验都实际发生过了，那个时刻
 // 是一个历史事实。
 func (v *Verifier) VerifyRepo(ctx context.Context, r registry.GitRepo) (registry.RepoVerifyResult, *time.Time) {
-	ctx, cancel := context.WithTimeout(ctx, v.timeout)
+	ctx, cancel := context.WithTimeout(ctx, v.transport.Timeout())
 	defer cancel()
 
 	_, err := v.cloneBranch(ctx, r)
@@ -126,7 +93,7 @@ func (v *Verifier) VerifyPath(
 		return registry.BindingVerifyNotVerified, nil
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, v.timeout)
+	ctx, cancel := context.WithTimeout(ctx, v.transport.Timeout())
 	defer cancel()
 
 	found, err := v.pathExists(ctx, r, policyPath)
@@ -175,8 +142,8 @@ func (v *Verifier) pathExists(ctx context.Context, r registry.GitRepo, policyPat
 // 发生在操作者按下保存时：如果它会写仓库，一次配置动作就等于产生了一次
 // 未经确认的下发（spec §3.1，CLAUDE.md 的 dry-run 要求）。
 //
-// 私钥字节从 Resolver 取出后直接交给 go-git 的 SSH 认证，不落盘、不进
-// 日志、不进错误信息，也不会留在 Verifier 上（spec §2.5）。
+// 私钥字节由 transport 从 Resolver 取出后直接交给 go-git 的 SSH 认证，
+// 不落盘、不进日志、不进错误信息，也不会留在 Verifier 上（spec §2.5）。
 //
 // r.URL 必须是 SSH 形态，这条由保存路径保证（registry.ValidateGitRepo），
 // 不在这里重复判断：这条链路回答的是「查了之后发现了什么」，而一个非
@@ -184,14 +151,9 @@ func (v *Verifier) pathExists(ctx context.Context, r registry.GitRepo, policyPat
 // 会被传输层当场拒掉 —— 一次拨号都没有，却会被归成「仓库不可达」。
 // 那不是一个严格的结论，是一句关于网络的假话。
 func (v *Verifier) cloneBranch(ctx context.Context, r registry.GitRepo) (*git.Repository, error) {
-	key, err := v.resolver.Resolve(ctx, r.CredentialRef)
+	auth, err := v.transport.Auth(ctx, r.CredentialRef)
 	if err != nil {
 		return nil, err
-	}
-
-	auth, err := v.sshAuth(key)
-	if err != nil {
-		return nil, errUnusableCredential
 	}
 
 	return git.CloneContext(ctx, memory.NewStorage(), nil, &git.CloneOptions{
@@ -205,28 +167,6 @@ func (v *Verifier) cloneBranch(ctx context.Context, r registry.GitRepo) (*git.Re
 		NoCheckout: true,
 		Tags:       git.NoTags,
 	})
-}
-
-// sshAuth 把私钥字节做成一个已经钉好 host key、并且带着目的地址判定的
-// 认证方法。
-//
-// 单独摘出来不是为了复用，是为了让「认证方法确实带着固定的 host key
-// 回调」这件事可以被直接断言。测试用的 file:// 传输不协商 SSH，永远
-// 走不到这个回调 —— 把这一行留在 cloneBranch 里面，它被换成
-// InsecureIgnoreHostKey 也不会有任何测试变红。
-//
-// guardDestination 包在外层：出站唯一的拨号发生在这条链路上，而这个回调
-// 是全链路唯一能拿到真实对端地址的位置（见 destination.go）。
-//
-// key 只在本调用栈里存在：解析完就交给 go-git，不落盘、不进日志、
-// 不挂到 Verifier 上（spec §2.5）。
-func (v *Verifier) sshAuth(key []byte) (*gitssh.PublicKeys, error) {
-	auth, err := gitssh.NewPublicKeys(sshUser, key, "")
-	if err != nil {
-		return nil, err
-	}
-	auth.HostKeyCallback = guardDestination(v.hostKeys)
-	return auth, nil
 }
 
 // headTree 取出 clone 下来的那个分支的顶层 tree。
@@ -260,51 +200,4 @@ func isMissingEntry(err error) bool {
 	return errors.Is(err, object.ErrEntryNotFound) ||
 		errors.Is(err, object.ErrDirectoryNotFound) ||
 		errors.Is(err, plumbing.ErrObjectNotFound)
-}
-
-// hostKeyCallback 用配置里的已知 host key 构造校验回调。
-//
-// 只接受精确匹配：带 marker（@revoked / @cert-authority）的条目、通配符
-// 与哈希过的主机名都不会进集合，因而只会导致拒绝，不会导致放行。这一层
-// 的失败方向必须是关，不是开。
-func hostKeyCallback(known []byte) (cryptossh.HostKeyCallback, error) {
-	authorized := make(map[string]map[string]struct{})
-
-	rest := known
-	for len(bytes.TrimSpace(rest)) > 0 {
-		marker, hosts, pub, _, next, err := cryptossh.ParseKnownHosts(rest)
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			// 不用 %w：底层错误会带上原始行内容。
-			return nil, errors.New("gitverify: malformed host key entry")
-		}
-		rest = next
-		if marker != "" {
-			continue
-		}
-		for _, h := range hosts {
-			entry := knownhosts.Normalize(h)
-			if authorized[entry] == nil {
-				authorized[entry] = make(map[string]struct{})
-			}
-			authorized[entry][string(pub.Marshal())] = struct{}{}
-		}
-	}
-
-	if len(authorized) == 0 {
-		return nil, ErrNoHostKeys
-	}
-
-	return func(hostname string, _ net.Addr, key cryptossh.PublicKey) error {
-		keys, ok := authorized[knownhosts.Normalize(hostname)]
-		if !ok {
-			return errUnknownHostKey
-		}
-		if _, ok := keys[string(key.Marshal())]; !ok {
-			return errUnknownHostKey
-		}
-		return nil
-	}, nil
 }

@@ -1,4 +1,4 @@
-package gitverify
+package gitssh
 
 import (
 	"errors"
@@ -8,12 +8,15 @@ import (
 	cryptossh "golang.org/x/crypto/ssh"
 )
 
-// errBlockedDestination 是目的地址落在禁止网段时的拒绝原因。
+// ErrBlockedDestination 是目的地址落在禁止网段时的拒绝原因。
 //
 // 与 errUnknownHostKey 同理，刻意不带地址、主机名或网段：这个错误会一路
-// 冒泡到 Classify，而结论是封闭枚举；内网地址属于敏感信息，不得随错误
-// 文本走到 API 响应或日志里（安全规范 §19、§22）。
-var errBlockedDestination = errors.New("gitverify: destination address is not permitted")
+// 冒泡到调用方的结论映射，而结论是封闭枚举；内网地址属于敏感信息，不得
+// 随错误文本走到 API 响应或日志里（安全规范 §19、§22）。
+//
+// 导出是因为判定搬进本包之后，调用方仍然要认得出「这次出站是被本平台的
+// 目的地址判定拦下的」—— 那正是证明守卫还挂在拨号链路上的那个断言。
+var ErrBlockedDestination = errors.New("gitssh: destination address is not permitted")
 
 // blockedPrefixes 是既不是私有地址、也不是链路本地地址，却仍然必须拒绝的
 // 云元数据网段。
@@ -58,7 +61,7 @@ func guardDestination(next cryptossh.HostKeyCallback) cryptossh.HostKeyCallback 
 func checkDestination(remote net.Addr) error {
 	ip, ok := remoteIP(remote)
 	if !ok {
-		return errBlockedDestination
+		return ErrBlockedDestination
 	}
 	return checkIP(ip)
 }
@@ -70,16 +73,16 @@ func checkDestination(remote net.Addr) error {
 // 否则 ::ffff:127.0.0.1 这类写法会绕过按 IPv4 写的判定（补充版 §26）。
 func checkIP(ip netip.Addr) error {
 	if !ip.IsValid() {
-		return errBlockedDestination
+		return ErrBlockedDestination
 	}
 	// IsGlobalUnicast 已经排除未指定、回环、组播（含链路本地与接口本地
 	// 组播）、链路本地单播与 IPv4 广播；剩下要单独判的只有私有地址。
 	if !ip.IsGlobalUnicast() || ip.IsPrivate() {
-		return errBlockedDestination
+		return ErrBlockedDestination
 	}
 	for _, p := range blockedPrefixes {
 		if p.Contains(ip) {
-			return errBlockedDestination
+			return ErrBlockedDestination
 		}
 	}
 	return nil
