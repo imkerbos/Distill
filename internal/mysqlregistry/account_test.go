@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
+
 	"github.com/imkerbos/Distill/internal/mysqlregistry"
 	"github.com/imkerbos/Distill/internal/registry"
 )
@@ -437,6 +439,147 @@ func waitForRowLockWaiters(t *testing.T, db *sql.DB, want int) {
 				n, want)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// realHash 生成一个真的 bcrypt 哈希。
+//
+// 与 testHash 那个字面量分工不同：字面量用来断言"这串字符不该出现在别处"，
+// 而这里要断言的是"读回来的哈希确实是刚写进去的那一份"，唯一能证明它的
+// 办法是拿它去验一次密码 —— PasswordHash 不给取出字节的出口，比较字符串
+// 这条路本来就不存在。
+func realHash(t *testing.T, password string) string {
+	t.Helper()
+	h, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("GenerateFromPassword: %v", err)
+	}
+	return string(h)
+}
+
+// 库里的账号必须有一条读得回自己密码哈希的路径，否则平台在第一次装好之后
+// 立刻不可用：引导账号建出第一个管理员，引导闸门随即关上，而那个管理员
+// 没有任何一条能登录的路（design doc 2026-08-14 §2）。
+//
+// 顺带钉死这条路径的谓词：停用与软删除的账号读不到哈希，因此连会话都
+// 换不到（与 RoleOf 对停用的处置一致）。
+func TestAccountPasswordHashReadsBackTheStoredHash(t *testing.T) {
+	s, _ := newAccountStore(t)
+	ctx := context.Background()
+	actor := registry.Actor{Username: "bootstrap"}
+	const password = "correct-horse-battery"
+
+	if err := s.CreateAccount(ctx, actor,
+		registry.Account{Username: "alice", Role: registry.RoleAdmin}, realHash(t, password),
+	); err != nil {
+		t.Fatalf("CreateAccount() error = %v", err)
+	}
+
+	h, ok, err := s.AccountPasswordHash(ctx, "alice")
+	if err != nil || !ok {
+		t.Fatalf("AccountPasswordHash() = (_, %v, %v), want the stored hash", ok, err)
+	}
+	if !h.Matches(password) {
+		t.Error("读回来的哈希验不过刚写进去的那个密码 —— 库里的账号登不进来")
+	}
+	// 反方向：一份恒为 true 的 Matches，或者读到了别人的哈希，都要被认出来。
+	if h.Matches("not-the-password") {
+		t.Error("读回来的哈希验过了一个错误密码")
+	}
+
+	// 改完密码之后读到的是新的那一份，不是一份陈旧的副本。
+	const newPassword = "another-correct-horse"
+	if err := s.SetAccountPassword(ctx, actor, "alice", realHash(t, newPassword)); err != nil {
+		t.Fatalf("SetAccountPassword() error = %v", err)
+	}
+	h, ok, err = s.AccountPasswordHash(ctx, "alice")
+	if err != nil || !ok {
+		t.Fatalf("AccountPasswordHash() after a password change = (_, %v, %v)", ok, err)
+	}
+	if !h.Matches(newPassword) || h.Matches(password) {
+		t.Error("改密之后读到的仍是旧哈希 —— 旧口令还能登录，新口令登不进来")
+	}
+
+	if _, ok, err := s.AccountPasswordHash(ctx, "nobody"); err != nil || ok {
+		t.Errorf("AccountPasswordHash() for a missing account = (%v, %v), want (false, nil)", ok, err)
+	}
+
+	// 停用的账号读不到哈希。需要第二个管理员，否则停用会被最后管理员判定拦下。
+	mustCreateAccount(t, s, actor, "admin-b", registry.RoleAdmin)
+	if err := s.DisableAccount(ctx, actor, "alice"); err != nil {
+		t.Fatalf("DisableAccount() error = %v", err)
+	}
+	if _, ok, err := s.AccountPasswordHash(ctx, "alice"); err != nil || ok {
+		t.Errorf("AccountPasswordHash() for a disabled account = (%v, %v), want (false, nil) —— "+
+			"停用的账号不该还能换到一张会话", ok, err)
+	}
+	// 重新启用之后又读得到：挡下的是"停用"这个状态，不是这个账号。
+	if err := s.EnableAccount(ctx, actor, "alice"); err != nil {
+		t.Fatalf("EnableAccount() error = %v", err)
+	}
+	if _, ok, err := s.AccountPasswordHash(ctx, "alice"); err != nil || !ok {
+		t.Errorf("AccountPasswordHash() after re-enabling = (%v, %v), want (true, nil)", ok, err)
+	}
+
+	// 软删除的账号同样读不到：那条行还占着主键，但它不再是一个身份。
+	if err := s.SoftDeleteAccount(ctx, actor, "alice"); err != nil {
+		t.Fatalf("SoftDeleteAccount() error = %v", err)
+	}
+	if _, ok, err := s.AccountPasswordHash(ctx, "alice"); err != nil || ok {
+		t.Errorf("AccountPasswordHash() for a soft-deleted account = (%v, %v), want (false, nil)", ok, err)
+	}
+}
+
+// 引导账号登录必须写审计（design doc 2026-08-14 §2，规范 §43）。
+//
+// 这不是记账：引导口重新可用，意味着平台此刻一个启用中的管理员都不剩。
+// 那是一次事故，而事故必须在事后可见 —— 少了这条审计行，"谁在什么时候
+// 从逃生口进来的"永远答不出来。
+func TestRecordBootstrapLoginWritesAnAuditRow(t *testing.T) {
+	s, db := newAccountStore(t)
+	ctx := context.Background()
+
+	if err := s.RecordBootstrapLogin(ctx, registry.Actor{Username: "demo"}); err != nil {
+		t.Fatalf("RecordBootstrapLogin() error = %v", err)
+	}
+
+	if n := auditCount(t, db, "BOOTSTRAP_LOGIN"); n != 1 {
+		t.Fatalf("BOOTSTRAP_LOGIN audit rows = %d, want exactly 1", n)
+	}
+	var actorCol, target, clusterID string
+	var before, after sql.NullString
+	if err := db.QueryRow(
+		`SELECT actor, target, cluster_id, before_val, after_val
+		   FROM audit_log WHERE action = 'BOOTSTRAP_LOGIN'`,
+	).Scan(&actorCol, &target, &clusterID, &before, &after); err != nil {
+		t.Fatalf("query BOOTSTRAP_LOGIN audit row: %v", err)
+	}
+	if actorCol != "demo" {
+		t.Errorf("actor = %q, want demo —— 审计要答得出「谁」（design doc §7）", actorCol)
+	}
+	if target != "account/demo" {
+		t.Errorf("target = %q, want account/demo", target)
+	}
+	// 引导登录与账号一样不属于任何集群：空串是唯一撞不上真实集群的取值，
+	// 换成别的字面量会与一个真叫这个名字的集群在 idx_cluster_time 上混成
+	// 一份读不开的记录（见 settingClusterID）。
+	if clusterID != "" {
+		t.Errorf("cluster_id = %q, want empty —— 引导登录不属于任何集群", clusterID)
+	}
+	if before.Valid || after.Valid {
+		t.Errorf("before/after = %v/%v, want both NULL —— 这次登录没有改变任何状态",
+			before, after)
+	}
+
+	// 它不建账号：引导账号只在配置文件里，一条把它写进 platform_account 的
+	// 实现会让引导闸门自己关上自己 —— 那个"管理员"没有人建过、也没有人
+	// 能把它删掉。
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM platform_account`).Scan(&n); err != nil {
+		t.Fatalf("count platform_account: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("platform_account rows = %d, want 0 —— 引导登录不得往账号表里写东西", n)
 	}
 }
 

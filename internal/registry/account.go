@@ -4,6 +4,8 @@ import (
 	"errors"
 	"time"
 	"unicode/utf8"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 // ErrLastAdmin 表示这次操作会让库里不再有任何一个启用中的管理员，因而
@@ -45,6 +47,74 @@ type Account struct {
 	CreatedAt time.Time
 	// UpdatedAt 是账号记录最近一次变更时间。
 	UpdatedAt time.Time
+}
+
+// redactedHash 是 PasswordHash 在任何格式化路径上印出来的占位符。
+//
+// 印一个固定串而不是空串：日志里出现空白会被读成"这里没有东西"，而这里
+// 有东西、只是刻意不给看。占位符让读日志的人知道自己看到的是一次遮蔽。
+const redactedHash = "[REDACTED]"
+
+// PasswordHash 是一条账号存在库里的 bcrypt 哈希。
+//
+// **它是个只进不出的容器。** 字段不导出，本类型也不提供任何取出哈希的
+// 方法 —— 唯一的出口是 Matches，它拿一个明文进来、只答一个布尔出去。
+// 这么做的理由与 Account 刻意不带密码字段是同一条（见 Account 的注释）：
+// 「一次响应把哈希带出去了」必须是**表达不出来的状态**，而不是每条新加的
+// 返回路径都要有人记得去检查的一条规则（规范 §19、§20、§35）。
+//
+// 光靠不导出字段还不够，因此还钉死了三条隐式的逃逸路径：
+//
+//   - json.Marshal 会跳过不导出字段而得到 {}，看似安全，但那依赖的是
+//     "将来没有人给这个类型加一个导出字段"。MarshalJSON 把结论固定下来。
+//   - fmt 的 %v/%+v 会把不导出的 []byte 原样印成一串字节，那就是一条
+//     进日志的哈希（规范 §21）。String 把它挡掉。
+//   - %#v 不走 Stringer，因此 GoString 也要有。
+//
+// 值类型而非指针：零值（nil 哈希）在 Matches 下恒为 false —— 一个没被
+// 赋过哈希的容器必须谁也验不过，而不是谁都验得过。
+type PasswordHash struct {
+	// hash 是 bcrypt 的输出。不导出是本类型存在的全部意义。
+	hash []byte
+}
+
+// NewPasswordHash 把存储层刚读到的一列 password_hash 包成 PasswordHash。
+//
+// 只有存储层该调它：构造方向是"哈希进来"，与 Matches 一样不给出口，因此
+// 导出这个构造函数不削弱上面那条不变量。
+func NewPasswordHash(hash string) PasswordHash {
+	return PasswordHash{hash: []byte(hash)}
+}
+
+// Matches 报告 password 是否与本哈希匹配。
+//
+// 不返回 error：bcrypt 区分"不匹配"与"哈希本身不成形"，而对认证来说这
+// 两者是同一个答复。把它们合成一个布尔，是为了让调用方没有一条"哈希坏了
+// 就当作通过"的分支可写（规范 §49）。
+//
+// **本方法恒定做完一次 bcrypt 计算**，调用方据此保持"未知用户与错误密码
+// 耗时一致"这条性质：账号不存在时调用方要自己拿 dummyHash 走一次比对，
+// 见 auth.Verify。
+func (h PasswordHash) Matches(password string) bool {
+	return bcrypt.CompareHashAndPassword(h.hash, []byte(password)) == nil
+}
+
+// String 让哈希在 %v、%s、%+v 与 slog 的任何一条格式化路径上都只印占位符。
+func (h PasswordHash) String() string {
+	return redactedHash
+}
+
+// GoString 同 String：%#v 不查 Stringer，缺了这个方法它会把哈希原样印出来。
+func (h PasswordHash) GoString() string {
+	return redactedHash
+}
+
+// MarshalJSON 让本类型即使被嵌进某个响应体也只序列化成占位符。
+//
+// 值接收者：指针接收者只在被序列化的是 *PasswordHash 时生效，而一个内嵌
+// 的值字段会绕开它 —— 那正是这个方法要防的那种疏漏。
+func (h PasswordHash) MarshalJSON() ([]byte, error) {
+	return []byte(`"` + redactedHash + `"`), nil
 }
 
 // ValidateAccount 校验一条账号记录里由调用方提供的字段。

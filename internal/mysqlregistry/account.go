@@ -35,6 +35,7 @@ const (
 	actionDeleteAccount     = "DELETE_ACCOUNT"
 	actionResetPassword     = "RESET_PASSWORD"
 	actionChangeOwnPassword = "CHANGE_OWN_PASSWORD"
+	actionBootstrapLogin    = "BOOTSTRAP_LOGIN"
 )
 
 // accountColumns 是账号读路径的列清单。
@@ -114,6 +115,51 @@ func (s *Store) Account(ctx context.Context, username string) (registry.Account,
 		return registry.Account{}, false, fmt.Errorf("query account: %w", err)
 	}
 	return a, true, nil
+}
+
+// AccountPasswordHash 读一个此刻能够登录的账号的密码哈希。
+//
+// **本方法刻意不复用 accountColumns。** 那份列清单是读模型的形状，它没有
+// password_hash 正是它存在的意义（见该常量的注释）；把哈希加进去会让每一条
+// 走读模型的路径都开始把哈希取出连接。这里是另一件事：一条只为登录比对
+// 存在的单点读，它的列清单只有一列，且只喂给 registry.PasswordHash ——
+// 哈希从这条路径出来之后就再也变不回一段可以序列化的文字。
+//
+// 谓词比 Account 多一条 disabled_at IS NULL：停用期间与"没有这个账号"
+// 等价（与 RoleOf 一致），被停用的账号因此连会话都换不到。调用方拿到
+// false 时必须自己走完一次哈希比对，否则这条路径就成了用户名探针 ——
+// 那条性质由 auth.Verify 保持，不在本层。
+func (s *Store) AccountPasswordHash(
+	ctx context.Context, username string,
+) (registry.PasswordHash, bool, error) {
+	var hash string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT password_hash FROM platform_account
+		   WHERE username = ? AND disabled_at IS NULL AND deleted_at IS NULL`,
+		username).Scan(&hash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return registry.PasswordHash{}, false, nil
+	}
+	if err != nil {
+		// 错误里不带 hash：查询失败的错误会一路进日志（规范 §21）。
+		return registry.PasswordHash{}, false, fmt.Errorf("query account password hash: %w", err)
+	}
+	return registry.NewPasswordHash(hash), true, nil
+}
+
+// RecordBootstrapLogin 为一次引导账号登录写一条审计行。
+//
+// 没有业务写入，因为这件事没有业务写入 —— 但它必须留痕：引导账号能登进来
+// 意味着平台此刻一个启用中的管理员都不剩（design doc 2026-08-14 §2，
+// 规范 §43）。仍然走 mutate 而不是直接 INSERT 一条审计：审计行的事务、
+// 列与失败语义只有一处定义，另开一条写路径就是另一份要跟着改的规则。
+//
+// cluster_id 取 accountClusterID（空串）：引导登录与账号一样不属于任何
+// 集群，理由见该常量。target 指向引导账号自己 —— 追溯的人从 target 一眼
+// 看出是哪一个身份从逃生口进来的。
+func (s *Store) RecordBootstrapLogin(ctx context.Context, actor registry.Actor) error {
+	return s.mutate(ctx, actor, accountClusterID, actionBootstrapLogin,
+		accountTarget(actor.Username), nil, nil, func(*sql.Tx) error { return nil })
 }
 
 // requireAdminRemains 在事务内断言：这次操作做完之后，库里仍然有至少

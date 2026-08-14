@@ -134,6 +134,24 @@ type Store interface {
 	Accounts(ctx context.Context) ([]Account, error)
 	// Account 按用户名查一个未删除的账号。不存在时第二个返回值为 false。
 	Account(ctx context.Context, username string) (Account, bool, error)
+	// AccountPasswordHash 读一个**此刻能够登录的**账号的密码哈希，供登录
+	// 时比对。账号不存在、已停用或已软删除时第二个返回值为 false。
+	//
+	// 没有这条路径，库里的账号永远登不进来：引导账号建出第一个管理员之后
+	// 引导闸门就关上了，而那个管理员没有任何一条能拿到自己哈希的路径 ——
+	// 平台在第一次装好之后立刻不可用（design doc 2026-08-14 §2）。
+	//
+	// 返回 PasswordHash 而不是 string：哈希从这里出来之后就再也变不回一段
+	// 可以写进响应体或日志的文字（见该类型的注释）。这是本方法唯一的
+	// 返回形状，也是全平台唯一一条读得到哈希的路径。
+	//
+	// **谓词比 Account 多一条 disabled_at IS NULL，这是有意的。** RoleOf 早已
+	// 确立"停用期间与没有这个账号等价"这条处置；把它同样落在认证这一层，
+	// 一个被停用的账号连会话都换不到，而不是换到一张什么都做不了的会话。
+	//
+	// 调用方必须在第二个返回值为 false 时自行走完一次哈希比对，否则登录
+	// 就成了一个用户名探针 —— 见 auth.Verify 与 auth.dummyHash 的注释。
+	AccountPasswordHash(ctx context.Context, username string) (PasswordHash, bool, error)
 	// CreateAccount 新建一个账号，同事务写审计。
 	//
 	// passwordHash 单独传入，不挂在 Account 上（见 Account 的注释）——
@@ -172,4 +190,16 @@ type Store interface {
 	// 的职责，本方法只管把新哈希落库（design doc 2026-08-14 §6）。
 	// 审计前后值只记"密码已变更"这一事实，不含哈希本身。
 	SetAccountPassword(ctx context.Context, actor Actor, username string, passwordHash string) error
+	// RecordBootstrapLogin 为一次引导账号登录写一条审计行，动作
+	// BOOTSTRAP_LOGIN（design doc 2026-08-14 §2）。
+	//
+	// 这是 Store 上唯一一个没有业务写入的方法，因为这件事本身没有业务
+	// 写入 —— 但它必须留痕：引导账号能登进来，意味着平台此刻一个启用中的
+	// 管理员都不剩。那是一次事故，不是一次登录，而事故必须在事后可见
+	// （规范 §43）。审计行仍然走与业务写入同一条事务路径，因此它与别的
+	// 审计行在失败语义上没有第二套规则。
+	//
+	// actor 就是引导账号本身；前后值都为空：动作名、操作者与时间已经答完
+	// 了"谁在什么时候从逃生口进来的"，再没有别的状态发生变化。
+	RecordBootstrapLogin(ctx context.Context, actor Actor) error
 }

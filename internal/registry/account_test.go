@@ -1,9 +1,14 @@
 package registry_test
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
+
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/imkerbos/Distill/internal/registry"
 )
@@ -67,6 +72,102 @@ func TestPasswordLongerThanBcryptAcceptsIsRejectedForMultiByteCharacters(t *test
 	// 远低于「72 个字符」这个误读会给出的上限。
 	if err := registry.ValidatePassword(strings.Repeat("密", 25)); !errors.Is(err, registry.ErrInvalid) {
 		t.Fatalf("ValidatePassword(25 汉字 = 75 字节) = %v, want ErrInvalid", err)
+	}
+}
+
+// PasswordHash 必须能验出正确的密码，也必须验不过错的。
+//
+// 先立这一条，下面「拿不出哈希」的几条才不能靠一个空壳类型全部通过 ——
+// 一个什么都不装的容器当然什么也漏不出来。
+func TestPasswordHashMatchesOnlyTheRightPassword(t *testing.T) {
+	const password = "correct-horse-battery"
+	raw, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("GenerateFromPassword: %v", err)
+	}
+	h := registry.NewPasswordHash(string(raw))
+
+	if !h.Matches(password) {
+		t.Error("Matches(正确密码) = false —— 库里的账号就此谁也登不进来")
+	}
+	if h.Matches("not-the-password") {
+		t.Error("Matches(错误密码) = true")
+	}
+	// 零值必须谁也验不过：一个没被赋过哈希的容器如果放行，那就是一条
+	// 登录绕过 —— 而它出现的场合恰好是「读路径忘了填」。
+	var zero registry.PasswordHash
+	if zero.Matches(password) || zero.Matches("") {
+		t.Error("零值 PasswordHash 验过了密码，它必须谁也验不过")
+	}
+}
+
+// 哈希不得从 PasswordHash 里以任何一条隐式路径漏出来。
+//
+// 三条路径一起断言，因为它们各自独立地会把不导出的 []byte 印出来：
+// json.Marshal（会进响应体，规范 §20、§35）、fmt 的 %v/%s/%+v 与 %#v
+// （会进日志，规范 §19、§21）。少钉一条，那条就是将来那次泄漏。
+//
+// 断言的是**哈希那串字符不出现**，不是"输出等于某个占位符"：后者在有人
+// 把占位符改成哈希本身时照样绿。
+func TestPasswordHashNeverPrintsItsBytes(t *testing.T) {
+	raw, err := bcrypt.GenerateFromPassword([]byte("correct-horse-battery"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("GenerateFromPassword: %v", err)
+	}
+	secret := string(raw)
+	h := registry.NewPasswordHash(secret)
+
+	// 哈希的字节形态也要查：%v 把 []byte 印成 [36 50 97 ...]，那串数字
+	// 不含 secret 的任何一个字符，只查字符串会把它整条放过去。
+	rawBytes := []byte(secret)
+	bytesForm := fmt.Sprintf("%v", rawBytes)
+
+	// 内嵌进一个响应体形状的结构里：真正的泄漏长这个样子，而不是有人
+	// 单独去序列化一个哈希。
+	envelope := struct {
+		Username string
+		Hash     registry.PasswordHash
+	}{Username: "alice", Hash: h}
+
+	blob, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	rendered := []string{
+		string(blob),
+		// %v 与 %s 对实现了 Stringer 的类型走同一条路径，列一个就够；
+		// h.String() 单列在下面，因此这里不再重复 %s。
+		fmt.Sprintf("%v", h),
+		fmt.Sprintf("%+v", h),
+		fmt.Sprintf("%#v", h),
+		fmt.Sprintf("%v", envelope),
+		fmt.Sprintf("%+v", envelope),
+		h.String(),
+	}
+	for _, out := range rendered {
+		if strings.Contains(out, secret) || strings.Contains(out, bytesForm) {
+			t.Errorf("PasswordHash 渲染成了 %q，其中带着密码哈希", out)
+		}
+	}
+
+	// 反方向：类型的导出方法集必须恰好是这四个。少了这条，一个将来加上
+	// Bytes() 的版本仍然能让上面全绿 —— 那时泄漏走的是那个方法，而不是
+	// 格式化，而本类型的全部保证都建立在"没有出口"上。
+	//
+	// 断言的是集合相等而不是"不含 Bytes"：黑名单漏掉一个名字就是放行
+	// 一个出口，而新增任何一个方法都应该是一次有人明确改过这条断言的
+	// 决定。
+	want := map[string]bool{
+		"Matches": true, "String": true, "GoString": true, "MarshalJSON": true,
+	}
+	rt := reflect.TypeOf(registry.PasswordHash{})
+	got := map[string]bool{}
+	for i := range rt.NumMethod() {
+		got[rt.Method(i).Name] = true
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("PasswordHash 的导出方法集 = %v, want %v —— "+
+			"新增的方法若能把哈希取出来，本类型的全部保证就作废了", got, want)
 	}
 }
 

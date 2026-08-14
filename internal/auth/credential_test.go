@@ -28,7 +28,10 @@ func hashOf(t *testing.T, plain string) string {
 // 直接改这里的记录来模拟另一条路径（管理员在界面上）刚刚改完权限。
 type fakeAccounts struct {
 	accounts map[string]registry.Account
-	err      error
+	// hashes 与 accounts 分开存，正如库里读模型与 password_hash 分成两条
+	// 读路径：把哈希挂进 registry.Account 是这一层刻意表达不出来的事。
+	hashes map[string]string
+	err    error
 }
 
 func newFakeAccounts(list ...registry.Account) *fakeAccounts {
@@ -36,7 +39,7 @@ func newFakeAccounts(list ...registry.Account) *fakeAccounts {
 	for _, a := range list {
 		m[a.Username] = a
 	}
-	return &fakeAccounts{accounts: m}
+	return &fakeAccounts{accounts: m, hashes: map[string]string{}}
 }
 
 func (f *fakeAccounts) Accounts(_ context.Context) ([]registry.Account, error) {
@@ -56,6 +59,31 @@ func (f *fakeAccounts) Account(_ context.Context, username string) (registry.Acc
 	}
 	a, ok := f.accounts[username]
 	return a, ok, nil
+}
+
+// AccountPasswordHash 复刻存储层的谓词：不存在、已停用、已软删除一律
+// 返回 false。照抄这条谓词是本假实现存在的意义 —— 少抄一条，
+// 「停用的账号还能登录」在这里就永远测不出来。
+func (f *fakeAccounts) AccountPasswordHash(
+	_ context.Context, username string,
+) (registry.PasswordHash, bool, error) {
+	if f.err != nil {
+		return registry.PasswordHash{}, false, f.err
+	}
+	a, ok := f.accounts[username]
+	if !ok || a.DisabledAt != nil {
+		return registry.PasswordHash{}, false, nil
+	}
+	h, ok := f.hashes[username]
+	if !ok {
+		return registry.PasswordHash{}, false, nil
+	}
+	return registry.NewPasswordHash(h), true, nil
+}
+
+// setPassword 给一个账号配上哈希，模拟它在库里真的有一条口令。
+func (f *fakeAccounts) setPassword(username, hash string) {
+	f.hashes[username] = hash
 }
 
 // disable 把一个账号标成停用；软删除则直接从表里移除，因为 Account 与
@@ -385,6 +413,167 @@ func TestRoleOfRefusesAnUnregisteredRole(t *testing.T) {
 	}
 	if ok || role.Valid() {
 		t.Errorf("RoleOf = (%q, %v), want refused for a role outside the enum", role, ok)
+	}
+}
+
+// 库里的账号必须能登录。
+//
+// **这条线决定平台在第一次装好之后还能不能用**：引导账号建出第一个管理员
+// 之后引导闸门就关上（design doc 2026-08-14 §2），若库内账号没有一条能拿到
+// 自己哈希的路径，那个刚建出来的管理员登不进来，平台从此不可用。
+func TestDatabaseAccountCanSignIn(t *testing.T) {
+	ctx := context.Background()
+	const password = "correct-horse-battery"
+	accounts := newFakeAccounts(enabledAccount("ops", registry.RoleAdmin))
+	accounts.setPassword("ops", hashOf(t, password))
+	v := auth.NewVerifier(bootstrapUser(t), accounts)
+
+	ok, err := v.Verify(ctx, "ops", password)
+	if err != nil {
+		t.Fatalf("Verify for a database account: %v", err)
+	}
+	if !ok {
+		t.Fatal("a database account cannot sign in — once the bootstrap gate closes, " +
+			"nobody can get into the platform at all")
+	}
+
+	// 错误密码必须被拒绝：一份恒为 true 的实现同样能让上面那行绿。
+	if ok, err := v.Verify(ctx, "ops", "not-the-password"); err != nil || ok {
+		t.Errorf("Verify with a wrong password = (%v, %v), want refused", ok, err)
+	}
+
+	// 引导闸门此刻是关着的（库里有一个启用中的管理员），库内账号照样登得
+	// 进来：两条身份互不牵连。
+	if ok, err := v.Verify(ctx, "demo", "bootstrap-secret"); err != nil || ok {
+		t.Errorf("bootstrap Verify while an enabled admin exists = (%v, %v), want refused", ok, err)
+	}
+}
+
+// 停用与软删除的账号一律登不进来。
+//
+// 停用期间与「没有这个账号」等价，这条处置 RoleOf 早就定了；把它同样落在
+// 认证这一层，被停用的账号连会话都换不到，而不是换到一张什么都做不了的
+// 会话（design doc 2026-08-14 §4）。
+func TestDisabledOrSoftDeletedAccountCannotSignIn(t *testing.T) {
+	ctx := context.Background()
+	const password = "correct-horse-battery"
+
+	for _, tc := range []struct {
+		name   string
+		revoke func(f *fakeAccounts)
+	}{
+		{"disabled", func(f *fakeAccounts) { f.disable("ops") }},
+		{"soft deleted", func(f *fakeAccounts) { f.softDelete("ops") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			accounts := newFakeAccounts(
+				enabledAccount("ops", registry.RoleAdmin),
+				enabledAccount("root", registry.RoleAdmin),
+			)
+			accounts.setPassword("ops", hashOf(t, password))
+			v := auth.NewVerifier(bootstrapUser(t), accounts)
+
+			// 前提：撤销之前它确实登得进来，否则下面那条断言什么也没证明。
+			if ok, err := v.Verify(ctx, "ops", password); err != nil || !ok {
+				t.Fatalf("precondition: Verify before %s = (%v, %v), want accepted", tc.name, ok, err)
+			}
+
+			tc.revoke(accounts)
+
+			ok, err := v.Verify(ctx, "ops", password)
+			if err != nil {
+				t.Fatalf("Verify after %s: %v", tc.name, err)
+			}
+			if ok {
+				t.Errorf("Verify after %s = true, want refused —— "+
+					"停用或删除的账号不该还能换到一张会话", tc.name)
+			}
+		})
+	}
+}
+
+// 未知账号那条分支必须与「账号存在但密码错了」花掉同一次 bcrypt 计算。
+//
+// TestVerifyUnknownUserStillHashes 只断言两种失败的**返回值**认不出来，而
+// 返回值相同的实现里有一份是「未知就立刻 return」——它泄漏的是耗时，不是
+// 返回值，那条用例对它是绿的。这一条量的就是耗时。
+//
+// 哈希用 bcrypt.DefaultCost 而不是 hashOf 的 MinCost：MinCost 的一次比对是
+// 几十微秒，与「直接返回」在调度噪声里分不开；DefaultCost 是几十毫秒，
+// 一次短路会掉到它的千分之一以下。判据因此不依赖一个猜出来的绝对时长，
+// 取三次里最快的一次也是同一个理由——噪声只会让耗时变长，取最小值就把
+// 它挤掉了。dummyHash 本身也是 cost 10，两条分支的工作量因此可比。
+func TestVerifyDoesNotShortCircuitForUnknownAccounts(t *testing.T) {
+	ctx := context.Background()
+	realCost, err := bcrypt.GenerateFromPassword([]byte("correct-horse-battery"), bcrypt.DefaultCost)
+	if err != nil {
+		t.Fatalf("hash at the default cost: %v", err)
+	}
+	accounts := newFakeAccounts(enabledAccount("ops", registry.RoleAdmin))
+	accounts.setPassword("ops", string(realCost))
+	v := auth.NewVerifier(bootstrapUser(t), accounts)
+
+	fastest := func(username string) time.Duration {
+		t.Helper()
+		var best time.Duration
+		for i := range 3 {
+			start := time.Now()
+			ok, err := v.Verify(ctx, username, "not-the-password")
+			if err != nil || ok {
+				t.Fatalf("Verify(%q) = (%v, %v), want a plain refusal", username, ok, err)
+			}
+			if d := time.Since(start); i == 0 || d < best {
+				best = d
+			}
+		}
+		return best
+	}
+
+	known := fastest("ops")
+	unknown := fastest("ghost")
+	// 四分之一是给调度噪声留的余量，不是给「少算一次哈希」留的：短路的
+	// 实现会掉到千分之一量级，这条线拦得住它而不会被抖动误伤。
+	if unknown*4 < known {
+		t.Errorf("unknown account took %v but a wrong password took %v —— "+
+			"未知账号那条分支没有走完哈希比对，登录接口成了一个用户名探针",
+			unknown, known)
+	}
+}
+
+// 库内账号的用户名不得与配置里的引导账号撞名（大小写不敏感）。
+//
+// 撞名会同时造成两件事：撞名的库内账号永远登不进来（Verify 先看引导
+// 分支），以及引导闸门开着时它会被解析成 ADMIN 而不管库里写的是什么角色
+// （RoleOf 同样先看引导分支）。后者是一次静默提权。
+//
+// 大小写不敏感是因为 platform_account 的排序规则是 utf8mb4_0900_ai_ci：
+// 库把 "demo" 与 "DEMO" 当成同一个主键，而 isBootstrap 用的是 Go 的 ==。
+func TestValidateNewUsernameRefusesTheBootstrapName(t *testing.T) {
+	v := auth.NewVerifier(bootstrapUser(t), newFakeAccounts())
+
+	for _, name := range []string{"demo", "DEMO", "Demo", "deMO"} {
+		if err := v.ValidateNewUsername(name); !errors.Is(err, registry.ErrInvalid) {
+			t.Errorf("ValidateNewUsername(%q) = %v, want ErrInvalid —— "+
+				"一个用户名不能同时是两套凭证", name, err)
+		}
+	}
+
+	// 不撞名的用户名必须放行，否则一份恒为拒绝的实现也能让上面几行绿。
+	// 空串在这里也放行：「用户名不能为空」是 ValidateAccount 的判定，
+	// 本函数只回答撞不撞名这一个问题。
+	for _, name := range []string{"demo2", "ademo", "de mo", "ops", ""} {
+		if err := v.ValidateNewUsername(name); err != nil {
+			t.Errorf("ValidateNewUsername(%q) = %v, want nil", name, err)
+		}
+	}
+
+	// 没有配置引导账号时不存在引导身份，也就不存在撞名 —— 此时用空用户名
+	// 去撞一个空的 bootstrapUser 必须放行，而不是拒绝一个与它无关的输入。
+	none := auth.NewVerifier(config.User{}, newFakeAccounts())
+	for _, name := range []string{"", "demo"} {
+		if err := none.ValidateNewUsername(name); err != nil {
+			t.Errorf("ValidateNewUsername(%q) with no bootstrap account = %v, want nil", name, err)
+		}
 	}
 }
 
