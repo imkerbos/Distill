@@ -236,22 +236,22 @@ function parsePositiveInt(raw: string, label: string): number | string {
  *
  * host key 的处理是本函数存在的主要理由：
  *
- * 输入框留空 = **不修改信任锚**。但服务端的 PUT 是整行替换，请求体里
- * 的 `gitVerifyHostKeys` 会被原样写进库（internal/mysqlregistry/setting.go
- * UpdateSetting）—— 也就是说，"留空"在协议上无法表达，发空串就是清空。
- * 而清空的后果不是"退化成不校验"：host key 为空时 gitverify.New 直接拒绝
- * 构造（design doc §1.3），此后每一次 Git 校验都出不了结论。
+ * 输入框留空 = **不修改信任锚**，落到请求体上就是**不带这个字段**
+ * （PlatformSettingWrite 里它是唯一可选的一项，后端 settingPayload 的
+ * 对应字段是指针，缺席即保持原值）。
  *
- * 于是当库里已经装着 host key（指纹非空）而输入框留空时，这里**不提交**，
- * 而不是提交一个会清空它的请求体。安全的失败方向是一次被拒绝的保存，
- * 不是一次静默移除的信任锚（规范 §49）。
+ * 从前这里发的是空串，而服务端的 PUT 是整行替换 —— "留空"在协议上说不
+ * 出口，空串就是清空。于是这里只能靠拦下整次保存来防止误清，代价是一个
+ * 手上不再留着 known_hosts 原文的操作者连会话 TTL 都改不了；而拦截本身
+ * 又只长在浏览器里，一次 curl 就绕过去了（规范 §34：前端不是安全边界）。
+ * 协议给了"缺席"一个位置之后，两头都不必再靠这里的自觉。
  *
- * 指纹为空时留空则照常提交空串：库里本来就没有 host key，写空串不改变
- * 任何事实，拦下它只会让一个从未配过 host key 的平台连会话 TTL 都改不了。
+ * 本函数因此**永远不构造清空信任锚的请求体**：输入框有内容就换，留空就
+ * 不提这个字段。清空是一件本页做不到的事，而不是一件要靠一段判断拦住的事
+ * （规范 §49：安全的失败方向）。真要清空由服务端另行决定，那条判定在
+ * registry.ValidateSettingUpdate 里，此刻是拒绝。
  */
-export function buildSettingsWrite(
-  values: SettingsFormValues, current: PlatformSettingView,
-): SettingsBuildResult {
+export function buildSettingsWrite(values: SettingsFormValues): SettingsBuildResult {
   // 五项一起走同一张表：漏掉一项就等于那一项的输入框存在、却从不被读取，
   // 保存后悄悄回到旧值。
   const numbers = {} as Record<NumericSettingKey, number>
@@ -265,15 +265,6 @@ export function buildSettingsWrite(
   if (fieldsError !== '') return { ok: false, error: fieldsError }
 
   const hostKeys = values.hostKeysInput.trim()
-  if (hostKeys === '' && current.gitVerifyHostKeysFingerprint !== '') {
-    return {
-      ok: false,
-      error: '保存被拦下：host key 输入框留空表示"不修改"，但服务端的保存是整行替换，'
-        + '一次留空的提交会把当前的 SSH 信任锚清空，此后所有 Git 校验都无法进行。'
-        + `要保存其他改动，请把当前生效的 known_hosts 原文粘回输入框（当前指纹 ${current.gitVerifyHostKeysFingerprint}，`
-        + '保存后可据此核对粘的是不是同一份）。',
-    }
-  }
 
   return {
     ok: true,
@@ -287,7 +278,9 @@ export function buildSettingsWrite(
       secretsPrefix: values.secretsPrefix.trim(),
       secretsDir: values.secretsDir.trim(),
       gitVerifyTimeoutMs: numbers.gitVerifyTimeoutMs,
-      gitVerifyHostKeys: hostKeys,
+      // 留空就整个不带这个键：空串在协议上是"清空"，而这一页表达不出
+      // 那个意思，也不该表达得出。
+      ...(hostKeys === '' ? {} : { gitVerifyHostKeys: hostKeys }),
     },
   }
 }
@@ -356,7 +349,9 @@ export function settingsDiff(
     }
   }
 
-  if (next.gitVerifyHostKeys !== '') {
+  // 只有真的带了原文才列这一行。缺席是"不修改"，凭空多出一条
+  // "信任锚要变了"会让操作者以为自己碰了不该碰的东西。
+  if (next.gitVerifyHostKeys !== undefined && next.gitVerifyHostKeys !== '') {
     rows.push({
       label: 'SSH 信任锚（host key）',
       before: current.gitVerifyHostKeysFingerprint || '（未配置）',

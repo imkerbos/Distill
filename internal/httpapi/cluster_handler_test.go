@@ -439,6 +439,11 @@ func (m *memRegistry) UpdateSetting(_ context.Context, _ registry.Actor, s regis
 	if err := registry.ValidatePlatformSetting(s); err != nil {
 		return err
 	}
+	// 变更约束与真实实现同处一层（mysqlregistry.UpdateSetting）：替身漏了
+	// 这一条，「一次 PUT 抹掉信任锚」就会在设置端点的测试里表现成成功。
+	if err := registry.ValidateSettingUpdate(m.setting, s); err != nil {
+		return err
+	}
 	m.record("UpdateSetting")
 	m.setting = s
 	return nil

@@ -65,7 +65,7 @@ function SettingsForm({ current, onSaved }: {
   // 每次渲染都重算：差异区要在操作者按下保存**之前**就显示这次会写什么，
   // 而不是在提交时才算一次。用的是与提交同一个函数的同一个结果，界面上
   // 看到的那份差异因此就是会被发出去的那一份。
-  const built = buildSettingsWrite(values, current)
+  const built = buildSettingsWrite(values)
   const rows = built.ok ? settingsDiff(current, built.body) : []
 
   async function submit(e: FormEvent) {
@@ -232,6 +232,8 @@ function HostKeysSection({ fingerprint, value, onChange }: {
         <SubHeading>
           这个框只用于写入，永远不会显示当前生效的 host key：服务端不回原文，
           能核对的只有上面那串指纹。保存之后请对照新指纹确认装上去的就是你粘的那一份。
+          留空保存时这一项根本不会被提交，当前信任锚原样保留，其余改动照常生效；
+          本页没有清空信任锚的操作。
         </SubHeading>
       </Card>
     </Section>

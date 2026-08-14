@@ -137,6 +137,15 @@ func (s *Store) UpdateSetting(
 	if err != nil {
 		return err
 	}
+	// 变更本身的约束在这里判，而不是在边界层：边界层是**一个**调用方，
+	// 而「信任锚不得被清空」这件事必须对每一个调用方成立（规范 §34）。
+	//
+	// 判定用的前值与审计的前值是同一个、同样取自事务外，因此并发编辑下
+	// 它与其余字段落在同一条已知空缺里（最后写入者覆盖，design doc §7），
+	// 不是这个字段特有的新问题。
+	if err := registry.ValidateSettingUpdate(before, ps); err != nil {
+		return err
+	}
 	return s.mutate(ctx, actor, settingClusterID, settingAction, settingTarget,
 		before, ps, func(tx *sql.Tx) error {
 			// 存在性由事务内的加锁读断言，不由 RowsAffected 断言：运行时

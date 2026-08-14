@@ -35,11 +35,36 @@ type settingPayload struct {
 	// 它在响应形状 settingView 里没有对应字段，那是刻意的：读取端点回的是
 	// 指纹（design doc §1.3、规范 §19/§20）。一份设置的响应不能变成把写进去
 	// 的东西再读回来的通道。
-	GitVerifyHostKeys string `json:"gitVerifyHostKeys"`
+	//
+	// 整份请求体里只有这一个字段是指针：**缺席或 null = 保持不变**。
+	//
+	// 其余每一项都能从响应里读回来，改任何一项都能带着完整的一份重放；
+	// host key 不能 —— 原文一旦保存就再也读不回来。于是在整行替换的 PUT
+	// 里，「这次不动信任锚」这句话在协议上根本说不出口：漏掉它与显式清空
+	// 长得一模一样。后果是两个方向都坏 —— 手上不再留着 known_hosts 原文的
+	// 操作者连会话 TTL 都改不了，而任何一次留空提交都是一次静默清空。
+	//
+	// 指针让「不修改」有了表示，同时把「清空」留成一件说得出口、因此也
+	// 拦得住的事：显式给出空串会被 registry.ValidateSettingUpdate 拒绝。
+	// 那条判定在 registry 层而不在这里，前端那段同源提示也只是提示
+	// （规范 §34：前端不是安全边界）。
+	//
+	// 只有这一个字段是指针，是为了不把整份请求体变成一个可以被误用成部分
+	// 更新的形状：其余字段缺席仍然是零值，仍然会被 ValidatePlatformSetting
+	// 当场拒绝。
+	GitVerifyHostKeys *string `json:"gitVerifyHostKeys"`
 }
 
 // toSetting 把请求体转成领域对象。
-func (p settingPayload) toSetting() registry.PlatformSetting {
+//
+// current 是库里当前那一份，只为 host key 那个字段而来：缺席时沿用它的值。
+// 合并只能发生在服务端 —— 让提交方把原文粘回来，就是把同一个问题原样退还
+// 给一个拿不到原文的人。
+func (p settingPayload) toSetting(current registry.PlatformSetting) registry.PlatformSetting {
+	hostKeys := current.GitVerifyHostKeys
+	if p.GitVerifyHostKeys != nil {
+		hostKeys = *p.GitVerifyHostKeys
+	}
 	return registry.PlatformSetting{
 		SessionTTL:          time.Duration(p.SessionTTLSeconds) * time.Second,
 		HTTPReadTimeout:     time.Duration(p.HTTPReadTimeoutMs) * time.Millisecond,
@@ -50,7 +75,7 @@ func (p settingPayload) toSetting() registry.PlatformSetting {
 		SecretsPrefix:       p.SecretsPrefix,
 		SecretsDir:          p.SecretsDir,
 		GitVerifyTimeout:    time.Duration(p.GitVerifyTimeoutMs) * time.Millisecond,
-		GitVerifyHostKeys:   p.GitVerifyHostKeys,
+		GitVerifyHostKeys:   hostKeys,
 	}
 }
 
@@ -149,7 +174,15 @@ func handleUpdateSetting(d Deps) http.HandlerFunc {
 			response.WriteSystem(w, http.StatusBadRequest, response.CodeInvalidParam)
 			return
 		}
-		s := p.toSetting()
+		// 先读当前那一份：gitVerifyHostKeys 缺席时要沿用它，而这个合并
+		// 只能在服务端做。读上来的其余字段一概不参与合并 —— 整行替换的
+		// 语义不变，缺席的字段仍然是零值、仍然会被校验当场拒绝。
+		current, err := d.Registry.Setting(r.Context())
+		if err != nil {
+			writeRegistryError(w, r, d, err)
+			return
+		}
+		s := p.toSetting(current)
 		if err := d.Registry.UpdateSetting(r.Context(), actorOf(r), s); err != nil {
 			writeRegistryError(w, r, d, err)
 			return

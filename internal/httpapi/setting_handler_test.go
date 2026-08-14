@@ -292,3 +292,71 @@ func TestSettingEndpointsDoNotLeakRegistryErrorText(t *testing.T) {
 		})
 	}
 }
+
+// 「这次不动信任锚」必须在协议上说得出口。
+//
+// PUT 是整行替换，而 host key 原文永远读不回来（读取端点只回指纹）。
+// 于是在这个字段上，「不修改」与「清空」原本长得一模一样：一个手上不再
+// 留着 known_hosts 原文的操作者，会连会话 TTL 都改不了 —— 表单要么拦下
+// 每一次保存，要么替他把信任锚抹掉。缺席即保持，这个死结才解开
+// （final review I3）。
+//
+// 三个方向一起断言：TTL 真的改了、信任锚原样留着、响应里的指纹仍然是
+// 当前那一份 —— 少了最后一条，一个把信任锚清掉却照常回 200 的实现也能
+// 通过前两条里的任何一条。
+func TestUpdateSettingKeepsTheTrustAnchorWhenTheFieldIsAbsent(t *testing.T) {
+	reg := settingRegistry()
+	h, _, cookie := newTestRouterWithRegistry(t, fixtureReader(), reg)
+
+	body := settingBody(nil)
+	// 操作者只想改会话 TTL，手上没有 known_hosts 原文，也没打算碰信任锚。
+	delete(body, "gitVerifyHostKeys")
+	body["sessionTtlSeconds"] = 3600
+
+	rec := authedPutJSON(t, h, cookie, settingPath, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if got := bodyOf(t, rec)["code"]; got != float64(0) {
+		t.Fatalf("code = %v, want 0 — leaving the trust anchor alone must not block the save (body %s)",
+			got, rec.Body.String())
+	}
+	if reg.setting.SessionTTL != time.Hour {
+		t.Errorf("sessionTtl = %v, want 1h — the operator could not change a setting he is allowed to change",
+			reg.setting.SessionTTL)
+	}
+	if reg.setting.GitVerifyHostKeys != testHostKeys {
+		t.Fatalf("gitVerifyHostKeys = %q, want it untouched — an absent field silently removed the trust anchor",
+			reg.setting.GitVerifyHostKeys)
+	}
+	data, _ := bodyOf(t, rec)["data"].(map[string]any)
+	if fp, _ := data["gitVerifyHostKeysFingerprint"].(string); fp == "" {
+		t.Error("the response reports no trust anchor after a save that never touched it")
+	}
+}
+
+// 显式清空必须被服务端拒绝，而不是被浏览器拦下。
+//
+// 设置页确实拦过这件事，但那是一份镜像、不是判定（规范 §34：前端不是
+// 安全边界）—— 一次 curl、一个将来新增的页面，都能一句话抹掉信任锚。
+// 清空的后果不是「退化成不校验」（gitverify.New 拒绝构造，失败朝关），
+// 而是一次无声的能力丧失：此后每一次 Git 校验都出不了结论，没有人做过
+// 这个决定，而原文再也读不回来，无法撤销。
+func TestUpdateSettingRefusesToClearTheTrustAnchor(t *testing.T) {
+	reg := settingRegistry()
+	h, _, cookie := newTestRouterWithRegistry(t, fixtureReader(), reg)
+	before := reg.setting
+
+	rec := authedPutJSON(t, h, cookie, settingPath,
+		settingBody(map[string]any{"gitVerifyHostKeys": ""}))
+	if got := bodyOf(t, rec)["code"]; got != float64(20001) {
+		t.Fatalf("code = %v, want 20001 — a single PUT cleared the platform's SSH trust anchor (body %s)",
+			got, rec.Body.String())
+	}
+	if msg, _ := bodyOf(t, rec)["msg"].(string); !strings.Contains(msg, "gitVerifyHostKeys") {
+		t.Errorf("msg = %q, want it to name the field that was refused", msg)
+	}
+	if reg.setting != before {
+		t.Errorf("setting = %+v, want it untouched by a rejected save", reg.setting)
+	}
+}

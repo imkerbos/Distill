@@ -100,6 +100,34 @@ func ValidatePlatformSetting(s PlatformSetting) error {
 	return validateSecretsBackendFields(s)
 }
 
+// ValidateSettingUpdate 校验一次设置**变更**。
+//
+// 与 ValidatePlatformSetting 分开：那个函数看的是一份设置自身是否成立，
+// 而这里的约束是关于**从哪一份变到哪一份**的，单看提交的那一份判不出来。
+//
+// 目前只有一条：库里已经装着 SSH 信任锚时，不接受一次把它清空的提交。
+//
+// 这条判定必须长在服务端。设置页确实拦过它，但那是一份镜像、不是判定
+// （规范 §34：前端不是安全边界）—— 任何一次直接调 API 的 PUT、任何将来
+// 新增的页面，都能一句话抹掉信任锚。
+//
+// 清空的后果不是「退化成不校验」：host key 为空时 gitverify.New 直接拒绝
+// 构造，失败方向朝关。坏在它是一次**无声的能力丧失** —— 此后每一次 Git
+// 校验都出不了结论，而没有任何人做过这个决定；原文又永远读不回来
+// （读取端点只回指纹），于是这次丢失不可逆。
+//
+// 不并进 ValidatePlatformSetting：空 host key 本身是一个合法状态（全新
+// 部署尚未配置时就是它），而 settings.Provider 会对**读上来的**每一份设置
+// 跑一次 ValidatePlatformSetting —— 把空值判成非法，平台会连启动都做不到。
+func ValidateSettingUpdate(current, next PlatformSetting) error {
+	if current.GitVerifyHostKeys != "" && next.GitVerifyHostKeys == "" {
+		return invalid("gitVerifyHostKeys 不能被清空：它是平台连接策略仓库时的信任锚，" +
+			"清空之后所有 Git 校验都无法完成，而原文无法再从平台读回。" +
+			"不修改信任锚时不要带这个字段")
+	}
+	return nil
+}
+
 // validateSecretsBackendFields 检查凭据字段是否与选中的后端互相印证。
 //
 // 三条约束都指向同一件事：设置页上的后端选择必须是唯一真相，字段不能

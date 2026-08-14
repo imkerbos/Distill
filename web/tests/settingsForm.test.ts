@@ -64,32 +64,39 @@ test('设置的读取形状里根本没有 host key 原文的位置', () => {
     '读取形状带上了 gitVerifyHostKeys —— 服务端不回它，前端也不该有它的位置')
 })
 
-test('host key 输入框留空时不提交清空：库里已装着信任锚就拦下这次保存', () => {
+test('host key 输入框留空时不提这个字段：保存照常进行，信任锚不动', () => {
   const current = view({ gitVerifyHostKeysFingerprint: 'SHA256:abcdEFGH1234' })
-  // 操作者只想改 Git 校验超时，压根没打算碰信任锚。
-  const built = buildSettingsWrite(values(current, { gitVerifyTimeoutMs: '20000' }), current)
-
-  assert.equal(built.ok, false,
-    '留空的 host key 被提交了出去——服务端的保存是整行替换，这一次提交会把 SSH 信任锚清空，'
-    + '此后所有 Git 校验都无法进行，而操作者以为自己只改了一个超时')
-  if (built.ok) return
-  assert.match(built.error, /信任锚|host key/,
-    '拦下了却没说清拦的是什么，操作者只会以为页面坏了')
-})
-
-test('从未配过 host key 时留空照常提交空串：那不是一次清空', () => {
-  const current = view({ gitVerifyHostKeysFingerprint: '' })
-  const built = buildSettingsWrite(values(current, { gitVerifyTimeoutMs: '20000' }), current)
+  // 操作者只想改 Git 校验超时，压根没打算碰信任锚，手上也没有 known_hosts 原文。
+  const built = buildSettingsWrite(values(current, { gitVerifyTimeoutMs: '20000' }))
 
   assert.equal(built.ok, true,
-    '库里本来就没有 host key，写空串不改变任何事实；拦下它只会让平台连超时都改不了')
+    '保存被拦下了——要求把原文粘回来才准保存，等于一个手上不再留着 known_hosts 的'
+    + '操作者连会话 TTL 都改不了，而唯一的出路是手工改库')
   if (!built.ok) return
-  assert.equal(built.body.gitVerifyHostKeys, '')
+
+  // 关键是"不带这个键"，不是"带一个空串"：空串在协议上的意思是清空。
+  assert.equal(Object.hasOwn(built.body, 'gitVerifyHostKeys'), false,
+    '请求体带上了 gitVerifyHostKeys——服务端的保存是整行替换，带着空串提交就是'
+    + '一次静默清空，此后所有 Git 校验都无法进行，而操作者以为自己只改了一个超时')
+  assert.equal(built.body.gitVerifyTimeoutMs, 20000)
+})
+
+test('从未配过 host key 时留空同样不提这个字段', () => {
+  const current = view({ gitVerifyHostKeysFingerprint: '' })
+  const built = buildSettingsWrite(values(current, { gitVerifyTimeoutMs: '20000' }))
+
+  assert.equal(built.ok, true,
+    '库里本来就没有 host key，拦下这次保存只会让平台连超时都改不了')
+  if (!built.ok) return
+  // 与"已经配过"那条走同一条路径：这一页从不构造清空信任锚的请求体，
+  // 于是"当前有没有配过"根本不参与这个决定，也就没有一个会判错的分支。
+  assert.equal(Object.hasOwn(built.body, 'gitVerifyHostKeys'), false,
+    '按当前指纹分岔构造请求体——多一个分支就多一次判错的机会，而判错的方向是清空')
 })
 
 test('输入框填了原文就照原文提交', () => {
   const current = view({ gitVerifyHostKeysFingerprint: 'SHA256:old' })
-  const built = buildSettingsWrite(values(current, { hostKeysInput: `  ${HOST_KEYS}\n` }), current)
+  const built = buildSettingsWrite(values(current, { hostKeysInput: `  ${HOST_KEYS}\n` }))
 
   assert.equal(built.ok, true)
   if (!built.ok) return
@@ -120,7 +127,7 @@ test('凭据后端与其字段必须互相印证，且这道检查在提交路�
     // 走的是 buildSettingsWrite 而不是那个私有的检查函数：这里同时问两件
     // 事——检查本身对不对，以及提交路径是不是还在调用它。只测检查函数，
     // 把它从 buildSettingsWrite 里删掉也照样全绿。
-    const built = buildSettingsWrite(values(current, over), current)
+    const built = buildSettingsWrite(values(current, over))
     assert.equal(built.ok, want, `${name}：期望 ok=${want}`)
   }
 })
@@ -128,12 +135,12 @@ test('凭据后端与其字段必须互相印证，且这道检查在提交路�
 test('超时与有效期必须为正整数', () => {
   const current = view()
   for (const bad of ['0', '-1', '', '  ', '1.5', '10s', 'abc']) {
-    const built = buildSettingsWrite(values(current, { httpReadTimeoutMs: bad }), current)
+    const built = buildSettingsWrite(values(current, { httpReadTimeoutMs: bad }))
     assert.equal(built.ok, false, `httpReadTimeoutMs=${JSON.stringify(bad)} 被放过了`)
   }
   // 五项都要被读到：漏掉一项就等于那个输入框存在却从不被提交。
   for (const f of NUMERIC_FIELDS) {
-    const built = buildSettingsWrite(values(current, { [f.key]: '0' }), current)
+    const built = buildSettingsWrite(values(current, { [f.key]: '0' }))
     assert.equal(built.ok, false, `${f.key} 填 0 被放过了——0 不是"不限制"`)
   }
 })
@@ -144,7 +151,7 @@ test('超时与有效期必须为正整数', () => {
 
 test('差异只列改动项，并给出前后值', () => {
   const current = view()
-  const built = buildSettingsWrite(values(current, { gitVerifyTimeoutMs: '20000' }), current)
+  const built = buildSettingsWrite(values(current, { gitVerifyTimeoutMs: '20000' }))
   assert.equal(built.ok, true)
   if (!built.ok) return
 
@@ -157,7 +164,7 @@ test('差异只列改动项，并给出前后值', () => {
 
 test('表单与库里一致时差异为空', () => {
   const current = view()
-  const built = buildSettingsWrite(values(current), current)
+  const built = buildSettingsWrite(values(current))
   assert.equal(built.ok, true)
   if (!built.ok) return
   assert.deepEqual(settingsDiff(current, built.body), [])
@@ -165,7 +172,7 @@ test('表单与库里一致时差异为空', () => {
 
 test('差异表永远不渲染 host key 原文，只说明它会被换掉', () => {
   const current = view({ gitVerifyHostKeysFingerprint: 'SHA256:old' })
-  const built = buildSettingsWrite(values(current, { hostKeysInput: HOST_KEYS }), current)
+  const built = buildSettingsWrite(values(current, { hostKeysInput: HOST_KEYS }))
   assert.equal(built.ok, true)
   if (!built.ok) return
 
@@ -183,7 +190,7 @@ test('差异表永远不渲染 host key 原文，只说明它会被换掉', () =
 
 test('没提交 host key 时差异里没有 host key 那一行', () => {
   const current = view()
-  const built = buildSettingsWrite(values(current, { gitVerifyTimeoutMs: '20000' }), current)
+  const built = buildSettingsWrite(values(current, { gitVerifyTimeoutMs: '20000' }))
   assert.equal(built.ok, true)
   if (!built.ok) return
   assert.equal(settingsDiff(current, built.body).some((r) => r.label.includes('host key')), false,
@@ -210,7 +217,7 @@ test('四项启动时读取的设置标为重启后生效，Git 校验超时不�
 test('改了要重启的项，差异里逐项标出来并能列出名字', () => {
   const current = view()
   const built = buildSettingsWrite(
-    values(current, { sessionTtlSeconds: '3600', gitVerifyTimeoutMs: '20000' }), current)
+    values(current, { sessionTtlSeconds: '3600', gitVerifyTimeoutMs: '20000' }))
   assert.equal(built.ok, true)
   if (!built.ok) return
 
@@ -226,7 +233,7 @@ test('改了要重启的项，差异里逐项标出来并能列出名字', () =>
 
 test('只改了立刻生效的项时不列重启项', () => {
   const current = view()
-  const built = buildSettingsWrite(values(current, { gitVerifyTimeoutMs: '20000' }), current)
+  const built = buildSettingsWrite(values(current, { gitVerifyTimeoutMs: '20000' }))
   assert.equal(built.ok, true)
   if (!built.ok) return
   assert.deepEqual(restartRequiredLabels(settingsDiff(current, built.body)), [])

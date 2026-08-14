@@ -103,3 +103,46 @@ func TestValidatePlatformSettingAcceptsAWellFormedSetting(t *testing.T) {
 		t.Fatalf("ValidatePlatformSetting() = %v, want nil", err)
 	}
 }
+
+// 已经装着信任锚时，一次把它清空的提交必须被拒。
+//
+// 这条判定只能长在服务端：设置页确实拦过它，但那是一份镜像，不是判定
+// （规范 §34）—— 一次 curl、一个将来新增的页面，都能一句话抹掉信任锚。
+// 后果不是「退化成不校验」（gitverify.New 失败朝关），而是一次无声的
+// 能力丧失，且原文再也读不回来，无法撤销。
+//
+// 四个方向一起断言，缺一条都能被一个错误的实现通过：不许清空、允许换成
+// 另一份、允许原样不变、以及**从未配过时的空提交必须放行** —— 把最后
+// 一条也拦下，一个还没配过 host key 的平台会连会话 TTL 都改不了，
+// 而这正是这次修改要消除的那个死结的镜像。
+func TestValidateSettingUpdateRefusesToClearTheTrustAnchor(t *testing.T) {
+	configured := validSetting()
+	blank := validSetting()
+	blank.GitVerifyHostKeys = ""
+
+	replaced := validSetting()
+	replaced.GitVerifyHostKeys = "other.example.com ssh-ed25519 BBBB..."
+
+	cases := []struct {
+		name          string
+		current, next registry.PlatformSetting
+		wantInvalid   bool
+	}{
+		{"clearing a configured trust anchor", configured, blank, true},
+		{"replacing it with another one", configured, replaced, false},
+		{"leaving it exactly as it was", configured, configured, false},
+		{"an empty submission when none was ever configured", blank, blank, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := registry.ValidateSettingUpdate(c.current, c.next)
+			if c.wantInvalid && !errors.Is(err, registry.ErrInvalid) {
+				t.Fatalf("ValidateSettingUpdate() = %v, want ErrInvalid: "+
+					"a single PUT can silently remove the platform's SSH trust anchor", err)
+			}
+			if !c.wantInvalid && err != nil {
+				t.Fatalf("ValidateSettingUpdate() = %v, want nil", err)
+			}
+		})
+	}
+}

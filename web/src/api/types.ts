@@ -672,6 +672,16 @@ export interface PlatformSettingWrite {
   secretsPrefix: string
   secretsDir: string
   gitVerifyTimeoutMs: number
-  /** known_hosts 原文。只入不出：读取端点没有对应字段，无从回显。 */
-  gitVerifyHostKeys: string
+  /**
+   * known_hosts 原文。只入不出：读取端点没有对应字段，无从回显。
+   *
+   * 唯一可选的一项，**缺席 = 保持不变**（后端 httpapi.settingPayload 的
+   * 那个指针字段）。它是唯一一个读不回来的字段，因此也是唯一一个在整行
+   * 替换里表达不出「这次不动它」的字段 —— 不给它一个缺席的位置，一个手上
+   * 不再留着 known_hosts 原文的操作者就连会话 TTL 都改不了。
+   *
+   * 显式给出空串是「清空」，那件事由服务端 registry.ValidateSettingUpdate
+   * 拒绝；本页从不构造那种请求体。
+   */
+  gitVerifyHostKeys?: string
 }
