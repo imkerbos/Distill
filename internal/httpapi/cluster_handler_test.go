@@ -41,6 +41,8 @@ type memRegistry struct {
 	// 绑定交出来」在落库结果上根本看不见 —— 一条只看 clusters 的断言，
 	// 无论 clusterPayload 还带不带 git 都会通过。
 	lastCluster registry.Cluster
+	// setting 是这个替身持有的平台设置，见 Setting/UpdateSetting。
+	setting registry.PlatformSetting
 }
 
 // writeErr 返回本次写调用该失败的错误，两个字段都没设时为 nil。
@@ -63,6 +65,16 @@ func newMemRegistry() *memRegistry {
 		clusters:  map[string]registry.Cluster{},
 		imports:   map[string][]registry.PolicyImport{},
 		overrides: map[string][]registry.RuleOverride{},
+		// 一份能过 ValidatePlatformSetting 的设置：零值那份读出来是
+		// 「会话立即过期、超时保护关掉」，不是一个可用的初始状态。
+		setting: registry.PlatformSetting{
+			SessionTTL:          8 * time.Hour,
+			HTTPReadTimeout:     10 * time.Second,
+			HTTPWriteTimeout:    20 * time.Second,
+			HTTPShutdownTimeout: 15 * time.Second,
+			SecretsBackend:      registry.SecretsBackendNone,
+			GitVerifyTimeout:    10 * time.Second,
+		},
 	}
 }
 
@@ -282,6 +294,31 @@ func (m *memRegistry) SoftDeleteRuleOverride(
 		}
 	}
 	return registry.ErrNotFound
+}
+
+// setting 是这个替身持有的平台设置。
+//
+// handler 层目前不读设置：校验器由装配方（cmd/distill-api）按当前设置现装，
+// httpapi 只拿到一个 GitVerifier 接口。这两个方法因此只为满足
+// registry.Store 而存在，行为保持最朴素的一份可用设置 —— 一旦有 handler
+// 真的读它，那个 handler 自己的测试会给这里提出具体要求。
+func (m *memRegistry) Setting(context.Context) (registry.PlatformSetting, error) {
+	if m.failWith != nil {
+		return registry.PlatformSetting{}, m.failWith
+	}
+	return m.setting, nil
+}
+
+func (m *memRegistry) UpdateSetting(_ context.Context, _ registry.Actor, s registry.PlatformSetting) error {
+	if err := m.writeErr(); err != nil {
+		return err
+	}
+	if err := registry.ValidatePlatformSetting(s); err != nil {
+		return err
+	}
+	m.record("UpdateSetting")
+	m.setting = s
+	return nil
 }
 
 // authedPostJSON 与 session_handler_test.go 的 postJSON 同形，多带一个
