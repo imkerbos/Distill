@@ -29,6 +29,27 @@ type Actor struct {
 	Username string
 }
 
+// PolicyExport 描述一次已确认策略的导出，写入审计。
+//
+// 时间窗拆成两个 time.Time 而不是复用 store.TimeWindow：registry 被 store
+// 依赖，反向 import 会成环。
+type PolicyExport struct {
+	// ClusterID 是被导出的集群。
+	ClusterID string
+	// Namespace 是导出时生效的命名空间筛选；空表示全集群。
+	Namespace string
+	// From、To 是导出所依据的时间窗。
+	//
+	// 必须记下来：同一个集群换一个窗口导出的是另一套规则，少了它，
+	// 事后无法判断某份流出去的文件对应的是哪一次判定。
+	From time.Time
+	To   time.Time
+	// Documents 是文件里 NetworkPolicy 文档的份数。
+	Documents int
+	// Rules 是文件里启用规则的条数（design doc 2026-08-14 §5）。
+	Rules int
+}
+
 // Store 是集群注册与策略导入的持久化接口。
 //
 // 只暴露完整的业务操作，不暴露事务句柄：任何能绕开审计的写路径，
@@ -54,6 +75,17 @@ type Store interface {
 	CreatePolicyImport(ctx context.Context, actor Actor, p PolicyImport) error
 	// SoftDeletePolicyImport 删除一条导入，同事务写审计。
 	SoftDeletePolicyImport(ctx context.Context, actor Actor, clusterID, importID string) error
+
+	// RecordPolicyExport 为一次策略导出写一条审计行，动作 EXPORT_POLICY
+	// （design doc 2026-08-14 §5，规范 §43「导出数据」）。
+	//
+	// 与 RecordBootstrapLogin 一样没有业务写入 —— 导出不改变平台里的任何
+	// 状态，但导出的是这个集群完整的网络策略，等同于集群网络结构的说明书。
+	// "谁在什么时候把它拿走了、拿的是哪个窗口下的哪一份"必须答得出来。
+	//
+	// 审计行本身不含策略内容：那是一份可能很大的文档，而审计要回答的是
+	// 「谁拿走了什么范围」，不是把被拿走的东西再存一份。
+	RecordPolicyExport(ctx context.Context, actor Actor, e PolicyExport) error
 
 	// RuleOverrides 返回一个集群下未删除的人工决定。
 	RuleOverrides(ctx context.Context, clusterID string) ([]RuleOverride, error)

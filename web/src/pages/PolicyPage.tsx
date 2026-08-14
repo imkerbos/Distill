@@ -10,6 +10,7 @@ import {
 import { useResource } from '../api/useResource'
 import { DryRunDetail } from './DryRunDetail'
 import { dryRunView, type DryRunView } from './dryRunView'
+import { policyExportView, type PolicyExportView } from './policyExportView'
 import { Card, Chip, EmptyState, Notice, PageHeader, ScrollTableCard, Section, StickyHead, StatTile, TableCard } from '../components/ui'
 
 /**
@@ -83,6 +84,9 @@ export default function PolicyPage({ cluster }: { cluster: string }) {
       <DryRunSection
         view={dryRunView(pv.prediction, pv.overridden.prediction, overrides.length)}
         overrideCount={overrides.length}
+        // 导出入口与 dry-run 同屏，取数同样只来自这一个 pv 对象：文件对应的
+        // 时间窗与上面那四个数字来自同一次预览响应（design doc §2、§6）。
+        exportView={policyExportView(pv)}
       />
       <CandidateSection candidates={pv.candidates} overrides={overrides} cluster={cluster} onChanged={onChanged} />
       <PendingSection candidates={pv.candidates} overrides={overrides} cluster={cluster} onChanged={onChanged} />
@@ -139,9 +143,10 @@ function NoTrafficNotice() {
  * Apply 对空覆盖列表是恒等变换——此时只显示一组数：否则每个集群第一次
  * 打开都要看一堆 `→ 0`，噪声掩盖了真正有覆盖时该看的差值。
  */
-function DryRunSection({ view, overrideCount }: {
+function DryRunSection({ view, overrideCount, exportView }: {
   view: DryRunView
   overrideCount: number
+  exportView: PolicyExportView
 }) {
   // 这个组件拿不到两套预测，只拿得到 dryRunView 选定后的视图：tile 的
   // 两端与明细区因此不可能来自不同的预测。C1 那条缺陷（清单列 81 行、
@@ -195,6 +200,10 @@ function DryRunSection({ view, overrideCount }: {
           tone="unknown" showDelta={showDelta} note="当前判定或新策略判定有一侧给不出结论"
         />
       </div>
+
+      {/* 导出入口紧跟四个 tile，不放页面底部：操作者刚读完"会拦断 81 条"，
+          文件与它对应的那个结论要在视觉上绑在一起（design doc §6）。 */}
+      <ExportControl view={exportView} />
 
       {showDelta && (
         <p style={{
@@ -285,6 +294,91 @@ function DryRunMetric({
         <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginTop: 'var(--space-1)' }}>
           {note}
         </div>
+      )}
+    </Card>
+  )
+}
+
+/**
+ * 导出已确认的策略。
+ *
+ * **禁用不是保护。** 服务端独立判定管理员权限、拒绝按命名空间筛选的导出、
+ * 拒绝零条启用规则的导出，那三道判定是权威的，这里少画一个按钮改变不了
+ * 任何一条（规范 §34）。这个控件存在的理由只有一个：让操作者在按下去
+ * 之前就知道为什么不行、以及下一步该做什么——一个点了才失败的按钮什么
+ * 也没教会他。
+ *
+ * 文件内容整份来自服务端的响应体：注释头里的集群、时间窗、四类计数、
+ * 导出者与导出时刻都不在前端重建（design doc §2、§3）。前端重建一份，
+ * "文件与页面上的预测同源"这个保证当场就没了。
+ */
+function ExportControl({ view }: { view: PolicyExportView }) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  async function download() {
+    setBusy(true)
+    setError('')
+    try {
+      const file = await api.policyExport(view.path)
+      // Blob URL + <a download>：把服务端那几十 KB 字节原样落到磁盘。
+      // 不提供"复制到剪贴板"作为唯一出口——大文件复制会静默截断，
+      // 而且不留任何痕迹（design doc §6）。
+      const url = URL.createObjectURL(file.blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = file.filename
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      // 延后回收：点击只是把下载排进队列，立刻 revoke 在部分浏览器上会
+      // 让这次下载中途失败，而失败的形状是"什么都没发生"。
+      setTimeout(() => URL.revokeObjectURL(url), 10_000)
+    } catch (err) {
+      // 服务端的拒绝原样展示（emptyExportMsg / namespacedExportMsg 都是
+      // 写给操作者看的完整理由），不收窄成一句"导出失败"。
+      setError(err instanceof ApiError ? err.msg : '导出失败，请稍后重试')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Card style={{ padding: 'var(--space-3)', marginBottom: 'var(--space-4)' }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 'var(--space-3)', flexWrap: 'wrap',
+      }}>
+        <button
+          type="button"
+          onClick={download}
+          disabled={!view.available || busy}
+          style={{
+            ...smallButtonStyle,
+            opacity: !view.available || busy ? 0.5 : 1,
+            cursor: !view.available || busy ? 'default' : 'pointer',
+          }}
+        >
+          {busy ? '导出中…' : '下载 NetworkPolicy YAML'}
+        </button>
+        {/* 不可用的原因与按钮同屏、不折进 tooltip：它是一条处置指引，
+            不是补充说明。理由为空的禁用等于"按钮坏了"。 */}
+        {!view.available && (
+          <span style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', flex: 1, minWidth: 280 }}>
+            {view.unavailableReason}
+          </span>
+        )}
+      </div>
+      <p style={{
+        margin: 'var(--space-2) 0 0', fontSize: 'var(--text-xs)', color: 'var(--text-muted)',
+      }}>
+        {view.windowNote}
+      </p>
+      {error && (
+        <p role="alert" style={{
+          margin: 'var(--space-2) 0 0', fontSize: 'var(--text-xs)', color: 'var(--verdict-deny)',
+        }}>
+          {error}
+        </p>
       )}
     </Card>
   )

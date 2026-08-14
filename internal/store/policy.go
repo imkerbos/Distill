@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	networkingv1 "k8s.io/api/networking/v1"
+
 	"github.com/imkerbos/Distill/internal/baseline"
 	"github.com/imkerbos/Distill/internal/fixture"
 	"github.com/imkerbos/Distill/internal/policygen"
@@ -65,6 +67,20 @@ type OverriddenView struct {
 	Candidates []policygen.CandidatePolicy `json:"candidates"`
 	// Prediction 是应用覆盖后的四类变化。
 	Prediction predict.Report `json:"prediction"`
+	// Enabled 是 Candidates 里启用规则渲染成的 NetworkPolicy，供导出使用。
+	//
+	// 挂在这里而不是让导出端点自己再生成一次，是导出这件事唯一真正的风险
+	// 所在（design doc 2026-08-14 §2）：第二条生成路径会产出一份与
+	// Prediction 不对应的策略集，而操作者应用的是文件、看过的是数字，
+	// 两者对不上时屏幕上没有任何迹象。同一个结构体里带出来，导出与预测
+	// 就是同一次计算的两种呈现。
+	//
+	// 由 Candidates 渲染而来，不是由未裁剪的 Result 渲染：屏幕上那一份
+	// 候选集经过 namespace 裁剪，文件必须与它逐条对应。
+	//
+	// json:"-"：它与 Candidates 是同一份内容的两种形状，序列化出去只会让
+	// 预览响应翻倍，也给前端制造了第二个可选的取数来源。
+	Enabled []networkingv1.NetworkPolicy `json:"-"`
 }
 
 // candidateSet 是重新生成一次候选策略集所需的全部中间产物。
@@ -177,6 +193,10 @@ func (r *FixtureReader) PolicyPreview(
 		Label:        func(ep replay.Endpoint) string { return endpointLabel(ep) },
 	})
 
+	// 一份裁剪结果，两处使用：屏幕上的候选集与导出的文件必须是同一个
+	// 切片渲染出来的，各裁一次就又有了两个可以互相分歧的选择点。
+	overriddenCandidates := filterCandidates(overridden.Policies, namespace)
+
 	return PolicyPreview{
 		Cluster: clusterID, Namespace: namespace, Window: window,
 		Candidates:        filterCandidates(gen.Policies, namespace),
@@ -188,8 +208,11 @@ func (r *FixtureReader) PolicyPreview(
 		Overrides:         stored,
 		StaleOverrides:    stale,
 		Overridden: OverriddenView{
-			Candidates: filterCandidates(overridden.Policies, namespace),
+			Candidates: overriddenCandidates,
 			Prediction: overriddenReport,
+			// 复用 EnabledPolicies 而不是另写一段渲染：「哪些规则算启用」
+			// 只能有一个定义，预测跑的正是这个函数的输出。
+			Enabled: policygen.Result{Policies: overriddenCandidates}.EnabledPolicies(),
 		},
 	}, nil
 }

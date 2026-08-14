@@ -71,6 +71,13 @@ type memRegistry struct {
 	// 2026-08-14 §2），而 registry.Store 刻意不暴露审计的读路径，测试
 	// 只能从这里断言那条写入确实发生过。
 	bootstrapLogins []string
+	// policyExports 记下每一次 EXPORT_POLICY 审计写入的内容。
+	//
+	// 与 bootstrapLogins 同理：registry.Store 刻意不暴露审计的读路径，
+	// 而「导出必须留痕」（design doc 2026-08-14 §5，规范 §43）只能从这里
+	// 断言。记的是整条记录而不是一个计数 —— 一条只数次数的断言，对一次
+	// 把命名空间或时间窗记错的导出照样是绿的。
+	policyExports []registry.PolicyExport
 }
 
 // memAccount 是替身里的一行账号，比 registry.Account 多一个哈希。
@@ -675,6 +682,24 @@ func (m *memRegistry) SetAccountPassword(
 // RecordBootstrapLogin 不进 trace：那份序列是用来给**一次被测操作**里的
 // 校验与写入排序的，而引导登录发生在装配阶段，混进去只会让每条顺序断言
 // 都多出一个与被测行为无关的头部。它自己的观察通道是 bootstrapLogins。
+// RecordPolicyExport 走 writeErr：导出的审计写失败必须能让整次导出失败，
+// 而那条路径只有在替身也会失败时才走得到。
+func (m *memRegistry) RecordPolicyExport(
+	_ context.Context, actor registry.Actor, e registry.PolicyExport,
+) error {
+	m.record("RecordPolicyExport")
+	if err := m.writeErr(); err != nil {
+		return err
+	}
+	if actor.Username == "" {
+		// 审计要答得出"谁"。空操作者在真实实现里会写进 actor 列，
+		// 事后读出来是一条无主的导出记录。
+		return registry.NewInvalidError("审计缺少操作者")
+	}
+	m.policyExports = append(m.policyExports, e)
+	return nil
+}
+
 func (m *memRegistry) RecordBootstrapLogin(_ context.Context, actor registry.Actor) error {
 	if err := m.accountErr(); err != nil {
 		return err

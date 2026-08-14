@@ -204,6 +204,11 @@ func NewRouter(d Deps) http.Handler {
 				accessViewer, handleSecurity(d))
 			az.route(protected, http.MethodGet, "/clusters/{clusterID}/policy-preview",
 				accessViewer, handlePolicyPreview(d))
+			// 导出按管理员算，比它渲染的那份预览更严：预览是看，导出交出去的
+			// 是一份完整的网络策略文档，等同于这个集群网络结构的说明书
+			// （design doc 2026-08-14 §5）。它也是本组里唯一写审计的读端点。
+			az.route(protected, http.MethodGet, "/clusters/{clusterID}/policy-export",
+				accessAdmin, handlePolicyExport(d))
 			az.route(protected, http.MethodPost, "/clusters/{clusterID}/rule-overrides",
 				accessAdmin, handleCreateOverride(d))
 			az.route(protected, http.MethodDelete, "/clusters/{clusterID}/rule-overrides",
