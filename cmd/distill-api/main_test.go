@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/imkerbos/Distill/internal/httpapi"
 	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/secrets"
 	"github.com/imkerbos/Distill/internal/secrets/gcpsecrets"
@@ -61,19 +62,26 @@ func quietLogger() *slog.Logger {
 	return slog.New(slog.NewJSONHandler(io.Discard, nil))
 }
 
-// sampleBinding 是一个形态合法的绑定。
+// sampleRepo 是一个形态合法的策略仓库。
 //
 // credentialRef 指向一个不存在的文件，于是 DirResolver 在第一步就失败，
 // 校验返回 CREDENTIAL_UNRESOLVED —— **一次出站都不会发生**，这条测试
-// 因此不依赖网络（见 gitverify.Verifier.Verify 的调用顺序）。
-func sampleBinding() registry.GitBinding {
-	return registry.GitBinding{
-		RepoURL:       "ssh://git@gitlab.example.com/distill/policies.git",
+// 因此不依赖网络（见 gitverify.Verifier.cloneBranch 的调用顺序）。
+func sampleRepo() registry.GitRepo {
+	return registry.GitRepo{
+		ID:            "policies",
+		URL:           "ssh://git@gitlab.example.com/distill/policies.git",
 		Branch:        "main",
-		PolicyPath:    "clusters/prod",
 		CredentialRef: "missing-credential",
 	}
 }
+
+// 装配出来的校验器必须满足边界层要的那个接口。
+//
+// 编译期断言而不是靠某条测试碰巧调到两个方法：httpapi.GitVerifier 是两层
+// 校验各一个方法，少实现一个的表现是装配处编译不过 —— 这一行让那次失败
+// 落在这里，而不是落在一次改了 Deps 装配的提交里。
+var _ httpapi.GitVerifier = (*settingsGitVerifier)(nil)
 
 // 校验器必须在**每一次使用**上按当前设置现装，不是启动时装一次。
 //
@@ -86,28 +94,33 @@ func sampleBinding() registry.GitBinding {
 func TestGitVerifierIsBuiltFromTheCurrentSettingOnEveryUse(t *testing.T) {
 	src := &mutableSource{current: baseSetting()}
 	v := newSettingsGitVerifier(settings.New(src), quietLogger())
-	b := sampleBinding()
+	r := sampleRepo()
 
-	if got := v.Verify(t.Context(), b); got != registry.VerifyNotVerified {
+	if got, _ := v.VerifyRepo(t.Context(), r); got != registry.RepoVerifyNotVerified {
 		t.Fatalf("verdict = %q with the NONE backend, want NOT_VERIFIED", got)
 	}
 
 	// 操作者在设置页选了目录后端并填了 host key。
 	src.current = dirSetting(t.TempDir())
 
-	got := v.Verify(t.Context(), b)
-	if got == registry.VerifyNotVerified {
+	got, at := v.VerifyRepo(t.Context(), r)
+	if got == registry.RepoVerifyNotVerified {
 		t.Errorf("verdict = %q after the backend changed to DIR, want the new setting to be in effect "+
 			"— a verifier built once at startup keeps answering NOT_VERIFIED until the process restarts", got)
 	}
-	if got != registry.VerifyCredentialUnresolved {
+	if got != registry.RepoVerifyCredentialUnresolved {
 		t.Errorf("verdict = %q, want CREDENTIAL_UNRESOLVED from the directory resolver", got)
+	}
+	// 校验确实发生过，因此有一个时刻。少了这条，一个「什么都没做就回一个
+	// 结论」的实现在上面两条断言下也可能是绿的。
+	if at == nil {
+		t.Error("verifiedAt is nil, want the moment this check happened")
 	}
 
 	// 反方向：改回 NONE 之后，启动时装好的那个校验器不得继续生效。
 	src.current = baseSetting()
 
-	if got := v.Verify(t.Context(), b); got != registry.VerifyNotVerified {
+	if got, _ := v.VerifyRepo(t.Context(), r); got != registry.RepoVerifyNotVerified {
 		t.Errorf("verdict = %q after the backend changed back to NONE, want NOT_VERIFIED "+
 			"— a cached verifier would keep resolving credentials that the operator turned off", got)
 	}
@@ -116,26 +129,48 @@ func TestGitVerifierIsBuiltFromTheCurrentSettingOnEveryUse(t *testing.T) {
 // 读不到设置不得退化成「没有校验器所以放行」。
 //
 // 得不出结论的检查是 NOT_VERIFIED，永远不是 OK。
+//
+// 两层各打一次：两个方法各自读一次设置、各自装一次校验器，只测其中一个的
+// 话，另一个漏掉这道兜底也不会有测试变红 —— 而漏掉的那一层会在设置读不到
+// 时把结论朝「可信」的方向开。
 func TestGitVerifierIsNotVerifiedWhenTheSettingCannotBeRead(t *testing.T) {
 	src := &mutableSource{err: errBrokenSource}
 	v := newSettingsGitVerifier(settings.New(src), quietLogger())
 
-	if got := v.Verify(t.Context(), sampleBinding()); got != registry.VerifyNotVerified {
-		t.Fatalf("verdict = %q when the setting cannot be read, want NOT_VERIFIED", got)
+	repoResult, at := v.VerifyRepo(t.Context(), sampleRepo())
+	if repoResult != registry.RepoVerifyNotVerified {
+		t.Fatalf("repo verdict = %q when the setting cannot be read, want NOT_VERIFIED", repoResult)
+	}
+	if at != nil {
+		t.Errorf("repo verifiedAt = %v, want nil — no check happened, so there is no such moment", at)
+	}
+
+	// 路径级传 OK 进去，正是为了让「仓库级不是 OK 就短路」那条规则挡不住
+	// 这次调用 —— 挡住的话，这条断言就永远成立，什么都证明不了。
+	pathResult, pathAt := v.VerifyPath(t.Context(), sampleRepo(), registry.RepoVerifyOK, "clusters/prod")
+	if pathResult != registry.BindingVerifyNotVerified {
+		t.Fatalf("path verdict = %q when the setting cannot be read, want NOT_VERIFIED", pathResult)
+	}
+	if pathAt != nil {
+		t.Errorf("path verifiedAt = %v, want nil — no check happened", pathAt)
 	}
 }
 
 // 设置能读到但装不出校验器（缺 host key）时同样是 NOT_VERIFIED。
 //
 // 与上一条分开：一个只在读失败时兜底、装配失败却 panic 或返回 OK 的实现，
-// 在上一条下是绿的。
+// 在上一条下是绿的。两层同样各打一次，理由同上。
 func TestGitVerifierIsNotVerifiedWhenItCannotBeBuilt(t *testing.T) {
 	s := dirSetting(t.TempDir())
 	s.GitVerifyHostKeys = "" // 没有 host key 就没有 SSH 校验，gitverify.New 拒绝构造。
 	v := newSettingsGitVerifier(settings.New(&mutableSource{current: s}), quietLogger())
 
-	if got := v.Verify(t.Context(), sampleBinding()); got != registry.VerifyNotVerified {
-		t.Fatalf("verdict = %q with no host keys, want NOT_VERIFIED — never OK", got)
+	if got, _ := v.VerifyRepo(t.Context(), sampleRepo()); got != registry.RepoVerifyNotVerified {
+		t.Fatalf("repo verdict = %q with no host keys, want NOT_VERIFIED — never OK", got)
+	}
+	got, _ := v.VerifyPath(t.Context(), sampleRepo(), registry.RepoVerifyOK, "clusters/prod")
+	if got != registry.BindingVerifyNotVerified {
+		t.Fatalf("path verdict = %q with no host keys, want NOT_VERIFIED — never OK", got)
 	}
 }
 

@@ -1,7 +1,11 @@
 import type {
-  APIServer, ClusterWrite, GitBinding, GitBindingWrite, RegisteredCluster,
-  VerifyResult, VerifyStatus,
+  APIServer, ClusterWrite, GitBinding, GitBindingWrite, PathVerifyResult,
+  PathVerifyStatus, RegisteredCluster,
 } from '../api/types'
+import {
+  describeOutcome, describeVerdict,
+  type VerdictCopy, type VerifyOutcomeView, type VerifyStatusView,
+} from './verifyView.ts'
 
 /**
  * 集群表单与 Git 绑定表单的纯逻辑层：从已注册集群播种表单、把表单折算
@@ -27,23 +31,28 @@ export interface ApiServerRow { host: string; cidr: string; port: string }
 export const emptyApiServerRow = (): ApiServerRow => ({ host: '', cidr: '', port: '' })
 const REQUIRED_APISERVER_FIELDS: readonly ['host', 'cidr', 'port'] = ['host', 'cidr', 'port']
 
-/** Git 绑定表单的可编辑值。四项与 GitBindingWrite 一一对应，不多不少。 */
+/**
+ * Git 绑定表单的可编辑值。两项与 GitBindingWrite 一一对应，不多不少。
+ *
+ * 仓库地址、分支与凭据**不在这里**：它们属于仓库，改它们去仓库页
+ * （design doc 2026-08-13 §3.2、§5）。放在这里的后果不是多两个输入框——
+ * 服务端的 gitBindingPayload 根本不收它们，操作者改完地址、请求返回成功、
+ * 界面显示保存生效，而平台真正会去连的仓库原封不动。
+ */
 export interface GitFormValues {
-  repoUrl: string
-  branch: string
+  repoId: string
   policyPath: string
-  credentialRef: string
 }
 
 /**
- * repoUrl / branch / policyPath 三项必填，credentialRef 可选。
+ * 两项都必填。
  *
  * 绑定表单只有一个动作（提交 = 绑定或改绑），所以这里不再有"全空"这个
  * 合法组合：想解除绑定按「解除绑定」，那是一次 DELETE。上一轮为了在
  * 整体替换下区分"我清空了字段"与"我要解绑"而设的那套消歧义逻辑，随它
  * 的成因一起消失（design doc 2026-08-13 §7）。
  */
-const REQUIRED_GIT_FIELDS: readonly ['repoUrl', 'branch', 'policyPath'] = ['repoUrl', 'branch', 'policyPath']
+const REQUIRED_GIT_FIELDS: readonly ['repoId', 'policyPath'] = ['repoId', 'policyPath']
 
 /**
  * 集群表单的全部可编辑值。编辑与注册共用一套形状，只在 mode 上分叉。
@@ -72,8 +81,7 @@ export interface ClusterFormValues {
 }
 
 /** 绑定表单的初始值：全空，对应"这个集群还没有绑定"。 */
-export const blankGitValues = (): GitFormValues =>
-  ({ repoUrl: '', branch: '', policyPath: '', credentialRef: '' })
+export const blankGitValues = (): GitFormValues => ({ repoId: '', policyPath: '' })
 
 /** 注册表单的初始值：全空。 */
 export function blankFormValues(): ClusterFormValues {
@@ -113,15 +121,12 @@ export function formValuesOf(c: RegisteredCluster): ClusterFormValues {
 /**
  * 用现有绑定播种绑定表单；未绑定时给一份空值。
  *
- * 只播种四个可写字段：verifyResult / verifiedAt / lastWrittenCommit 是
+ * 只播种两个可写字段：verifyResult / verifiedAt / lastWrittenCommit 是
  * 平台自己产生的东西，一旦进了表单状态，下一个人就会顺手把它们提交上去。
  */
 export function gitFormValuesOf(git: GitBinding | null | undefined): GitFormValues {
   if (!git) return blankGitValues()
-  return {
-    repoUrl: git.repoUrl, branch: git.branch,
-    policyPath: git.policyPath, credentialRef: git.credentialRef,
-  }
+  return { repoId: git.repoId, policyPath: git.policyPath }
 }
 
 export type GitResolution =
@@ -134,189 +139,110 @@ export type GitResolution =
  * 这里只有一个去向：绑定或改绑。解除不由它表达 —— 那是 DELETE
  * /clusters/{id}/git-binding，界面上是一个单独的按钮
  * （design doc 2026-08-13 §5、§7）。因此本函数不再需要知道"当前绑定
- * 是什么"，"四个字段都空着"也不再有歧义：它就是三项必填没填。
+ * 是什么"，"两个字段都空着"也不再有歧义：它就是两项必填没填。
  *
- * 三项必填在填了任意一项（含 credentialRef）时才报"缺少"，一项都没填
- * 时报"请填写"：前者说的是一份填了一半的绑定，credentialRef 单独填写
- * 同样触发，否则它录入的值会在三项检查之外被静默丢弃。
+ * **折算不出仓库地址**：提交体里只有 repoId 与 policyPath，平台去连哪个
+ * 地址由那个 repoId 指向的仓库说了算。想改地址去仓库页 —— 从这里带一份
+ * 地址过去，服务端不收，界面却会显示保存生效。
  */
 export function resolveGitBinding(values: GitFormValues): GitResolution {
   const missing = REQUIRED_GIT_FIELDS.filter((k) => values[k].trim() === '')
-  if (missing.length === REQUIRED_GIT_FIELDS.length && values.credentialRef.trim() === '') {
+  if (missing.length === REQUIRED_GIT_FIELDS.length) {
     return {
       ok: false,
-      error: '请填写 repoUrl / branch / policyPath。要解除这个集群的 Git 绑定，'
+      error: '请选择一个已登记的仓库并填写 policyPath。要解除这个集群的 Git 绑定，'
         + '请用「解除绑定」——把输入框清空不会解除任何东西。',
     }
   }
   if (missing.length > 0) {
     return {
       ok: false,
-      error: `Git 绑定缺少：${missing.join('、')}。repoUrl / branch / policyPath 三项在你填写了 `
-        + `Git 绑定的任意一项（含 credentialRef）时都是必需的，否则已填的值不会被保存。`,
+      error: `Git 绑定缺少：${missing.join('、')}。repoId 与 policyPath 两项必须同时给出，`
+        + `否则已填的值不会被保存。仓库地址、分支与凭据属于仓库，改它们去仓库页。`,
     }
   }
 
-  const repoUrl = values.repoUrl.trim()
-  const branch = values.branch.trim()
+  const repoId = values.repoId.trim()
   const policyPath = values.policyPath.trim()
   // 提交体里没有 lastWrittenCommit：漂移基准是平台自己的断言，由服务端
-  // 从库里的现值推导（同一仓库同一分支沿用，改指向则归零）。客户端即使
-  // 带上它也不会被采纳——一个能被调用方设定的基准可以被调成与仓库现状
-  // 一致，于是"无漂移"这句话再也无法被证伪。
+  // 从库里的现值推导。客户端即使带上它也不会被采纳——一个能被调用方设定
+  // 的基准可以被调成与仓库现状一致，于是"无漂移"这句话再也无法被证伪。
   return {
     ok: true,
-    binding: {
-      repoUrl, branch, policyPath,
-      credentialRef: values.credentialRef.trim(),
-    },
-    summary: `提交后：绑定到 ${repoUrl}@${branch}，路径 ${policyPath}`,
+    binding: { repoId, policyPath },
+    summary: `提交后：绑定到仓库 ${repoId}，路径 ${policyPath}`,
   }
 }
 
 /* ---------------------------------------------------------------------- */
-/* Git 绑定校验结论的展示形态                                                */
+/* 路径级校验结论的展示形态                                                   */
 /* ---------------------------------------------------------------------- */
 
 /**
- * 结论的语气分档。只有三档，且刻意不做成"分数"：
- * 「没查过」与「查了、没通过」不是程度差别，是不同性质的事实。
- */
-export type VerifyTone = 'ok' | 'bad' | 'unverified'
-
-export interface VerifyStatusView {
-  /** 结论本身，一律非空。 */
-  label: string
-  /** 一句话说明这个结论意味着什么、该找谁。 */
-  detail: string
-  tone: VerifyTone
-  /** 校验时刻的说明，已明示是历史事实而非当前状态。 */
-  checkedAt: string
-}
-
-/**
- * 校验结论的中文标签。
+ * 路径级结论的全部文案。
  *
- * 键类型是封闭枚举而不是 string：后端新增一个取值却忘了在这里补文案，
- * `tsc` 会直接报错，而不是让界面渲染出一个空白的结论列（同 PolicyPage 的
- * WORKLOAD_EXCLUSION_REASON_LABEL）。这里比那处更要紧一档——空白的排除
- * 原因只是少了一条解释，空白的校验结论会被读成「这个绑定没问题」。
+ * 只有三个取值：仓库级那四个失败取值不在这一层，它们在 gitRepoForm.ts
+ * （design doc §3.3）。这一层只回答一个问题 —— policyPath 在仓库的那个
+ * 分支上是否存在。
+ *
+ * 每一句都点名「路径」这一层，且与仓库级那张表逐条不同：两层共用
+ * NOT_VERIFIED 与 OK 两个枚举值，文案若也一样，把仓库级结论渲染到这一格
+ * 上在界面上就完全看不出来 —— 而那正是上一次前端缺陷的形状。
  *
  * PATH_MISSING 说的是「路径不存在」，不是「不可写入」：校验只做只读操作，
  * 它查的是路径在不在，从来没试过往那里放东西（design doc §3.1）。
+ *
+ * NOT_VERIFIED 的说明必须把「仓库级没通过」这种情形也说到：路径级以仓库级
+ * 为前提，仓库都没连上时这一层只会是未校验，而操作者看到的若只有「从未
+ * 校验过」，就会以为是自己忘了点按钮。
+ *
+ * OK 这一条的措辞是本表最容易出事的地方：只读校验没有向仓库放过任何东西，
+ * 所以它证明不了平台能往那个路径放东西。整张表里不出现「写」这个字，正是
+ * 为了让这条约束有一个能被测试抓住的形状——见测试里那条禁用词断言。
  */
-const VERIFY_RESULT_LABEL: Record<VerifyResult, string> = {
-  NOT_VERIFIED: '未校验',
-  OK: '只读校验通过',
-  CREDENTIAL_UNRESOLVED: '凭据取不到',
-  AUTH_FAILED: '认证被拒绝',
-  REPO_UNREACHABLE: '仓库不可达',
-  BRANCH_MISSING: '分支不存在',
-  PATH_MISSING: '路径不存在',
+const PATH_VERIFY_COPY: VerdictCopy<PathVerifyResult> = {
+  label: {
+    NOT_VERIFIED: '路径未校验',
+    OK: '路径只读校验通过',
+    PATH_MISSING: '路径不存在',
+  },
+  detail: {
+    NOT_VERIFIED: '这个路径从未被校验过，或者仓库那一层此刻没有通过——路径级以仓库级为前提，'
+      + '仓库都没到达过时不会给出关于路径的结论。没查过不等于查过没问题，两者是相反的事实。',
+    OK: 'policyPath 在该仓库的那个分支上存在。只读校验能得出的结论到此为止：'
+      + '它没有向仓库提交过任何内容，因此也证明不了平台能往这个路径提交。',
+    PATH_MISSING: '仓库那一层已经通过，但 policyPath 在该分支上找不到。'
+      + '校验只做只读查询，查的是路径在不在。',
+  },
+  tone: {
+    // NOT_VERIFIED 单独一档，不并进 bad 也不并进 ok：它在界面上必须与 OK
+    // 一眼可分，而与「查了没过」也不是一回事——前者要去按一次校验（或先把
+    // 仓库那一层修好），后者要去改 policyPath。
+    NOT_VERIFIED: 'unverified',
+    OK: 'ok',
+    PATH_MISSING: 'bad',
+  },
 }
 
 /**
- * 每条结论的处置说明。
- *
- * CREDENTIAL_UNRESOLVED 与 AUTH_FAILED 的文字必须让人一眼看出该找谁：
- * 前者是平台侧配置错，后者是仓库侧权限错，处置人不是同一个人，读者把
- * 两者混在一起就会去敲错人的门（design doc §3.2）。
- *
- * OK 这一条的措辞是本页最容易出事的地方：只读校验没有向仓库放过任何
- * 东西，所以它证明不了平台能往那个路径放东西。整张表里不出现「写」这
- * 个字，正是为了让这条约束有一个能被测试抓住的形状——见 clusterForm
- * 测试里那条禁用词断言。
- */
-const VERIFY_RESULT_DETAIL: Record<VerifyResult, string> = {
-  NOT_VERIFIED: '这个绑定从未被校验过。没查过不等于查过没问题，两者是相反的事实。',
-  OK: '仓库可达、认证通过，分支与路径都存在。只读校验能得出的结论到此为止：'
-    + '它没有向仓库提交过任何内容，因此也证明不了平台能往这个路径提交。',
-  CREDENTIAL_UNRESOLVED: 'credentialRef 在凭据服务里解析不到，是平台侧的配置问题，找平台管理员。',
-  AUTH_FAILED: '凭据取到了，但仓库拒绝了这次连接，是仓库侧的权限问题，找仓库管理员。',
-  REPO_UNREACHABLE: '网络、地址或超时导致没能到达仓库，分支与路径都还没来得及查。',
-  BRANCH_MISSING: '仓库可达、认证通过，但这个分支在仓库里找不到。',
-  PATH_MISSING: 'policyPath 在该分支上找不到。校验只做只读查询，查的是路径在不在。',
-}
-
-/**
- * 结论到语气的映射。
- *
- * NOT_VERIFIED 单独一档，不并进 bad 也不并进 ok：它在界面上必须与 OK
- * 一眼可分，而与「查了没过」也不是一回事——前者要去按一次校验，后者
- * 要去修一个系统。
- */
-const VERIFY_RESULT_TONE: Record<VerifyResult, VerifyTone> = {
-  NOT_VERIFIED: 'unverified',
-  OK: 'ok',
-  CREDENTIAL_UNRESOLVED: 'bad',
-  AUTH_FAILED: 'bad',
-  REPO_UNREACHABLE: 'bad',
-  BRANCH_MISSING: 'bad',
-  PATH_MISSING: 'bad',
-}
-
-/**
- * 全部已登记的结论取值。
+ * 全部已登记的路径级取值。
  *
  * 从文案表的键推导而不是另写一份字面量数组：文案表的键类型是
- * `Record<VerifyResult, string>`，`tsc` 已经保证它一个不多一个不少，
+ * `Record<PathVerifyResult, string>`，`tsc` 已经保证它一个不多一个不少，
  * 再抄一份只会多出一处可以漂移的地方。
  */
-export const ALL_VERIFY_RESULTS = Object.keys(VERIFY_RESULT_LABEL) as VerifyResult[]
+export const ALL_PATH_VERIFY_RESULTS = Object.keys(PATH_VERIFY_COPY.label) as PathVerifyResult[]
 
 /**
- * 把一个 RFC3339 时刻格式化成 UTC 展示串。
+ * 把一个绑定的**路径级**校验结论折算成可渲染的形态。
  *
- * 解析不出来时原样返回而不是抛错：一个格式意外的时间戳该让那一格显示
- * 得难看，不该让整张表白屏——同一张表里还有别的集群的登记信息要看。
+ * 参数是 GitBinding 而不是一个裸枚举：仓库页手上只有 GitRepo，于是「把
+ * 路径级结论渲染到仓库那一格」在那里根本编译不过。集群页上两者都在作用域
+ * 里（那一段要只读展示仓库地址），那一处挡不住 —— 由测试里的组件源码断言
+ * 兜一层，见它对自身局限的说明。
  */
-export function formatUtcTime(iso: string): string {
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return iso
-  return d.toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC')
-}
-
-/**
- * 把校验时刻写成一句明确的历史陈述。
- *
- * 不能只甩一个时间戳：一个孤零零的时间挨着「只读校验通过」，读起来就是
- * 「现在是通过的」。轮 4 写回前必须重新校验，拿几天前的结论当此刻的状态
- * 正是 design doc §3.4 禁止的那件事，界面上的措辞是第一道拦截。
- */
-function describeCheckedAt(at: string | null | undefined): string {
-  if (!at) return '从未校验过'
-  return `上次校验于 ${formatUtcTime(at)} —— 这是当时的结论，不代表此刻的状态`
-}
-
-/**
- * 把一个绑定的校验结论折算成可直接渲染的形态。
- *
- * 单独成函数而不是在组件里就地查表，是为了让这段判断能被测试直接跑：
- * 组件是 .tsx，`node --test` 的类型擦除读不了 JSX，留在组件里就等于
- * 这套文案永远没有测试。
- *
- * 未登记的取值不按原样透出，也不留空，而是收窄成「未校验」的语气：
- * 结论字段是封闭枚举，一个界面还不认识的值只能说明文案没跟上，此时
- * 失败方向朝「未确认」关，不朝「可信」开（与后端 VerifyResult.Valid
- * 的收窄同一条纪律）。
- */
-export function describeVerifyStatus(git: GitBinding): VerifyStatusView {
-  const result = git.verifyResult
-  if (!Object.hasOwn(VERIFY_RESULT_LABEL, result)) {
-    return {
-      label: '结论无法识别',
-      detail: `服务端给出了本界面还不认识的结论「${String(result)}」。`
-        + '在文案补齐之前一律按未校验处置：不认识的结论不是通过了的结论。',
-      tone: 'unverified',
-      checkedAt: describeCheckedAt(git.verifiedAt),
-    }
-  }
-  return {
-    label: VERIFY_RESULT_LABEL[result],
-    detail: VERIFY_RESULT_DETAIL[result],
-    tone: VERIFY_RESULT_TONE[result],
-    checkedAt: describeCheckedAt(git.verifiedAt),
-  }
+export function describePathVerifyStatus(git: GitBinding): VerifyStatusView {
+  return describeVerdict(PATH_VERIFY_COPY, git.verifyResult, git.verifiedAt)
 }
 
 export type ApiServerResolution =
@@ -392,56 +318,15 @@ export function buildClusterWrite(values: ClusterFormValues): BuildResult {
 }
 
 /* ---------------------------------------------------------------------- */
-/* 一次校验请求的回执                                                        */
+/* 一次路径级校验请求的回执                                                   */
 /* ---------------------------------------------------------------------- */
 
-export interface VerifyOutcomeView {
-  /** 这次请求是否真的发生了一次校验。 */
-  happened: boolean
-  /** 给操作者看的一句话回执，一律非空。 */
-  message: string
-  tone: VerifyTone
-}
-
 /**
- * 把保存/重校验端点的响应折算成一句回执。
+ * 把绑定保存/路径级重校验端点的响应折算成一句回执。
  *
- * 要处理的是一个会让人读错的形状：未配置校验器时，服务端返回
- * `NOT_VERIFIED` 且 `verifiedAt` 缺席，并且**刻意什么都不落库** ——
- * 写一个时间戳就等于宣称某时某刻校验过一次，而那件事没有发生
- * （internal/httpapi/gitverify_handler.go）。
- *
- * 于是响应会与重新加载后看到的东西不一致：响应说"从未校验"，库里那行
- * 却还留着更早的结论。两者都没错，它们回答的是不同的问题 —— 响应说的是
- * "这一次发生了什么"，列表说的是"库里现在记着什么"。
- *
- * 处置：`verifiedAt` 缺席一律读作"这次没有发生校验"，回执明说这一点，
- * 且**不把 NOT_VERIFIED 当成一个新结论贴到界面上**。把它渲染成一个崭新的
- * 「未校验」，操作者会以为自己刚刚把结论刷掉了，而下一次刷新页面它又变
- * 回旧结论 —— 一个自己会变回去的界面，比一个说"什么都没发生"的界面更
- * 难被信任。列表那一格照旧由服务端的读模型驱动，不受这条回执影响。
+ * 与仓库级那条（describeRepoVerifyOutcome）共用同一段逻辑、各用各的文案表：
+ * 「这次到底有没有发生一次校验」两层的判断完全一样，说法却必须分得开。
  */
-export function describeVerifyOutcome(status: VerifyStatus): VerifyOutcomeView {
-  if (!status.verifiedAt) {
-    return {
-      happened: false,
-      // 措辞要同时对两种情形成立：库里已有一个更早的结论（重校验），以及
-      // 库里本来就没有结论（刚绑上）。说成「仍是上一次校验的结论」在后者
-      // 是假的——那里从来没有过一次校验。
-      message: '这次没有发生校验：平台未配置校验器（或校验器给出了未登记的结论），'
-        + '服务端因此没有记下任何结论——列表里那一格是库里原有的结论，不是刚刚得出的。',
-      tone: 'unverified',
-    }
-  }
-  const label = Object.hasOwn(VERIFY_RESULT_LABEL, status.verifyResult)
-    ? VERIFY_RESULT_LABEL[status.verifyResult]
-    : '结论无法识别'
-  const tone = Object.hasOwn(VERIFY_RESULT_TONE, status.verifyResult)
-    ? VERIFY_RESULT_TONE[status.verifyResult]
-    : 'unverified'
-  return {
-    happened: true,
-    message: `校验于 ${formatUtcTime(status.verifiedAt)} 完成：${label}。`,
-    tone,
-  }
+export function describePathVerifyOutcome(status: PathVerifyStatus): VerifyOutcomeView {
+  return describeOutcome(PATH_VERIFY_COPY, status)
 }

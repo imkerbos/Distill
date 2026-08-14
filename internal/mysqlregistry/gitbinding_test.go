@@ -19,10 +19,12 @@ import (
 // 不填 VerifyResult / VerifiedAt：请求形状里没有它们（design doc
 // 2026-08-13 §5），测试因此也从同一个形状出发，否则测的是一条
 // 生产上不存在的输入。
+//
+// 仓库地址与分支不在这里：它们属于 GitRepo（design doc §3.2）。要绑定
+// 先得有仓库，调用方用 mustCreateGitRepo 建出 sampleGitRepo。
 func sampleGitBinding() registry.GitBinding {
 	return registry.GitBinding{
-		RepoURL:    "ssh://git@gitlab.example.com/net/policies.git",
-		Branch:     "main",
+		RepoID:     sampleGitRepo().ID,
 		PolicyPath: "clusters/prod-asia-1",
 	}
 }
@@ -104,6 +106,7 @@ func TestSetGitVerifyResultLeavesTheClusterUntouched(t *testing.T) {
 	if err := s.CreateCluster(ctx, actor, c); err != nil {
 		t.Fatalf("CreateCluster() error = %v", err)
 	}
+	mustCreateGitRepo(t, s, actor)
 	if err := s.BindGitRepo(ctx, actor, c.ID, sampleGitBinding()); err != nil {
 		t.Fatalf("BindGitRepo() error = %v", err)
 	}
@@ -117,7 +120,7 @@ func TestSetGitVerifyResultLeavesTheClusterUntouched(t *testing.T) {
 		`SELECT * FROM cluster_git_binding WHERE cluster_id = ?`, c.ID)
 
 	at := time.Date(2026, 8, 13, 9, 0, 0, 0, time.UTC)
-	if err := s.SetGitVerifyResult(ctx, actor, c.ID, registry.VerifyOK, at); err != nil {
+	if err := s.SetGitVerifyResult(ctx, actor, c.ID, registry.BindingVerifyOK, at); err != nil {
 		t.Fatalf("SetGitVerifyResult() error = %v", err)
 	}
 
@@ -145,8 +148,8 @@ func TestSetGitVerifyResultLeavesTheClusterUntouched(t *testing.T) {
 			t.Errorf("cluster_git_binding.%s = %q, want it untouched at %q", col, bindingAfter[col], want)
 		}
 	}
-	if bindingAfter["verify_result"] != string(registry.VerifyOK) {
-		t.Errorf("verify_result = %q, want %q", bindingAfter["verify_result"], registry.VerifyOK)
+	if bindingAfter["verify_result"] != string(registry.BindingVerifyOK) {
+		t.Errorf("verify_result = %q, want %q", bindingAfter["verify_result"], registry.BindingVerifyOK)
 	}
 	if bindingAfter["verified_at"] == bindingBefore["verified_at"] {
 		t.Errorf("verified_at = %q, unchanged from %q —— 结论根本没落库",
@@ -166,11 +169,12 @@ func TestBindingWritesCarryTheirOwnAuditAction(t *testing.T) {
 	if err := s.CreateCluster(ctx, actor, c); err != nil {
 		t.Fatalf("CreateCluster() error = %v", err)
 	}
+	mustCreateGitRepo(t, s, actor)
 	if err := s.BindGitRepo(ctx, actor, c.ID, sampleGitBinding()); err != nil {
 		t.Fatalf("BindGitRepo() error = %v", err)
 	}
 	at := time.Date(2026, 8, 13, 9, 0, 0, 0, time.UTC)
-	if err := s.SetGitVerifyResult(ctx, actor, c.ID, registry.VerifyOK, at); err != nil {
+	if err := s.SetGitVerifyResult(ctx, actor, c.ID, registry.BindingVerifyOK, at); err != nil {
 		t.Fatalf("SetGitVerifyResult() error = %v", err)
 	}
 	if err := s.UnbindGitRepo(ctx, actor, c.ID); err != nil {
@@ -217,24 +221,24 @@ func TestBindingWritesCarryTheirOwnAuditAction(t *testing.T) {
 	if bindBefore != nil {
 		t.Errorf("BIND_GIT_REPO before_val = %v, want NULL for a first-time binding", bindBefore)
 	}
-	if bindAfter["repoUrl"] != sampleGitBinding().RepoURL {
-		t.Errorf("BIND_GIT_REPO after_val repoUrl = %v, want %q",
-			bindAfter["repoUrl"], sampleGitBinding().RepoURL)
+	if bindAfter["repoId"] != sampleGitBinding().RepoID {
+		t.Errorf("BIND_GIT_REPO after_val repoId = %v, want %q",
+			bindAfter["repoId"], sampleGitBinding().RepoID)
 	}
 
 	// 校验这次写的是平台自己的判断，前后值只该有结论与时间 ——
 	// 带上整个集群，就等于把「谁改了仓库地址」和「平台跑了一次校验」
 	// 重新混回同一种 diff 里。
 	verifyBefore, verifyAfter := auditPayload(t, db, "VERIFY_GIT_BINDING")
-	if verifyBefore["verifyResult"] != string(registry.VerifyNotVerified) {
+	if verifyBefore["verifyResult"] != string(registry.BindingVerifyNotVerified) {
 		t.Errorf("VERIFY_GIT_BINDING before_val verifyResult = %v, want %q",
-			verifyBefore["verifyResult"], registry.VerifyNotVerified)
+			verifyBefore["verifyResult"], registry.BindingVerifyNotVerified)
 	}
-	if verifyAfter["verifyResult"] != string(registry.VerifyOK) {
+	if verifyAfter["verifyResult"] != string(registry.BindingVerifyOK) {
 		t.Errorf("VERIFY_GIT_BINDING after_val verifyResult = %v, want %q",
-			verifyAfter["verifyResult"], registry.VerifyOK)
+			verifyAfter["verifyResult"], registry.BindingVerifyOK)
 	}
-	for _, leaked := range []string{"podCidr", "displayName", "apiServers", "repoUrl"} {
+	for _, leaked := range []string{"podCidr", "displayName", "apiServers", "repoId", "policyPath"} {
 		if _, ok := verifyAfter[leaked]; ok {
 			t.Errorf("VERIFY_GIT_BINDING after_val carries %q; "+
 				"这次写入只动了结论与时间，前后值不该是一个更大的对象", leaked)
@@ -252,6 +256,7 @@ func TestUnbindKeepsTheAuditTrail(t *testing.T) {
 	if err := s.CreateCluster(ctx, actor, c); err != nil {
 		t.Fatalf("CreateCluster() error = %v", err)
 	}
+	mustCreateGitRepo(t, s, actor)
 	if err := s.BindGitRepo(ctx, actor, c.ID, sampleGitBinding()); err != nil {
 		t.Fatalf("BindGitRepo() error = %v", err)
 	}
@@ -269,14 +274,14 @@ func TestUnbindKeepsTheAuditTrail(t *testing.T) {
 
 	// 绑定行没了，但「曾经指向哪里」这个问题仍然答得出来。
 	_, bindAfter := auditPayload(t, db, "BIND_GIT_REPO")
-	if bindAfter["repoUrl"] != sampleGitBinding().RepoURL {
-		t.Errorf("BIND_GIT_REPO after_val repoUrl = %v, want %q —— "+
-			"解绑抹掉了这个集群的策略曾经指向哪里", bindAfter["repoUrl"], sampleGitBinding().RepoURL)
+	if bindAfter["repoId"] != sampleGitBinding().RepoID {
+		t.Errorf("BIND_GIT_REPO after_val repoId = %v, want %q —— "+
+			"解绑抹掉了这个集群的策略曾经指向哪里", bindAfter["repoId"], sampleGitBinding().RepoID)
 	}
 	unbindBefore, unbindAfter := auditPayload(t, db, "UNBIND_GIT_REPO")
-	if unbindBefore["repoUrl"] != sampleGitBinding().RepoURL {
-		t.Errorf("UNBIND_GIT_REPO before_val repoUrl = %v, want %q",
-			unbindBefore["repoUrl"], sampleGitBinding().RepoURL)
+	if unbindBefore["repoId"] != sampleGitBinding().RepoID {
+		t.Errorf("UNBIND_GIT_REPO before_val repoId = %v, want %q",
+			unbindBefore["repoId"], sampleGitBinding().RepoID)
 	}
 	if unbindAfter != nil {
 		t.Errorf("UNBIND_GIT_REPO after_val = %v, want NULL", unbindAfter)
@@ -299,9 +304,7 @@ func TestClusterWritesDoNotTouchTheGitBinding(t *testing.T) {
 	c := sampleCluster()
 	// 即便调用方在集群对象上带了绑定，集群写入也不该替它落库：
 	// 绑定有自己的写入与自己的授权含义。
-	c.Git = &registry.GitBinding{
-		RepoURL: "ssh://git@gitlab.example.com/net/wrong.git", Branch: "main", PolicyPath: "wrong",
-	}
+	c.Git = &registry.GitBinding{RepoID: "repo-wrong", PolicyPath: "wrong"}
 	if err := s.CreateCluster(ctx, actor, c); err != nil {
 		t.Fatalf("CreateCluster() error = %v", err)
 	}
@@ -314,11 +317,12 @@ func TestClusterWritesDoNotTouchTheGitBinding(t *testing.T) {
 		t.Errorf("cluster_git_binding rows after CreateCluster = %d, want 0", n)
 	}
 
+	mustCreateGitRepo(t, s, actor)
 	if err := s.BindGitRepo(ctx, actor, c.ID, sampleGitBinding()); err != nil {
 		t.Fatalf("BindGitRepo() error = %v", err)
 	}
 	at := time.Date(2026, 8, 13, 9, 0, 0, 0, time.UTC)
-	if err := s.SetGitVerifyResult(ctx, actor, c.ID, registry.VerifyOK, at); err != nil {
+	if err := s.SetGitVerifyResult(ctx, actor, c.ID, registry.BindingVerifyOK, at); err != nil {
 		t.Fatalf("SetGitVerifyResult() error = %v", err)
 	}
 
@@ -335,12 +339,12 @@ func TestClusterWritesDoNotTouchTheGitBinding(t *testing.T) {
 	if got.Git == nil {
 		t.Fatal("UpdateCluster() 删掉了绑定：改一次网段不该顺手解绑")
 	}
-	if got.Git.RepoURL != sampleGitBinding().RepoURL {
-		t.Errorf("repoUrl = %q, want %q", got.Git.RepoURL, sampleGitBinding().RepoURL)
+	if got.Git.RepoID != sampleGitBinding().RepoID {
+		t.Errorf("repoId = %q, want %q", got.Git.RepoID, sampleGitBinding().RepoID)
 	}
-	if got.Git.VerifyResult != registry.VerifyOK {
+	if got.Git.VerifyResult != registry.BindingVerifyOK {
 		t.Errorf("VerifyResult = %q, want %q —— 一次集群更新清掉了校验结论",
-			got.Git.VerifyResult, registry.VerifyOK)
+			got.Git.VerifyResult, registry.BindingVerifyOK)
 	}
 }
 
@@ -360,20 +364,29 @@ func TestBindGitRepoRejectsMissingClusterAndInvalidBinding(t *testing.T) {
 	if err := s.CreateCluster(ctx, actor, c); err != nil {
 		t.Fatalf("CreateCluster() error = %v", err)
 	}
+	mustCreateGitRepo(t, s, actor)
 	half := sampleGitBinding()
-	half.Branch = ""
+	half.PolicyPath = ""
 	if err := s.BindGitRepo(ctx, actor, c.ID, half); !errors.Is(err, registry.ErrInvalid) {
 		t.Errorf("BindGitRepo() with a half-filled binding err = %v, want ErrInvalid", err)
 	}
 
+	// 绑到一个没登记过的仓库：外键之外还有软删除，判定由 requireLiveRepo
+	// 给出，因此这里问的是 ErrNotFound 而不是一条驱动错误。
+	ghost := sampleGitBinding()
+	ghost.RepoID = "repo-never-registered"
+	if err := s.BindGitRepo(ctx, actor, c.ID, ghost); !errors.Is(err, mysqlregistry.ErrNotFound) {
+		t.Errorf("BindGitRepo() to an unregistered repo err = %v, want ErrNotFound", err)
+	}
+
 	// 结论是封闭枚举：自由文本落进库里，统计口径就此失去意义。
-	if err := s.SetGitVerifyResult(ctx, actor, c.ID, registry.VerifyResult("LOOKS_FINE"),
+	if err := s.SetGitVerifyResult(ctx, actor, c.ID, registry.BindingVerifyResult("LOOKS_FINE"),
 		time.Now().UTC()); !errors.Is(err, registry.ErrInvalid) {
 		t.Errorf("SetGitVerifyResult() with an unregistered result err = %v, want ErrInvalid", err)
 	}
 
 	// 没有绑定却要写结论：要写的那个东西不在。
-	if err := s.SetGitVerifyResult(ctx, actor, c.ID, registry.VerifyOK,
+	if err := s.SetGitVerifyResult(ctx, actor, c.ID, registry.BindingVerifyOK,
 		time.Now().UTC()); !errors.Is(err, mysqlregistry.ErrNotFound) {
 		t.Errorf("SetGitVerifyResult() without a binding err = %v, want ErrNotFound", err)
 	}

@@ -361,44 +361,113 @@ export interface APIServer {
 }
 
 /**
- * Git 绑定只读校验的结论。封闭枚举，与后端 registry.VerifyResult 逐值对齐。
+ * 仓库级只读校验的结论。封闭枚举，与后端 registry.RepoVerifyResult 逐值对齐。
+ *
+ * 与路径级的 PathVerifyResult 拆成两个类型，而不是一个枚举配两套「哪些
+ * 取值在这一层合法」的约定（design doc 2026-08-13 §3.3）：后者的约定只活在
+ * 注释与 review 里，迟早会漂，而漂的方向是把一句仓库级的话当成路径级的
+ * 结论渲染出去 —— 「认证被拒绝」显示在 policyPath 那一格上，读的人会以为
+ * 那是关于路径的判断，然后去改一个根本没问题的路径。
  *
  * 类型是联合而不是 string：这份取值表在界面上要一一对应到文案，用 string
  * 就等于允许后端某天多一个取值而界面照旧渲染出一个空格。校验结论是
- * 「这个绑定可不可信」的判断，空格会被读成「没问题」。
+ * 「这个仓库可不可信」的判断，空格会被读成「没问题」。
  */
-export type VerifyResult =
+export type RepoVerifyResult =
   | 'NOT_VERIFIED' | 'OK' | 'CREDENTIAL_UNRESOLVED' | 'AUTH_FAILED'
-  | 'REPO_UNREACHABLE' | 'BRANCH_MISSING' | 'PATH_MISSING'
+  | 'REPO_UNREACHABLE' | 'BRANCH_MISSING'
 
-export interface GitBinding {
+/**
+ * 路径级只读校验的结论。封闭枚举，与后端 registry.BindingVerifyResult 逐值对齐。
+ *
+ * 只回答一个问题：policyPath 在仓库的那个分支上是否存在。仓库级的四个
+ * 失败取值不在这里 —— 拆分的理由写在 RepoVerifyResult 上。
+ *
+ * 路径级以仓库级为前提：仓库级不是 OK 时这一层只能是 NOT_VERIFIED，
+ * 不得报 PATH_MISSING（design doc §3.3）。这条由服务端落实，前端不重算，
+ * 只是照着它给的结论渲染。
+ */
+export type PathVerifyResult = 'NOT_VERIFIED' | 'OK' | 'PATH_MISSING'
+
+/**
+ * 一个策略仓库，独立于集群存在（design doc 2026-08-13 §3.1）。
+ *
+ * 它在任何集群绑定它之前就存在，因此没有 clusterId：把集群塞进这里等于
+ * 宣称一个仓库属于某个集群，而这正是本次拆分要消除的东西。
+ */
+export interface GitRepo {
+  repoId: string
   repoUrl: string
   branch: string
-  policyPath: string
+  /** Secret Manager 中凭据的引用。凭据本身永不经由接口传输。 */
   credentialRef: string
-  lastWrittenCommit: string
-  /** 最近一次只读校验的结论。 */
-  verifyResult: VerifyResult
+  /** 最近一次仓库级只读校验的结论。 */
+  verifyResult: RepoVerifyResult
   /**
-   * 最近一次校验发生的时间。
+   * 最近一次仓库级校验发生的时间。
    *
    * 后端带 omitempty，从未校验过时这个键根本不出现——因此是可选而不是
    * 恒存在的 null。它是历史事实，不是当前状态：一个三天前的 OK 说的是
-   * 三天前那一刻，不能拿来声明此刻的绑定可信（design doc §3.4）。
+   * 三天前那一刻，不能拿来声明此刻的仓库可信（design doc §3.4）。
    */
   verifiedAt?: string | null
 }
 
 /**
- * POST /clusters/{id}/git-binding/verify 的响应。
+ * 仓库写入体（POST /git-repos 与 PUT /git-repos/{repoID} 共用）。
  *
- * 后端只回结论，不回整个集群（见 httpapi 的 verifyStatus）——调用方已经
- * 有仓库地址与引用了。本页拿到它之后仍然重新拉一次集群列表：服务端是
+ * 用 Pick 而不是 Omit，理由同 GitBindingWrite：白名单只放行点名的四项，
+ * 读模型将来多一个平台自产的字段时它不会漏进写路径。
+ *
+ * verifyResult / verifiedAt 不在这里：它们是平台对仓库可信度的判断，由
+ * 服务端在校验后自己写入。一个能由调用方提交的结论可以被填成 OK，于是
+ * 「已校验通过」这句话再也无法被证伪。
+ *
+ * repoId 在这里，但 PUT 时服务端只认路径参数（internal/httpapi/repo_handler.go）：
+ * 仓库 ID 是不可改键，允许改它等于让一次「改地址」把审计里那一串行变成
+ * 无主记录。前端也就不给它编辑入口。
+ */
+export type GitRepoWrite = Pick<GitRepo, 'repoId' | 'repoUrl' | 'branch' | 'credentialRef'>
+
+/**
+ * 集群与一个已存在策略仓库的绑定。
+ *
+ * **不含仓库地址、分支与凭据**：它们属于 GitRepo（design doc §3.2）。留在
+ * 这里就是两个真相来源 —— 操作者在集群页改了地址，仓库页显示的还是旧的，
+ * 而平台真正会去连的是哪一个，只能靠读代码才知道。
+ */
+export interface GitBinding {
+  repoId: string
+  policyPath: string
+  lastWrittenCommit: string
+  /** 最近一次路径级只读校验的结论。 */
+  verifyResult: PathVerifyResult
+  /** 最近一次路径级校验发生的时间。语义同 GitRepo.verifiedAt。 */
+  verifiedAt?: string | null
+}
+
+/**
+ * POST /git-repos/{repoID}/verify 与 POST /git-repos 的响应。
+ *
+ * 后端只回结论，不回整个仓库（见 httpapi 的 repoVerifyStatus）——调用方已经
+ * 有仓库地址与引用了。本页拿到它之后仍然重新拉一次仓库列表：服务端是
  * 唯一真相源，就地把这两个字段贴进本地行会让界面出现一份没人能核对的
  * 拼接状态。
  */
-export interface VerifyStatus {
-  verifyResult: VerifyResult
+export interface RepoVerifyStatus {
+  verifyResult: RepoVerifyResult
+  verifiedAt?: string | null
+}
+
+/**
+ * PUT / POST /clusters/{id}/git-binding[/verify] 的响应。
+ *
+ * 与 RepoVerifyStatus 是两个类型而不是一个带 string 字段的通用形状，理由
+ * 与后端 bindingVerifyStatus 完全一样：两个枚举各自封闭，共用一个载体就
+ * 等于允许把 AUTH_FAILED 当成路径级的结论传下去。
+ */
+export interface PathVerifyStatus {
+  verifyResult: PathVerifyResult
   verifiedAt?: string | null
 }
 
@@ -463,8 +532,10 @@ export interface ClusterWrite {
 /**
  * Git 绑定写入体：PUT /clusters/{id}/git-binding 的请求体，独立于 ClusterWrite。
  *
- * 四个字段就是绑定的全部可写内容（design doc 2026-08-13 §5），共同点是
- * 都由操作者提供、平台自己产生不了。凡是平台自己产生的东西都不在这里：
+ * 两个字段就是绑定的全部可写内容（design doc 2026-08-13 §4），共同点是
+ * 都由操作者提供、平台自己产生不了。仓库地址、分支与凭据引用不在这里：
+ * 它们属于仓库，由 /git-repos 那组端点管，在集群页上只读展示。凡是平台
+ * 自己产生的东西同样不在这里：
  *
  * lastWrittenCommit 是平台对"我最近一次往这个仓库写了什么"的断言，漂移
  * 检测拿它与 Git 现状比对。它由服务端从库里的现值推导，请求体带上去也
@@ -477,12 +548,11 @@ export interface ClusterWrite {
  * 调用方提交的结论可以被填成 OK，于是"已校验通过"这句话再也无法被
  * 证伪——这正是 verdict 与 confidence 必须分列的同一条纪律。
  *
- * 用 Pick 而不是 Omit：白名单只放行点名的四项，读模型将来多一个平台
+ * 用 Pick 而不是 Omit：白名单只放行点名的两项，读模型将来多一个平台
  * 自产的字段时它不会漏进写路径；黑名单则要靠每次新增字段的人记得回来
  * 补一笔，漏掉了没有任何东西会提醒他。
  */
-export type GitBindingWrite =
-  Pick<GitBinding, 'repoUrl' | 'branch' | 'policyPath' | 'credentialRef'>
+export type GitBindingWrite = Pick<GitBinding, 'repoId' | 'policyPath'>
 
 export interface PolicyImportItem {
   clusterId: string
@@ -547,4 +617,71 @@ export interface PolicyPreview {
   staleOverrides: StaleOverride[]
   /** 应用人工决定之后的版本，与默认推荐（本对象其余字段）并列展示。 */
   overridden: OverriddenView
+}
+
+/* ---------------------------------------------------------------------- */
+/* 平台设置                                                                 */
+/* ---------------------------------------------------------------------- */
+
+/**
+ * 凭据解析后端。封闭枚举，与后端 registry.SecretsBackend 逐值对齐。
+ *
+ * 联合而不是 string：这份取值表在设置页上要一一对应到文案与一组字段
+ * 约束，用 string 就等于允许后端某天多一个取值而界面照旧渲染出一个空
+ * 选项——而选中一个界面读不出名字的凭据后端，等于平台去哪里取身份这
+ * 件事没人说得清。
+ */
+export type SecretsBackend = 'NONE' | 'DIR' | 'SECRET_MANAGER'
+
+/**
+ * GET /api/v1/settings 的响应。
+ *
+ * **没有 gitVerifyHostKeys 字段**，这与后端 httpapi.settingView 是同一个
+ * 刻意的形状：host key 原文只入不出，读取端点回的是指纹（design doc §1.3、
+ * 规范 §19/§20）。类型里根本没有承载原文的位置，于是"设置页把 host key
+ * 显示出来了"这件事在前端也写不出来，不靠页面自觉。
+ */
+export interface PlatformSettingView {
+  sessionTtlSeconds: number
+  httpReadTimeoutMs: number
+  httpWriteTimeoutMs: number
+  httpShutdownTimeoutMs: number
+  secretsBackend: SecretsBackend
+  secretsProject: string
+  secretsPrefix: string
+  secretsDir: string
+  gitVerifyTimeoutMs: number
+  /** 当前 host key 原文的 SHA-256 指纹；未配置时为空串。 */
+  gitVerifyHostKeysFingerprint: string
+}
+
+/**
+ * PUT /api/v1/settings 的请求体。
+ *
+ * 全字段必填，理由同 ClusterWrite：服务端写整行，缺省的字段会被写成零值
+ * （internal/mysqlregistry/setting.go UpdateSetting 是一条整行 UPDATE）。
+ * 让类型强制每一项都出现，调用方就不可能"只发一个字段"然后把超时清成 0。
+ */
+export interface PlatformSettingWrite {
+  sessionTtlSeconds: number
+  httpReadTimeoutMs: number
+  httpWriteTimeoutMs: number
+  httpShutdownTimeoutMs: number
+  secretsBackend: SecretsBackend
+  secretsProject: string
+  secretsPrefix: string
+  secretsDir: string
+  gitVerifyTimeoutMs: number
+  /**
+   * known_hosts 原文。只入不出：读取端点没有对应字段，无从回显。
+   *
+   * 唯一可选的一项，**缺席 = 保持不变**（后端 httpapi.settingPayload 的
+   * 那个指针字段）。它是唯一一个读不回来的字段，因此也是唯一一个在整行
+   * 替换里表达不出「这次不动它」的字段 —— 不给它一个缺席的位置，一个手上
+   * 不再留着 known_hosts 原文的操作者就连会话 TTL 都改不了。
+   *
+   * 显式给出空串是「清空」，那件事由服务端 registry.ValidateSettingUpdate
+   * 拒绝；本页从不构造那种请求体。
+   */
+  gitVerifyHostKeys?: string
 }

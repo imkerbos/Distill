@@ -12,6 +12,17 @@ import (
 // 而边界层依赖某个具体存储实现的哨兵，会让将来换存储变成跨层改动。
 var ErrNotFound = errors.New("registry target not found")
 
+// ErrRepoInUse 表示仓库仍被某个集群绑定，因而不能删除。
+//
+// 删除仍被绑定的仓库直接拒绝，不做级联（design doc 2026-08-13 §4）：
+// 级联会让一次仓库清理静默解除某个集群的策略下发路径 —— 没有报错、
+// 没有人做过「这个集群不再下发策略」的决定，下一次推荐照常产出，
+// 只是再也没有地方接收它。
+//
+// 与 ErrNotFound 一样定义在本包：边界层要把它映射成业务错误码，
+// 而依赖某个具体存储实现的哨兵会让将来换存储变成跨层改动。
+var ErrRepoInUse = errors.New("git repo is still bound to a cluster")
+
 // Actor 是操作者身份，写入审计。
 type Actor struct {
 	// Username 是操作者登录名。
@@ -54,19 +65,45 @@ type Store interface {
 	// SoftDeleteRuleOverride 撤销一条人工决定，同事务写审计。
 	SoftDeleteRuleOverride(ctx context.Context, actor Actor, clusterID, namespace, workload, fingerprint string) error
 
+	// GitRepos 返回全部未删除的策略仓库。
+	GitRepos(ctx context.Context) ([]GitRepo, error)
+	// GitRepo 按 ID 查一个未删除的仓库。不存在时第二个返回值为 false。
+	GitRepo(ctx context.Context, repoID string) (GitRepo, bool, error)
+	// CreateGitRepo 登记一个仓库，同事务写审计。
+	CreateGitRepo(ctx context.Context, actor Actor, r GitRepo) error
+	// UpdateGitRepo 修改一个仓库，同事务写审计。仓库不存在时返回 ErrNotFound。
+	//
+	// 整体替换，不做部分更新：与 UpdateSetting 同一个理由，部分更新会让
+	// 审计的前后值只描述「这次提交带上了哪几个字段」，追溯时读不出全貌。
+	UpdateGitRepo(ctx context.Context, actor Actor, r GitRepo) error
+	// SoftDeleteGitRepo 下线一个仓库，同事务写审计。
+	// 仓库不存在时返回 ErrNotFound；仍被集群绑定时返回 ErrRepoInUse。
+	//
+	// 「仍被绑定就拒绝」是这个方法的契约，不是调用方的责任：放在 handler
+	// 里检查，等于让「先查绑定、再删仓库」之间的并发窗口决定结果，而那
+	// 段窗口里刚好新建的绑定会指向一个已经不存在的仓库。
+	SoftDeleteGitRepo(ctx context.Context, actor Actor, repoID string) error
+	// SetGitRepoVerifyResult 只写一次仓库级只读校验的结论与时间，同事务写审计。
+	//
+	// 与 UpdateGitRepo 分开，理由同 SetGitVerifyResult 与 BindGitRepo 的
+	// 分开：一个是操作者在下达配置变更，一个是平台在记录自己跑校验得到的
+	// 判断，操作者并未提供这个结论、也不该能顺着这条路径伪造它。
+	SetGitRepoVerifyResult(ctx context.Context, actor Actor, repoID string,
+		result RepoVerifyResult, at time.Time) error
+
 	// BindGitRepo 写入或替换一个集群的 Git 绑定，同事务写审计。
-	// 集群不存在时返回 ErrNotFound。
+	// 集群或 repoId 指向的仓库不存在时返回 ErrNotFound。
 	//
 	// 整体替换，不做部分更新：可写字段是绑定的全部内容
-	// （design doc 2026-08-13 §5）。这一步是操作者在改配置——仓库地址、
-	// 分支、路径都是平台自己不会产生的值，谁改的、改成了什么，必须能
+	// （design doc 2026-08-13 §5）。这一步是操作者在改配置——绑到哪个仓库、
+	// 哪个路径都是平台自己不会产生的值，谁改的、改成了什么，必须能
 	// 从审计里单独认出来，不与 SetGitVerifyResult 的写入混在一起
 	// （理由见该方法的注释）。
 	BindGitRepo(ctx context.Context, actor Actor, clusterID string, b GitBinding) error
 	// UnbindGitRepo 解除一个集群的 Git 绑定，同事务写审计。
 	// 绑定不存在时返回 ErrNotFound。
 	UnbindGitRepo(ctx context.Context, actor Actor, clusterID string) error
-	// SetGitVerifyResult 只写一次只读校验的结论与时间，同事务写审计。
+	// SetGitVerifyResult 只写一次路径级只读校验的结论与时间，同事务写审计。
 	//
 	// 与 BindGitRepo 分开而不是合成一个方法：二者的授权含义不同。
 	// BindGitRepo 是操作者在下达配置变更；SetGitVerifyResult 是平台在
@@ -75,7 +112,7 @@ type Store interface {
 	// 地址"与"平台跑了一次校验"这两件不同的事——这正是绑定嵌在集群
 	// 写模型里时已经付出的代价之一（design doc 2026-08-13 §1）。
 	SetGitVerifyResult(ctx context.Context, actor Actor, clusterID string,
-		result VerifyResult, at time.Time) error
+		result BindingVerifyResult, at time.Time) error
 
 	// Setting 读当前的平台设置。
 	//

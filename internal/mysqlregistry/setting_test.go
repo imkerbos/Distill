@@ -296,3 +296,58 @@ func TestUpdateSettingRejectsDurationsThatWouldBeTruncated(t *testing.T) {
 		t.Errorf("setting after rejected updates = %+v, want it untouched at %+v", got, want)
 	}
 }
+
+// 装着信任锚的那一行，不接受一次把它清空的写入 —— 判定必须落在这条写路径上。
+//
+// httpapi 那边的同名用例走的是内存替身，只能证明边界层会把拒绝翻译成一条
+// 业务失败；证明不了**这一层**真的会拒。而这一层才是所有调用方的必经之处
+// （规范 §34：浏览器不是安全边界，一个 handler 也不是唯一的调用方）。
+//
+// 一并断言写路径没有被这条判定误伤：换成另一份 host key 必须照常成功，
+// 否则「不许清空」就变成了「不许修改」，信任锚轮换会因此做不了。
+func TestUpdateSettingRefusesToClearTheHostKeys(t *testing.T) {
+	s, db := newSettingStore(t)
+	ctx := context.Background()
+	actor := registry.Actor{Username: "settings-admin"}
+
+	anchored := seededSetting()
+	anchored.GitVerifyHostKeys = "gitlab.example.com ssh-ed25519 AAAAANCHOR"
+	if err := s.UpdateSetting(ctx, actor, anchored); err != nil {
+		t.Fatalf("UpdateSetting() error = %v", err)
+	}
+
+	cleared := anchored
+	cleared.GitVerifyHostKeys = ""
+	cleared.SessionTTL = time.Hour
+	err := s.UpdateSetting(ctx, actor, cleared)
+	if !errors.Is(err, registry.ErrInvalid) {
+		t.Fatalf("UpdateSetting() clearing the host keys = %v, want registry.ErrInvalid: "+
+			"一次 PUT 就能抹掉平台的 SSH 信任锚，而原文再也读不回来", err)
+	}
+
+	got, err := s.Setting(ctx)
+	if err != nil {
+		t.Fatalf("Setting() error = %v", err)
+	}
+	if !reflect.DeepEqual(got, anchored) {
+		t.Errorf("setting after a rejected clear = %+v, want it untouched at %+v", got, anchored)
+	}
+	// 被拒的那一次不得留下审计行：一条记着「信任锚被换掉了」的审计，
+	// 会让复盘的人去找一次从未发生的变更。
+	var n int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM audit_log WHERE action = ?`, "UPDATE_PLATFORM_SETTING",
+	).Scan(&n); err != nil {
+		t.Fatalf("count audit rows: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("audit rows = %d, want 1 —— 只有那次成功的写入该留下记录", n)
+	}
+
+	rotated := anchored
+	rotated.GitVerifyHostKeys = "gitlab.example.com ssh-ed25519 AAAANEWKEY"
+	if err := s.UpdateSetting(ctx, actor, rotated); err != nil {
+		t.Fatalf("UpdateSetting() rotating the host keys = %v, want it accepted: "+
+			"「不许清空」不得变成「不许修改」", err)
+	}
+}

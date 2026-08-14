@@ -2,25 +2,30 @@ import { Fragment, useState, type CSSProperties, type FormEvent, type ReactNode 
 import { api, ApiError } from '../api/client'
 import {
   IMPORT_ROLE_LABEL, IMPORT_SOURCE_LABEL, ONBOARD_STATE_LABEL,
-  type APIServer, type GitBinding, type ImportRole, type ImportSource,
+  type APIServer, type GitBinding, type GitRepo, type ImportRole, type ImportSource,
   type PolicyImportItem, type RegisteredCluster,
 } from '../api/types'
 import { useResource } from '../api/useResource'
 import {
-  blankFormValues, blankGitValues, buildClusterWrite, describeVerifyOutcome, describeVerifyStatus,
-  emptyApiServerRow, formatUtcTime, formValuesOf, gitFormValuesOf, resolveGitBinding,
+  blankFormValues, blankGitValues, buildClusterWrite, describePathVerifyOutcome,
+  describePathVerifyStatus, emptyApiServerRow, formValuesOf, gitFormValuesOf, resolveGitBinding,
   type ApiServerRow, type ClusterFormValues, type GitFormValues,
-  type VerifyOutcomeView, type VerifyStatusView, type VerifyTone,
 } from './clusterForm'
+import { formatUtcTime, type VerifyOutcomeView } from './verifyView'
+import { VerifyBadge, VerifyOutcomeNote } from '../components/Verdict'
 import { Card, Chip, EmptyState, Field, PageHeader, Section, Select, TableCard } from '../components/ui'
 
 /**
- * 集群管理页：注册、下线、Git 绑定展示、策略导入。
+ * 集群管理页：注册、下线、Git 绑定、策略导入。
  *
  * 三节共用同一个 refreshKey——注册/下线/导入/删除任一操作成功后自增，
  * 驱动集群列表与导入清单重新拉取。不各自维护一套本地状态叠加服务端
  * 响应：服务端是唯一真相源（接入状态尤其如此，由服务端推进，本页
  * 任何表单字段都不能影响它）。
+ *
+ * 仓库清单与集群列表一起拉，且同样受 refreshKey 驱动：绑定只存一个
+ * repoId，仓库地址与分支要从这份清单里查。清单单独缓存一份会让这一页
+ * 显示的地址与仓库页的不一致，而平台真正会去连的是仓库页那一份。
  */
 export default function ClustersPage() {
   const [refreshKey, setRefreshKey] = useState(0)
@@ -30,15 +35,22 @@ export default function ClustersPage() {
     `clusters:${refreshKey}`,
     () => api.clusters(),
   )
+  const { data: repos, error: reposError } = useResource(
+    `git-repos:${refreshKey}`,
+    () => api.gitRepos(),
+  )
 
   return (
     <div>
       <PageHeader
         title="集群管理"
-        description="登记新集群、查看 GitOps 绑定、导入已有 NetworkPolicy。接入状态（已登记/学习中/可产出候选策略）完全由服务端根据实际采集到的数据推进，本页任何表单都无法直接指定它。"
+        description="登记新集群、把集群绑定到一个已登记的策略仓库、导入已有 NetworkPolicy。接入状态（已登记/学习中/可产出候选策略）完全由服务端根据实际采集到的数据推进，本页任何表单都无法直接指定它。仓库的地址、分支与凭据在本页只读 —— 它们属于仓库，改它们请去「策略仓库」页。"
       />
 
-      <ClusterListSection clusters={clusters} error={error} loading={loading} onChanged={bump} />
+      <ClusterListSection
+        clusters={clusters} repos={repos} reposError={reposError}
+        error={error} loading={loading} onChanged={bump}
+      />
       <RegisterSection onCreated={bump} />
       <ImportSection clusters={clusters ?? []} refreshKey={refreshKey} onChanged={bump} />
     </div>
@@ -49,8 +61,10 @@ export default function ClustersPage() {
 /* 1. 已注册集群                                                           */
 /* ---------------------------------------------------------------------- */
 
-function ClusterListSection({ clusters, error, loading, onChanged }: {
+function ClusterListSection({ clusters, repos, reposError, error, loading, onChanged }: {
   clusters: RegisteredCluster[] | null
+  repos: GitRepo[] | null
+  reposError: string
   error: string
   loading: boolean
   onChanged: () => void
@@ -74,9 +88,15 @@ function ClusterListSection({ clusters, error, loading, onChanged }: {
   return (
     <Section
       title="已注册集群"
-      description="Git 绑定为空时显式写「未绑定」——空单元格会被读成「加载中」或「未知」，两者都不是这里想表达的事实；同一条理由，没校验过的绑定写「未校验」而不是留白。校验只做只读查询：它能确认仓库可达、认证通过、分支与路径存在，但它从不向仓库提交任何内容，因此证明不了平台能往那个路径提交——那要等真正提交一次才知道。「编辑」在行内展开成两份各自提交的表单：登记信息一份、Git 绑定一份。绑定是一个有自己生命周期的资源，改集群不会碰它，改绑定也不会重写集群。"
+      description="Git 绑定为空时显式写「未绑定」——空单元格会被读成「加载中」或「未知」，两者都不是这里想表达的事实；同一条理由，没校验过的路径写「路径未校验」而不是留白。这一格展示的是**路径级**结论：policyPath 在不在。仓库那一层能不能连上是仓库页的事，两层各有各的结论，不合成一个。校验只做只读查询，它从不向仓库提交任何内容，因此证明不了平台能往那个路径提交——那要等真正提交一次才知道。「编辑」在行内展开成两份各自提交的表单：登记信息一份、Git 绑定一份。绑定是一个有自己生命周期的资源，改集群不会碰它，改绑定也不会重写集群，更不会改动仓库。"
       meta={clusters ? `${clusters.length} 个` : undefined}
     >
+      {/*
+        仓库清单没拉到时必须说出来：下面那一格要靠它把 repoId 翻成地址，
+        缺了它界面只能显示一个光秃秃的 ID，而读者无从判断这是「仓库没
+        登记」还是「这次没查到」。
+      */}
+      {reposError && <FormError>仓库清单加载失败：{reposError}</FormError>}
       {error ? (
         <p style={{ color: 'var(--verdict-deny)' }}>{error}</p>
       ) : loading || !clusters ? (
@@ -119,7 +139,12 @@ function ClusterListSection({ clusters, error, loading, onChanged }: {
                   <td><CCNPMark present={c.ccnpPresent} /></td>
                   <td>
                     {c.git
-                      ? <GitBindingCell clusterId={c.id} git={c.git} onChanged={onChanged} />
+                      ? (
+                        <GitBindingCell
+                          clusterId={c.id} git={c.git}
+                          repo={repoOf(repos, c.git.repoId)} onChanged={onChanged}
+                        />
+                      )
                       : <span style={{ color: 'var(--text-muted)' }}>未绑定</span>}
                   </td>
                   <td>
@@ -163,7 +188,7 @@ function ClusterListSection({ clusters, error, loading, onChanged }: {
                         只读校验，那句回执正是操作者点保存最想知道的东西，
                         面板一收起就没地方显示它了。
                       */}
-                      <GitBindingForm cluster={c} onChanged={onChanged} />
+                      <GitBindingForm cluster={c} repos={repos} onChanged={onChanged} />
                     </td>
                   </tr>
                 )}
@@ -177,27 +202,49 @@ function ClusterListSection({ clusters, error, loading, onChanged }: {
 }
 
 /**
- * Git 绑定这一格：仓库指向、校验结论、校验时刻、重新校验。
+ * 从仓库清单里按 ID 取一个仓库；清单还没到或这个 ID 不在清单里时给 undefined。
  *
- * 四样东西挤在同一格而不是拆成四列，是因为它们说的是同一件事的四个侧面
- * ——一个「只读校验通过」脱离了它指向的仓库和它发生的时刻就没有意义。
+ * 单独成函数是为了让「没查到」有一个明确的返回值，调用点必须处理它：
+ * 绑定只存一个 repoId，而仓库清单本身可能这次没拉到、那个仓库也可能已被
+ * 下线。这两种情形都不能显示成空白。
+ */
+function repoOf(repos: GitRepo[] | null, repoId: string): GitRepo | undefined {
+  return repos?.find((r) => r.repoId === repoId)
+}
+
+/**
+ * Git 绑定这一格：绑到哪个仓库、路径在哪、**路径级**结论、校验时刻、重新校验。
+ *
+ * 挤在同一格而不是拆成几列，是因为它们说的是同一件事的几个侧面——一个
+ * 「路径只读校验通过」脱离了它所在的仓库和它发生的时刻就没有意义。
+ *
+ * 仓库地址与分支在这里**只读**：它们属于仓库，改它们去仓库页
+ * （design doc §3.2、§5）。两处都能改就是两个真相来源，而平台真正会去连
+ * 的是哪一个，只能靠读代码才知道。
+ *
+ * 展示的结论只有路径级这一层。仓库级结论不摆在这一格 —— 一个「认证被拒绝」
+ * 挨着 policyPath，读的人会以为那是关于路径的判断，然后去改一个根本没问题
+ * 的路径（design doc §3.3）。
  *
  * 结论与时刻一律显示，不做「没问题就不说话」的省略：一格空白在这张表里
  * 会被读成「没什么要报告的」，而「从未校验过」与「校验通过」是相反的两
  * 件事实（同本节 description 里「未绑定」的理由）。
  */
-function GitBindingCell({ clusterId, git, onChanged }: {
+function GitBindingCell({ clusterId, git, repo, onChanged }: {
   clusterId: string
   git: GitBinding
+  repo: GitRepo | undefined
   onChanged: () => void
 }) {
   const [busy, setBusy] = useState(false)
   const [outcome, setOutcome] = useState<VerifyOutcomeView | null>(null)
-  const view = describeVerifyStatus(git)
+  const [error, setError] = useState('')
+  const view = describePathVerifyStatus(git)
 
   async function reverify() {
     setBusy(true)
     setOutcome(null)
+    setError('')
     try {
       const status = await api.verifyGitBinding(clusterId)
       // 上面那个徽章始终由服务端读模型驱动，响应里的结论不就地贴进去：
@@ -205,15 +252,16 @@ function GitBindingCell({ clusterId, git, onChanged }: {
       //
       // 但「这一次发生了什么」必须单独说出来，否则未配置校验器时点一下
       // 「重新校验」界面毫无反应，操作者只能猜是按钮坏了还是结论没变。
-      // describeVerifyOutcome 的注释里写了这条回执与徽章为什么会不一致。
-      setOutcome(describeVerifyOutcome(status))
+      // describeOutcome 的注释里写了这条回执与徽章为什么会不一致。
+      setOutcome(describePathVerifyOutcome(status))
       onChanged()
     } catch (err) {
       // 未绑定的集群这个端点回 404，但这一格只在已绑定时渲染，所以真正
-      // 会撞上的是绑定本身不合今天的规则（比如库里存着的 https:// 地址，
-      // 服务端会指名 SSH 形态作为理由）。原样展示后端的 msg，不收窄成
-      // 一句「失败」——收窄掉的正是操作者据以行动的那句话。
-      window.alert(err instanceof ApiError ? err.msg : '重新校验失败，请稍后重试')
+      // 会撞上的是它指向的仓库不合今天的规则（比如库里存着的 https://
+      // 地址，服务端会指名 SSH 形态作为理由）。原样展示后端的 msg，不
+      // 收窄成一句「失败」——收窄掉的正是操作者据以行动的那句话，而这条
+      // 路上该做的动作在仓库页，不在这里。
+      setError(err instanceof ApiError ? err.msg : '重新校验失败，请稍后重试')
     } finally {
       setBusy(false)
     }
@@ -224,9 +272,9 @@ function GitBindingCell({ clusterId, git, onChanged }: {
       display: 'flex', flexDirection: 'column', alignItems: 'flex-start',
       gap: 'var(--space-1)', maxWidth: 340,
     }}>
-      <span className="mono" style={{ fontSize: 'var(--text-sm)' }}>
-        {git.repoUrl}@{git.branch}
-      </span>
+      <span className="mono" style={{ fontSize: 'var(--text-sm)' }}>{git.repoId}</span>
+      <RepoReference repo={repo} repoId={git.repoId} />
+      <span className="mono" style={{ fontSize: 'var(--text-xs)' }}>路径 {git.policyPath}</span>
       <VerifyBadge view={view} />
       <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
         {view.checkedAt}
@@ -240,63 +288,33 @@ function GitBindingCell({ clusterId, git, onChanged }: {
         disabled={busy}
         style={{ ...secondaryButtonStyle, marginTop: 'var(--space-1)' }}
       >
-        {busy ? '校验中…' : '重新校验（只读）'}
+        {busy ? '校验中…' : '重新校验路径（只读）'}
       </button>
       {outcome && <VerifyOutcomeNote outcome={outcome} />}
+      {error && <FormError>{error}</FormError>}
     </div>
   )
 }
 
 /**
- * 一次校验请求的回执。
+ * 绑定指向的那个仓库的地址与分支，只读。
  *
- * 与上方的徽章分开显示，且措辞上分得开：徽章说的是「库里现在记着什么」，
- * 这句说的是「刚才那一下发生了什么」。合成一个会逼出一个选择——要么把
- * 一次没发生的校验渲染成崭新的「未校验」（刷新后自己变回旧结论），要么
- * 干脆什么都不说（操作者以为按钮坏了）。两个都不行，所以分成两处。
+ * 查不到时不留空、也不假装没有这回事：绑定还指着这个 ID，而界面说不出它
+ * 是什么，这本身就是要被看见的一件事——一格空白会被读成「这个绑定没有
+ * 仓库」，而实际情况是平台仍然会去连某个我们此刻显示不出来的地方。
  */
-function VerifyOutcomeNote({ outcome }: { outcome: VerifyOutcomeView }) {
+function RepoReference({ repo, repoId }: { repo: GitRepo | undefined; repoId: string }) {
+  if (!repo) {
+    return (
+      <span style={{ fontSize: 'var(--text-xs)', color: 'var(--verdict-unknown)' }}>
+        仓库 {repoId} 不在当前仓库清单里（可能已下线，或清单这次没拉到）——
+        地址与分支无法显示，去「策略仓库」页确认。
+      </span>
+    )
+  }
   return (
-    <p role="status" style={{
-      margin: 'var(--space-1) 0 0', fontSize: 'var(--text-xs)',
-      color: outcome.happened ? 'var(--text-secondary)' : 'var(--verdict-unknown)',
-    }}>
-      {outcome.message}
-    </p>
-  )
-}
-
-/**
- * 校验结论的样式：三种语气三种画法。
- *
- * 借用判定语义色（本该只归 VerdictBadge）是有意为之，与同文件里
- * GitVerifiedMark 同一条理由：这里陈述的正是「这个绑定可不可信」，是
- * 判断结论而不是元信息。未校验用描边而非灰化——灰掉等于把「没查过」
- * 弱化成一句次要提示，而它恰恰是这一格里最需要被看见的事实。
- */
-const VERIFY_TONE_STYLE: Record<VerifyTone, CSSProperties> = {
-  ok: {
-    color: 'var(--verdict-allow)', background: 'var(--verdict-allow-bg)',
-    border: '1px solid var(--verdict-allow)',
-  },
-  bad: {
-    color: 'var(--verdict-deny)', background: 'var(--verdict-deny-bg)',
-    border: '1px solid var(--verdict-deny)',
-  },
-  unverified: {
-    color: 'var(--verdict-unknown)', background: 'transparent',
-    border: 'var(--degraded-stroke-width) solid var(--verdict-unknown)',
-  },
-}
-
-function VerifyBadge({ view }: { view: VerifyStatusView }) {
-  return (
-    <span style={{
-      display: 'inline-flex', alignItems: 'center', padding: '2px 8px',
-      fontSize: 'var(--text-xs)', fontWeight: 500, borderRadius: 999,
-      ...VERIFY_TONE_STYLE[view.tone],
-    }}>
-      {view.label}
+    <span className="mono" style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+      {repo.repoUrl}@{repo.branch}
     </span>
   )
 }
@@ -446,7 +464,7 @@ function ClusterFields({ values, patch, mode }: {
 /* ---------------------------------------------------------------------- */
 
 /**
- * 一个集群的 Git 绑定：绑定 / 改绑 / 解绑。
+ * 一个集群的 Git 绑定：绑到一个已登记的仓库 / 改绑 / 解绑。
  *
  * 与集群表单彻底分开，两条路径互不相干（design doc 2026-08-13 §5、§7）：
  * 保存这里只发 PUT /clusters/{id}/git-binding，不发集群 PUT。顺手补一次
@@ -454,13 +472,21 @@ function ClusterFields({ values, patch, mode }: {
  * **没有播种过**的一份状态写进库，比如把 ccnpPresent 清成 false，让一个
  * 本该降级的集群给出笃定的判定。
  *
- * 解绑是一个按钮（DELETE），不是「把四个字段清空后保存」。上一轮那个
+ * 同样地，这里**不发仓库 PUT**：仓库地址、分支与凭据在这一屏只读展示，
+ * 改它们去仓库页（design doc §3.2、§5）。在这里顺手改一次仓库，改的是一个
+ * 可能还被别的集群绑着的共享资源，而操作者以为自己只动了这一个集群。
+ *
+ * 选仓库用下拉而不是让人手打 repoId：能手打就能打错，而一个指向不存在
+ * 仓库的绑定，服务端只会回一句 404 —— 那句话读起来像是这个集群不存在。
+ *
+ * 解绑是一个按钮（DELETE），不是「把字段清空后保存」。上一轮那个
  * 「解除 Git 绑定」勾选框存在的唯一理由是：整体替换下「我清空了字段」与
  * 「我要解绑」提交结果相同、意图不同。现在解绑有了自己的动词，这个歧义
  * 不存在了，勾选框也就跟着消失。
  */
-function GitBindingForm({ cluster, onChanged }: {
+function GitBindingForm({ cluster, repos, onChanged }: {
   cluster: RegisteredCluster
+  repos: GitRepo[] | null
   onChanged: () => void
 }) {
   const current = cluster.git ?? null
@@ -491,15 +517,16 @@ function GitBindingForm({ cluster, onChanged }: {
       // 结果（校验失败也不阻止保存），只显示后者会让一次成功的保存读起来
       // 像失败了。存下来和可信是两件事，界面上也得是两句话。
       setSaved(true)
-      // 保存会顺带跑一次只读校验，这句回执说的是那一次校验；上面列表里的
-      // 徽章仍然由服务端读模型驱动。两者可能不一致，理由见
-      // describeVerifyOutcome 的注释。
-      setOutcome(describeVerifyOutcome(status))
+      // 保存会顺带跑一次**路径级**只读校验，这句回执说的是那一次校验；上面
+      // 列表里的徽章仍然由服务端读模型驱动。两者可能不一致，理由见
+      // describeOutcome 的注释。
+      setOutcome(describePathVerifyOutcome(status))
       onChanged()
     } catch (err) {
-      // 后端把拒绝的具体理由写进 msg（库里存着的 https:// 地址会被指名
-      // 「不是 SSH 形态」）。原样展示，不收窄成一句「绑定失败」——收窄掉的
-      // 正是操作者据以行动的那句话，而这恰好是 prod-asia-1 的现状。
+      // 后端把拒绝的具体理由写进 msg：绑定前它会先校验目标仓库，而库里
+      // 存着的 https:// 地址会被指名「不是 SSH 形态」。原样展示，不收窄成
+      // 一句「绑定失败」——收窄掉的正是操作者据以行动的那句话，而这恰好是
+      // repo-prod-asia-1 的现状：要修它得去仓库页，不是改这里的 policyPath。
       setError(err instanceof ApiError ? err.msg : '绑定失败，请稍后重试')
     } finally {
       setBusy('')
@@ -516,8 +543,11 @@ function GitBindingForm({ cluster, onChanged }: {
     setBusy('unbind')
     try {
       await api.unbindGitRepo(cluster.id)
-      // 输入框跟着清空：解绑之后留着上一处仓库地址，界面会同时显示
-      // 「未绑定」和一个填着地址的表单，读起来像是还绑着。
+      // 表单跟着清空：解绑之后留着上一个仓库与路径，界面会同时显示
+      // 「未绑定」和一份填好的表单，读起来像是还绑着。
+      //
+      // 这只是清空绑定表单。仓库本身不动：解绑不删仓库，那个仓库可能还被
+      // 别的集群绑着，而删仓库有它自己的动词，在仓库页。
       setValues(blankGitValues())
       onChanged()
     } catch (err) {
@@ -531,31 +561,45 @@ function GitBindingForm({ cluster, onChanged }: {
     <Card style={{ padding: 'var(--space-4)', margin: 'var(--space-3) 0' }}>
       <form onSubmit={submit}>
         <SubHeading>
-          {cluster.id} 的 Git 绑定 —— 这是一次独立提交，不会改动上面的登记信息。
-          repoUrl / branch / policyPath 三项必填，credentialRef 可选。
-          repoUrl 必须是 SSH 形态（ssh://git@host/path 或 git@host:path）：平台按仓库发放 deploy key，
-          https:// 地址连拨号都不会发生，服务端会在保存时直接拒绝。
-          保存会顺带做一次只读校验，校验不通过不影响保存 —— 存下来和可信是两件事。
+          {cluster.id} 的 Git 绑定 —— 这是一次独立提交，不会改动上面的登记信息，也不会改动仓库。
+          选一个已登记的仓库并填 policyPath，两项都必填。
+          仓库的地址、分支与凭据在这里只读：它们属于仓库，改它们请去「策略仓库」页 ——
+          那是一个可能还被别的集群绑着的共享资源。
+          保存会顺带做一次路径级只读校验，校验不通过不影响保存 —— 存下来和可信是两件事。
         </SubHeading>
         <FormGrid>
-          <TextField
-            label="repoUrl" value={values.repoUrl} mono
-            placeholder="ssh://git@gitlab.example.com/net/policies.git"
-            onChange={(v) => patch({ repoUrl: v })}
-          />
-          <TextField
-            label="branch" value={values.branch} mono
-            onChange={(v) => patch({ branch: v })}
-          />
+          <label style={{ display: 'block' }}>
+            <span style={fieldLabelStyle}>仓库</span>
+            <Select
+              value={values.repoId}
+              ariaLabel={`${cluster.id} 绑定的策略仓库`}
+              onChange={(v) => patch({ repoId: v })}
+              options={[
+                ['', repos === null ? '仓库清单加载中…' : '请选择仓库'],
+                // 已绑定但仓库不在清单里时补一个占位项：否则下拉会自动落在
+                // 「请选择仓库」上，看起来像这个集群从来没绑过东西，而一次
+                // 「只想改路径」的保存会带着空 repoId 被服务端拒绝，理由读
+                // 起来还与操作者做的事对不上。
+                ...(values.repoId !== '' && !repoOf(repos, values.repoId)
+                  ? [[values.repoId, `${values.repoId}（不在当前清单里）`] as [string, string]]
+                  : []),
+                ...(repos ?? []).map((r) => [r.repoId, r.repoId] as [string, string]),
+              ]}
+              style={{ width: '100%' }}
+            />
+          </label>
           <TextField
             label="policyPath" value={values.policyPath} mono
+            placeholder={`clusters/${cluster.id}`}
             onChange={(v) => patch({ policyPath: v })}
           />
-          <TextField
-            label="credentialRef" value={values.credentialRef} mono
-            onChange={(v) => patch({ credentialRef: v })}
-          />
         </FormGrid>
+        {/*
+          选中仓库的地址与分支就在提交按钮上方只读展示：一个只显示 repoId
+          的下拉，操作者无从判断自己选的是不是那个仓库，而选错的后果是策略
+          被下发到另一个仓库去。
+        */}
+        <SelectedRepoDetail repo={repoOf(repos, values.repoId)} repoId={values.repoId} />
         <GitOutcome values={values} />
 
         {error && <FormError>{error}</FormError>}
@@ -588,9 +632,47 @@ function GitBindingForm({ cluster, onChanged }: {
 }
 
 /**
+ * 选中仓库的地址、分支与凭据引用，只读。
+ *
+ * **这里刻意没有输入框**：它们属于仓库，本页只是把它们念出来
+ * （design doc §3.2、§5）。给一个能改的输入框，服务端的 gitBindingPayload
+ * 根本不收它 —— 请求返回成功，界面显示保存生效，而平台真正会去连的地址
+ * 原封不动。两个真相来源比一个错的更难查。
+ *
+ * 也不展示仓库级校验结论：那是仓库页那一栏的事。把它摆在这张绑定表单里，
+ * 与下面那句路径级回执挨在一起，两层结论会被读成一句话。
+ */
+function SelectedRepoDetail({ repo, repoId }: { repo: GitRepo | undefined; repoId: string }) {
+  if (repoId === '') {
+    return (
+      <p style={{ margin: 0, fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+        还没有选择仓库。仓库地址与分支在选定之后显示 —— 它们只读，改它们去「策略仓库」页。
+      </p>
+    )
+  }
+  if (!repo) {
+    return (
+      <p style={{ margin: 0, fontSize: 'var(--text-xs)', color: 'var(--verdict-unknown)' }}>
+        仓库 {repoId} 不在当前仓库清单里（可能已下线，或清单这次没拉到）——
+        地址与分支无法显示。提交前请去「策略仓库」页确认它还在。
+      </p>
+    )
+  }
+  return (
+    <p className="mono" style={{
+      margin: 0, fontSize: 'var(--text-xs)', color: 'var(--text-muted)',
+    }}>
+      {repo.repoUrl}@{repo.branch}
+      {' · 凭据 '}
+      {repo.credentialRef === '' ? '未配置' : repo.credentialRef}
+    </p>
+  )
+}
+
+/**
  * 提交前把「这一次会把绑定改成什么」写出来。
  *
- * 四个输入框的不同填法长得都一样，让结果只在提交后从列表里的一行文字
+ * 两个控件的不同填法长得都一样，让结果只在提交后从列表里的一行文字
  * 体现，等于把「我以为我只改了路径」留到已经写进库之后才被发现。
  */
 function GitOutcome({ values }: { values: GitFormValues }) {

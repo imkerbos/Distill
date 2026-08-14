@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -22,6 +23,7 @@ import (
 // 而事务与外键行为在 internal/mysqlregistry 的集成测试里验证。
 type memRegistry struct {
 	clusters  map[string]registry.Cluster
+	repos     map[string]registry.GitRepo
 	imports   map[string][]registry.PolicyImport
 	overrides map[string][]registry.RuleOverride
 	failWith  error
@@ -41,6 +43,12 @@ type memRegistry struct {
 	// 绑定交出来」在落库结果上根本看不见 —— 一条只看 clusters 的断言，
 	// 无论 clusterPayload 还带不带 git 都会通过。
 	lastCluster registry.Cluster
+	// lastRepo 是最近一次仓库写入**拿到的原始参数**。
+	//
+	// 与 repos 里存下的那份分开，理由同 lastCluster：真实实现会把请求形状
+	// 里没有的结论字段落成 NOT_VERIFIED，于是「handler 有没有把一个调用方
+	// 伪造的 OK 交出来」在落库结果上根本看不见。
+	lastRepo registry.GitRepo
 	// setting 是这个替身持有的平台设置，见 Setting/UpdateSetting。
 	setting registry.PlatformSetting
 }
@@ -63,6 +71,7 @@ func (m *memRegistry) record(op string) {
 func newMemRegistry() *memRegistry {
 	return &memRegistry{
 		clusters:  map[string]registry.Cluster{},
+		repos:     map[string]registry.GitRepo{},
 		imports:   map[string][]registry.PolicyImport{},
 		overrides: map[string][]registry.RuleOverride{},
 		// 一份能过 ValidatePlatformSetting 的设置：零值那份读出来是
@@ -153,12 +162,126 @@ func (m *memRegistry) BindGitRepo(
 	if !ok {
 		return registry.ErrNotFound
 	}
+	// 与 mysqlregistry 一样断言仓库存在：绑定表上有一把指向 git_repo 的
+	// 外键，一个绑到不存在仓库的替身会让 handler 层「先确认仓库在不在」
+	// 这条前置判断失去意义。
+	if _, ok := m.repos[b.RepoID]; !ok {
+		return registry.ErrNotFound
+	}
 	// 空值按 NOT_VERIFIED 落库，与真实实现一致：空串不是登记过的枚举值。
 	if b.VerifyResult == "" {
-		b.VerifyResult = registry.VerifyNotVerified
+		b.VerifyResult = registry.BindingVerifyNotVerified
 	}
 	c.Git = &b
 	m.clusters[clusterID] = c
+	return nil
+}
+
+// GitRepos 返回全部已登记的仓库。
+func (m *memRegistry) GitRepos(context.Context) ([]registry.GitRepo, error) {
+	if m.failWith != nil {
+		return nil, m.failWith
+	}
+	out := make([]registry.GitRepo, 0, len(m.repos))
+	for _, r := range m.repos {
+		out = append(out, r)
+	}
+	return out, nil
+}
+
+func (m *memRegistry) GitRepo(_ context.Context, repoID string) (registry.GitRepo, bool, error) {
+	if m.failWith != nil {
+		return registry.GitRepo{}, false, m.failWith
+	}
+	r, ok := m.repos[repoID]
+	return r, ok, nil
+}
+
+// CreateGitRepo 与 mysqlregistry 一样先过 ValidateGitRepo，并把空结论落成
+// NOT_VERIFIED：这个替身若比真实实现宽松，handler 测试就会在一条真实实现
+// 会拒绝的输入上通过。
+func (m *memRegistry) CreateGitRepo(_ context.Context, _ registry.Actor, r registry.GitRepo) error {
+	m.record("create-repo")
+	m.lastRepo = r
+	if err := m.writeErr(); err != nil {
+		return err
+	}
+	if err := registry.ValidateGitRepo(r); err != nil {
+		return err
+	}
+	if r.VerifyResult == "" {
+		r.VerifyResult = registry.RepoVerifyNotVerified
+	}
+	m.repos[r.ID] = r
+	return nil
+}
+
+// UpdateGitRepo 整体替换一个仓库，与真实实现一样把结论清成 NOT_VERIFIED ——
+// 换了地址之后，旧的 OK 描述的是另一个仓库。
+func (m *memRegistry) UpdateGitRepo(_ context.Context, _ registry.Actor, r registry.GitRepo) error {
+	m.record("update-repo")
+	m.lastRepo = r
+	if err := m.writeErr(); err != nil {
+		return err
+	}
+	if err := registry.ValidateGitRepo(r); err != nil {
+		return err
+	}
+	if _, ok := m.repos[r.ID]; !ok {
+		return registry.ErrNotFound
+	}
+	if r.VerifyResult == "" {
+		r.VerifyResult = registry.RepoVerifyNotVerified
+	}
+	m.repos[r.ID] = r
+	return nil
+}
+
+// SoftDeleteGitRepo 下线一个仓库，仍被绑定时返回 registry.ErrRepoInUse。
+//
+// 「仍被绑定就拒绝」写在这里而不是留给 handler，与真实实现一致
+// （design doc §4）：替身若不带这条，边界层把 ErrRepoInUse 映射成业务失败
+// 的那段代码就永远不会被执行到，而一条断言在没被执行到的分支上永远成立。
+func (m *memRegistry) SoftDeleteGitRepo(_ context.Context, _ registry.Actor, repoID string) error {
+	m.record("delete-repo")
+	if err := m.writeErr(); err != nil {
+		return err
+	}
+	if _, ok := m.repos[repoID]; !ok {
+		return registry.ErrNotFound
+	}
+	for _, c := range m.clusters {
+		if c.Git != nil && c.Git.RepoID == repoID {
+			return fmt.Errorf("%w: repo %s is bound to cluster %s", registry.ErrRepoInUse, repoID, c.ID)
+		}
+	}
+	delete(m.repos, repoID)
+	return nil
+}
+
+// SetGitRepoVerifyResult 只写仓库级结论与时间。
+//
+// 只动这两个字段而不是整体替换仓库：真实实现的 UPDATE 只有 verify_result
+// 与 verified_at 两列，一个顺手重写整行的替身会让「跑一次校验改写了仓库
+// 地址」这种事在测试里看不出来。
+func (m *memRegistry) SetGitRepoVerifyResult(
+	_ context.Context, _ registry.Actor, repoID string,
+	result registry.RepoVerifyResult, at time.Time,
+) error {
+	m.record("set-repo-verdict")
+	if err := m.writeErr(); err != nil {
+		return err
+	}
+	if !result.Valid() {
+		return registry.NewInvalidError("verifyResult 不在已登记的取值范围内")
+	}
+	r, ok := m.repos[repoID]
+	if !ok {
+		return registry.ErrNotFound
+	}
+	r.VerifyResult = result
+	r.VerifiedAt = &at
+	m.repos[repoID] = r
 	return nil
 }
 
@@ -185,7 +308,7 @@ func (m *memRegistry) UnbindGitRepo(_ context.Context, _ registry.Actor, cluster
 // 地址」这种事在测试里看不出来。
 func (m *memRegistry) SetGitVerifyResult(
 	_ context.Context, _ registry.Actor, clusterID string,
-	result registry.VerifyResult, at time.Time,
+	result registry.BindingVerifyResult, at time.Time,
 ) error {
 	m.record("set-verdict")
 	if err := m.writeErr(); err != nil {
@@ -298,10 +421,10 @@ func (m *memRegistry) SoftDeleteRuleOverride(
 
 // setting 是这个替身持有的平台设置。
 //
-// handler 层目前不读设置：校验器由装配方（cmd/distill-api）按当前设置现装，
-// httpapi 只拿到一个 GitVerifier 接口。这两个方法因此只为满足
-// registry.Store 而存在，行为保持最朴素的一份可用设置 —— 一旦有 handler
-// 真的读它，那个 handler 自己的测试会给这里提出具体要求。
+// 与真实实现一样在 UpdateSetting 里过一次 ValidatePlatformSetting：替身若
+// 比真实实现宽松，设置端点的测试就会在一份真实实现会拒绝的输入上通过。
+// 校验器本身仍由装配方（cmd/distill-api）按当前设置现装，httpapi 只拿到
+// 一个 GitVerifier 接口 —— 这两个方法服务的是 /settings 那两个端点。
 func (m *memRegistry) Setting(context.Context) (registry.PlatformSetting, error) {
 	if m.failWith != nil {
 		return registry.PlatformSetting{}, m.failWith
@@ -314,6 +437,11 @@ func (m *memRegistry) UpdateSetting(_ context.Context, _ registry.Actor, s regis
 		return err
 	}
 	if err := registry.ValidatePlatformSetting(s); err != nil {
+		return err
+	}
+	// 变更约束与真实实现同处一层（mysqlregistry.UpdateSetting）：替身漏了
+	// 这一条，「一次 PUT 抹掉信任锚」就会在设置端点的测试里表现成成功。
+	if err := registry.ValidateSettingUpdate(m.setting, s); err != nil {
 		return err
 	}
 	m.record("UpdateSetting")
@@ -566,7 +694,7 @@ func TestClusterWritesNeverReachOut(t *testing.T) {
 		t.Run(method, func(t *testing.T) {
 			reg := newMemRegistry()
 			reg.clusters["c1"] = boundCluster()
-			stub := &stubGitVerifier{result: registry.VerifyOK}
+			stub := &stubGitVerifier{result: registry.BindingVerifyOK}
 			h, _, cookie := newTestRouterWithGitVerifier(t, fixtureReader(), reg, stub)
 
 			body := fullClusterBody(nil)

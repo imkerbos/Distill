@@ -96,21 +96,18 @@ func (s *Store) loadChildren(ctx context.Context, c *registry.Cluster) error {
 	}
 
 	var g registry.GitBinding
-	var credRef, lastCommit, verifyResult sql.NullString
+	var lastCommit, verifyResult sql.NullString
 	var verifiedAt sql.NullTime
 	err = s.db.QueryRowContext(ctx,
-		`SELECT repo_url, branch, policy_path, credential_ref, last_written_commit,
-		        verified_at, verify_result
+		`SELECT repo_id, policy_path, last_written_commit, verified_at, verify_result
 		   FROM cluster_git_binding WHERE cluster_id = ?`, c.ID).
-		Scan(&g.RepoURL, &g.Branch, &g.PolicyPath, &credRef, &lastCommit,
-			&verifiedAt, &verifyResult)
+		Scan(&g.RepoID, &g.PolicyPath, &lastCommit, &verifiedAt, &verifyResult)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return nil
 	case err != nil:
 		return fmt.Errorf("query git binding: %w", err)
 	}
-	g.CredentialRef = credRef.String
 	g.LastWrittenCommit = lastCommit.String
 	// NULL 必须落成 nil，不能落成零值 time.Time：零值是一个真实存在的
 	// 过去时间点（1970 年），任何新鲜度检查都会把它当成「校验过」而非
@@ -119,7 +116,7 @@ func (s *Store) loadChildren(ctx context.Context, c *registry.Cluster) error {
 		t := verifiedAt.Time
 		g.VerifiedAt = &t
 	}
-	g.VerifyResult = registry.VerifyResult(verifyResult.String)
+	g.VerifyResult = registry.BindingVerifyResult(verifyResult.String)
 	c.Git = &g
 	return nil
 }

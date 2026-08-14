@@ -25,8 +25,8 @@ func gitBindingTarget(clusterID string) string {
 // 一并塞进前后值，追溯的人又要在一个更大的对象里认「哪几个字段真的
 // 变了」—— 那正是本次拆分要消灭的东西。
 type gitVerifyRecord struct {
-	VerifyResult registry.VerifyResult `json:"verifyResult"`
-	VerifiedAt   *time.Time            `json:"verifiedAt,omitempty"`
+	VerifyResult registry.BindingVerifyResult `json:"verifyResult"`
+	VerifiedAt   *time.Time                   `json:"verifiedAt,omitempty"`
 }
 
 // gitBinding 读一个集群当前的绑定，供绑定级写入取审计前值。
@@ -38,21 +38,18 @@ func (s *Store) gitBinding(
 	ctx context.Context, clusterID string,
 ) (registry.GitBinding, bool, error) {
 	var g registry.GitBinding
-	var credRef, lastCommit, verifyResult sql.NullString
+	var lastCommit, verifyResult sql.NullString
 	var verifiedAt sql.NullTime
 	err := s.db.QueryRowContext(ctx,
-		`SELECT repo_url, branch, policy_path, credential_ref, last_written_commit,
-		        verified_at, verify_result
+		`SELECT repo_id, policy_path, last_written_commit, verified_at, verify_result
 		   FROM cluster_git_binding WHERE cluster_id = ?`, clusterID).
-		Scan(&g.RepoURL, &g.Branch, &g.PolicyPath, &credRef, &lastCommit,
-			&verifiedAt, &verifyResult)
+		Scan(&g.RepoID, &g.PolicyPath, &lastCommit, &verifiedAt, &verifyResult)
 	if errors.Is(err, sql.ErrNoRows) {
 		return registry.GitBinding{}, false, nil
 	}
 	if err != nil {
 		return registry.GitBinding{}, false, fmt.Errorf("query git binding: %w", err)
 	}
-	g.CredentialRef = credRef.String
 	g.LastWrittenCommit = lastCommit.String
 	// 与 loadChildren 同一个理由：NULL 落成 nil 而不是零值 time.Time，
 	// 否则「从未校验」会被新鲜度检查当成 1970 年校验过而放行。
@@ -60,7 +57,7 @@ func (s *Store) gitBinding(
 		t := verifiedAt.Time
 		g.VerifiedAt = &t
 	}
-	g.VerifyResult = registry.VerifyResult(verifyResult.String)
+	g.VerifyResult = registry.BindingVerifyResult(verifyResult.String)
 	return g, true, nil
 }
 
@@ -84,12 +81,36 @@ func requireLiveCluster(ctx context.Context, tx *sql.Tx, clusterID string) error
 	return nil
 }
 
+// requireLiveRepo 在事务内确认仓库仍然存在且未删除。
+//
+// 与 requireLiveCluster 同一个理由：外键挡得住「仓库从未登记」，挡不住
+// 「仓库已软删除」—— 软删除留着 git_repo 行，外键照样满足，于是一个在
+// 仓库页上已经看不见的仓库仍然能被绑上，而它的地址与凭据从此没人维护。
+// 加锁读同时让这一行在本事务提交前不能被改成已删除，这次绑定因此落在
+// 一个此刻仍然存活的仓库上。
+//
+// 锁的次序与 SoftDeleteGitRepo 一致（先 git_repo 再 cluster_git_binding），
+// 两条写路径因此不会互相死锁。
+func requireLiveRepo(ctx context.Context, tx *sql.Tx, repoID string) error {
+	var alive int
+	err := tx.QueryRowContext(ctx,
+		`SELECT 1 FROM git_repo WHERE repo_id = ? AND deleted_at IS NULL FOR UPDATE`,
+		repoID).Scan(&alive)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w: git repo %s", ErrNotFound, repoID)
+	}
+	if err != nil {
+		return fmt.Errorf("lock git repo: %w", err)
+	}
+	return nil
+}
+
 // BindGitRepo 写入或替换一个集群的 Git 绑定，同事务写审计。
 // 集群不存在时返回 ErrNotFound。
 //
 // 整体替换，不做部分更新（design doc 2026-08-13 §5）：因此改绑会把上一次
-// 的校验结论一并清掉 —— 换了仓库地址之后，旧的 OK 描述的是另一个仓库，
-// 留着它就是拿一句关于别处的判断给新地址背书。
+// 的校验结论一并清掉 —— 换了仓库之后，旧的 OK 描述的是另一个仓库里的
+// 另一条路径，留着它就是拿一句关于别处的判断给新绑定背书。
 func (s *Store) BindGitRepo(
 	ctx context.Context, actor registry.Actor, clusterID string, b registry.GitBinding,
 ) error {
@@ -99,7 +120,7 @@ func (s *Store) BindGitRepo(
 	// 空值按 NOT_VERIFIED 落库，不落空串：空串不是登记过的枚举值，
 	// 会让「从未校验」在库里以一个不合法的值存在。
 	if b.VerifyResult == "" {
-		b.VerifyResult = registry.VerifyNotVerified
+		b.VerifyResult = registry.BindingVerifyNotVerified
 	}
 	before, bound, err := s.gitBinding(ctx, clusterID)
 	if err != nil {
@@ -116,22 +137,48 @@ func (s *Store) BindGitRepo(
 			if err := requireLiveCluster(ctx, tx, clusterID); err != nil {
 				return err
 			}
-			if _, err := tx.ExecContext(ctx,
-				`INSERT INTO cluster_git_binding
-				   (cluster_id, repo_url, branch, policy_path, credential_ref,
-				    last_written_commit, verified_at, verify_result)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-				 ON DUPLICATE KEY UPDATE
-				   repo_url = VALUES(repo_url), branch = VALUES(branch),
-				   policy_path = VALUES(policy_path),
-				   credential_ref = VALUES(credential_ref),
-				   last_written_commit = VALUES(last_written_commit),
-				   verified_at = VALUES(verified_at), verify_result = VALUES(verify_result)`,
-				clusterID, b.RepoURL, b.Branch, b.PolicyPath, nullIfEmpty(b.CredentialRef),
-				nullIfEmpty(b.LastWrittenCommit), nullTimeIfNil(b.VerifiedAt),
-				string(b.VerifyResult),
-			); err != nil {
-				return fmt.Errorf("upsert git binding: %w", err)
+			if err := requireLiveRepo(ctx, tx, b.RepoID); err != nil {
+				return err
+			}
+			// 先加锁读出本集群当前绑在哪，再决定 INSERT 还是 UPDATE，
+			// 不用 INSERT ... ON DUPLICATE KEY UPDATE：绑定表现在有两个唯一
+			// 键（主键 cluster_id 与 repo_id 上的 UNIQUE）。撞上后者时
+			// ON DUPLICATE KEY UPDATE 会去改**另一个集群**那一行，而不是
+			// 报错 —— 一次「把 B 绑到 A 的仓库」的请求，结果是 A 的绑定被
+			// 悄悄改成了 B 的路径，两边都不会看到任何错误。分成两条语句
+			// 之后，repo_id 上的 UNIQUE 是唯一裁决者：它报 1062，写入失败。
+			var boundRepo string
+			err := tx.QueryRowContext(ctx,
+				`SELECT repo_id FROM cluster_git_binding WHERE cluster_id = ? FOR UPDATE`,
+				clusterID).Scan(&boundRepo)
+			// 撞上 repo_id 的唯一键是操作者选错了仓库，不是服务故障：
+			// 一个仓库只能绑一个集群（design doc §3.2）。
+			taken := fmt.Sprintf("仓库 %q 已被另一个集群绑定，一个仓库只能绑定一个集群", b.RepoID)
+			switch {
+			case errors.Is(err, sql.ErrNoRows):
+				if _, err := tx.ExecContext(ctx,
+					`INSERT INTO cluster_git_binding
+					   (cluster_id, repo_id, policy_path, last_written_commit,
+					    verified_at, verify_result)
+					 VALUES (?, ?, ?, ?, ?, ?)`,
+					clusterID, b.RepoID, b.PolicyPath, nullIfEmpty(b.LastWrittenCommit),
+					nullTimeIfNil(b.VerifiedAt), string(b.VerifyResult),
+				); err != nil {
+					return writeFailure("insert git binding", taken, "", err)
+				}
+			case err != nil:
+				return fmt.Errorf("lock git binding: %w", err)
+			default:
+				if _, err := tx.ExecContext(ctx,
+					`UPDATE cluster_git_binding
+					    SET repo_id = ?, policy_path = ?, last_written_commit = ?,
+					        verified_at = ?, verify_result = ?
+					  WHERE cluster_id = ?`,
+					b.RepoID, b.PolicyPath, nullIfEmpty(b.LastWrittenCommit),
+					nullTimeIfNil(b.VerifiedAt), string(b.VerifyResult), clusterID,
+				); err != nil {
+					return writeFailure("update git binding", taken, "", err)
+				}
 			}
 			return nil
 		})
@@ -180,11 +227,11 @@ func (s *Store) UnbindGitRepo(
 // 绑定不存在时返回 ErrNotFound。
 //
 // 只 UPDATE verify_result 与 verified_at 两列：跑一次校验不是一次配置
-// 变更，它没有理由改写仓库地址、分支、路径，更没有理由重写集群行
+// 变更，它没有理由改写绑定指向的仓库或路径，更没有理由重写集群行
 // （design doc 2026-08-13 §1 说的正是嵌在集群写模型里时付出的这笔代价）。
 func (s *Store) SetGitVerifyResult(
 	ctx context.Context, actor registry.Actor, clusterID string,
-	result registry.VerifyResult, at time.Time,
+	result registry.BindingVerifyResult, at time.Time,
 ) error {
 	if !result.Valid() {
 		// 封闭枚举：自由文本落进库里，统计口径当场失去意义，

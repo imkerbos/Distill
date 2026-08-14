@@ -117,35 +117,35 @@ type APIServer struct {
 	Port int32 `json:"port"`
 }
 
-// VerifyResult 是绑定只读校验的结论。封闭枚举。
+// BindingVerifyResult 是绑定路径级只读校验的结论。封闭枚举。
+//
+// 与仓库级的 RepoVerifyResult 是两个类型（design doc 2026-08-13 §3.3）：
+// 拆分的理由写在 RepoVerifyResult 上。这一层只回答一个问题 ——
+// policyPath 在仓库的那个分支上是否存在。
 //
 // 与「绑定能否保存」完全无关：保存与否是动作结果，可信与否是判断
 // 结论，两者合并就是用「能保存」冒充「能下发」（design doc §3.2）。
-type VerifyResult string
+type BindingVerifyResult string
 
 const (
-	// VerifyNotVerified 表示尚未校验过。空值在校验中按这个值处理。
-	VerifyNotVerified VerifyResult = "NOT_VERIFIED"
-	// VerifyOK 表示凭据可解析、仓库可达、认证通过、分支与路径均存在。
-	VerifyOK VerifyResult = "OK"
-	// VerifyCredentialUnresolved 表示 credentialRef 在 Secret Manager
-	// 里取不到 —— 平台侧配置问题。
-	VerifyCredentialUnresolved VerifyResult = "CREDENTIAL_UNRESOLVED" //nolint:gosec // G101 false positive: this is an enum label, not a credential.
-	// VerifyAuthFailed 表示凭据取到了，但仓库拒绝 —— 仓库侧权限问题。
+	// BindingVerifyNotVerified 表示尚未校验过。空值在校验中按这个值处理。
 	//
-	// 不与 VerifyCredentialUnresolved 合并：两者的处置人不是同一个人，
-	// 合并会让排障的人找错负责人。
-	VerifyAuthFailed VerifyResult = "AUTH_FAILED"
-	// VerifyRepoUnreachable 表示网络或地址问题，未能到达仓库；
-	// 出站超时也归入这一类，不单列取值 —— 从操作者视角处置相同。
-	VerifyRepoUnreachable VerifyResult = "REPO_UNREACHABLE"
-	// VerifyBranchMissing 表示仓库可达、认证通过，但分支不存在。
-	VerifyBranchMissing VerifyResult = "BRANCH_MISSING"
-	// VerifyPathMissing 表示分支存在，但 policyPath 在该分支上不存在。
+	// 仓库级不是 OK 时，路径级也只能落在这个值上：仓库都没到达过就说
+	// 「路径不存在」，是一句没有东西支撑的结论，而操作者会照着它去改
+	// policyPath（design doc §3.3）。类型只挡得住把 AUTH_FAILED 写进这一
+	// 层，挡不住「跳过仓库级直接报 PATH_MISSING」—— 那一条要由实现路径级
+	// 校验器的任务落实：仓库级结论不是 RepoVerifyOK 时必须返回本值。
+	BindingVerifyNotVerified BindingVerifyResult = "NOT_VERIFIED"
+	// BindingVerifyOK 表示 policyPath 在该分支上存在。
 	//
 	// 只表示「存在」，不表示「可写入」：可写性只有一次真正的写入才能
 	// 验证，而校验只做只读操作（design doc §3.1），不得把两者混说。
-	VerifyPathMissing VerifyResult = "PATH_MISSING"
+	BindingVerifyOK BindingVerifyResult = "OK"
+	// BindingVerifyPathMissing 表示仓库级校验已经通过，但 policyPath
+	// 在该分支上不存在。
+	//
+	// 「仓库级已经通过」是这个取值成立的前提，不是背景说明。
+	BindingVerifyPathMissing BindingVerifyResult = "PATH_MISSING"
 )
 
 // Valid 判断该结论是否已登记。
@@ -153,41 +153,37 @@ const (
 // 用显式 switch 而非 map/slice 查表：新增一个常量却忘了把它加进这里，
 // switch 让这处遗漏在 review 时是看得见的一行；换成表驱动，遗漏就是
 // 一次无声的编译通过。
-func (v VerifyResult) Valid() bool {
+func (v BindingVerifyResult) Valid() bool {
 	switch v {
-	case VerifyNotVerified, VerifyOK, VerifyCredentialUnresolved,
-		VerifyAuthFailed, VerifyRepoUnreachable, VerifyBranchMissing, VerifyPathMissing:
+	case BindingVerifyNotVerified, BindingVerifyOK, BindingVerifyPathMissing:
 		return true
 	default:
 		return false
 	}
 }
 
-// GitBinding 是集群与其 GitOps 仓库的绑定。
+// GitBinding 是集群与一个已存在的策略仓库的绑定。
 //
 // 一个不知道自己策略在哪个仓库哪个路径的集群，接入是不完整的 ——
 // Git 是策略的部署事实来源。
+//
+// 仓库地址、分支、凭据不在这里：它们属于 GitRepo（design doc §3.2）。
+// 绑定只携带「指向哪个仓库」「策略在仓库里的哪个路径」，以及这个路径
+// 自己的校验结论。
 type GitBinding struct {
-	// RepoURL 是仓库地址。
-	RepoURL string `json:"repoUrl"`
-	// Branch 是分支。
-	Branch string `json:"branch"`
+	// RepoID 是被绑定的仓库标识，指向一条 GitRepo。
+	RepoID string `json:"repoId"`
 	// PolicyPath 是该集群策略在仓库中的根路径。
 	PolicyPath string `json:"policyPath"`
-	// CredentialRef 是 Secret Manager 中凭据的引用。
-	//
-	// 凭据本身永不入库：一个能从平台数据库 dump 出 Git token 的设计，
-	// 等于把 GitOps 的信任根搬进了平台。
-	CredentialRef string `json:"credentialRef"`
 	// LastWrittenCommit 是平台最近一次写入该仓库的 commit，漂移检测的基准。
 	LastWrittenCommit string `json:"lastWrittenCommit"`
-	// VerifiedAt 是最近一次只读校验发生的时间；nil 表示从未校验过。
+	// VerifiedAt 是最近一次路径级只读校验发生的时间；nil 表示从未校验过。
 	//
 	// 这是历史事实，不是当前状态：轮 4 写回前必须重新校验，不能拿一个
 	// 几天前的 OK 当作现在可写（design doc §3.4）。
 	VerifiedAt *time.Time `json:"verifiedAt,omitempty"`
-	// VerifyResult 是最近一次校验的结论。
-	VerifyResult VerifyResult `json:"verifyResult"`
+	// VerifyResult 是最近一次路径级校验的结论。
+	VerifyResult BindingVerifyResult `json:"verifyResult"`
 }
 
 // Cluster 是一个已注册的集群。
