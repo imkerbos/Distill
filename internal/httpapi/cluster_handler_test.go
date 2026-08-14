@@ -9,9 +9,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/response"
@@ -51,6 +54,35 @@ type memRegistry struct {
 	lastRepo registry.GitRepo
 	// setting 是这个替身持有的平台设置，见 Setting/UpdateSetting。
 	setting registry.PlatformSetting
+	// accounts 是这个替身持有的账号表，见本文件末尾的账号方法。
+	accounts map[string]*memAccount
+	// failAccountsWith 让账号读写失败。
+	//
+	// **账号路径有自己的开关，不吃 failWith / failWritesWith**，这不是
+	// 图省事：那两个开关表达的是"这个端点要读写的东西不可用"，而每一个
+	// 用例的装配都要先登录一次，登录与随后的每次授权判定都要读账号表。
+	// 让账号表跟着一起坏，那些用例就会在装配阶段就拿不到会话，断言的
+	// 对象从"这个端点怎么处理故障"悄悄变成"授权中间件怎么处理故障"——
+	// 而后者在 authz_internal_test.go 里有自己的覆盖。
+	failAccountsWith error
+	// bootstrapLogins 记下每一次 BOOTSTRAP_LOGIN 审计写入的操作者。
+	//
+	// 这是替身里唯一被观察的审计痕迹：引导账号登录必须留痕（design doc
+	// 2026-08-14 §2），而 registry.Store 刻意不暴露审计的读路径，测试
+	// 只能从这里断言那条写入确实发生过。
+	bootstrapLogins []string
+}
+
+// memAccount 是替身里的一行账号，比 registry.Account 多一个哈希。
+//
+// 哈希留在替身内部、不出现在任何读方法的返回里（AccountPasswordHash 除外，
+// 而它回的是 registry.PasswordHash）：真实实现的读路径根本不 SELECT 这一列
+// （见 mysqlregistry.accountColumns），替身若把它挂在读模型上，"某条响应
+// 把哈希带出去了"就会在 handler 测试里表现成正常。
+type memAccount struct {
+	account   registry.Account
+	hash      string
+	deletedAt *time.Time
 }
 
 // writeErr 返回本次写调用该失败的错误，两个字段都没设时为 nil。
@@ -74,6 +106,7 @@ func newMemRegistry() *memRegistry {
 		repos:     map[string]registry.GitRepo{},
 		imports:   map[string][]registry.PolicyImport{},
 		overrides: map[string][]registry.RuleOverride{},
+		accounts:  map[string]*memAccount{},
 		// 一份能过 ValidatePlatformSetting 的设置：零值那份读出来是
 		// 「会话立即过期、超时保护关掉」，不是一个可用的初始状态。
 		setting: registry.PlatformSetting{
@@ -447,6 +480,227 @@ func (m *memRegistry) UpdateSetting(_ context.Context, _ registry.Actor, s regis
 	m.record("UpdateSetting")
 	m.setting = s
 	return nil
+}
+
+// —— 账号 ——
+//
+// 这一组方法与真实实现（internal/mysqlregistry/account.go）在**拒绝的
+// 条件上**保持一致：软删除与停用的可见性、最后一个管理员的保护、用户名
+// 不复用。替身若比真实实现宽松，账号端点的测试就会在一条真实实现会拒绝
+// 的输入上通过 —— 与本文件其余替身方法同一条纪律。
+
+// accountErr 返回本次账号调用该失败的错误，见 failAccountsWith。
+func (m *memRegistry) accountErr() error {
+	return m.failAccountsWith
+}
+
+// live 返回一个未软删除的账号。
+func (m *memRegistry) live(username string) (*memAccount, bool) {
+	a, ok := m.accounts[username]
+	if !ok || a.deletedAt != nil {
+		return nil, false
+	}
+	return a, true
+}
+
+// lastEnabledAdmin 判断 username 是不是此刻唯一一个启用中的管理员。
+//
+// 真实实现在事务里加锁做同一件判定（requireAdminRemains）：替身漏了这条，
+// 边界层把 ErrLastAdmin 映射成业务失败的那段代码就永远不会被执行到，而一条
+// 断言在没被执行到的分支上永远成立。
+func (m *memRegistry) lastEnabledAdmin(username string) bool {
+	var admins []string
+	for name, a := range m.accounts {
+		if a.deletedAt == nil && a.account.DisabledAt == nil && a.account.Role == registry.RoleAdmin {
+			admins = append(admins, name)
+		}
+	}
+	return len(admins) == 1 && admins[0] == username
+}
+
+func (m *memRegistry) Accounts(context.Context) ([]registry.Account, error) {
+	if err := m.accountErr(); err != nil {
+		return nil, err
+	}
+	out := make([]registry.Account, 0, len(m.accounts))
+	for _, a := range m.accounts {
+		if a.deletedAt == nil {
+			out = append(out, a.account)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Username < out[j].Username })
+	return out, nil
+}
+
+func (m *memRegistry) Account(_ context.Context, username string) (registry.Account, bool, error) {
+	if err := m.accountErr(); err != nil {
+		return registry.Account{}, false, err
+	}
+	a, ok := m.live(username)
+	if !ok {
+		return registry.Account{}, false, nil
+	}
+	return a.account, true, nil
+}
+
+// AccountPasswordHash 的谓词比 Account 多一条「未停用」，与真实实现一致：
+// 一个被停用的账号连会话都换不到，而不是换到一张什么都做不了的会话。
+func (m *memRegistry) AccountPasswordHash(
+	_ context.Context, username string,
+) (registry.PasswordHash, bool, error) {
+	if err := m.accountErr(); err != nil {
+		return registry.PasswordHash{}, false, err
+	}
+	a, ok := m.live(username)
+	if !ok || a.account.DisabledAt != nil {
+		return registry.PasswordHash{}, false, nil
+	}
+	return registry.NewPasswordHash(a.hash), true, nil
+}
+
+func (m *memRegistry) CreateAccount(
+	_ context.Context, _ registry.Actor, a registry.Account, passwordHash string,
+) error {
+	m.record("CreateAccount")
+	if err := m.accountErr(); err != nil {
+		return err
+	}
+	if err := registry.ValidateAccount(a); err != nil {
+		return err
+	}
+	if passwordHash == "" {
+		return registry.NewInvalidError("密码哈希不能为空")
+	}
+	// 软删除的行仍占着主键：用户名不复用是设计的一部分，复用会让新账号
+	// 继承旧账号在审计里的身份（design doc 2026-08-14 §3）。
+	if _, taken := m.accounts[a.Username]; taken {
+		return registry.NewInvalidError("用户名已被占用（含已删除的），请换一个")
+	}
+	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+	created := a
+	created.DisabledAt = nil
+	created.CreatedAt = now
+	created.UpdatedAt = now
+	m.accounts[a.Username] = &memAccount{account: created, hash: passwordHash}
+	return nil
+}
+
+func (m *memRegistry) UpdateAccountRole(
+	_ context.Context, _ registry.Actor, username string, role registry.Role,
+) error {
+	m.record("UpdateAccountRole")
+	if err := m.accountErr(); err != nil {
+		return err
+	}
+	if !role.Valid() {
+		return registry.NewInvalidError("角色不在已登记的取值范围内")
+	}
+	a, ok := m.live(username)
+	if !ok {
+		return registry.ErrNotFound
+	}
+	// 降级最后一个启用中的管理员会让平台再也没有人能管理它。
+	if role != registry.RoleAdmin && m.lastEnabledAdmin(username) {
+		return fmt.Errorf("%w: %s", registry.ErrLastAdmin, username)
+	}
+	a.account.Role = role
+	return nil
+}
+
+func (m *memRegistry) DisableAccount(_ context.Context, _ registry.Actor, username string) error {
+	m.record("DisableAccount")
+	if err := m.accountErr(); err != nil {
+		return err
+	}
+	a, ok := m.live(username)
+	if !ok {
+		return registry.ErrNotFound
+	}
+	if m.lastEnabledAdmin(username) {
+		return fmt.Errorf("%w: %s", registry.ErrLastAdmin, username)
+	}
+	at := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+	a.account.DisabledAt = &at
+	return nil
+}
+
+func (m *memRegistry) EnableAccount(_ context.Context, _ registry.Actor, username string) error {
+	m.record("EnableAccount")
+	if err := m.accountErr(); err != nil {
+		return err
+	}
+	a, ok := m.live(username)
+	if !ok {
+		return registry.ErrNotFound
+	}
+	a.account.DisabledAt = nil
+	return nil
+}
+
+func (m *memRegistry) SoftDeleteAccount(_ context.Context, _ registry.Actor, username string) error {
+	m.record("SoftDeleteAccount")
+	if err := m.accountErr(); err != nil {
+		return err
+	}
+	a, ok := m.live(username)
+	if !ok {
+		return registry.ErrNotFound
+	}
+	if m.lastEnabledAdmin(username) {
+		return fmt.Errorf("%w: %s", registry.ErrLastAdmin, username)
+	}
+	at := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+	a.deletedAt = &at
+	return nil
+}
+
+func (m *memRegistry) SetAccountPassword(
+	_ context.Context, _ registry.Actor, username string, passwordHash string,
+) error {
+	m.record("SetAccountPassword")
+	if err := m.accountErr(); err != nil {
+		return err
+	}
+	if passwordHash == "" {
+		return registry.NewInvalidError("密码哈希不能为空")
+	}
+	a, ok := m.live(username)
+	if !ok {
+		return registry.ErrNotFound
+	}
+	a.hash = passwordHash
+	return nil
+}
+
+// RecordBootstrapLogin 不进 trace：那份序列是用来给**一次被测操作**里的
+// 校验与写入排序的，而引导登录发生在装配阶段，混进去只会让每条顺序断言
+// 都多出一个与被测行为无关的头部。它自己的观察通道是 bootstrapLogins。
+func (m *memRegistry) RecordBootstrapLogin(_ context.Context, actor registry.Actor) error {
+	if err := m.accountErr(); err != nil {
+		return err
+	}
+	m.bootstrapLogins = append(m.bootstrapLogins, actor.Username)
+	return nil
+}
+
+// withAccount 往替身里塞一个账号，返回它的明文密码。
+//
+// 走 CreateAccount 而不是直接写 map：建号路径上的那几条拒绝（角色合法、
+// 哈希非空、用户名不复用）因此对测试数据同样生效，测试就不可能在一个
+// 真实实现建不出来的账号上做断言。
+func (m *memRegistry) withAccount(t *testing.T, username string, role registry.Role, password string) {
+	t.Helper()
+	// MinCost 而不是 DefaultCost：这些账号只是测试夹具，而一次 DefaultCost
+	// 哈希要几十毫秒，几十个用例累加起来就是分钟级。被测代码自己用的仍是
+	// DefaultCost。
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("hash %s: %v", username, err)
+	}
+	a := registry.Account{Username: username, Role: role}
+	if err := m.CreateAccount(context.Background(), registry.Actor{Username: "test"}, a, string(hash)); err != nil {
+		t.Fatalf("seed account %s: %v", username, err)
+	}
 }
 
 // authedPostJSON 与 session_handler_test.go 的 postJSON 同形，多带一个

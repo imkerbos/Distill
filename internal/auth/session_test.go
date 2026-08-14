@@ -1,18 +1,19 @@
 package auth_test
 
 import (
-	"errors"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/imkerbos/Distill/internal/auth"
+	"github.com/imkerbos/Distill/internal/registry"
 )
 
 func TestSessionCreateAndGet(t *testing.T) {
 	now := time.Date(2026, 7, 31, 10, 0, 0, 0, time.UTC)
 	s := auth.NewSessionStore(time.Hour, func() time.Time { return now })
 
-	sess, err := s.Create("demo", auth.RoleAdmin)
+	sess, err := s.Create("demo")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -30,43 +31,23 @@ func TestSessionCreateAndGet(t *testing.T) {
 	if got.Username != "demo" {
 		t.Errorf("Username = %q, want demo", got.Username)
 	}
-	// 角色必须原样存活到读出来那一刻：授权层读的正是这个字段，
-	// 一个在存取之间丢掉的角色会让每次判定都落到零值上。
-	if got.Role != auth.RoleAdmin {
-		t.Errorf("Role = %q, want %q", got.Role, auth.RoleAdmin)
-	}
 }
 
-// 会话的角色由签发方给出，取什么值就存什么值 —— 不会被悄悄提权。
-func TestSessionCreateKeepsTheGivenRole(t *testing.T) {
-	s := auth.NewSessionStore(time.Hour, nil)
-	sess, err := s.Create("readonly", auth.RoleViewer)
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	if sess.Role != auth.RoleViewer {
-		t.Fatalf("Role = %q, want %q", sess.Role, auth.RoleViewer)
-	}
-	got, ok := s.Get(sess.ID)
-	if !ok {
-		t.Fatal("session must be retrievable")
-	}
-	if got.Role != auth.RoleViewer {
-		t.Errorf("stored Role = %q, want %q — a viewer must not read back as anything else",
-			got.Role, auth.RoleViewer)
-	}
-}
-
-// 签不出没有角色的会话：那样的会话一旦存在，授权层就要为它的零值兜底。
-func TestSessionCreateRejectsAnUnregisteredRole(t *testing.T) {
-	s := auth.NewSessionStore(time.Hour, nil)
-	for _, role := range []auth.Role{"", "SUPERADMIN", "admin"} {
-		sess, err := s.Create("demo", role)
-		if !errors.Is(err, auth.ErrInvalidRole) {
-			t.Errorf("Create with role %q: err = %v, want ErrInvalidRole", role, err)
-		}
-		if sess.ID != "" {
-			t.Errorf("Create with role %q returned a session anyway: %q", role, sess.ID)
+// 会话不得携带角色。
+//
+// 这条断言直接对着结构体本身，因为「角色被抄进会话」的症状不在任何一次
+// 单独的调用里 —— 每次登录看起来都正常，差别只在一个账号被降权或停用
+// **之后**，那张已经签发的会话还剩多久（design doc 2026-08-14 §4）。
+// 字段一旦加回来，授权层就会去读它，而这里是能在编译产物上看见它的地方。
+func TestSessionCarriesNoRole(t *testing.T) {
+	st := reflect.TypeOf(auth.Session{})
+	roleType := reflect.TypeOf(registry.Role(""))
+	for i := 0; i < st.NumField(); i++ {
+		f := st.Field(i)
+		if f.Type == roleType || f.Name == "Role" {
+			t.Errorf("auth.Session has field %s %s — the session carries identity only; "+
+				"the role must be read from the account record at authorization time",
+				f.Name, f.Type)
 		}
 	}
 }
@@ -76,7 +57,7 @@ func TestSessionIDsAreUnique(t *testing.T) {
 	s := auth.NewSessionStore(time.Hour, nil)
 	seen := map[string]bool{}
 	for i := 0; i < 200; i++ {
-		sess, err := s.Create("demo", auth.RoleAdmin)
+		sess, err := s.Create("demo")
 		if err != nil {
 			t.Fatalf("Create: %v", err)
 		}
@@ -95,7 +76,7 @@ func TestSessionExpires(t *testing.T) {
 	clock := func() time.Time { return now }
 	s := auth.NewSessionStore(time.Hour, clock)
 
-	sess, err := s.Create("demo", auth.RoleAdmin)
+	sess, err := s.Create("demo")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -113,7 +94,7 @@ func TestSessionExpires(t *testing.T) {
 
 func TestSessionDelete(t *testing.T) {
 	s := auth.NewSessionStore(time.Hour, nil)
-	sess, err := s.Create("demo", auth.RoleAdmin)
+	sess, err := s.Create("demo")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -138,7 +119,7 @@ func TestSessionStoreIsConcurrencySafe(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		go func() {
 			defer func() { done <- struct{}{} }()
-			sess, err := s.Create("demo", auth.RoleAdmin)
+			sess, err := s.Create("demo")
 			if err != nil {
 				return
 			}

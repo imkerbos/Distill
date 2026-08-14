@@ -4,6 +4,7 @@ import { api } from '../api/client'
 import { Select } from './ui'
 import type { RegisteredCluster } from '../api/types'
 import { useSession } from '../auth/SessionContext'
+import { showsAccountAdminEntry } from '../pages/accountForm'
 
 interface Props {
   cluster: string
@@ -79,6 +80,19 @@ export default function AppShell({ cluster, onClusterChange, children }: Props) 
           { to: '/clusters', label: '集群管理' },
           { to: '/git-repos', label: '策略仓库' },
           { to: '/settings', label: '平台设置' },
+          /*
+            账号管理入口只对管理员渲染。**这只是体验，不是安全** ——
+            服务端对 /api/v1/accounts 下的每一个端点都声明了 accessAdmin，
+            并在每次请求现读角色，只读账号把地址敲进浏览器一样是 403
+            （规范 §34、design doc 2026-08-14 §8）。隐藏这一项省下的只是
+            「点了才发现被拒」那一次无用点击；谁把它当成那些端点的保护，
+            删掉这一行时会以为自己只是改了导航。
+          */
+          ...(identity && showsAccountAdminEntry(identity.role)
+            ? [{ to: '/accounts', label: '账号管理' }]
+            : []),
+          // 改自己的密码任何角色都能做，因此不在上面那道过滤里。
+          { to: '/me/password', label: '修改密码' },
         ].map((item) => (
           <NavLink
             key={item.to}

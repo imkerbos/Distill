@@ -186,7 +186,7 @@ func TestRequireSessionRejectsAnonymous(t *testing.T) {
 
 func TestRequireSessionAcceptsValidCookie(t *testing.T) {
 	sessions := auth.NewSessionStore(time.Hour, nil)
-	sess, err := sessions.Create("demo", auth.RoleAdmin)
+	sess, err := sessions.Create("demo")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestRequireSessionRejectsExpired(t *testing.T) {
 	now := time.Date(2026, 7, 31, 10, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
 	sessions := auth.NewSessionStore(time.Hour, clock)
-	sess, _ := sessions.Create("demo", auth.RoleAdmin)
+	sess, _ := sessions.Create("demo")
 
 	now = now.Add(2 * time.Hour)
 

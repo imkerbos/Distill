@@ -93,10 +93,34 @@ func newTestRouterWithWindow(
 	return buildTestRouter(t, reader, reg, window, nil)
 }
 
+// newTestRouterWithLog 是 newTestRouterWithRegistry 的变体，额外把请求日志
+// 引到一个缓冲区。
+//
+// 只有验证「日志里有没有账号名」的用例需要它（design doc 2026-08-14 §7）：
+// 那条断言必须读**真实的日志输出**，从 handler 或会话存储反推等于让测试
+// 自己回答自己的问题。其余用例仍把日志丢进 io.Discard。
+func newTestRouterWithLog(
+	t *testing.T, reg registry.Store,
+) (http.Handler, *auth.SessionStore, *http.Cookie, *bytes.Buffer) {
+	t.Helper()
+	var buf bytes.Buffer
+	h, sessions, cookie := buildTestRouterWithLog(t, nil, reg, store.TimeWindow{}, nil, "INFO", &buf)
+	return h, sessions, cookie, &buf
+}
+
 // buildTestRouter 是全部装配入口的底层实现。
 func buildTestRouter(
 	t *testing.T, reader store.Reader, reg registry.Store,
 	window store.TimeWindow, gv httpapi.GitVerifier,
+) (http.Handler, *auth.SessionStore, *http.Cookie) {
+	t.Helper()
+	return buildTestRouterWithLog(t, reader, reg, window, gv, "ERROR", io.Discard)
+}
+
+// buildTestRouterWithLog 是 buildTestRouter 多带一个日志去处的版本。
+func buildTestRouterWithLog(
+	t *testing.T, reader store.Reader, reg registry.Store,
+	window store.TimeWindow, gv httpapi.GitVerifier, level string, logOut io.Writer,
 ) (http.Handler, *auth.SessionStore, *http.Cookie) {
 	t.Helper()
 
@@ -105,14 +129,18 @@ func buildTestRouter(
 		t.Fatalf("hash: %v", err)
 	}
 	sessions := auth.NewSessionStore(time.Hour, nil)
-	logger, err := applog.New("ERROR", io.Discard)
+	logger, err := applog.New(level, logOut)
 	if err != nil {
 		t.Fatalf("logger: %v", err)
 	}
 
 	h := httpapi.NewRouter(httpapi.Deps{
-		Sessions:    sessions,
-		Verifier:    auth.NewVerifier([]config.User{{Username: "demo", PasswordHash: string(hash)}}),
+		Sessions: sessions,
+		// 账号表跟着传进去：角色在每次请求上从账号记录现读，而引导账号
+		// 只在库里没有启用中的管理员时可用（design doc 2026-08-14 §2、§4）。
+		// 绝大多数用例的账号表是空的，于是 "demo" 仍然是那个能登进来的
+		// 管理员 —— 与这些用例此前的形态一致。
+		Verifier:    auth.NewVerifier(config.User{Username: "demo", PasswordHash: string(hash)}, reg),
 		Logger:      logger,
 		Reader:      reader,
 		Registry:    reg,

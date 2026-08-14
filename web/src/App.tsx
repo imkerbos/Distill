@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import AppShell from './components/AppShell'
 import { SessionProvider, useSession } from './auth/SessionContext'
+import AccountsPage, { OwnPasswordPage } from './pages/AccountsPage'
 import ClustersPage from './pages/ClustersPage'
 import FlowsPage from './pages/FlowsPage'
 import GitReposPage from './pages/GitReposPage'
@@ -33,6 +34,15 @@ function Protected() {
         <Route path="/git-repos" element={<GitReposPage />} />
         {/* 设置是平台自身的配置，不属于任何一个集群，因此不接 cluster。 */}
         <Route path="/settings" element={<SettingsPage />} />
+        {/*
+          账号与集群无关，因此同样不接 cluster。
+          这条路由**不按角色摘掉**：摘掉它，只读账号敲进这个地址会被
+          「* → /topology」悄悄弹走，那看起来像地址打错了。让页面自己说
+          「服务端会拒绝这一页上的每一个请求」，说的是实情（规范 §34）。
+        */}
+        <Route path="/accounts" element={<AccountsPage />} />
+        {/* 改自己的密码任何角色都能做，因此不在任何角色判断里。 */}
+        <Route path="/me/password" element={<OwnPasswordPage />} />
         <Route path="*" element={<Navigate to="/topology" replace />} />
       </Routes>
     </AppShell>

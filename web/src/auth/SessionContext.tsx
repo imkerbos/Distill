@@ -3,10 +3,17 @@ import {
   type ReactNode,
 } from 'react'
 import { api, onUnauthorized } from '../api/client'
-import type { Identity } from '../api/types'
+import type { CurrentSession } from '../api/types'
 
 interface SessionValue {
-  identity: Identity | null
+  /**
+   * 当前身份与它此刻生效的角色，**全部来自服务端的当前会话端点**。
+   *
+   * 角色不来自登录响应（那里没有角色）、不来自 Cookie（HttpOnly 读不到）、
+   * 也不来自任何本地存储 —— 界面因此没有任何一条能自称管理员的路径
+   * （design doc 2026-08-14 §8，规范 §34）。
+   */
+  identity: CurrentSession | null
   /** 首次探测会话期间为 true —— 此时不能判定用户未登录并跳转。 */
   loading: boolean
   login: (username: string, password: string) => Promise<void>
@@ -16,7 +23,7 @@ interface SessionValue {
 const SessionContext = createContext<SessionValue | null>(null)
 
 export function SessionProvider({ children }: { children: ReactNode }) {
-  const [identity, setIdentity] = useState<Identity | null>(null)
+  const [identity, setIdentity] = useState<CurrentSession | null>(null)
   const [loading, setLoading] = useState(true)
 
   // 刷新页面后 Cookie 还在，但内存里的身份没了 —— 启动时探测一次，
@@ -33,8 +40,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     onUnauthorized(() => setIdentity(null))
   }, [])
 
+  // 登录成功后再问一次当前会话，而不是把登录响应直接存下来：登录响应里
+  // 只有用户名，**没有角色**（handleCreateSession 刻意只回身份）。要角色
+  // 就只能来自当前会话端点，那里回的是服务端本次授权判定用过的那一个。
+  // 少了这一次请求，刚登录的人会一直是「角色未知」，直到他刷新页面。
   const login = useCallback(async (username: string, password: string) => {
-    setIdentity(await api.login(username, password))
+    await api.login(username, password)
+    setIdentity(await api.me())
   }, [])
 
   const logout = useCallback(async () => {

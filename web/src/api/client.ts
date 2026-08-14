@@ -1,8 +1,8 @@
 import type {
-  ClusterWrite, Decision, Envelope, FlowFilter, FlowPage, GitBindingWrite,
+  Account, ClusterWrite, CurrentSession, Decision, Envelope, FlowFilter, FlowPage, GitBindingWrite,
   GitRepo, GitRepoWrite, Identity, ImportRole, ImportSource, OverrideDecision,
   PathVerifyStatus, PlatformSettingView, PlatformSettingWrite, PolicyImportItem, PolicyPreview,
-  Quality, RegisteredCluster, RepoVerifyStatus, SecurityReport, Topology, TopologyLevel,
+  Quality, RegisteredCluster, RepoVerifyStatus, Role, SecurityReport, Topology, TopologyLevel,
 } from './types'
 
 /** ApiError 同时携带 HTTP 状态与业务码，调用方两者都可能需要判断。 */
@@ -76,7 +76,73 @@ export const api = {
 
   logout: () => request<null>('/api/v1/sessions/current', { method: 'DELETE' }),
 
-  me: () => request<Identity>('/api/v1/sessions/current'),
+  // 当前会话是界面获知自己角色的**唯一**来源（design doc 2026-08-14 §8）。
+  // 登录响应里没有角色，Cookie 是 HttpOnly 读不到，本地也不存任何身份 ——
+  // 于是「我是不是管理员」在客户端根本无从自称，只能来自这一次请求，而
+  // 服务端回的是它本次授权判定用过的那个角色（handleCurrentSession）。
+  me: () => request<CurrentSession>('/api/v1/sessions/current'),
+
+  /* 账号管理。全部端点服务端声明 accessAdmin，只读账号一律被拒（§34）。 */
+
+  accounts: () => request<Account[]>('/api/v1/accounts'),
+
+  // 新建账号固定建成只读，请求体里没有 role：服务端的 createAccountRequest
+  // 也没有这个字段，提权只能走 updateAccountRole 那一次单独的、有自己审计
+  // 动作的操作。带一个不会被采纳的 role 上去，调用方会以为自己建出了管理员。
+  //
+  // 明文密码走请求体，不走路径也不走查询串：URL 会进浏览器历史、Referer
+  // 与服务端访问日志，而那三处都不该出现密码（规范 §19、§21）。响应里
+  // 只有用户名与角色 —— 服务端不回显它刚收到的那个密码。
+  createAccount: (username: string, password: string) =>
+    request<{ username: string; role: Role }>('/api/v1/accounts', {
+      method: 'POST',
+      body: JSON.stringify({ username, password }),
+    }),
+
+  // 全平台唯一一处把 role 放进请求体的调用，而它的含义是「要改成什么」，
+  // 不是「我是什么」（规范 §9）。降级最后一个启用中的管理员由服务端在
+  // 同一事务内拒绝，界面上的计数只是提前把话说在前面（design doc §5）。
+  updateAccountRole: (username: string, role: Role) =>
+    request<{ username: string; role: string }>(
+      `/api/v1/accounts/${encodeURIComponent(username)}/role`,
+      { method: 'PUT', body: JSON.stringify({ role }) },
+    ),
+
+  disableAccount: (username: string) =>
+    request<{ username: string }>(
+      `/api/v1/accounts/${encodeURIComponent(username)}/disable`, { method: 'POST' },
+    ),
+
+  enableAccount: (username: string) =>
+    request<{ username: string }>(
+      `/api/v1/accounts/${encodeURIComponent(username)}/enable`, { method: 'POST' },
+    ),
+
+  // 软删除：审计行记录着这个账号做过什么，用户名也不再回收（design doc §3）。
+  deleteAccount: (username: string) =>
+    request<{ username: string }>(
+      `/api/v1/accounts/${encodeURIComponent(username)}`, { method: 'DELETE' },
+    ),
+
+  // 管理员重置他人密码。不带当前密码 —— 管理员并不知道对方的密码，要求他
+  // 提供等于把这个功能变成做不到的操作；由审计（RESET_PASSWORD）负责事后
+  // 可查。新密码只在请求体里，响应回的是用户名。
+  resetAccountPassword: (username: string, password: string) =>
+    request<{ username: string }>(
+      `/api/v1/accounts/${encodeURIComponent(username)}/password`,
+      { method: 'POST', body: JSON.stringify({ password }) },
+    ),
+
+  // 改自己的密码。目标取自服务端的会话，路径里没有用户名 —— 让调用方指定
+  // 目标，一个只读账号就能改管理员的密码（internal/httpapi/router.go 的注释）。
+  //
+  // **必须带当前密码**（规范 §28）：会话可能是一台没锁屏的机器留下的，而
+  // 改密码会把账号的控制权永久转移给改的人。两个密码都在请求体里。
+  changeOwnPassword: (currentPassword: string, newPassword: string) =>
+    request<{ username: string }>('/api/v1/me/password', {
+      method: 'POST',
+      body: JSON.stringify({ currentPassword, newPassword }),
+    }),
 
   // 平台设置。每次进页面都现读，不在模块里缓存：设置整体是"按需读取"的
   // （design doc 2026-08-13 §1.1），一份缓存下来的设置会在别处改完之后

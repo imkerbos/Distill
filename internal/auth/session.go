@@ -3,7 +3,6 @@ package auth
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -13,22 +12,19 @@ import (
 // 128 位熵，十六进制编码后 32 个字符，不可枚举。
 const sessionIDBytes = 16
 
-// ErrInvalidRole 表示试图用一个未登记的角色签发会话。
-var ErrInvalidRole = errors.New("session requires a registered role")
-
 // Session 是一次已认证的会话。
+//
+// **它只携带身份，不携带角色。** 权限从账号记录现读（见 Verifier.RoleOf）：
+// 会话在签发时抄一份角色的话，一个刚被降权或停用的账号会继续拿着原权限
+// 直到会话过期，默认 8 小时（design doc 2026-08-14 §4）。
+//
+// 身份本身仍然只从这里来：请求体、请求头、Cookie 与查询串里出现的任何
+// username/role/is_admin 字段都与授权无关，也永远不会被读（规范 §9、§34）。
 type Session struct {
 	// ID 是会话标识，随机生成，作为 Cookie 值下发。
 	ID string
-	// Username 是会话归属的账号。
+	// Username 是会话归属的账号，也是现读角色时的查找键。
 	Username string
-	// Role 是该账号的角色。
-	//
-	// **权限只从这里来。** 它在签发会话时由服务端从账号记录取得，此后
-	// 只在服务端内存里流动 —— 请求体、请求头、Cookie 与查询串里出现的
-	// 任何 role/is_admin 字段都与它无关，也永远不会被读（规范 §9、§34）。
-	// 会话本身就是那份可信状态。
-	Role Role
 	// ExpiresAt 是过期时刻。
 	ExpiresAt time.Time
 }
@@ -58,14 +54,9 @@ func NewSessionStore(ttl time.Duration, now func() time.Time) *SessionStore {
 
 // Create 为指定账号签发一个新会话。
 //
-// role 是必填参数而不是一个可以事后补上的字段：签不出一个没有角色的会话，
-// 「忘了设角色」这条路径就不存在。未登记的角色（含零值）一律拒绝签发 ——
-// 退一步给它一个默认角色，等于让一次装配失误变成一次静默的授权。
-func (s *SessionStore) Create(username string, role Role) (Session, error) {
-	if !role.Valid() {
-		return Session{}, fmt.Errorf("%w: %q", ErrInvalidRole, role)
-	}
-
+// 不再接收角色：签发时不知道、也不需要知道这个账号能做什么。授权在每次
+// 请求上现读账号记录（见 Verifier.RoleOf），这里只记下"是谁"。
+func (s *SessionStore) Create(username string) (Session, error) {
 	raw := make([]byte, sessionIDBytes)
 	if _, err := rand.Read(raw); err != nil {
 		return Session{}, fmt.Errorf("generate session id: %w", err)
@@ -74,7 +65,6 @@ func (s *SessionStore) Create(username string, role Role) (Session, error) {
 	sess := Session{
 		ID:        hex.EncodeToString(raw),
 		Username:  username,
-		Role:      role,
 		ExpiresAt: s.now().Add(s.ttl),
 	}
 

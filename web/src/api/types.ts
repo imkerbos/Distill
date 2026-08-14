@@ -10,6 +10,50 @@ export interface Envelope<T> {
 
 export interface Identity { username: string }
 
+/**
+ * 平台角色的封闭枚举，取值与服务端 registry.Role 一一对应。
+ *
+ * 界面拿到它只用来决定渲染什么（design doc 2026-08-14 §8）。**它不是权限**：
+ * 授权判定在服务端每次请求现读账号记录（internal/auth Verifier.RoleOf），
+ * 这里这个字符串只是那次判定结果的一份回显（规范 §34）。
+ */
+export type Role = 'ADMIN' | 'VIEWER'
+
+/**
+ * GET /api/v1/sessions/current 的响应。
+ *
+ * 与 Identity 分开而不是给它加一个可选的 role：登录（POST /sessions）的
+ * 响应里**没有**角色，服务端刻意只回用户名。合成一个可选字段的类型，
+ * 调用方就分不出「这次没带角色」和「这个人没有角色」，而两者的正确处置
+ * 相反 —— 前者要去问一次当前会话端点，后者要什么都不渲染。
+ */
+export interface CurrentSession {
+  username: string
+  role: Role
+}
+
+/**
+ * 一条平台账号的读模型，对应服务端 accountView。
+ *
+ * **这里没有密码，也没有密码哈希，这是刻意的**：服务端的 accountView 与
+ * registry.Account 同样没有那个字段（规范 §19、§20、§35）。三层都没有它，
+ * 「某条路径把哈希带到界面上」就成了写不出来的状态，而不是每次改动都要
+ * 有人记得去检查的一条规则。
+ */
+export interface Account {
+  username: string
+  role: Role
+  /**
+   * 为空表示账号处于启用状态。
+   *
+   * 是时刻而不是一个 disabled 布尔：停用是可逆的暂停，「什么时候被停的」
+   * 是操作者要看的信息，布尔答不出来（design doc §3）。
+   */
+  disabledAt: string | null
+  createdAt: string
+  updatedAt: string
+}
+
 export interface TopologyNode {
   id: string
   cluster: string

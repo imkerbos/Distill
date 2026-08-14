@@ -25,6 +25,11 @@ type ctxKey int
 const (
 	ctxKeyRequestID ctxKey = iota
 	ctxKeySession
+	ctxKeyActor
+	// ctxKeyRole 携带本次请求现读出来的角色。写入方是 authz.go 的授权
+	// 中间件，键定义在这里只是为了让全部 context 键留在同一处 ——
+	// 分散之后，"这个包一共往 context 里放了几样东西"就没有一处答得上来。
+	ctxKeyRole
 )
 
 // RequestID 为每个请求生成标识，并回写到响应头。
@@ -70,17 +75,51 @@ func (s *statusRecorder) RecordCode(code response.Code) {
 	s.code = code
 }
 
+// requestActor 是本次请求的账号信箱。
+//
+// 它存在的理由是中间件的装配次序：RequestLogger 在路由根部，而会话要到
+// RequireSession 才认得出来，且是往**下游**派生的 context 里放的 ——
+// 上游手里的 r 永远看不到它。原先那句 `if sess, ok := SessionFrom(...)`
+// 因此是一条从不成立的死分支，日志里的账号名字段从未落过盘
+// （design doc 2026-08-14 §7）。
+//
+// 用一个指针信箱而不是把日志中间件挪到认证之后：挪下去之后，401 与
+// 未匹配到路由的请求就不再产生完成日志，而"谁在被拒"正是审计要问的
+// 那一半（规范 §43）。
+//
+// 只放账号名。会话 ID 是凭据，进日志等于把它复制进一份长期留存、
+// 且比内存更容易被导出的地方（规范 §21）。
+type requestActor struct {
+	username string
+}
+
+// recordActor 把已认证的账号名写进本次请求的信箱；没有信箱时什么都不做。
+//
+// 不加锁：信箱在一次请求的处理 goroutine 内创建、写入、读取，写入发生在
+// next.ServeHTTP 之内，读取发生在它返回之后，两者之间有 happens-before。
+func recordActor(ctx context.Context, username string) {
+	if a, ok := ctx.Value(ctxKeyActor).(*requestActor); ok {
+		a.username = username
+	}
+}
+
 // RequestLogger 为每个请求输出一条完成日志。
 //
 // 只记录路径而不记录查询串与 Cookie：登录接口的密码可能出现在查询串里，
 // 会话 token 就在 Cookie 里，两者都绝不能落盘。
+//
+// 已认证的请求还带上账号名：没有它，第 5 节那条"最后一个管理员"的保护
+// 即使触发，事后也说不清是谁触发的；授权拒绝（403）同样必须对得上账号
+// （design doc 2026-08-14 §7）。账号名由 RequireSession 通过 requestActor
+// 回填 —— 见该类型的注释。
 func RequestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
 			rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 
-			next.ServeHTTP(rec, r)
+			actor := &requestActor{}
+			next.ServeHTTP(rec, r.WithContext(context.WithValue(r.Context(), ctxKeyActor, actor)))
 
 			attrs := []any{
 				"request_id", RequestIDFrom(r.Context()),
@@ -90,8 +129,10 @@ func RequestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 				"code", int(rec.code),
 				"duration_ms", time.Since(start).Milliseconds(),
 			}
-			if sess, ok := SessionFrom(r.Context()); ok {
-				attrs = append(attrs, "user", sess.Username)
+			// 未认证的请求不写这个字段，而不是写一个空串："user":"" 会在
+			// 日志聚合里被当成一个真实存在的账号名。
+			if actor.username != "" {
+				attrs = append(attrs, "user", actor.username)
 			}
 			logger.Info("request completed", attrs...)
 		})
@@ -158,6 +199,11 @@ func RequireSession(sessions *auth.SessionStore) func(http.Handler) http.Handler
 				response.WriteSystem(w, http.StatusUnauthorized, response.CodeSessionExpired)
 				return
 			}
+
+			// 身份在这里第一次成立，因此回填信箱也只能在这里：
+			// 请求日志、授权拒绝与审计要回答的"谁"，全都指向这一个值
+			// （design doc 2026-08-14 §7）。
+			recordActor(r.Context(), sess.Username)
 
 			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKeySession, sess)))
 		})
