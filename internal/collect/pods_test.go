@@ -37,7 +37,7 @@ func onlyWarning(t *testing.T, ws []snapshot.Warning) snapshot.Warning {
 func TestClassifyPodIPStaysSilentForAPodWithoutAnIP(t *testing.T) {
 	c := collectorWith(fleetRegistry(t))
 
-	got, warnings := c.classifyPodIP("", "default/pending")
+	got, warnings := c.classifyPodIP("", "default/pending", false)
 	if len(warnings) != 0 {
 		t.Errorf("warnings = %+v, want none; Phase already explains an unassigned IP", warnings)
 	}
@@ -49,7 +49,7 @@ func TestClassifyPodIPStaysSilentForAPodWithoutAnIP(t *testing.T) {
 func TestClassifyPodIPWarnsOnAnUnparsableAddress(t *testing.T) {
 	c := collectorWith(fleetRegistry(t))
 
-	got, warnings := c.classifyPodIP("10.0.1.999", "default/web")
+	got, warnings := c.classifyPodIP("10.0.1.999", "default/web", false)
 	w := onlyWarning(t, warnings)
 	if w.Kind != snapshot.WarningPodIPUnparsable {
 		t.Errorf("warning kind = %q, want %q", w.Kind, snapshot.WarningPodIPUnparsable)
@@ -76,7 +76,7 @@ func TestClassifyPodIPPropagatesUnknownInsteadOfSubstitutingADefault(t *testing.
 	}})
 	c := collectorWith(incomplete)
 
-	got, warnings := c.classifyPodIP("172.20.0.7", "default/web")
+	got, warnings := c.classifyPodIP("172.20.0.7", "default/web", false)
 	if got.Scope != cluster.ScopeUnknown {
 		t.Fatalf("Scope = %q, want %q", got.Scope, cluster.ScopeUnknown)
 	}
@@ -106,7 +106,7 @@ func TestClassifyPodIPPropagatesAmbiguousWithoutPickingACluster(t *testing.T) {
 	})
 	c := collectorWith(overlapping)
 
-	got, warnings := c.classifyPodIP("10.0.1.5", "default/web")
+	got, warnings := c.classifyPodIP("10.0.1.5", "default/web", false)
 	if got.Scope != cluster.ScopeAmbiguous {
 		t.Fatalf("Scope = %q, want %q", got.Scope, cluster.ScopeAmbiguous)
 	}
@@ -138,7 +138,7 @@ func TestClassifyPodIPWarnsWhenTheAddressBelongsToAnotherCluster(t *testing.T) {
 	})
 	c := collectorWith(fleet)
 
-	got, warnings := c.classifyPodIP("10.1.2.3", "default/web")
+	got, warnings := c.classifyPodIP("10.1.2.3", "default/web", false)
 	if got.Scope != cluster.ScopePod || got.ClusterID != "staging" {
 		t.Fatalf("classification = %+v, want POD in staging", got)
 	}
@@ -150,7 +150,7 @@ func TestClassifyPodIPWarnsWhenTheAddressBelongsToAnotherCluster(t *testing.T) {
 func TestClassifyPodIPIsSilentForAnAddressInItsOwnPodCIDR(t *testing.T) {
 	c := collectorWith(fleetRegistry(t))
 
-	got, warnings := c.classifyPodIP("10.0.1.5", "default/web")
+	got, warnings := c.classifyPodIP("10.0.1.5", "default/web", false)
 	if got.Scope != cluster.ScopePod || got.ClusterID != testClusterID {
 		t.Fatalf("classification = %+v, want POD in %s", got, testClusterID)
 	}
@@ -175,7 +175,7 @@ func TestClassifyPodIPWarnsOnAScopeNoPodShouldHave(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, warnings := c.classifyPodIP(tc.ip, "default/web")
+			got, warnings := c.classifyPodIP(tc.ip, "default/web", false)
 			if got.Scope != tc.want {
 				t.Fatalf("Scope = %q, want %q", got.Scope, tc.want)
 			}
@@ -183,6 +183,63 @@ func TestClassifyPodIPWarnsOnAScopeNoPodShouldHave(t *testing.T) {
 				t.Errorf("warning kind = %q, want %q", w.Kind, snapshot.WarningPodIPOutsideCluster)
 			}
 		})
+	}
+}
+
+// hostNetwork Pod 的 IP 就是它所在节点的 IP，判成 NODE 是**正确答案**。
+//
+// 这条来自 2026-08-17 第一次对真实 kind 集群的采集：28 个 Pod 里有 12 个
+// 报了 POD_IP_OUTSIDE_CLUSTER，全部是 hostNetwork Pod（cilium、etcd、
+// kube-apiserver、kube-proxy、kube-scheduler…）。它们的登记一点问题都没有。
+//
+// 43% 的误报率不是"多几条噪音"：这条告警存在的全部理由是让一份填错的网段
+// 登记在采集当时就被发现，而一条每次都在喊的告警会被整体忽略，
+// 于是真正填错的那一次也一起被忽略了（同 servicesWithoutEndpoints 的取舍）。
+func TestHostNetworkPodOnItsNodeIPRaisesNoWarning(t *testing.T) {
+	c := collectorWith(fleetRegistry(t))
+
+	got, warnings := c.classifyPodIP("192.168.0.10", "kube-system/kube-proxy", true)
+	if got.Scope != cluster.ScopeNode {
+		t.Fatalf("Scope = %q, want %q", got.Scope, cluster.ScopeNode)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("warnings = %+v, want none: a hostNetwork pod carries its node's address, "+
+			"so NODE scope is the expected answer, not a registration error", warnings)
+	}
+}
+
+// 但 hostNetwork Pod 的地址落在别处仍然要发声。
+//
+// 与上一条互为反面。只加一条"hostNetwork 就闭嘴"的分支，会把这类 Pod
+// 整个移出这条守卫的覆盖范围 —— 而节点网段填错同样会让每一条涉及它的
+// 流量被还原成错误的主体。
+func TestHostNetworkPodOutsideTheNodeCIDRIsStillWarned(t *testing.T) {
+	c := collectorWith(fleetRegistry(t))
+
+	cases := []struct {
+		name string
+		ip   string
+	}{
+		{"in the pod cidr", "10.0.1.5"},
+		{"outside the fleet", "8.8.8.8"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, warnings := c.classifyPodIP(tc.ip, "kube-system/agent", true)
+			if w := onlyWarning(t, warnings); w.Kind != snapshot.WarningPodIPOutsideCluster {
+				t.Errorf("warning kind = %q, want %q", w.Kind, snapshot.WarningPodIPOutsideCluster)
+			}
+		})
+	}
+}
+
+// 普通 Pod 落在节点网段仍然是错的 —— hostNetwork 那条豁免不得外溢。
+func TestOrdinaryPodOnANodeIPIsStillWarned(t *testing.T) {
+	c := collectorWith(fleetRegistry(t))
+
+	_, warnings := c.classifyPodIP("192.168.0.10", "default/web", false)
+	if w := onlyWarning(t, warnings); w.Kind != snapshot.WarningPodIPOutsideCluster {
+		t.Errorf("warning kind = %q, want %q", w.Kind, snapshot.WarningPodIPOutsideCluster)
 	}
 }
 
@@ -226,7 +283,10 @@ func TestToPodCopiesEveryFieldTheEvaluationLayerNeeds(t *testing.T) {
 			ServiceAccountName: "db-sa",
 			Containers:         []corev1.Container{{Name: "app"}},
 		},
-		Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.1.5"},
+		// hostNetwork Pod 配一个节点网段的地址：这个 fixture 必须自洽。
+		// 一个 hostNetwork Pod 带着 Pod 网段的 IP 在现实里不存在，
+		// 而用它当"正常情形"会让这条用例顺带断言掉一条本该报出的告警。
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "192.168.0.10"},
 	}
 
 	got, warnings := c.toPod(p, nil)
@@ -243,8 +303,8 @@ func TestToPodCopiesEveryFieldTheEvaluationLayerNeeds(t *testing.T) {
 		{"Name", got.Name, "db-0"},
 		{"UID", got.UID, "uid-1"},
 		{"Phase", got.Phase, "Running"},
-		{"IP", got.IP, "10.0.1.5"},
-		{"IPScope", got.IPScope, cluster.ScopePod},
+		{"IP", got.IP, "192.168.0.10"},
+		{"IPScope", got.IPScope, cluster.ScopeNode},
 		{"HostNetwork", got.HostNetwork, true},
 		{"NodeName", got.NodeName, "node-a"},
 		{"ServiceAccount", got.ServiceAccount, "db-sa"},
