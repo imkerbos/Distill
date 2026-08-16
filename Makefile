@@ -23,12 +23,15 @@ dev-down:
 # MySQL 集成测试跑在 distill_test 上，不是 distill。测试会 truncate 业务表，
 # 打到 dev 库会清掉种子集群与全部覆盖决定——已经发生过一次。库名写死在这里，
 # 就不必每次手敲 DSN，也就不会敲错。
+#
+# -p 1 是必需的：两个包清空的是同一个库里的同一批表，并行跑会互相删掉
+# 对方正在用的行，表现为随机失败的测试。
 test-integration:
 	docker compose exec -T mysql mysql -uroot -pdistill-local \
 	  -e "CREATE DATABASE IF NOT EXISTS distill_test CHARACTER SET utf8mb4;"
 	docker compose exec -T \
 	  -e DISTILL_TEST_MYSQL_DSN='root:distill-local@tcp(mysql:3306)/distill_test?parseTime=true&loc=UTC' \
-	  distill-api go test ./internal/mysqlregistry/ -count=1
+	  distill-api go test ./internal/mysqlregistry/ ./internal/snapshotstore/ -count=1 -p 1
 
 # conformance-up/-down 起停 test/conformance/setup.sh 管理的 kind 集群；
 # conformance 跑 harness 本身，默认连 setup.sh 建出来的 kind-distill。
