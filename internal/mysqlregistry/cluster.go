@@ -13,7 +13,8 @@ import (
 // Clusters 返回全部未删除的集群，按 ID 升序。
 func (s *Store) Clusters(ctx context.Context) ([]registry.Cluster, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT cluster_id, display_name, pod_cidr, node_cidr, ccnp_present, onboard_state
+		`SELECT cluster_id, display_name, pod_cidr, node_cidr, ccnp_present, onboard_state,
+		        kubeconfig_ref
 		   FROM cluster WHERE deleted_at IS NULL ORDER BY cluster_id`)
 	if err != nil {
 		return nil, fmt.Errorf("query clusters: %w", err)
@@ -24,7 +25,7 @@ func (s *Store) Clusters(ctx context.Context) ([]registry.Cluster, error) {
 	for rows.Next() {
 		var c registry.Cluster
 		if err := rows.Scan(&c.ID, &c.DisplayName, &c.PodCIDR, &c.NodeCIDR,
-			&c.CCNPPresent, &c.State); err != nil {
+			&c.CCNPPresent, &c.State, &c.KubeconfigRef); err != nil {
 			return nil, fmt.Errorf("scan cluster: %w", err)
 		}
 		out = append(out, c)
@@ -44,9 +45,11 @@ func (s *Store) Clusters(ctx context.Context) ([]registry.Cluster, error) {
 func (s *Store) Cluster(ctx context.Context, id string) (registry.Cluster, bool, error) {
 	var c registry.Cluster
 	err := s.db.QueryRowContext(ctx,
-		`SELECT cluster_id, display_name, pod_cidr, node_cidr, ccnp_present, onboard_state
+		`SELECT cluster_id, display_name, pod_cidr, node_cidr, ccnp_present, onboard_state,
+		        kubeconfig_ref
 		   FROM cluster WHERE cluster_id = ? AND deleted_at IS NULL`, id).
-		Scan(&c.ID, &c.DisplayName, &c.PodCIDR, &c.NodeCIDR, &c.CCNPPresent, &c.State)
+		Scan(&c.ID, &c.DisplayName, &c.PodCIDR, &c.NodeCIDR, &c.CCNPPresent, &c.State,
+			&c.KubeconfigRef)
 	if errors.Is(err, sql.ErrNoRows) {
 		return registry.Cluster{}, false, nil
 	}
@@ -132,10 +135,10 @@ func (s *Store) CreateCluster(ctx context.Context, actor registry.Actor, c regis
 			if _, err := tx.ExecContext(ctx,
 				`INSERT INTO cluster
 				   (cluster_id, display_name, pod_cidr, node_cidr, ccnp_present,
-				    onboard_state, created_at, updated_at)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+				    onboard_state, kubeconfig_ref, created_at, updated_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				c.ID, c.DisplayName, c.PodCIDR, c.NodeCIDR, c.CCNPPresent,
-				string(c.State), now, now,
+				string(c.State), c.KubeconfigRef, now, now,
 			); err != nil {
 				return writeFailure("insert cluster",
 					fmt.Sprintf("集群 ID %q 已被注册，请换一个或先下线原集群", c.ID), "", err)
@@ -163,10 +166,11 @@ func (s *Store) UpdateCluster(ctx context.Context, actor registry.Actor, c regis
 		func(tx *sql.Tx) error {
 			res, err := tx.ExecContext(ctx,
 				`UPDATE cluster SET display_name = ?, pod_cidr = ?, node_cidr = ?,
-				        ccnp_present = ?, onboard_state = ?, updated_at = ?
+				        ccnp_present = ?, onboard_state = ?, kubeconfig_ref = ?,
+				        updated_at = ?
 				  WHERE cluster_id = ? AND deleted_at IS NULL`,
 				c.DisplayName, c.PodCIDR, c.NodeCIDR, c.CCNPPresent,
-				string(c.State), s.now(), c.ID,
+				string(c.State), c.KubeconfigRef, s.now(), c.ID,
 			)
 			if err != nil {
 				return fmt.Errorf("update cluster: %w", err)

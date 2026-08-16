@@ -22,11 +22,20 @@ import (
 // 填了仓库地址、请求返回成功、绑定却从未写下，直到某天有人发现这个集群
 // 的策略一直没有下发。
 type clusterPayload struct {
-	ID                 string               `json:"id"`
-	DisplayName        string               `json:"displayName"`
-	PodCIDR            string               `json:"podCidr"`
-	NodeCIDR           string               `json:"nodeCidr"`
-	CCNPPresent        bool                 `json:"ccnpPresent"`
+	ID          string `json:"id"`
+	DisplayName string `json:"displayName"`
+	PodCIDR     string `json:"podCidr"`
+	NodeCIDR    string `json:"nodeCidr"`
+	CCNPPresent bool   `json:"ccnpPresent"`
+	// KubeconfigRef 是这个集群的 kubeconfig 在凭据后端里的短名。
+	//
+	// 采集器是唯一的消费方，也是唯一解析它的地方（cmd/distill-collector）。
+	// 这里只收下一个名字：主服务永不解析它，更不持有它指向的凭据。
+	//
+	// 与 git 那条相反，这个字段**必须**在这里：集群没有别的路由能说出
+	// 自己的凭据引用，漏掉它的后果是采集器永远拿不到凭据，
+	// 而这件事要到第一次真采集才暴露。
+	KubeconfigRef      string               `json:"kubeconfigRef"`
 	State              string               `json:"state"`
 	APIServers         []registry.APIServer `json:"apiServers"`
 	HealthCheckSources []string             `json:"healthCheckSources"`
@@ -50,6 +59,7 @@ func (p clusterPayload) toCluster() registry.Cluster {
 		PodCIDR:            p.PodCIDR,
 		NodeCIDR:           p.NodeCIDR,
 		CCNPPresent:        p.CCNPPresent,
+		KubeconfigRef:      p.KubeconfigRef,
 		APIServers:         p.APIServers,
 		HealthCheckSources: p.HealthCheckSources,
 	}

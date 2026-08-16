@@ -44,7 +44,8 @@ function unbound(): RegisteredCluster {
 }
 
 const CLUSTER_WRITE_KEYS = [
-  'apiServers', 'ccnpPresent', 'displayName', 'healthCheckSources', 'id', 'nodeCidr', 'podCidr',
+  'apiServers', 'ccnpPresent', 'displayName', 'healthCheckSources', 'id', 'kubeconfigRef',
+  'nodeCidr', 'podCidr',
 ]
 
 /* ---------------------------------------------------------------------- */
@@ -134,6 +135,55 @@ test('编辑只改显示名时，未触碰的字段原样提交', () => {
   // 给出笃定的判定——平台因此显得比它应该的样子更有把握。
   assert.equal(built.body.ccnpPresent, true,
     'ccnpPresent 没有被原样提交：一次与它无关的编辑会把该集群的判定降级悄悄关掉')
+})
+
+/**
+ * kubeconfigRef 必须被播种并原样提交。
+ *
+ * 与 ccnpPresent 同一条纪律，后果又不同：PUT 是整体替换，漏播它的结果
+ * 不是"改不了凭据"，而是**一个只想改显示名的操作者顺手清空了凭据引用**，
+ * 于是采集器此后再也连不上这个集群 —— 而这件事要到下一次采集才暴露，
+ * 表现成"这个集群没有采集记录"。
+ *
+ * 后端那一层已经有对应的用例（TestUpdateClusterWritesTheKubeconfigReference）；
+ * 表单这一层单独钉，是因为界面才是操作者真正走的那条路径。
+ */
+test('kubeconfigRef 被播种并原样提交，不因一次无关编辑而清空', () => {
+  const cluster = bound()
+  cluster.kubeconfigRef = 'prod-asia-1-kubeconfig'
+
+  const values = formValuesOf(cluster)
+  assert.equal(values.kubeconfigRef, 'prod-asia-1-kubeconfig',
+    '编辑表单没有播种凭据引用 —— 打开表单那一刻它就已经被清空了')
+
+  values.displayName = '亚太生产（新）'
+  const built = buildClusterWrite(values)
+  assert.equal(built.ok, true)
+  if (!built.ok) return
+  assert.equal(built.body.kubeconfigRef, 'prod-asia-1-kubeconfig',
+    '一次与凭据无关的编辑清空了 kubeconfigRef —— 采集器此后连不上这个集群')
+})
+
+/**
+ * 反面：没有凭据引用的集群提交出来是空串，不是别的什么。
+ *
+ * 少了这条，一个把 kubeconfigRef 写死成某个常量的实现同样能让上一条通过。
+ */
+test('没有登记凭据的集群提交空串', () => {
+  const cluster = bound()
+  delete (cluster as { kubeconfigRef?: string }).kubeconfigRef
+
+  const built = buildClusterWrite(formValuesOf(cluster))
+  assert.equal(built.ok, true)
+  if (!built.ok) return
+  assert.equal(built.body.kubeconfigRef, '')
+})
+
+/** 表单上必须真的有这个输入框，否则接口通了也没人填得进去。 */
+test('集群表单上有 kubeconfigRef 输入框', () => {
+  const page = readFileSync(new URL('../src/pages/ClustersPage.tsx', import.meta.url), 'utf8')
+  assert.match(page, /kubeconfigRef/,
+    'ClustersPage 上没有凭据引用的输入框 —— 接口能收，界面上却填不了')
 })
 
 /**

@@ -67,6 +67,51 @@ func TestValidateClusterRejectsUnregisteredState(t *testing.T) {
 	}
 }
 
+// kubeconfigRef 复用 secrets.ValidateRef 而不是另写一份字符集校验，
+// 这条用例锁住这个复用关系：路径穿越式的引用必须在入库前就被拦下。
+//
+// 它拦的是一个能指向凭据目录之外的引用。丢了这条校验不会有任何症状，
+// 直到采集器拿着它读到别的东西 —— 而这条引用后面挂的是 kubeconfig，
+// 读到别的东西意味着用一个不属于本集群的身份去对 apiserver 说话。
+func TestValidateClusterRejectsMalformedKubeconfigRef(t *testing.T) {
+	for name, ref := range map[string]string{
+		"path traversal": "../escape",
+		"slash":          "prod/asia",
+		"uppercase":      "Prod-Asia-1",
+		"too long":       strings.Repeat("a", 65),
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := validCluster()
+			c.KubeconfigRef = ref
+			err := registry.ValidateCluster(c)
+			if !errors.Is(err, registry.ErrInvalid) {
+				t.Fatalf("ValidateCluster(kubeconfigRef=%q) = %v, want ErrInvalid", ref, err)
+			}
+			if !strings.Contains(err.Error(), "kubeconfigRef") {
+				t.Errorf("error %q does not name the offending field", err)
+			}
+		})
+	}
+}
+
+// kubeconfigRef 可以为空：集群可以先登记下来，凭据稍后再配 ——
+// 与 GitRepo.CredentialRef 同一条规则。
+func TestValidateClusterAllowsEmptyKubeconfigRef(t *testing.T) {
+	c := validCluster()
+	c.KubeconfigRef = ""
+	if err := registry.ValidateCluster(c); err != nil {
+		t.Fatalf("ValidateCluster() = %v, want nil", err)
+	}
+}
+
+func TestValidateClusterAcceptsAWellFormedKubeconfigRef(t *testing.T) {
+	c := validCluster()
+	c.KubeconfigRef = "prod-asia-1-kubeconfig"
+	if err := registry.ValidateCluster(c); err != nil {
+		t.Fatalf("ValidateCluster() = %v, want nil", err)
+	}
+}
+
 // 绑定的合法性必须与集群其余字段无关：一个 podCidr 写错的集群，
 // 其绑定仍然应当能被独立校验。这条正是拆分要买到的东西。
 func TestValidateGitBindingIsIndependentOfTheCluster(t *testing.T) {

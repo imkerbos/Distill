@@ -34,7 +34,14 @@ type ServicePort struct {
 	// Port 是 Service 端口。
 	Port int32
 	// TargetPort 是后端 Pod 端口，规则生成用的是它。
+	// targetPort 为命名端口时此处为 0，端口名在 TargetPortName。
 	TargetPort int32
+	// TargetPortName 是命名形式的后端端口，为空表示 targetPort 是数字。
+	//
+	// 与 TargetPort 分成两个字段：命名端口必须解析到具体 Pod 才知道是哪个
+	// 数字，合成一个 int32 会把它静默记成 0 —— 而 0 是合法端口值，
+	// 一条指向端口 0 的规则永远匹配不上，外观却完全正常。
+	TargetPortName string
 	// Protocol 是传输层协议，取值 TCP / UDP / SCTP。
 	Protocol string
 }

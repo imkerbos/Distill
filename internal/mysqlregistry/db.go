@@ -12,7 +12,6 @@ import (
 	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/golang-migrate/migrate/v4"
 	migratemysql "github.com/golang-migrate/migrate/v4/database/mysql"
-	_ "github.com/golang-migrate/migrate/v4/source/file" // file:// 源
 
 	"github.com/imkerbos/Distill/internal/config"
 )
@@ -62,7 +61,16 @@ func migrationDSN(dsn string) (string, error) {
 // 这个连接与 Open 返回的应用连接池完全分开：它需要 multiStatements，
 // 应用连接池不需要也不应该有。返回的 *migrate.Migrate.Close() 会
 // 一并关闭这个连接，调用方无需另行处理。
+//
+// 迁移源在连库之前构造：目录形态是本地就判得出的，先连库会让一个目录
+// 问题要等一次网络往返才暴露，而 API 容器启动时就跑迁移 —— 这条路径上
+// 每一次不必要的等待都是启动失败前的静默时间。
 func migrator(cfg config.DatabaseConfig, dir string) (*migrate.Migrate, error) {
+	src, err := migrationSource(dir)
+	if err != nil {
+		return nil, err
+	}
+
 	dsn, err := migrationDSN(cfg.DSN)
 	if err != nil {
 		return nil, err
@@ -80,7 +88,7 @@ func migrator(cfg config.DatabaseConfig, dir string) (*migrate.Migrate, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate driver: %w", err)
 	}
-	m, err := migrate.NewWithDatabaseInstance("file://"+dir, "mysql", driver)
+	m, err := migrate.NewWithInstance("iofs", src, "mysql", driver)
 	if err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate init: %w", err)

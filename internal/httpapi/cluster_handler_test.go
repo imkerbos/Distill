@@ -833,6 +833,87 @@ func TestCreateClusterRoundTrips(t *testing.T) {
 	}
 }
 
+// 集群必须能通过接口说出它的 kubeconfig 引用。
+//
+// 这条是 2026-08-17 第一次对真实 kind 集群跑采集时撞出来的：迁移 000010
+// 建了 kubeconfig_ref 列，registry.Cluster 有这个字段，ValidateCluster 校验
+// 它，mysqlregistry 读写它 —— 但 clusterPayload 里没有这个键，toCluster()
+// 也不赋值，于是**没有任何路径能把它设成非空**，采集器永远拿不到凭据。
+// 每一层都有，只差写入它的那一层，而所有既有测试都直接构造
+// registry.Cluster，绕过了这一层。
+//
+// 断言读回来的值而不是"请求成功"：一个收下再丢掉的字段同样会返回 200。
+func TestCreateClusterStoresTheKubeconfigReference(t *testing.T) {
+	reg := newMemRegistry()
+	h, _, cookie := newTestRouterWithRegistry(t, fixtureReader(), reg)
+
+	rec := authedPostJSON(t, h, cookie, "/api/v1/clusters", map[string]any{
+		"id": "cred-1", "displayName": "Cred", "podCidr": "10.20.0.0/14",
+		"nodeCidr": "10.140.0.0/20", "kubeconfigRef": "kind-distill",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	got, ok := reg.clusters["cred-1"]
+	if !ok {
+		t.Fatal("cluster was not stored")
+	}
+	if got.KubeconfigRef != "kind-distill" {
+		t.Errorf("KubeconfigRef = %q, want %q: without it the collector can never "+
+			"reach this cluster, and the failure surfaces only at collection time",
+			got.KubeconfigRef, "kind-distill")
+	}
+}
+
+// 非法的引用必须被拒，且要点名是哪个字段。
+//
+// 引用会被拼进凭据后端的资源路径，能表达的字符越多，能表达的越权路径越多
+// （secrets.ValidateRef）。校验早就在 registry 里了，这条钉的是它确实被
+// 这条 HTTP 路径走到 —— 一个根本不传字段的实现同样能让上一条通过。
+func TestCreateClusterRejectsAMalformedKubeconfigReference(t *testing.T) {
+	h, _, cookie := newTestRouterWithRegistry(t, fixtureReader(), newMemRegistry())
+
+	rec := authedPostJSON(t, h, cookie, "/api/v1/clusters", map[string]any{
+		"id": "cred-bad", "displayName": "Bad", "podCidr": "10.20.0.0/14",
+		"nodeCidr": "10.140.0.0/20", "kubeconfigRef": "../../etc/passwd",
+	})
+	if got := bodyOf(t, rec)["code"]; got != float64(20001) {
+		t.Fatalf("code = %v, want 20001", got)
+	}
+	if msg, _ := bodyOf(t, rec)["msg"].(string); !strings.Contains(msg, "kubeconfigRef") {
+		t.Errorf("msg = %q, want it to name kubeconfigRef", msg)
+	}
+}
+
+// 修改集群时，引用同样要写进去。
+//
+// PUT 写整行（见 handleUpdateCluster 的注释），所以漏掉这个字段的后果不是
+// "改不了"，而是**每一次改集群都会把已经登记好的凭据引用清空** ——
+// 改一次显示名，采集器就再也连不上了。
+func TestUpdateClusterWritesTheKubeconfigReference(t *testing.T) {
+	reg := newMemRegistry()
+	h, _, cookie := newTestRouterWithRegistry(t, fixtureReader(), reg)
+
+	if rec := authedPostJSON(t, h, cookie, "/api/v1/clusters", map[string]any{
+		"id": "cred-2", "displayName": "Cred", "podCidr": "10.20.0.0/14",
+		"nodeCidr": "10.140.0.0/20", "kubeconfigRef": "first-ref",
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("create status = %d (body %s)", rec.Code, rec.Body.String())
+	}
+
+	if rec := authedPutJSON(t, h, cookie, "/api/v1/clusters/cred-2", map[string]any{
+		"id": "cred-2", "displayName": "Cred renamed", "podCidr": "10.20.0.0/14",
+		"nodeCidr": "10.140.0.0/20", "kubeconfigRef": "second-ref",
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("update status = %d (body %s)", rec.Code, rec.Body.String())
+	}
+
+	if got := reg.clusters["cred-2"].KubeconfigRef; got != "second-ref" {
+		t.Errorf("KubeconfigRef after update = %q, want %q", got, "second-ref")
+	}
+}
+
 // 网段写错是业务失败，不该计入服务错误率，也不该只回一句「参数不合法」——
 // 一个集群有四类网段，不说是哪一类会让操作者逐个试。
 func TestCreateClusterRejectsMalformedCIDR(t *testing.T) {

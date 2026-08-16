@@ -1,5 +1,7 @@
+import { isNoRunError, isUnknownClusterError } from '../pages/collectionView'
 import type {
-  Account, ClusterWrite, CurrentSession, Decision, Envelope, FlowFilter, FlowPage, GitBindingWrite,
+  Account, ClusterWrite, CollectionState, CollectionSummary,
+  CurrentSession, Decision, Envelope, FlowFilter, FlowPage, GitBindingWrite,
   GitRepo, GitRepoWrite, Identity, ImportRole, ImportSource, OverrideDecision,
   PathVerifyStatus, PlatformSettingView, PlatformSettingWrite, PolicyImportItem, PolicyPreview,
   Quality, RegisteredCluster, RepoVerifyStatus, Role, SecurityReport, Topology, TopologyLevel,
@@ -329,6 +331,33 @@ export const api = {
     request<Topology>(
       `/api/v1/clusters/${encodeURIComponent(cluster)}/topology?level=${level}`,
     ),
+
+  /**
+   * 最近一次资产采集的摘要。
+   *
+   * **这份数据不参与任何结论**（spec §5.2）：上面每一个读取端点仍然读
+   * 合成数据集，这一条读的是真实集群采回来的资产。两者不相通，页面必须
+   * 把这件事说给操作者听（见 pages/collectionView.ts 的
+   * COLLECTION_FEEDS_NOTHING）。
+   *
+   * 「从未采集过」在这里被转成一种状态而不是一次错误：它是一个正常状态，
+   * 而 catch 分支里的一句错误文案会让它和"读取失败"长得一样。其余错误
+   * 照常抛出 —— 一次读取故障不能被伪装成"还没采过"。
+   *
+   * 服务端声明 accessAdmin，只读账号一律 403（规范 §34）。
+   */
+  collection: async (cluster: string): Promise<CollectionState> => {
+    try {
+      const summary = await request<CollectionSummary>(
+        `/api/v1/clusters/${encodeURIComponent(cluster)}/collection`,
+      )
+      return { kind: 'RUN', summary }
+    } catch (e) {
+      if (isNoRunError(e)) return { kind: 'NO_RUN' }
+      if (isUnknownClusterError(e)) return { kind: 'UNKNOWN_CLUSTER' }
+      throw e
+    }
+  },
 
   quality: (cluster: string) =>
     request<Quality>(`/api/v1/clusters/${encodeURIComponent(cluster)}/quality`),
