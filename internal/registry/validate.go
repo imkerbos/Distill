@@ -116,6 +116,16 @@ func ValidateCluster(c Cluster) error {
 			return err
 		}
 	}
+	// kubeconfigRef 可以为空：集群可以先登记下来，凭据稍后再配 —— 与
+	// GitRepo.CredentialRef 同一条规则，理由也同一条。非空时复用
+	// secrets.ValidateRef，不另写一份字符集校验：两份安全相关的字符类
+	// 定义迟早会走样，而走样的那一份放行的是一个能指向凭据目录之外的
+	// 引用，丢了不会有任何症状，直到有人用它读到别的东西。
+	if c.KubeconfigRef != "" {
+		if err := secrets.ValidateRef(c.KubeconfigRef); err != nil {
+			return wrapInvalid(fmt.Sprintf("kubeconfigRef %q 不是合法的凭据引用", c.KubeconfigRef), err)
+		}
+	}
 	return nil
 }
 

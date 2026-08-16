@@ -304,19 +304,20 @@ func TestLatestScopesCountsAndWarningsToItsOwnRun(t *testing.T) {
 		t.Fatalf("Latest().RunID = %q, want run-late", got.RunID)
 	}
 
-	// Counts 每类资源恰好一行 —— 混进上一次的计数会让 POD 出现两次。
+	// 每类资源恰好一条 —— 混进上一次的结果会让 POD 出现两次。
 	seen := map[string]int{}
-	for _, c := range got.Counts {
-		seen[c.Resource]++
+	for _, o := range got.Resources {
+		seen[o.Resource]++
 	}
 	for resource, n := range seen {
 		if n != 1 {
-			t.Errorf("Counts contains %s %d times, want 1 (counts from other runs leaked in)", resource, n)
+			t.Errorf("Resources contains %s %d times, want 1 (results from other runs leaked in)", resource, n)
 		}
 	}
-	if seen["POD"] != 1 || countOf(got.Counts, "POD") != 1 {
-		t.Errorf("POD count = %d, want 1 (the late run saw one pod; the early run saw two)",
-			countOf(got.Counts, "POD"))
+	n, observed := observedCount(got.Resources, "POD")
+	if !observed || n != 1 {
+		t.Errorf("POD count = %d (observed=%v), want 1 (the late run saw one pod; the early run saw two)",
+			n, observed)
 	}
 
 	if got.WarningTotal != 0 {
@@ -327,13 +328,29 @@ func TestLatestScopesCountsAndWarningsToItsOwnRun(t *testing.T) {
 	}
 }
 
-func countOf(counts []snapshotstore.ResourceCount, resource string) int {
-	for _, c := range counts {
-		if c.Resource == resource {
-			return c.Count
+// observedCount 返回摘要里某类资源观测到的条数。
+//
+// observed 为 false 有两种情形：这一类根本没出现在摘要里，或者出现了
+// 但带着一条失败记录。两者都不该被当成一个数字读，所以合成同一个 false。
+func observedCount(outcomes []snapshotstore.ResourceOutcome, resource string) (count int, observed bool) {
+	for _, o := range outcomes {
+		if o.Resource == resource {
+			return o.Count()
 		}
 	}
-	return -1
+	return 0, false
+}
+
+// outcomeOf 返回摘要里某类资源的结果，找不到时 t.Fatal。
+func outcomeOf(t *testing.T, outcomes []snapshotstore.ResourceOutcome, resource string) snapshotstore.ResourceOutcome {
+	t.Helper()
+	for _, o := range outcomes {
+		if o.Resource == resource {
+			return o
+		}
+	}
+	t.Fatalf("Resources has no entry for %s; got %+v", resource, outcomes)
+	return snapshotstore.ResourceOutcome{}
 }
 
 // 一次中途失败的运行不得留下任何行。
@@ -400,18 +417,19 @@ func TestPartialRunIsDistinguishableFromACompleteOne(t *testing.T) {
 	if got.Status != string(snapshot.RunPartial) {
 		t.Errorf("Status = %q, want PARTIAL", got.Status)
 	}
-	if len(got.Failures) != 1 {
-		t.Fatalf("Failures = %+v, want exactly one record", got.Failures)
+
+	policies := outcomeOf(t, got.Resources, string(snapshot.ResourceNetworkPolicy))
+	record, failed := policies.Failure()
+	if !failed {
+		t.Fatalf("NETWORKPOLICY outcome = %+v, want a failure record", policies)
 	}
-	if got.Failures[0].Resource != string(snapshot.ResourceNetworkPolicy) {
-		t.Errorf("Failures[0].Resource = %q, want NETWORKPOLICY", got.Failures[0].Resource)
+	if record.Reason != string(snapshot.FailureForbidden) {
+		t.Errorf("NETWORKPOLICY failure reason = %q, want FORBIDDEN", record.Reason)
 	}
-	if got.Failures[0].Reason != string(snapshot.FailureForbidden) {
-		t.Errorf("Failures[0].Reason = %q, want FORBIDDEN", got.Failures[0].Reason)
-	}
-	// 计数照写 0：缺行与 0 必须能区分（store.go insertRun 的理由）。
-	if n := countOf(got.Counts, "NETWORKPOLICY"); n != 0 {
-		t.Errorf("NETWORKPOLICY count = %d, want 0 with a row present", n)
+
+	// 采到的那部分照常报出来：PARTIAL 不是"整次运行作废"。
+	if n, observed := observedCount(got.Resources, "POD"); !observed || n != 1 {
+		t.Errorf("POD count = %d (observed=%v), want 1", n, observed)
 	}
 }
 

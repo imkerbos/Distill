@@ -198,6 +198,20 @@ type Cluster struct {
 	NodeCIDR string `json:"nodeCidr"`
 	// CCNPPresent 表示集群存在 Cilium 策略，判定需降级。
 	CCNPPresent bool `json:"ccnpPresent"`
+	// KubeconfigRef 是 Secret Manager 中该集群 kubeconfig 的引用
+	// （design doc 2026-08-16 §3.5）。
+	//
+	// 存的是短名，**kubeconfig 本身永不入库** —— 形状与取舍都与
+	// GitRepo.CredentialRef 一致：一个能从平台数据库 dump 里取出集群凭据的
+	// 设计，等于把整个 fleet 的信任根搬进平台。这里的值比 Git 那把更重
+	// ——kubeconfig 里带的是能对 apiserver 说话的身份，不是一个仓库的读权限。
+	//
+	// **只有采集器解析它。** distill-api 存它、显示它，但不得把它交给
+	// secrets.Resolver：CLAUDE.md 禁止平台主服务持有日常 Kubernetes 权限，
+	// spec §1 把采集器拆成独立二进制正是为了让这件事成为部署事实。
+	// 绊线见 internal/registry 的 kubecred_callsite_test.go，那里也写了
+	// 它拦不住什么。
+	KubeconfigRef string `json:"kubeconfigRef"`
 	// State 是接入状态。
 	State OnboardState `json:"state"`
 	// APIServers 是 API server 端点。

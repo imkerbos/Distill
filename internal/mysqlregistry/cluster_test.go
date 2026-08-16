@@ -47,6 +47,11 @@ func sampleCluster() registry.Cluster {
 		ID: "prod-asia-1", DisplayName: "Asia Prod",
 		PodCIDR: "10.4.0.0/14", NodeCIDR: "10.128.0.0/20",
 		CCNPPresent: false, State: registry.StateRegistered,
+		// 短名，不是 kubeconfig：这一列存的一直只是 Secret Manager 里的
+		// 引用（design doc 2026-08-16 §3.5）。放进公共样本而不是只在
+		// 专门的用例里填，图的是 TestClusterSurvivesAFullRoundTripThroughMySQL
+		// 那趟 DeepEqual 往返自动覆盖它 —— 挑着断言挡不住写错值。
+		KubeconfigRef:      "prod-asia-1-kubeconfig",
 		APIServers:         []registry.APIServer{{Host: "10.9.0.2", CIDR: "10.9.0.0/28", Port: 443}},
 		HealthCheckSources: []string{"35.191.0.0/16", "130.211.0.0/22"},
 	}
@@ -294,6 +299,68 @@ func TestClusterSurvivesAFullRoundTripThroughMySQL(t *testing.T) {
 	}
 	if got.Git == nil || *got.Git != *want.Git {
 		t.Errorf("git binding = %+v, want %+v", got.Git, want.Git)
+	}
+}
+
+// kubeconfigRef 必须走完写、改、列表三条路径，且 kubeconfig 本身一列都不占。
+//
+// 三条路径分开钉：DeepEqual 那趟往返只经过 CreateCluster 与单条 Cluster()，
+// UpdateCluster 的 SET 子句和 Clusters() 的列清单各自是另一份 SQL ——
+// 少写一处的症状是「换了凭据、保存成功、采集器仍然拿旧的那一条」，
+// 或者「列表里每个集群看起来都没配凭据」，两者都不会报错。
+func TestKubeconfigRefIsStoredUpdatedAndListed(t *testing.T) {
+	s, db := newTestStore(t)
+	ctx := context.Background()
+	actor := registry.Actor{Username: "admin"}
+
+	if err := s.CreateCluster(ctx, actor, sampleCluster()); err != nil {
+		t.Fatalf("CreateCluster() error = %v", err)
+	}
+
+	list, err := s.Clusters(ctx)
+	if err != nil {
+		t.Fatalf("Clusters() error = %v", err)
+	}
+	if len(list) != 1 || list[0].KubeconfigRef != "prod-asia-1-kubeconfig" {
+		t.Errorf("Clusters()[0].KubeconfigRef = %q, want the stored reference", list[0].KubeconfigRef)
+	}
+
+	c := sampleCluster()
+	c.KubeconfigRef = "prod-asia-1-rotated"
+	if err := s.UpdateCluster(ctx, actor, c); err != nil {
+		t.Fatalf("UpdateCluster() error = %v", err)
+	}
+	got, ok, err := s.Cluster(ctx, c.ID)
+	if err != nil || !ok {
+		t.Fatalf("Cluster() = %+v, %v, %v", got, ok, err)
+	}
+	if got.KubeconfigRef != "prod-asia-1-rotated" {
+		t.Errorf("KubeconfigRef after update = %q, want the rotated reference — "+
+			"a reference that cannot be changed cannot be rotated", got.KubeconfigRef)
+	}
+
+	// 清空必须能表达：凭据被撤销时，平台记得的引用也要能被撤下来。
+	c.KubeconfigRef = ""
+	if err := s.UpdateCluster(ctx, actor, c); err != nil {
+		t.Fatalf("UpdateCluster() clearing the ref error = %v", err)
+	}
+	if got, _, _ := s.Cluster(ctx, c.ID); got.KubeconfigRef != "" {
+		t.Errorf("KubeconfigRef after clearing = %q, want empty", got.KubeconfigRef)
+	}
+
+	// 这张表上不得出现一个能装下 kubeconfig 的列。VARCHAR(256) 装不下
+	// 一份 kubeconfig，这条断言钉的是「引用而非凭据」这个决定本身：
+	// 有人把它改成 TEXT，就是准备往里塞内容了。
+	var dataType, colType string
+	if err := db.QueryRow(
+		`SELECT data_type, column_type FROM information_schema.columns
+		  WHERE table_schema = DATABASE() AND table_name = 'cluster'
+		    AND column_name = 'kubeconfig_ref'`).Scan(&dataType, &colType); err != nil {
+		t.Fatalf("query information_schema for kubeconfig_ref: %v", err)
+	}
+	if dataType != "varchar" || colType != "varchar(256)" {
+		t.Errorf("kubeconfig_ref is %s (%s), want varchar(256): this column holds a Secret "+
+			"Manager short name, never the kubeconfig itself", colType, dataType)
 	}
 }
 

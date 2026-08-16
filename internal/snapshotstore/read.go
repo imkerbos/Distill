@@ -3,23 +3,79 @@ package snapshotstore
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 )
 
-// ResourceCount 是一类资源在某次运行中的记录条数。
-type ResourceCount struct {
-	Resource string `json:"resource"`
-	Count    int    `json:"count"`
+// FailureRecord 说明一类资源为什么没有被采到。
+//
+// Reason 与 Detail 分开的理由与 unknown_reason 相同（CLAUDE.md §3）：
+// 统计口径只认封闭枚举，自由文本进了统计就再也对不上账。
+type FailureRecord struct {
+	// Reason 取值 FORBIDDEN / NOT_FOUND / TIMEOUT / UNAVAILABLE / OTHER。
+	Reason string `json:"reason"`
+	// Detail 是原始错误文本，只供操作者判断该改 RBAC 还是该查网络。
+	Detail string `json:"detail"`
 }
 
-// FailureRecord 是一类资源在某次运行中的失败。
-type FailureRecord struct {
-	Resource string `json:"resource"`
-	Reason   string `json:"reason"`
-	// Detail 是原始错误文本，只供操作者阅读。
-	Detail string `json:"detail"`
+// ResourceOutcome 是一类资源在一次采集运行中的结果：要么是一个条数，
+// 要么是一条失败记录，不会两者都是。
+//
+// 计数与失败合成一个类型，而不是摘要上两张并列的表 —— 分开时，
+// 一个"只渲染计数"的可见面是随手就能写出来的，而计数表里
+// 「NetworkPolicy = 0」与「NetworkPolicy 因权限不足根本没采到」
+// 长得一模一样（spec §4.2）。那个可见面会把「我们没被授权看策略」
+// 显示成「这个集群没有任何策略」，而后者会让平台推荐一份 default-deny。
+//
+// 因此条数字段不导出：包外唯一取到数字的途径是 Count()，它的第二个
+// 返回值就是"这一类到底采到没有"。MarshalJSON 同样二选一 —— 采集失败时
+// payload 里根本没有 count 这个键，下游即使想渲染也拿不到数字。
+type ResourceOutcome struct {
+	// Resource 是资源类型，取值来自 snapshot.ResourceKind 的封闭枚举。
+	Resource string
+
+	count   int
+	failure *FailureRecord
+}
+
+// Count 返回这类资源观测到的条数。
+//
+// observed 为 false 表示这一类没有采到，此时返回的数字没有任何含义，
+// 调用方必须改看 Failure()。
+func (o ResourceOutcome) Count() (count int, observed bool) {
+	if o.failure != nil {
+		return 0, false
+	}
+	return o.count, true
+}
+
+// Failure 返回这类资源没被采到的原因，failed 为 false 表示采集成功。
+func (o ResourceOutcome) Failure() (record FailureRecord, failed bool) {
+	if o.failure == nil {
+		return FailureRecord{}, false
+	}
+	return *o.failure, true
+}
+
+// MarshalJSON 输出 count 与 failure 中的恰好一个。
+//
+// 不是风格选择：这是上面那条约束在网络边界上的落实。采集失败的资源
+// 在 JSON 里没有 count 键，于是"渲染一个数字却不看失败"在前端也
+// 写不出来 —— 数字根本不在报文里。
+func (o ResourceOutcome) MarshalJSON() ([]byte, error) {
+	if o.failure != nil {
+		return json.Marshal(struct {
+			Resource string        `json:"resource"`
+			Failure  FailureRecord `json:"failure"`
+		}{Resource: o.Resource, Failure: *o.failure})
+	}
+	return json.Marshal(struct {
+		Resource string `json:"resource"`
+		Count    int    `json:"count"`
+	}{Resource: o.Resource, Count: o.count})
 }
 
 // WarningCount 是一类告警的条数。
@@ -28,27 +84,29 @@ type WarningCount struct {
 	Count int    `json:"count"`
 }
 
-// CollectionSummary 是一个集群最近一次采集运行的摘要。
+// CollectionSummary 是一个集群最近一次采集运行的摘要：跑在什么时候、
+// 判定是什么、看见了什么、以及有什么没看见。
 //
-// Counts、Failures 与 Warnings 三者都给出而非只报一个总体状态：
-// 一次 PARTIAL 运行只说"部分失败"是没用的，操作者需要知道失败的是哪一类、
-// 因为什么，才知道该去改 RBAC 还是去查网络。
+// 只给可见面需要的这几项，不回放十一张表的内容（安全规范 §20 / §35）。
 type CollectionSummary struct {
-	ClusterID  string    `json:"clusterId"`
-	RunID      string    `json:"runId"`
+	ClusterID string `json:"clusterId"`
+	RunID     string `json:"runId"`
+	// ObservedAt 是这批记录共用的观测时刻，也是各 observed_* 表的 join 键。
 	ObservedAt time.Time `json:"observedAt"`
 	StartedAt  time.Time `json:"startedAt"`
 	FinishedAt time.Time `json:"finishedAt"`
 	// Status 取值 OK / PARTIAL / FAILED。
 	Status string `json:"status"`
-	// Counts 是各类资源的条数，含条数为 0 的类型。
-	Counts []ResourceCount `json:"counts"`
-	// Failures 是各类资源的失败记录，为空表示没有资源采集失败。
-	Failures []FailureRecord `json:"failures"`
+	// Resources 是各类资源的结果，按资源名排序，一类至多一条。
+	//
+	// 只列这次运行留下了记录的资源类型，不按枚举补齐：ResourceReplicaSet
+	// 在枚举里但从不计数（它只用于解 owner 链，不是被观测的资产），
+	// 补齐会把它的缺席变成一条凭空捏造的失败（spec §4.2）。
+	Resources []ResourceOutcome `json:"resources"`
 	// Warnings 是各类告警的条数。
 	//
-	// 与 Failures 分开：告警说的是采到的事实与注册表登记不符，
-	// 采集本身是成功的。合并会让一次成功的采集看起来像是出了故障。
+	// 与资源失败分开：告警说的是采到的事实与注册表登记不符，采集本身是
+	// 成功的。合并会让一次成功的采集看起来像是出了故障。
 	Warnings []WarningCount `json:"warnings"`
 	// WarningTotal 是告警总条数。
 	WarningTotal int `json:"warningTotal"`
@@ -64,6 +122,8 @@ var ErrNoRun = errors.New("snapshotstore: cluster has no collection run")
 // Latest 返回一个集群最近一次采集运行的摘要。
 //
 // 按 observed_at 取最新而非按 run_id：run_id 是随机串，没有顺序。
+// 每一条查询都带 cluster_id：不同集群的 Pod CIDR 可以重叠，
+// 漏掉它会让摘要落到另一个集群的运行上且不报错（CLAUDE.md §4）。
 func (s *Store) Latest(ctx context.Context, clusterID string) (CollectionSummary, error) {
 	var out CollectionSummary
 	out.ClusterID = clusterID
@@ -82,10 +142,7 @@ func (s *Store) Latest(ctx context.Context, clusterID string) (CollectionSummary
 		return CollectionSummary{}, fmt.Errorf("snapshotstore: read latest run: %w", err)
 	}
 
-	if out.Counts, err = s.readCounts(ctx, clusterID, out.RunID); err != nil {
-		return CollectionSummary{}, err
-	}
-	if out.Failures, err = s.readFailures(ctx, clusterID, out.RunID); err != nil {
+	if out.Resources, err = s.readResources(ctx, clusterID, out.RunID); err != nil {
 		return CollectionSummary{}, err
 	}
 	if out.Warnings, out.WarningTotal, err = s.readWarnings(ctx, clusterID, out.RunID); err != nil {
@@ -94,22 +151,65 @@ func (s *Store) Latest(ctx context.Context, clusterID string) (CollectionSummary
 	return out, nil
 }
 
-func (s *Store) readCounts(ctx context.Context, clusterID, runID string) ([]ResourceCount, error) {
+// readResources 把计数表与失败表合成每类资源一条结果。
+//
+// 两张表取并集而不是以计数表为准：一类资源可能只在失败表里出现
+// （采集器根本没能列出它，也就没有计数可写）。以计数表为准会让这种
+// 失败在摘要上完全消失 —— 缺席被读成"这一类没有任何东西"。
+func (s *Store) readResources(ctx context.Context, clusterID, runID string) ([]ResourceOutcome, error) {
+	counts, err := s.readCounts(ctx, clusterID, runID)
+	if err != nil {
+		return nil, err
+	}
+	failures, err := s.readFailures(ctx, clusterID, runID)
+	if err != nil {
+		return nil, err
+	}
+
+	names := make([]string, 0, len(counts)+len(failures))
+	for resource := range counts {
+		names = append(names, resource)
+	}
+	for resource := range failures {
+		if _, ok := counts[resource]; !ok {
+			names = append(names, resource)
+		}
+	}
+	slices.Sort(names)
+
+	out := make([]ResourceOutcome, 0, len(names))
+	for _, resource := range names {
+		outcome := ResourceOutcome{Resource: resource, count: counts[resource]}
+		// 失败压过计数：一次 FORBIDDEN 的 NetworkPolicy 同样留下一行
+		// item_count = 0，把那个 0 交出去就是把"没被授权"说成"没有策略"。
+		if failure, ok := failures[resource]; ok {
+			outcome.count = 0
+			outcome.failure = &failure
+		}
+		out = append(out, outcome)
+	}
+	return out, nil
+}
+
+func (s *Store) readCounts(ctx context.Context, clusterID, runID string) (map[string]int, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT resource, item_count FROM collection_run_resource
-		  WHERE cluster_id = ? AND run_id = ? ORDER BY resource`, clusterID, runID)
+		  WHERE cluster_id = ? AND run_id = ?`, clusterID, runID)
 	if err != nil {
 		return nil, fmt.Errorf("snapshotstore: read resource counts: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	out := []ResourceCount{}
+	out := map[string]int{}
 	for rows.Next() {
-		var c ResourceCount
-		if err := rows.Scan(&c.Resource, &c.Count); err != nil {
+		var (
+			resource string
+			count    int
+		)
+		if err := rows.Scan(&resource, &count); err != nil {
 			return nil, fmt.Errorf("snapshotstore: scan resource count: %w", err)
 		}
-		out = append(out, c)
+		out[resource] = count
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("snapshotstore: iterate resource counts: %w", err)
@@ -117,22 +217,25 @@ func (s *Store) readCounts(ctx context.Context, clusterID, runID string) ([]Reso
 	return out, nil
 }
 
-func (s *Store) readFailures(ctx context.Context, clusterID, runID string) ([]FailureRecord, error) {
+func (s *Store) readFailures(ctx context.Context, clusterID, runID string) (map[string]FailureRecord, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT resource, reason, detail FROM collection_run_failure
-		  WHERE cluster_id = ? AND run_id = ? ORDER BY resource`, clusterID, runID)
+		  WHERE cluster_id = ? AND run_id = ?`, clusterID, runID)
 	if err != nil {
 		return nil, fmt.Errorf("snapshotstore: read failures: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	out := []FailureRecord{}
+	out := map[string]FailureRecord{}
 	for rows.Next() {
-		var f FailureRecord
-		if err := rows.Scan(&f.Resource, &f.Reason, &f.Detail); err != nil {
+		var (
+			resource string
+			record   FailureRecord
+		)
+		if err := rows.Scan(&resource, &record.Reason, &record.Detail); err != nil {
 			return nil, fmt.Errorf("snapshotstore: scan failure: %w", err)
 		}
-		out = append(out, f)
+		out[resource] = record
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("snapshotstore: iterate failures: %w", err)
@@ -141,6 +244,9 @@ func (s *Store) readFailures(ctx context.Context, clusterID, runID string) ([]Fa
 }
 
 // readWarnings 按类别聚合告警，并返回总条数。
+//
+// 聚合而非逐条返回：告警条数没有上界（一个网段填错的集群会给每个 Pod
+// 记一条），逐条返回会让一次读取拖回几千行（安全规范 §23 / §24）。
 //
 // 总数单独查询而非把聚合结果相加：两者对不上时说明有告警的 kind 落在
 // 封闭枚举之外，而那正是"新增了一个原因却忘了同步统计口径"的迹象
