@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/imkerbos/Distill/internal/cluster"
+	"github.com/imkerbos/Distill/internal/kubeclient"
 	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/snapshot"
 )
@@ -198,6 +201,48 @@ func TestWriteAccessStopsTheRunButLeavesATrace(t *testing.T) {
 	}
 	if got.runID == "" {
 		t.Error("aborted run has no run id; a run that cannot be joined is not a run")
+	}
+}
+
+// apiserver 地址被出站守卫拒绝，不得报成"没能证明只读"。
+//
+// 这条来自 2026-08-17 对真实集群的实测：把 kubeconfig 指到
+// https://169.254.169.254:6443，采集器答的是"could not prove read-only
+// access"，于是操作者去查 RBAC，而真正的原因是地址被本平台的守卫拒了。
+//
+// 成因在时序上：kubeclient.New 只解析 kubeconfig、不拨号，守卫要到第一次
+// 真实 API 调用才发力 —— 而那次调用恰好是自证本身。两件完全不同的事
+// 因此落在同一个分支里。RunErrorClientUnavailable 这个枚举值正是为它
+// 准备的，此前不可达。
+//
+// 三个方向一起断言，少一条都不够：错误要能与只读自证失败区分开、
+// 落库原因要是 CLIENT_UNAVAILABLE、且错误文本里不得出现 apiserver 地址
+// （规范 §19、§22 —— 这个进程的输出终点是集群日志）。
+func TestABlockedAPIServerIsNotReportedAsUnprovenReadOnly(t *testing.T) {
+	const blocked = "https://169.254.169.254:6443/apis/authorization.k8s.io/v1"
+
+	cs := fake.NewClientset()
+	cs.PrependReactor("create", "selfsubjectaccessreviews",
+		func(k8stesting.Action) (bool, runtime.Object, error) {
+			// 形状照抄真实链路：client-go 把拨号错误包进 url.Error，
+			// 实测 errors.Is 能穿透它。
+			return true, nil, fmt.Errorf("Get %q: %w", blocked, kubeclient.ErrBlockedDestination)
+		})
+	store := &recordingStore{}
+
+	_, err := collectOnce(t.Context(), testClusterID, cs, testFleet(), store, quietLogger())
+	if !errors.Is(err, ErrBlockedAPIServer) {
+		t.Fatalf("collectOnce() error = %v, want %v", err, ErrBlockedAPIServer)
+	}
+	if errors.Is(err, ErrNotProvenReadOnly) {
+		t.Error("a rejected address is reported as an unproven read-only check; " +
+			"the operator will go and audit RBAC for an address problem")
+	}
+	if got := store.onlyAborted(t); got.reason != snapshot.RunErrorClientUnavailable {
+		t.Errorf("aborted reason = %q, want %q", got.reason, snapshot.RunErrorClientUnavailable)
+	}
+	if strings.Contains(err.Error(), "169.254.169.254") {
+		t.Errorf("error text = %q, carries the apiserver address", err.Error())
 	}
 }
 

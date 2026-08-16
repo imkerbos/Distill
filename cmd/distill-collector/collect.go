@@ -13,6 +13,7 @@ import (
 
 	"github.com/imkerbos/Distill/internal/cluster"
 	"github.com/imkerbos/Distill/internal/collect"
+	"github.com/imkerbos/Distill/internal/kubeclient"
 	"github.com/imkerbos/Distill/internal/snapshot"
 )
 
@@ -33,7 +34,20 @@ const runIDBytes = 16
 // 代价是"我确实有写权限"与"我问不出来"这两种成因在这一层分不开 ——
 // 已知缺口，收口的做法是让 AssertReadOnly 返回一个封闭枚举的结论，
 // 那是 internal/collect 的改动，不在本次装配范围内。
+//
+// **地址被守卫拒绝已经从这个缺口里拆了出来**，见 ErrBlockedAPIServer。
 var ErrNotProvenReadOnly = errors.New("could not prove read-only access to the target cluster")
+
+// ErrBlockedAPIServer 表示 apiserver 地址被本平台的出站守卫拒绝。
+//
+// 与 ErrNotProvenReadOnly 分开是必需的，不是细分：两者的处置方向相反，
+// 一个是改 RBAC，一个是改地址。它们此前落在同一个分支里，成因在时序上 ——
+// kubeclient.New 只解析 kubeconfig、不拨号，守卫要到第一次真实 API 调用
+// 才发力，而那次调用恰好是只读自证本身。于是一次被拒的地址会答"没能证明
+// 只读"，操作者据此去审计一个完全正常的 RBAC。
+//
+// 同样不带底层错误：那段文本里有 apiserver 地址（规范 §19、§22）。
+var ErrBlockedAPIServer = errors.New("the apiserver address was refused by the outbound guard")
 
 // runStore 是一次采集运行的落库口。*snapshotstore.Store 满足它。
 //
@@ -104,6 +118,16 @@ func collectOnce(
 	startedAt := time.Now()
 
 	if err := collect.AssertReadOnly(ctx, client); err != nil {
+		// 先问地址：自证是第一次真实 API 调用，所以出站守卫的拒绝会从这里
+		// 冒出来。不先分开的话，一次被拒的地址会答"没能证明只读"，
+		// 而那句话会把操作者送去审计一个完全正常的 RBAC。
+		if errors.Is(err, kubeclient.ErrBlockedDestination) {
+			logger.Error("the apiserver address was refused by the outbound guard; not reading the cluster",
+				"cluster", clusterID)
+			recordAbortedRun(ctx, store, clusterID, startedAt, snapshot.RunErrorClientUnavailable, logger)
+			return snapshot.Run{}, ErrBlockedAPIServer
+		}
+
 		logger.Error("the collector could not prove it holds no policy write access; not reading the cluster",
 			"cluster", clusterID)
 		// 一个资源都没读，但这一轮必须在历史里留下痕迹：不留的话界面显示
