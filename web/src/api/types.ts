@@ -527,6 +527,13 @@ export interface RegisteredCluster {
   podCidr: string
   nodeCidr: string
   ccnpPresent: boolean
+  /**
+   * 这个集群的 kubeconfig 在凭据后端里的短名，未登记时为空串。
+   *
+   * 只是一个名字：界面与主服务都不解析它，更不持有它指向的凭据。
+   * 采集器（cmd/distill-collector）是唯一解析它的地方。
+   */
+  kubeconfigRef?: string
   state: OnboardState
   apiServers?: APIServer[] | null
   healthCheckSources?: string[] | null
@@ -569,6 +576,14 @@ export interface ClusterWrite {
   podCidr: string
   nodeCidr: string
   ccnpPresent: boolean
+  /**
+   * 凭据引用。**必须在这里**，且必须每次原样带上。
+   *
+   * PUT 是整体替换：漏带一次的后果不是"改不了凭据"，而是一个只想改
+   * 显示名的操作者顺手清空了它，采集器此后再也连不上这个集群 ——
+   * 而这件事要到下一次采集才暴露，表现成"这个集群没有采集记录"。
+   */
+  kubeconfigRef: string
   apiServers: APIServer[]
   healthCheckSources: string[]
 }

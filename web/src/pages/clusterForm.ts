@@ -75,6 +75,14 @@ export interface ClusterFormValues {
    * 把它清成 false，让平台显得比它应该的样子更有把握。
    */
   ccnpPresent: boolean
+  /**
+   * kubeconfig 在凭据后端里的短名，空串表示这个集群还没有登记凭据。
+   *
+   * 与 ccnpPresent 同一条纪律（PUT 整体替换，必须携带并预填），
+   * 后果的方向又不同：它被清空不会让判定出错，而是让采集器此后连不上
+   * 这个集群 —— 下一次采集才暴露，且表现成"这个集群没有采集记录"。
+   */
+  kubeconfigRef: string
   apiServerRows: ApiServerRow[]
   /** 健康检查网段，每行一个 CIDR。 */
   healthChecks: string
@@ -87,6 +95,7 @@ export const blankGitValues = (): GitFormValues => ({ repoId: '', policyPath: ''
 export function blankFormValues(): ClusterFormValues {
   return {
     id: '', displayName: '', podCidr: '', nodeCidr: '', ccnpPresent: false,
+    kubeconfigRef: '',
     apiServerRows: [emptyApiServerRow()], healthChecks: '',
   }
 }
@@ -112,6 +121,8 @@ export function formValuesOf(c: RegisteredCluster): ClusterFormValues {
     // 网段回答，漏播这一项会让一个本该降级的集群显示成正常判定——
     // 前者是错误，后者是"看上去更有把握的错误"，更难被发现。
     ccnpPresent: c.ccnpPresent,
+    // 未登记时后端回空串，旧响应可能整个没有这个键 —— 两者都落成空串。
+    kubeconfigRef: c.kubeconfigRef ?? '',
     // 至少留一行空行，否则界面上没有任何可填的输入框，"添加"按钮成了唯一入口。
     apiServerRows: rows.length > 0 ? rows : [emptyApiServerRow()],
     healthChecks: (c.healthCheckSources ?? []).join('\n'),
@@ -311,6 +322,7 @@ export function buildClusterWrite(values: ClusterFormValues): BuildResult {
       podCidr: values.podCidr.trim(),
       nodeCidr: values.nodeCidr.trim(),
       ccnpPresent: values.ccnpPresent,
+      kubeconfigRef: values.kubeconfigRef.trim(),
       apiServers: servers.apiServers,
       healthCheckSources: values.healthChecks.split('\n').map((s) => s.trim()).filter(Boolean),
     },

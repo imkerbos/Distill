@@ -371,6 +371,21 @@ function ClusterFields({ values, patch, mode }: {
         <TextField label="显示名" value={values.displayName} onChange={(v) => patch({ displayName: v })} required />
         <TextField label="Pod CIDR" value={values.podCidr} onChange={(v) => patch({ podCidr: v })} required mono />
         <TextField label="Node CIDR" value={values.nodeCidr} onChange={(v) => patch({ nodeCidr: v })} required mono />
+        {/*
+          凭据引用只是一个**名字**：界面与主服务都不解析它，也永远不持有它
+          指向的 kubeconfig —— 采集器是全平台唯一解析它的地方。这里能填的
+          只有短名，正因如此这个输入框本身不构成一次凭据输入。
+
+          非必填：没有登记凭据的集群仍然可以注册，只是采集器采不了它。
+          但一旦填过，每次保存都必须原样带上 —— PUT 是整体替换，
+          漏带一次就等于把它清空（见 clusterForm.ts 的同一段注释）。
+        */}
+        <TextField
+          label="kubeconfig 引用"
+          value={values.kubeconfigRef}
+          onChange={(v) => patch({ kubeconfigRef: v })}
+          mono
+        />
       </FormGrid>
 
       {/*
