@@ -103,6 +103,10 @@ func adminRoutes() []struct{ method, path string } {
 		{http.MethodPut, "/api/v1/clusters/prod-asia-1/git-binding"},
 		{http.MethodDelete, "/api/v1/clusters/prod-asia-1/git-binding"},
 		{http.MethodPost, "/api/v1/clusters/prod-asia-1/git-binding/verify"},
+		// 采集摘要：回传一个真实集群的资产盘点，以及平台在这个集群上哪几类
+		// 资源没被授权读 —— 后者是一份「平台在哪里是瞎的」的清单。
+		// 分类存疑时取更严的那一侧（见 router.go 上那段注释）。
+		{http.MethodGet, "/api/v1/clusters/prod-asia-1/collection"},
 		{http.MethodGet, "/api/v1/clusters/prod-asia-1/policy-imports"},
 		{http.MethodPost, "/api/v1/clusters/prod-asia-1/policy-imports"},
 		{http.MethodDelete, "/api/v1/clusters/prod-asia-1/policy-imports/1"},

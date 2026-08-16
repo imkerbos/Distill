@@ -41,6 +41,27 @@ type ResourceOutcome struct {
 	failure *FailureRecord
 }
 
+// NewObservedResource 构造一条"采到了、共 count 条"的结果。
+//
+// 与 NewFailedResource 分成两个构造器，而不是一个带可选失败参数的：
+// 两个构造器各自只收得下一种事实，于是"既报了条数又报了失败"这种取值
+// 在包外根本构造不出来 —— 与 MarshalJSON 二选一同一条约束的另一半。
+//
+// 导出的理由是消费方要能在没有数据库的情况下测自己（比如
+// internal/httpapi 的可见面），而字段不导出是这个类型的核心约束，
+// 不会为了测试放开。
+func NewObservedResource(resource string, count int) ResourceOutcome {
+	return ResourceOutcome{Resource: resource, count: count}
+}
+
+// NewFailedResource 构造一条"这一类没采到"的结果。
+//
+// 没有 count 参数：失败的资源没有条数可言，给它一个参数就是给调用方
+// 一个填 0 的位置，而那个 0 会被读成"这个集群没有任何这类资源"。
+func NewFailedResource(resource string, record FailureRecord) ResourceOutcome {
+	return ResourceOutcome{Resource: resource, failure: &record}
+}
+
 // Count 返回这类资源观测到的条数。
 //
 // observed 为 false 表示这一类没有采到，此时返回的数字没有任何含义，

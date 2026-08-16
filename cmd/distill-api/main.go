@@ -29,6 +29,7 @@ import (
 	"github.com/imkerbos/Distill/internal/secrets"
 	"github.com/imkerbos/Distill/internal/secrets/gcpsecrets"
 	"github.com/imkerbos/Distill/internal/settings"
+	"github.com/imkerbos/Distill/internal/snapshotstore"
 	"github.com/imkerbos/Distill/internal/store"
 )
 
@@ -111,6 +112,9 @@ func run(configPath string) error {
 		// 是为了让边界层只拿到它真正需要的那几个方法，不是为了换实现。
 		Writeback:    reg,
 		PolicyWriter: newSettingsPolicyWriter(settingsProvider, logger),
+		// 资产采集的只读摘要。写入侧属于 cmd/distill-collector —— 这里
+		// 只拿读的那一面，主服务不持有任何 Kubernetes 凭据。
+		Collection: snapshotstore.New(db),
 		// demo 的默认时间窗取 fixture 数据的实际范围。任何"最近 N 天"
 		// 的取值都会随真实时间推移而在某天返回 0 条 —— demo 会在没有
 		// 人改动代码的情况下自己坏掉。接真实存储时这里换成有界窗口。

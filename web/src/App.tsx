@@ -4,6 +4,7 @@ import AppShell from './components/AppShell'
 import { SessionProvider, useSession } from './auth/SessionContext'
 import AccountsPage, { OwnPasswordPage } from './pages/AccountsPage'
 import ClustersPage from './pages/ClustersPage'
+import CollectionPage from './pages/CollectionPage'
 import FlowsPage from './pages/FlowsPage'
 import GitReposPage from './pages/GitReposPage'
 import LoginPage from './pages/LoginPage'
@@ -30,6 +31,14 @@ function Protected() {
         <Route path="/security" element={<SecurityPage cluster={cluster} />} />
         <Route path="/policy" element={<PolicyPage cluster={cluster} />} />
         <Route path="/clusters" element={<ClustersPage />} />
+        {/*
+          资产采集是这块界面上唯一显示真实集群数据的一屏，因此接 cluster。
+          这条路由**不按角色摘掉**，理由同 /accounts：摘掉它，只读账号敲进
+          这个地址会被「* → /topology」悄悄弹走，那看起来像地址打错了。
+          服务端对这条端点声明 accessAdmin，让页面自己把拒绝显示出来
+          （规范 §34）。
+        */}
+        <Route path="/collection" element={<CollectionPage cluster={cluster} />} />
         {/* 策略仓库独立于集群存在，因此与设置页同理，不接 cluster。 */}
         <Route path="/git-repos" element={<GitReposPage />} />
         {/* 设置是平台自身的配置，不属于任何一个集群，因此不接 cluster。 */}

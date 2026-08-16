@@ -73,6 +73,20 @@ func newTestRouterWithGitVerifier(
 	return buildTestRouter(t, reader, reg, fixtureWindow(reader), gv)
 }
 
+// newTestRouterWithCollection 是 newTestRouterWithRegistry 的变体，额外注入
+// 一个采集摘要读取端。
+//
+// 单独开一个入口，理由同 newTestRouterWithGitVerifier：绝大多数用例装配的
+// 是"没有部署采集器"的形态（读取端为 nil），而那正是当前真实部署的形态，
+// 必须持续被覆盖。让它保持零参数，就不会有人为了改签名顺手给它塞一个
+// 非 nil 的替身。
+func newTestRouterWithCollection(
+	t *testing.T, reg registry.Store, cr httpapi.CollectionReader,
+) (http.Handler, *auth.SessionStore, *http.Cookie) {
+	t.Helper()
+	return buildTestRouterWithLog(t, nil, reg, store.TimeWindow{}, nil, nil, cr, "ERROR", io.Discard)
+}
+
 // newTestRouterWithWindow 是 newTestRouterWithRegistry 的底层版本，
 // 额外接受一个显式的 DefaultWindow，而不是自动取 fixture 的全量窗口。
 //
@@ -104,7 +118,7 @@ func newTestRouterWithLog(
 ) (http.Handler, *auth.SessionStore, *http.Cookie, *bytes.Buffer) {
 	t.Helper()
 	var buf bytes.Buffer
-	h, sessions, cookie := buildTestRouterWithLog(t, nil, reg, store.TimeWindow{}, nil, nil, "INFO", &buf)
+	h, sessions, cookie := buildTestRouterWithLog(t, nil, reg, store.TimeWindow{}, nil, nil, nil, "INFO", &buf)
 	return h, sessions, cookie, &buf
 }
 
@@ -116,14 +130,14 @@ func buildTestRouter(
 	t.Helper()
 	// 写入器为 nil：绝大多数用例装配的是"没有写回这条路径"的形态，也是
 	// 部署上真实存在的一种。写回用例走 newTestRouterForWriteback。
-	return buildTestRouterWithLog(t, reader, reg, window, gv, nil, "ERROR", io.Discard)
+	return buildTestRouterWithLog(t, reader, reg, window, gv, nil, nil, "ERROR", io.Discard)
 }
 
 // buildTestRouterWithLog 是 buildTestRouter 多带一个日志去处的版本。
 func buildTestRouterWithLog(
 	t *testing.T, reader store.Reader, reg registry.Store,
 	window store.TimeWindow, gv httpapi.GitVerifier, pw httpapi.PolicyWriter,
-	level string, logOut io.Writer,
+	cr httpapi.CollectionReader, level string, logOut io.Writer,
 ) (http.Handler, *auth.SessionStore, *http.Cookie) {
 	t.Helper()
 
@@ -148,6 +162,10 @@ func buildTestRouterWithLog(
 		Reader:      reader,
 		Registry:    reg,
 		GitVerifier: gv,
+		// 采集读取端默认为 nil：这是当前真实部署的形态（采集器还没有装配
+		// 进 cmd/distill-api），也是「没有读取端」与「这个集群没被采过」
+		// 必须分得开的那一侧。
+		Collection: cr,
 		// 写回的持久化去处跟着注册表走：同一个替身同时满足两个接口，与
 		// mysqlregistry.Store 一样。断言不成立时留 nil —— 那正是"没有审计
 		// 去处"的形态，而写回在那种形态下必须拒绝。

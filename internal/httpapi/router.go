@@ -41,6 +41,12 @@ type Deps struct {
 	// 允许为 nil：未配置 secrets 的部署没有写回这回事。nil 表示"没有这条
 	// 路径"，**不是**"随便谁都能推"——见 handlePolicyWritebackPush。
 	PolicyWriter PolicyWriter
+	// Collection 读最近一次资产采集运行的摘要。
+	//
+	// 允许为 nil：采集是一个独立进程，未部署它的形态下没有采集这回事。
+	// nil 表示"本部署没有采集读取端"，**不是**"这个集群没有采集记录"——
+	// 见 handleCollection。
+	Collection CollectionReader
 	// GitVerifier 对 Git 绑定做只读校验。
 	//
 	// 允许为 nil：未配置 secrets 的部署（比如 demo）不做校验，结论一律是
@@ -209,6 +215,20 @@ func NewRouter(d Deps) http.Handler {
 				accessAdmin, handleCreateImport(d))
 			az.route(protected, http.MethodDelete, "/clusters/{clusterID}/policy-imports/{importID}",
 				accessAdmin, handleDeleteImport(d))
+			// 采集摘要按管理员算，不是按只读算。它回传的是一个**真实**集群
+			// 的资产盘点（各类资源各有多少），以及平台在这个集群上哪几类
+			// 资源没被授权读 —— 后者是一份「平台在哪里是瞎的」的清单，属于
+			// 平台自身的权限态势，与设置页回传凭据后端同类（规范 §19：
+			// 内部网络信息、安全策略）。
+			//
+			// 存疑的方向记在这里：/quality 与 /security 是形状相同的完整度
+			// 报告，而它们是只读级。区别在于那两条描述的是合成数据集上的
+			// 判定能力，这一条描述的是真集群的资产与平台自己的 RBAC 缺口。
+			// 分类存疑时取更严的那一侧，与 policy-imports、settings 同一处置。
+			// 只读账号的用途是看拓扑与流量，而这份数据不参与任何结论
+			// （spec §5.2）—— 没有哪条只读判定依赖它。
+			az.route(protected, http.MethodGet, "/clusters/{clusterID}/collection",
+				accessAdmin, handleCollection(d))
 			az.route(protected, http.MethodGet, "/clusters/{clusterID}/topology",
 				accessViewer, handleTopology(d))
 			az.route(protected, http.MethodGet, "/clusters/{clusterID}/quality",

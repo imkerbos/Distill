@@ -78,6 +78,13 @@ export default function AppShell({ cluster, onClusterChange, children }: Props) 
           { to: '/policy', label: '候选策略' },
           { to: '/quality', label: '数据质量' },
           { to: '/clusters', label: '集群管理' },
+          /*
+            资产采集排在集群管理之后、策略仓库之前：它讲的是"平台看见了
+            这个集群的什么"，属于接入这一段，不属于上面那四屏的判定链路。
+            入口对所有角色都渲染 —— 服务端声明 accessAdmin，隐藏它只会
+            让一个只读账号以为这块界面不存在（规范 §34）。
+          */
+          { to: '/collection', label: '资产采集' },
           { to: '/git-repos', label: '策略仓库' },
           { to: '/settings', label: '平台设置' },
           /*

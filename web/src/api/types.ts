@@ -821,3 +821,56 @@ export interface PlatformSettingWrite {
    */
   gitVerifyHostKeys?: string
 }
+
+/**
+ * 一类资源在最近一次采集里的结果。
+ *
+ * 判别式是**键的存在与否**，不是某个哨兵值：后端在采集失败时根本不发
+ * `count` 这个键，在采集成功时不发 `failureReason`（internal/httpapi/
+ * collection_handler.go 的 MarshalJSON 二选一）。写成两个都可选的普通
+ * interface，`r.count ?? 0` 就是一个随手写得出来的表达式，而它会把
+ * 「NetworkPolicy 因权限不足根本没采到」显示成「这个集群没有任何策略」
+ * —— 后者会让平台推荐一份 default-deny（spec §4.2）。
+ *
+ * 联合类型逼着调用方先分支再取值：`count` 在失败分支上类型是
+ * `undefined`，编译器不让你把它当数字用。
+ */
+export type CollectionResource =
+  | { readonly resource: string; readonly count: number; readonly failureReason?: undefined }
+  | { readonly resource: string; readonly failureReason: string; readonly count?: undefined }
+
+/** 一类采集告警的条数。与资源失败分列：告警说的是采到的事实与登记不符。 */
+export interface CollectionWarning {
+  readonly kind: string
+  readonly count: number
+}
+
+/**
+ * GET /api/v1/clusters/{id}/collection 的响应体。
+ *
+ * 没有 observedAt：那是各 observed_* 表的 join 键，属于落库形态，
+ * 服务端不回传（规范 §20、§35）。也没有失败记录的原始错误文本 ——
+ * 它由目标集群的 apiserver 决定，里面有内部主机名（规范 §19、§22）。
+ */
+export interface CollectionSummary {
+  readonly clusterId: string
+  readonly runId: string
+  readonly startedAt: string
+  readonly finishedAt: string
+  /** 取值 OK / PARTIAL / FAILED。 */
+  readonly status: string
+  readonly resources: readonly CollectionResource[]
+  readonly warnings: readonly CollectionWarning[]
+  readonly warningTotal: number
+}
+
+/**
+ * 一个集群的采集状态。
+ *
+ * NO_RUN 独立成一种状态而不是一份空摘要：「这个集群从没被采过」与
+ * 「采过、但什么都没采到」的下一步动作完全不同，两者都渲染成一张空表
+ * 会让一次持续的采集故障看起来和一个刚注册的集群一模一样。
+ */
+export type CollectionState =
+  | { readonly kind: 'RUN'; readonly summary: CollectionSummary }
+  | { readonly kind: 'NO_RUN' }
