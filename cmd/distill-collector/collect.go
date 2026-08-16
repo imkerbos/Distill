@@ -42,6 +42,45 @@ var ErrNotProvenReadOnly = errors.New("could not prove read-only access to the t
 // MySQL 就能变红的用例。
 type runStore interface {
 	Save(ctx context.Context, run snapshot.Run) error
+	// SaveAbortedRun 记下一次在读到集群之前就失败的运行。
+	//
+	// 与 Save 分开，理由见 snapshotstore.SaveAbortedRun：一份"全 0 计数"
+	// 的空快照读起来像一个空集群，而事实是我们根本没看过它。
+	SaveAbortedRun(
+		ctx context.Context, clusterID, runID string,
+		startedAt, finishedAt time.Time, reason snapshot.RunErrorReason,
+	) error
+}
+
+// recordAbortedRun 把一次"还没开始采集就失败"的运行落进历史。
+//
+// 落库失败只记日志、不改变调用方要返回的那个错误：中止的成因才是操作者
+// 要看的东西，把它换成一句"落库失败"等于用记账的失败盖住被记的那件事。
+func recordAbortedRun(
+	ctx context.Context,
+	store runStore,
+	clusterID string,
+	startedAt time.Time,
+	reason snapshot.RunErrorReason,
+	logger *slog.Logger,
+) {
+	runID, err := newRunID()
+	if err != nil {
+		logger.Error("cannot record the aborted run", "cluster", clusterID, "reason", string(reason))
+		return
+	}
+
+	// 另起一个不随上游一起被取消的上下文，理由同 collectOnce 的落库：
+	// 超时或 Ctrl-C 之后，"这一轮为什么没能开始"正是最该留下来的东西。
+	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), saveTimeout)
+	defer cancel()
+
+	if err := store.SaveAbortedRun(saveCtx, clusterID, runID, startedAt, time.Now(), reason); err != nil {
+		// 底层错误不外传到调用方，但要进日志：落不下这一行，界面就会把
+		// 一次配置错误显示成"这个集群还没有被采集过"。
+		logger.Error("cannot record the aborted run",
+			"err", err, "cluster", clusterID, "runId", runID, "reason", string(reason))
+	}
 }
 
 // collectOnce 跑完一次采集：先自证只读，再采集，最后落库。
@@ -62,9 +101,15 @@ func collectOnce(
 	store runStore,
 	logger *slog.Logger,
 ) (snapshot.Run, error) {
+	startedAt := time.Now()
+
 	if err := collect.AssertReadOnly(ctx, client); err != nil {
 		logger.Error("the collector could not prove it holds no policy write access; not reading the cluster",
 			"cluster", clusterID)
+		// 一个资源都没读，但这一轮必须在历史里留下痕迹：不留的话界面显示
+		// "这个集群还没有过任何一次资产采集"，与一个采集器压根没被拉起来
+		// 过的集群一模一样，操作者会去等一次永远不会成功的采集。
+		recordAbortedRun(ctx, store, clusterID, startedAt, snapshot.RunErrorReadOnlyUnproven, logger)
 		return snapshot.Run{}, ErrNotProvenReadOnly
 	}
 

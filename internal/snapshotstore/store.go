@@ -13,6 +13,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/imkerbos/Distill/internal/snapshot"
 )
@@ -55,15 +56,53 @@ func (s *Store) Save(ctx context.Context, run snapshot.Run) (err error) {
 	return nil
 }
 
+// SaveAbortedRun 记下一次在读到集群之前就失败的运行。
+//
+// 与 Save 分开而不是给它传一个空 Observation：Save 会为**每一类**资源写
+// 一行计数，值为 0。那些 0 是真话时（集群里确实没有 Ingress）它们必须写，
+// 而这里它们全是假话 —— 一个资源都没被尝试过。落成一排 0 会让这一屏显示
+// 「采到了零个 Pod、零个 Service」，读起来像一个空集群，而事实是我们根本
+// 没看过它。
+//
+// 因此这里只写 collection_run 一行：没有计数、没有资源失败、没有告警。
+// 可见面据此渲染成"这一轮没有开始"，而不是"这一轮什么都没有"。
+//
+// reason 为空时拒绝：一次没有原因的失败运行，在界面上与一次采到零资源的
+// 成功运行无法区分，而那正是这个方法存在的全部理由。
+func (s *Store) SaveAbortedRun(
+	ctx context.Context,
+	clusterID, runID string,
+	startedAt, finishedAt time.Time,
+	reason snapshot.RunErrorReason,
+) error {
+	if reason == snapshot.RunErrorNone {
+		return fmt.Errorf(
+			"snapshotstore: refusing to record an aborted run for %s with no reason; "+
+				"it would be indistinguishable from a run that observed nothing", clusterID)
+	}
+
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO collection_run
+		   (cluster_id, run_id, observed_at, started_at, finished_at, status, error_reason)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		clusterID, runID, startedAt, startedAt, finishedAt,
+		string(snapshot.RunFailed), string(reason))
+	if err != nil {
+		return fmt.Errorf("snapshotstore: insert aborted run: %w", err)
+	}
+	return nil
+}
+
 // insertRun 写入运行元数据、各资源计数、失败记录与告警。
 func insertRun(ctx context.Context, tx *sql.Tx, run snapshot.Run) error {
 	obs := run.Observation
 
 	_, err := tx.ExecContext(ctx,
 		`INSERT INTO collection_run
-		   (cluster_id, run_id, observed_at, started_at, finished_at, status)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		obs.ClusterID, obs.RunID, obs.ObservedAt, run.StartedAt, run.FinishedAt, string(run.Status))
+		   (cluster_id, run_id, observed_at, started_at, finished_at, status, error_reason)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		obs.ClusterID, obs.RunID, obs.ObservedAt, run.StartedAt, run.FinishedAt,
+		string(run.Status), string(run.ErrorReason))
 	if err != nil {
 		return fmt.Errorf("snapshotstore: insert run: %w", err)
 	}

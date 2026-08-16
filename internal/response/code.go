@@ -30,6 +30,13 @@ const (
 	CodeNotFound Code = 20002
 	// CodeRateLimited 表示请求过于频繁，被限流拒绝。
 	CodeRateLimited Code = 20003
+	// CodeNoCollectionRun 表示该集群已注册，但还没有过任何一次资产采集。
+	//
+	// 与 20002 分开是必需的，不是细分，理由同 10004：真实读取端对一个
+	// 不存在的集群同样查不到采集行，两者共用一个码，一次集群 ID 拼写错误
+	// 就会得到"还没有采集记录"，于是操作者去查采集器为什么没跑，
+	// 而真正的原因是他打错了字。
+	CodeNoCollectionRun Code = 20004
 
 	// CodeInternal 表示服务端内部错误。
 	CodeInternal Code = 50001
@@ -52,6 +59,7 @@ var messages = map[Code]string{
 	CodeInvalidParam:          "请求参数不合法",
 	CodeNotFound:              "请求的资源不存在",
 	CodeRateLimited:           "请求过于频繁，请稍后再试",
+	CodeNoCollectionRun:       "该集群还没有过资产采集记录",
 	CodeInternal:              "服务内部错误",
 	CodeDependencyUnavailable: "依赖服务暂时不可用",
 }
@@ -81,6 +89,7 @@ var registered = []Code{
 	CodeInvalidParam,
 	CodeNotFound,
 	CodeRateLimited,
+	CodeNoCollectionRun,
 	CodeInternal,
 	CodeDependencyUnavailable,
 }

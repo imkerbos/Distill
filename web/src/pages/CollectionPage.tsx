@@ -35,6 +35,14 @@ export default function CollectionPage({ cluster }: { cluster: string }) {
         <p style={{ color: 'var(--verdict-deny)' }}>{error}</p>
       ) : loading || !state ? (
         <p style={{ color: 'var(--text-muted)' }}>加载中…</p>
+      ) : state.kind === 'UNKNOWN_CLUSTER' ? (
+        <EmptyState
+          message="没有这个集群。"
+          detail={
+            '这里说的不是「还没采过」—— 平台的注册表里根本没有这个集群 ID。'
+            + '通常是地址栏里的 ID 打错了，或者这个集群已经下线。'
+          }
+        />
       ) : state.kind === 'NO_RUN' ? (
         <EmptyState
           message="这个集群还没有过任何一次资产采集。"
@@ -55,6 +63,13 @@ function CollectionRun({ summary }: { summary: CollectionSummary }) {
 
   return (
     <div>
+      {/*
+        「这一轮根本没开始」排在任何数字之上：它一出现，下面的表格就是空的，
+        而一张空表在界面上与「采到了零个资源」无法区分。必须先说清楚
+        平台根本没有看过这个集群，再让操作者去看那张表。
+      */}
+      {view.errorNote ? <Notice>{view.errorNote}</Notice> : null}
+
       <div style={{
         display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
         gap: 'var(--space-3)',

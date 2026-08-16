@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	authv1 "k8s.io/api/authorization/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -26,12 +27,37 @@ type recordingStore struct {
 	runs   []snapshot.Run
 	ctxErr []error
 	err    error
+	// aborted 记下每一次「还没开始采集就失败」的落库。
+	aborted []abortedRun
+}
+
+// abortedRun 是一次中止运行的落库参数。
+type abortedRun struct {
+	clusterID string
+	runID     string
+	reason    snapshot.RunErrorReason
 }
 
 func (s *recordingStore) Save(ctx context.Context, run snapshot.Run) error {
 	s.runs = append(s.runs, run)
 	s.ctxErr = append(s.ctxErr, ctx.Err())
 	return s.err
+}
+
+func (s *recordingStore) SaveAbortedRun(
+	_ context.Context, clusterID, runID string, _, _ time.Time, reason snapshot.RunErrorReason,
+) error {
+	s.aborted = append(s.aborted, abortedRun{clusterID: clusterID, runID: runID, reason: reason})
+	return s.err
+}
+
+// onlyAborted 返回唯一一次中止落库；不是恰好一次即致命。
+func (s *recordingStore) onlyAborted(t *testing.T) abortedRun {
+	t.Helper()
+	if len(s.aborted) != 1 {
+		t.Fatalf("store received %d aborted runs, want exactly 1", len(s.aborted))
+	}
+	return s.aborted[0]
 }
 
 // only 返回唯一一次落库收到的运行；不是恰好一次即致命。
@@ -138,8 +164,16 @@ func TestReadOnlyIsProvenBeforeTheClusterIsRead(t *testing.T) {
 	}
 }
 
-// 自证失败时一个资源都不许读，一行都不许落库。
-func TestWriteAccessStopsTheRunBeforeItReadsAnything(t *testing.T) {
+// 自证失败时一个资源都不许读，但这一轮必须在历史里留下痕迹。
+//
+// 前半条是守卫本身。后半条是它 2026-08-16 才补上的另一半：原先这条路径
+// 一行 collection_run 也不写，于是界面显示「这个集群还没有过任何一次资产
+// 采集」—— 与一个刚注册、采集器压根没被拉起来过的集群一模一样，
+// 而操作者会去等一次因为权限配错而永远不会成功的采集。
+//
+// 落的是**中止运行**而不是一份空快照：后者会给每一类资源写一行 0，
+// 读起来像一个空集群，而事实是我们根本没看过它。
+func TestWriteAccessStopsTheRunButLeavesATrace(t *testing.T) {
 	cs := fake.NewClientset()
 	answerReviews(cs, true)
 	store := &recordingStore{}
@@ -152,7 +186,18 @@ func TestWriteAccessStopsTheRunBeforeItReadsAnything(t *testing.T) {
 		t.Errorf("the collector listed cluster resources (action %d) after failing its read-only self-check", got)
 	}
 	if len(store.runs) != 0 {
-		t.Errorf("store received %d runs, want 0 — a run that never happened must not appear in the history", len(store.runs))
+		t.Errorf("store received %d full runs, want 0 — nothing was observed, so nothing may be counted", len(store.runs))
+	}
+
+	got := store.onlyAborted(t)
+	if got.reason != snapshot.RunErrorReadOnlyUnproven {
+		t.Errorf("aborted reason = %q, want %q", got.reason, snapshot.RunErrorReadOnlyUnproven)
+	}
+	if got.clusterID != testClusterID {
+		t.Errorf("aborted clusterID = %q, want %q", got.clusterID, testClusterID)
+	}
+	if got.runID == "" {
+		t.Error("aborted run has no run id; a run that cannot be joined is not a run")
 	}
 }
 

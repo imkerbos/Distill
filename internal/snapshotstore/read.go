@@ -131,6 +131,11 @@ type CollectionSummary struct {
 	Warnings []WarningCount `json:"warnings"`
 	// WarningTotal 是告警总条数。
 	WarningTotal int `json:"warningTotal"`
+	// ErrorReason 仅在这一轮**根本没能开始采集**时非空。
+	//
+	// 非空时 Resources 与 Warnings 都是空的，且那不是"什么都没有"，
+	// 是"我们根本没看过这个集群"。取值见 snapshot.RunErrorReason。
+	ErrorReason string `json:"errorReason"`
 }
 
 // ErrNoRun 表示这个集群还没有过任何一次采集运行。
@@ -150,12 +155,13 @@ func (s *Store) Latest(ctx context.Context, clusterID string) (CollectionSummary
 	out.ClusterID = clusterID
 
 	err := s.db.QueryRowContext(ctx,
-		`SELECT run_id, observed_at, started_at, finished_at, status
+		`SELECT run_id, observed_at, started_at, finished_at, status, error_reason
 		   FROM collection_run
 		  WHERE cluster_id = ?
 		  ORDER BY observed_at DESC
 		  LIMIT 1`, clusterID).
-		Scan(&out.RunID, &out.ObservedAt, &out.StartedAt, &out.FinishedAt, &out.Status)
+		Scan(&out.RunID, &out.ObservedAt, &out.StartedAt, &out.FinishedAt,
+			&out.Status, &out.ErrorReason)
 	if errors.Is(err, sql.ErrNoRows) {
 		return CollectionSummary{}, ErrNoRun
 	}

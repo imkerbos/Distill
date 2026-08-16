@@ -859,6 +859,14 @@ export interface CollectionSummary {
   readonly finishedAt: string
   /** 取值 OK / PARTIAL / FAILED。 */
   readonly status: string
+  /**
+   * 仅在这一轮**根本没能开始采集**时出现。
+   *
+   * 与 resources 里的 failureReason 分列：那些说的是「某一类资源没采到」，
+   * 这里说的是「这一轮从来没读到过集群」。正常的一轮报文里没有这个键 ——
+   * 不是空串，是根本没有，于是「渲染一个空的失败原因」写不出来。
+   */
+  readonly errorReason?: string
   readonly resources: readonly CollectionResource[]
   readonly warnings: readonly CollectionWarning[]
   readonly warningTotal: number
@@ -870,7 +878,12 @@ export interface CollectionSummary {
  * NO_RUN 独立成一种状态而不是一份空摘要：「这个集群从没被采过」与
  * 「采过、但什么都没采到」的下一步动作完全不同，两者都渲染成一张空表
  * 会让一次持续的采集故障看起来和一个刚注册的集群一模一样。
+ *
+ * UNKNOWN_CLUSTER 与 NO_RUN 同理再分一层：后端读取端查的是 collection_run，
+ * 对一个拼错的集群 ID 同样查不到行。两者合并会让一次 URL 里的拼写错误
+ * 显示成「还没有采集记录」，于是操作者去查采集器为什么没跑。
  */
 export type CollectionState =
   | { readonly kind: 'RUN'; readonly summary: CollectionSummary }
   | { readonly kind: 'NO_RUN' }
+  | { readonly kind: 'UNKNOWN_CLUSTER' }

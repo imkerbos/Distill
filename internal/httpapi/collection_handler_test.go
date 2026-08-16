@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -71,6 +72,21 @@ func partialSummary() snapshotstore.CollectionSummary {
 		},
 		WarningTotal: 3,
 	}
+}
+
+// dataOf 取出响应里的 data 对象，保持"某个键在不在"这件事可断言。
+//
+// 不解析成 struct：这些断言问的正是键的缺席，而任何目标结构体都会给
+// 缺席的键补一个零值，把要测的那件事抹平。
+func dataOf(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
+	t.Helper()
+	var envelope struct {
+		Data map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("response is not an envelope: %v", err)
+	}
+	return envelope.Data
 }
 
 // collectionResources 取出响应里的资源数组，逐条保持原始 JSON。
@@ -281,11 +297,122 @@ func TestClusterWithNoRunIsNotAnEmptySummary(t *testing.T) {
 		t.Fatalf("status = %d, want 200 — 从未采集是正常状态，不该计进服务错误率", rec.Code)
 	}
 	body := bodyOf(t, rec)
-	if got := body["code"]; got != float64(response.CodeNotFound) {
-		t.Errorf("code = %v, want %d", got, response.CodeNotFound)
+	if got := body["code"]; got != float64(response.CodeNoCollectionRun) {
+		t.Errorf("code = %v, want %d", got, response.CodeNoCollectionRun)
 	}
 	if body["data"] != nil {
 		t.Errorf("data = %v, want null — 没有运行就没有摘要", body["data"])
+	}
+}
+
+// 一次「还没开始采集就失败」的运行，必须带着它的原因交出去。
+//
+// 没有它，这一轮在报文里是一份没有任何资源、没有任何告警的 FAILED 摘要 ——
+// 与一次真的采到零资源的运行长得一模一样，而两者的下一步动作完全不同：
+// 前者要去查凭据或 RBAC，后者说明集群确实是空的。
+func TestAnAbortedRunCarriesWhyItNeverStarted(t *testing.T) {
+	reg := fixtureSource()
+	aborted := partialSummary()
+	aborted.Status = string(snapshot.RunFailed)
+	aborted.Resources = nil
+	aborted.Warnings = nil
+	aborted.WarningTotal = 0
+	aborted.ErrorReason = string(snapshot.RunErrorReadOnlyUnproven)
+
+	h, sessions, _ := newTestRouterWithCollection(t, reg, &fakeCollection{summary: aborted})
+	cookie := sessionCookie(t, sessions, reg, adminUser, registry.RoleAdmin)
+
+	rec := callWith(t, h, http.MethodGet, collectionPath, cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	data := dataOf(t, rec)
+	if got := data["errorReason"]; got != string(snapshot.RunErrorReadOnlyUnproven) {
+		t.Errorf("errorReason = %v, want %q", got, snapshot.RunErrorReadOnlyUnproven)
+	}
+}
+
+// 正常的一轮报文里**根本没有 errorReason 这个键**。
+//
+// 与资源失败同一个处置（collectionResourceView）：键不在报文里，
+// 前端就渲染不出一句"原因不明"。空串留在那里迟早会被渲染成一行空白提示。
+func TestANormalRunCarriesNoErrorReasonKey(t *testing.T) {
+	reg := fixtureSource()
+	h, sessions, _ := newTestRouterWithCollection(t, reg, &fakeCollection{summary: partialSummary()})
+	cookie := sessionCookie(t, sessions, reg, adminUser, registry.RoleAdmin)
+
+	rec := callWith(t, h, http.MethodGet, collectionPath, cookie)
+	if _, present := dataOf(t, rec)["errorReason"]; present {
+		t.Error("a run that did read the cluster carries an errorReason key; " +
+			"an empty reason on every normal run makes the abnormal one look ordinary")
+	}
+}
+
+// 库里的 error_reason 不在封闭枚举内时，不得原样交出去。
+//
+// 与 failureReason 同一个理由（规范 §19、§22）：这一列的封闭性只由写入侧
+// 的 Go 常量保证，一次写错列的改动会让别的东西落进来，而 VARCHAR(32)
+// 装得下一段带内部地址的短文本。
+func TestUnknownRunErrorReasonIsNotPassedThrough(t *testing.T) {
+	reg := fixtureSource()
+	aborted := partialSummary()
+	aborted.ErrorReason = "https://apiserver.internal.prod-asia-1:6443"
+
+	h, sessions, _ := newTestRouterWithCollection(t, reg, &fakeCollection{summary: aborted})
+	cookie := sessionCookie(t, sessions, reg, adminUser, registry.RoleAdmin)
+
+	rec := callWith(t, h, http.MethodGet, collectionPath, cookie)
+	got := dataOf(t, rec)["errorReason"]
+	if got != "UNRECOGNIZED" {
+		t.Errorf("errorReason = %v, want UNRECOGNIZED", got)
+	}
+	if strings.Contains(rec.Body.String(), "apiserver.internal") {
+		t.Error("the raw reason crossed the boundary")
+	}
+}
+
+// 打错的集群 ID 不得读成"这个集群从没被采集过"。
+//
+// 真实读取端对一个不存在的集群同样返回 ErrNoRun —— 它查的是
+// collection_run，而那张表里当然没有一个不存在的集群的行。于是一次拼写
+// 错误会得到一句"还没有采集记录"，操作者据此去查采集器为什么没跑，
+// 而真正的原因是他打错了字。这个平台的每块屏都必须能说清自己没告诉你什么。
+//
+// 两个方向一起断言，缺一条都不够：
+//   - 两种情形的 code 必须不同。少了这条，两句话仍然分不开。
+//   - 不存在的集群不得碰到读取端。少了这条，一个"先查库、查完再判存在"
+//     的实现也能通过，而那正是这条检查要省掉的那次无谓查询。
+func TestUnknownClusterIsNotReportedAsNeverCollected(t *testing.T) {
+	reg := fixtureSource()
+	collection := &fakeCollection{err: snapshotstore.ErrNoRun}
+	h, sessions, _ := newTestRouterWithCollection(t, reg, collection)
+	cookie := sessionCookie(t, sessions, reg, adminUser, registry.RoleAdmin)
+
+	// 已注册但从未采集过的集群。
+	known := callWith(t, h, http.MethodGet, collectionPath, cookie)
+	knownCode := bodyOf(t, known)["code"]
+	if knownCode != float64(response.CodeNoCollectionRun) {
+		t.Errorf("registered-but-never-collected code = %v, want %d",
+			knownCode, response.CodeNoCollectionRun)
+	}
+
+	callsAfterKnown := collection.calls
+
+	// 打错字的集群 ID。
+	unknown := callWith(t, h, http.MethodGet,
+		"/api/v1/clusters/prod-asia-l/collection", cookie)
+	unknownCode := bodyOf(t, unknown)["code"]
+	if unknownCode != float64(response.CodeNotFound) {
+		t.Errorf("unknown-cluster code = %v, want %d", unknownCode, response.CodeNotFound)
+	}
+
+	if knownCode == unknownCode {
+		t.Errorf("both answers are %v: a typo is indistinguishable from a cluster "+
+			"that has never been collected", knownCode)
+	}
+	if collection.calls != callsAfterKnown {
+		t.Errorf("collection reader was queried %d extra times for an unknown cluster, want 0",
+			collection.calls-callsAfterKnown)
 	}
 }
 

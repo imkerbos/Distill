@@ -1,4 +1,4 @@
-import { isNoRunError } from '../pages/collectionView'
+import { isNoRunError, isUnknownClusterError } from '../pages/collectionView'
 import type {
   Account, ClusterWrite, CollectionState, CollectionSummary,
   CurrentSession, Decision, Envelope, FlowFilter, FlowPage, GitBindingWrite,
@@ -354,6 +354,7 @@ export const api = {
       return { kind: 'RUN', summary }
     } catch (e) {
       if (isNoRunError(e)) return { kind: 'NO_RUN' }
+      if (isUnknownClusterError(e)) return { kind: 'UNKNOWN_CLUSTER' }
       throw e
     }
   },

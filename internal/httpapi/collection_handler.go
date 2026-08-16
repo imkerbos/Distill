@@ -40,6 +40,17 @@ var collectionFailureReasons = map[string]bool{
 	string(snapshot.FailureOther):       true,
 }
 
+// collectionErrorReasons 是允许出现在响应里的「这一轮没能开始」的原因。
+//
+// 与 collectionFailureReasons 分列而不是并成一张表：两者是两个封闭枚举，
+// 合表会让一次写错列的改动（把资源失败的原因写进运行行）顺利通过校验，
+// 而那正是这两列最容易被弄混的地方。
+var collectionErrorReasons = map[string]bool{
+	string(snapshot.RunErrorCredentialUnavailable): true,
+	string(snapshot.RunErrorClientUnavailable):     true,
+	string(snapshot.RunErrorReadOnlyUnproven):      true,
+}
+
 // reasonUnrecognized 是库里的取值不在封闭枚举内时交出去的原因。
 //
 // 不折成 OTHER：OTHER 的含义是"采集器判定不出更具体的原因"，而这里的
@@ -102,6 +113,15 @@ type collectionSummaryView struct {
 	FinishedAt time.Time `json:"finishedAt"`
 	// Status 取值 OK / PARTIAL / FAILED。
 	Status string `json:"status"`
+	// ErrorReason 仅在这一轮根本没能开始采集时非空。
+	//
+	// 与 Resources 里的失败分列：那些说的是"某一类资源没采到"，这里说的
+	// 是"这一轮从来没读到过集群"。合并会让"NetworkPolicy 被拒"与
+	// "采集器连不上这个集群"在界面上落进同一句话。
+	//
+	// 空串用 omitempty 抹掉：正常的一轮报文里根本没有这个键，
+	// 于是"渲染一个空的失败原因"在前端写不出来 —— 同 collectionResourceView。
+	ErrorReason string `json:"errorReason,omitempty"`
 	// Resources 是各类资源的结果，一类至多一条，顺序由读取侧决定。
 	//
 	// 不按枚举补齐：ResourceReplicaSet 在枚举里但从不计数（它只用于解
@@ -137,13 +157,25 @@ func handleCollection(d Deps) http.HandlerFunc {
 			return
 		}
 
+		// 先确认这个集群确实注册过，再去问采集记录。
+		//
+		// 读取端查的是 collection_run，而那张表里当然没有一个不存在的集群
+		// 的行 —— 于是它对拼错的 ID 同样返回 ErrNoRun。少了这一关，一次
+		// 拼写错误会答成"还没有采集记录"，操作者据此去查采集器为什么没跑。
+		if !registeredCluster(w, r, d) {
+			return
+		}
+
 		clusterID := chi.URLParam(r, "clusterID")
 		summary, err := d.Collection.Latest(r.Context(), clusterID)
 		switch {
 		case errors.Is(err, snapshotstore.ErrNoRun):
 			// 业务失败而不是 500：这个集群还没有被采集过是一个正常状态，
 			// 计进服务错误率会让"还没接上"看起来像平台坏了。
-			response.WriteBusiness(w, response.CodeNotFound)
+			//
+			// 用 CodeNoCollectionRun 而不是 CodeNotFound：上面那一关已经
+			// 证明集群是存在的，这里说的是"存在、但没采过"。
+			response.WriteBusiness(w, response.CodeNoCollectionRun)
 			return
 		case err != nil:
 			d.Logger.Error("cannot read the latest collection run",
@@ -167,6 +199,7 @@ func (d Deps) collectionView(r *http.Request, s snapshotstore.CollectionSummary)
 		StartedAt:    s.StartedAt,
 		FinishedAt:   s.FinishedAt,
 		Status:       s.Status,
+		ErrorReason:  d.errorReason(r, s.ErrorReason),
 		Resources:    make([]collectionResourceView, 0, len(s.Resources)),
 		Warnings:     make([]collectionWarningView, 0, len(s.Warnings)),
 		WarningTotal: s.WarningTotal,
@@ -193,6 +226,20 @@ func (d Deps) collectionView(r *http.Request, s snapshotstore.CollectionSummary)
 		out.Warnings = append(out.Warnings, collectionWarningView{Kind: w.Kind, Count: w.Count})
 	}
 	return out
+}
+
+// errorReason 把「这一轮没能开始」的原因收窄到封闭枚举。
+//
+// 空串原样放行：那表示这一轮真的读到了集群，是一个正常取值，不是一次
+// 认不出来的原因。把它也换成 UNRECOGNIZED 会让每一次正常采集都在界面上
+// 顶着一句"原因不明"。
+func (d Deps) errorReason(r *http.Request, reason string) string {
+	if reason == "" || collectionErrorReasons[reason] {
+		return reason
+	}
+	d.Logger.Error("collection run error reason is not in the closed enum",
+		"request_id", RequestIDFrom(r.Context()), "reason", reason)
+	return reasonUnrecognized
 }
 
 // failureReason 把库里的原因收窄到封闭枚举。

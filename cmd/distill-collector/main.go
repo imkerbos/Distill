@@ -32,6 +32,7 @@ import (
 	"github.com/imkerbos/Distill/internal/secrets"
 	"github.com/imkerbos/Distill/internal/secrets/gcpsecrets"
 	"github.com/imkerbos/Distill/internal/settings"
+	"github.com/imkerbos/Distill/internal/snapshot"
 	"github.com/imkerbos/Distill/internal/snapshotstore"
 )
 
@@ -104,8 +105,17 @@ func run(configPath, clusterID string, timeout time.Duration) error {
 		return fmt.Errorf("cluster %q is not registered", clusterID)
 	}
 
-	client, err := newClusterClient(ctx, reg, target)
+	// startedAt 在这里取，而不是等到 collectOnce：从这一行往下的每一次
+	// 失败都还没读到集群，但都必须在历史里留下痕迹。
+	startedAt := time.Now()
+	store := snapshotstore.New(db)
+
+	client, reason, err := newClusterClient(ctx, reg, target)
 	if err != nil {
+		// 凭据解析不出来、或客户端构造不出来，都是"这一轮根本没开始"。
+		// 不落这一行，界面会把一次配置错误显示成"这个集群还没有被采集过"，
+		// 于是操作者去等一次永远不会成功的采集。
+		recordAbortedRun(ctx, store, clusterID, startedAt, reason, logger)
 		return err
 	}
 
@@ -123,7 +133,7 @@ func run(configPath, clusterID string, timeout time.Duration) error {
 		logger.Warn("a cluster has an unusable CIDR registration; IP scope will degrade to UNKNOWN", "cluster", id)
 	}
 
-	result, err := collectOnce(ctx, clusterID, client, fleet, snapshotstore.New(db), logger)
+	result, err := collectOnce(ctx, clusterID, client, fleet, store, logger)
 	if err != nil {
 		return err
 	}
@@ -142,42 +152,53 @@ func run(configPath, clusterID string, timeout time.Duration) error {
 // 凭据只在这个函数的栈上以字节存在：不落临时文件、不进日志、不进错误信息
 // （规范 §19、§33）。kubeconfig 里带的是一个能对 apiserver 说话的身份，
 // 比 Git 那把 deploy key 重得多。**这是全平台唯一一处解析它的地方。**
-func newClusterClient(ctx context.Context, reg registry.Store, target registry.Cluster) (kubernetes.Interface, error) {
+// 第二个返回值是失败时该记进 collection_run.error_reason 的封闭原因；
+// 成功时为 snapshot.RunErrorNone。返回它而不是让调用方去猜：错误文本
+// 刻意不带底层细节，从它反推原因只能靠字符串匹配。
+func newClusterClient(
+	ctx context.Context, reg registry.Store, target registry.Cluster,
+) (kubernetes.Interface, snapshot.RunErrorReason, error) {
 	ref := target.KubeconfigRef
 	if ref == "" {
-		return nil, fmt.Errorf("cluster %q has no kubeconfig reference registered", target.ID)
+		return nil, snapshot.RunErrorCredentialUnavailable,
+			fmt.Errorf("cluster %q has no kubeconfig reference registered", target.ID)
 	}
 	// 引用来自数据库里操作者填的值，先过短名校验再交给解析器：
 	// 短名会被拼进后端的资源路径，能表达的字符越多，能表达的越权路径越多。
 	if err := secrets.ValidateRef(ref); err != nil {
-		return nil, fmt.Errorf("cluster %q has an invalid kubeconfig reference: %w", target.ID, err)
+		return nil, snapshot.RunErrorCredentialUnavailable,
+			fmt.Errorf("cluster %q has an invalid kubeconfig reference: %w", target.ID, err)
 	}
 
 	// 设置只读一次：这是一个跑完就退出的进程，不存在"改了设置却要等重启"
 	// 的问题 —— 那条禁止启动快照的规则针对的是常驻服务。
 	setting, err := settings.New(reg).Current(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("read the platform setting: %w", err)
+		return nil, snapshot.RunErrorCredentialUnavailable,
+			fmt.Errorf("read the platform setting: %w", err)
 	}
 	resolver, err := newSecretResolver(ctx, setting)
 	if err != nil {
-		return nil, err
+		return nil, snapshot.RunErrorCredentialUnavailable, err
 	}
 	if resolver == nil {
 		// 后端是 NONE：操作者明确选了"不解析凭据"，于是也就没有采集。
 		// 静默跳过会让这次运行看起来只是"什么都没采到"。
-		return nil, errors.New("the secrets backend is NONE: the collector cannot resolve a kubeconfig")
+		return nil, snapshot.RunErrorCredentialUnavailable,
+			errors.New("the secrets backend is NONE: the collector cannot resolve a kubeconfig")
 	}
 
 	kubeconfig, err := resolver.Resolve(ctx, ref)
 	if err != nil {
 		if errors.Is(err, secrets.ErrNotFound) {
-			return nil, fmt.Errorf("the kubeconfig reference %q resolves to nothing", ref)
+			return nil, snapshot.RunErrorCredentialUnavailable,
+				fmt.Errorf("the kubeconfig reference %q resolves to nothing", ref)
 		}
 		// 底层错误不外传：目录后端的错误里带文件系统路径，Secret Manager
 		// 的错误里带项目与资源名（规范 §22）。引用本身不是机密，说得出
 		// 是哪一个引用就够操作者定位了。
-		return nil, fmt.Errorf("cannot resolve the kubeconfig reference %q", ref)
+		return nil, snapshot.RunErrorCredentialUnavailable,
+			fmt.Errorf("cannot resolve the kubeconfig reference %q", ref)
 	}
 	// 解析出来的字节用完即清。清的是这一份原始副本 —— 客户端内部仍然
 	// 持有它解出来的凭据，那是它能工作的前提；这里能保证的是这份可以被
@@ -188,9 +209,12 @@ func newClusterClient(ctx context.Context, reg registry.Store, target registry.C
 	if err != nil {
 		// 同样不外传：clientcmd 的解析错误会把 kubeconfig 的片段与
 		// apiserver 地址一起带出来，而这个进程的输出终点是集群日志。
-		return nil, fmt.Errorf("cannot build a Kubernetes client from the kubeconfig behind %q", ref)
+		// 凭据本身拿到了，构造不出客户端 —— 包括 apiserver 地址被出站守卫
+		// 拒绝。与凭据不可用分开：两者的处置一个是改凭据，一个是改地址。
+		return nil, snapshot.RunErrorClientUnavailable,
+			fmt.Errorf("cannot build a Kubernetes client from the kubeconfig behind %q", ref)
 	}
-	return client, nil
+	return client, snapshot.RunErrorNone, nil
 }
 
 // newSecretResolver 按设置选出的后端装配凭据解析器。

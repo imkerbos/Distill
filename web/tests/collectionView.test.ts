@@ -4,9 +4,11 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import {
-  COLLECTION_FEEDS_NOTHING, COLLECTION_NO_RUN_CODE, FAILURE_REASON_ACTION, FAILURE_REASON_LABEL,
+  COLLECTION_FEEDS_NOTHING, COLLECTION_NO_RUN_CODE, COLLECTION_UNKNOWN_CLUSTER_CODE,
+  FAILURE_REASON_ACTION, FAILURE_REASON_LABEL,
   collectionCoverageNote, collectionDuration, collectionRows, collectionSummaryView,
-  collectionWarningRows, isNoRunError, summaryStatusTone,
+  RUN_ERROR_REASON_ACTION, RUN_ERROR_REASON_LABEL,
+  collectionWarningRows, isNoRunError, isUnknownClusterError, runErrorNote, summaryStatusTone,
 } from '../src/pages/collectionView.ts'
 import type { CollectionResource, CollectionSummary } from '../src/api/types.ts'
 
@@ -189,13 +191,91 @@ test('页面源码里没有把缺席补成 0 的兜底写法', () => {
 /* 3. 三种"没有数字"必须分得开                                               */
 /* ---------------------------------------------------------------------- */
 
-test('20002 被识别成「从未采集过」，其余失败不是', () => {
-  assert.equal(COLLECTION_NO_RUN_CODE, 20002)
-  assert.equal(isNoRunError({ code: 20002 }), true)
+test('20004 被识别成「从未采集过」，其余失败不是', () => {
+  assert.equal(COLLECTION_NO_RUN_CODE, 20004)
+  assert.equal(isNoRunError({ code: 20004 }), true)
   assert.equal(isNoRunError({ code: 50002 }), false, '依赖不可用不是「从未采集过」')
   assert.equal(isNoRunError({ code: 50001 }), false, '一次读取故障不能被伪装成「还没采过」')
   assert.equal(isNoRunError(new Error('boom')), false)
   assert.equal(isNoRunError(undefined), false)
+})
+
+/**
+ * 「集群不存在」与「从未采集过」必须是两个码、两条判定。
+ *
+ * 后端读取端查的是 collection_run，对一个拼错的集群 ID 同样查不到行 ——
+ * 两者共用一个码时，一次 URL 里的拼写错误会显示成「还没有采集记录」，
+ * 于是操作者去查采集器为什么没跑，而真正的原因是他打错了字。
+ *
+ * 两个方向都断言：各自认得自己那个码，且**互不认对方的** ——
+ * 少了后半条，两个都返回 true 的实现照样能过。
+ */
+test('20002 是「集群不存在」，与「从未采集过」互不相认', () => {
+  assert.equal(COLLECTION_UNKNOWN_CLUSTER_CODE, 20002)
+  assert.notEqual(COLLECTION_UNKNOWN_CLUSTER_CODE, COLLECTION_NO_RUN_CODE)
+
+  assert.equal(isUnknownClusterError({ code: 20002 }), true)
+  assert.equal(isUnknownClusterError({ code: 20004 }), false,
+    '「还没采过」被当成了「集群不存在」')
+  assert.equal(isNoRunError({ code: 20002 }), false,
+    '一次集群 ID 拼写错误被显示成「还没有采集记录」')
+  assert.equal(isUnknownClusterError(new Error('boom')), false)
+  assert.equal(isUnknownClusterError(undefined), false)
+})
+
+/**
+ * 「这一轮根本没开始」必须与「采到了零个资源」分开。
+ *
+ * 这是这条端点最容易骗人的一种状态：采集器被拉起、在读集群之前就失败
+ * 退出。没有这条提示，页面上是一张空表 —— 与一次真的采到零资源的运行
+ * 在界面上完全一样，而两者的下一步动作完全不同。
+ */
+test('没能开始的一轮讲清它不是「采到了零个资源」', () => {
+  const note = runErrorNote('READ_ONLY_UNPROVEN')
+  assert.match(note, /这一轮没有开始/)
+  assert.match(note, /不是「采到了零个资源」/,
+    '提示没有把「根本没看过」与「看了、什么都没有」分开')
+  assert.match(note, /RBAC/, '没有告诉操作者下一步该查什么')
+
+  // 正常的一轮必须**没有**这条提示：每一轮都顶着一句话，
+  // 会让真正出事的那一轮看起来和平常一样。
+  assert.equal(runErrorNote(undefined), '')
+  assert.equal(runErrorNote(''), '')
+})
+
+/** 未收录的原因照原样显示，不丢弃、不留空。 */
+test('不认识的「没能开始」原因照原样显示', () => {
+  const note = runErrorNote('SOMETHING_NEW')
+  assert.match(note, /SOMETHING_NEW/,
+    '少显示一种成因等于把一类系统性问题藏起来')
+})
+
+/** 三种「没能开始」的原因各自有标签与处置，且处置方向不同。 */
+test('每种「没能开始」的原因都有标签与处置', () => {
+  for (const reason of ['CREDENTIAL_UNAVAILABLE', 'CLIENT_UNAVAILABLE', 'READ_ONLY_UNPROVEN']) {
+    assert.ok(RUN_ERROR_REASON_LABEL[reason], `${reason} 没有标签`)
+    assert.ok(RUN_ERROR_REASON_ACTION[reason], `${reason} 没有处置`)
+  }
+  // 与资源级失败不共用一张表：合成一张会让「NetworkPolicy 被拒」与
+  // 「采集器连不上这个集群」落进同一句话。
+  assert.notDeepEqual(RUN_ERROR_REASON_LABEL, FAILURE_REASON_LABEL)
+})
+
+/** 页面必须在任何数字之上渲染这条提示。 */
+test('没能开始的提示排在数字之前', () => {
+  assert.match(PAGE_SOURCE, /view\.errorNote \? <Notice>\{view\.errorNote\}<\/Notice> : null/,
+    '页面没有渲染「这一轮没能开始」的提示')
+  const noticeAt = PAGE_SOURCE.indexOf('view.errorNote')
+  const tileAt = PAGE_SOURCE.indexOf('本次采集结果')
+  assert.ok(noticeAt >= 0 && tileAt >= 0 && noticeAt < tileAt,
+    '提示排在数字之后 —— 操作者会先把一张空表当成事实读一遍')
+})
+
+/** 集群不存在的空态必须说它不是「还没采过」。 */
+test('集群不存在的空态说明它与「还没采过」不是一回事', () => {
+  assert.match(PAGE_SOURCE, /没有这个集群/)
+  assert.match(PAGE_SOURCE, /这里说的不是「还没采过」/,
+    '空态没有把「打错 ID」与「采集器还没跑」区分开')
 })
 
 /**

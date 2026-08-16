@@ -16,11 +16,43 @@ type Run struct {
 	Failures []Failure
 	// Status 是本次运行的结果判定。
 	Status RunStatus
+	// ErrorReason 仅在这一轮**根本没能开始采集**时非空。
+	//
+	// 它非空时 Observation 里不会有任何资产，Failures 也是空的 ——
+	// 因为一个资源都没被尝试过。这与"尝试了、全都失败"是两回事。
+	ErrorReason RunErrorReason
 	// StartedAt 与 FinishedAt 界定这次运行占用的时间。
 	StartedAt time.Time
 	// FinishedAt 是运行结束时刻。
 	FinishedAt time.Time
 }
+
+// RunErrorReason 是一次运行**根本没能开始采集**的原因，封闭枚举。
+//
+// 与 Failure.Reason 是两件事，不得合并：后者说的是"某一类资源没采到"，
+// 前者说的是"这一轮从来没读到过集群"。合并会让"NetworkPolicy 被拒"
+// 与"采集器连不上这个集群"落进同一个统计口径。
+//
+// 它存在的理由是这条端点最容易骗人的一种状态：采集器被拉起、在读集群
+// 之前就失败退出，于是一行 collection_run 也没有，界面显示"这个集群还
+// 没有过任何一次资产采集"—— 与一个刚注册、采集器压根没跑过的集群一模
+// 一样。操作者会去等一次永远不会成功的采集。
+type RunErrorReason string
+
+const (
+	// RunErrorNone 表示这一轮真的读到了集群，成败见 RunStatus。
+	RunErrorNone RunErrorReason = ""
+	// RunErrorCredentialUnavailable 表示凭据引用缺失、非法或解析不出来。
+	//
+	//nolint:gosec // G101 false positive: 这是一个落库的原因枚举值，不是凭据。
+	RunErrorCredentialUnavailable RunErrorReason = "CREDENTIAL_UNAVAILABLE"
+	// RunErrorClientUnavailable 表示凭据拿到了，但构造不出可用的客户端 ——
+	// 包括 apiserver 地址被出站守卫拒绝。
+	RunErrorClientUnavailable RunErrorReason = "CLIENT_UNAVAILABLE"
+	// RunErrorReadOnlyUnproven 表示这次运行没能证明自己对目标集群只读，
+	// 因而一个资源都没有读。
+	RunErrorReadOnlyUnproven RunErrorReason = "READ_ONLY_UNPROVEN"
+)
 
 // ResourceKind 是一类被采集的 Kubernetes 资源，封闭枚举。
 type ResourceKind string

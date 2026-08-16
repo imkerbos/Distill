@@ -22,18 +22,34 @@ export const COLLECTION_FEEDS_NOTHING =
   + '基于不存在的流量的阻断结论 —— 那是一个错误结论伪装成体检报告。'
 
 /**
- * 这个集群从未被采集过时，后端回的业务码。
+ * 这个集群已注册、但从未被采集过时，后端回的业务码。
  *
- * 20002 在这条端点上只有一个含义：`snapshotstore.ErrNoRun`。
- * 它必须与"采集过、但某一类资源没采到"分开 —— 后者是摘要里的一条失败，
- * 前者是根本没有摘要。
+ * 它必须与三件事分开，缺一件都会让这一屏说错话：
+ *  - "采集过、但某一类资源没采到" —— 那是摘要里的一条失败，不是没有摘要。
+ *  - "这个集群根本不存在"（20002）—— 后端读取端查的是 collection_run，
+ *    对拼错的 ID 同样查不到行，两者共用一个码时一次拼写错误会显示成
+ *    "还没有采集记录"，于是操作者去查采集器为什么没跑。
+ *  - "本部署没有采集读取端"（50002）—— 那是装配缺失。
  */
-export const COLLECTION_NO_RUN_CODE = 20002
+export const COLLECTION_NO_RUN_CODE = 20004
+
+/** 集群本身不存在时，后端回的业务码。 */
+export const COLLECTION_UNKNOWN_CLUSTER_CODE = 20002
 
 /** isNoRunError 判断一次失败是不是"这个集群还没有过采集"。 */
 export function isNoRunError(e: unknown): boolean {
+  return errorCodeIs(e, COLLECTION_NO_RUN_CODE)
+}
+
+/** isUnknownClusterError 判断一次失败是不是"这个集群不存在"。 */
+export function isUnknownClusterError(e: unknown): boolean {
+  return errorCodeIs(e, COLLECTION_UNKNOWN_CLUSTER_CODE)
+}
+
+/** errorCodeIs 比对一次失败携带的业务码。 */
+function errorCodeIs(e: unknown, code: number): boolean {
   return typeof e === 'object' && e !== null && 'code' in e
-    && (e as { code: unknown }).code === COLLECTION_NO_RUN_CODE
+    && (e as { code: unknown }).code === code
 }
 
 /**
@@ -75,6 +91,41 @@ export const FAILURE_REASON_LABEL: Record<string, string> = {
   UNAVAILABLE: 'apiserver 不可用',
   OTHER: '其它原因',
   UNRECOGNIZED: '原因不在封闭枚举内',
+}
+
+/**
+ * 一次运行「根本没能开始」的原因标签。与后端 snapshot.RunErrorReason 对齐。
+ *
+ * 与 FAILURE_REASON_LABEL 分成两张表，不是重复：那张说的是某一类资源，
+ * 这张说的是整一轮。合成一张会让「NetworkPolicy 被拒」与「采集器连不上
+ * 这个集群」在界面上落进同一句话，而两者的下一步动作完全不同。
+ */
+export const RUN_ERROR_REASON_LABEL: Record<string, string> = {
+  CREDENTIAL_UNAVAILABLE: '拿不到这个集群的凭据',
+  CLIENT_UNAVAILABLE: '凭据拿到了，但连不上这个集群的 apiserver',
+  READ_ONLY_UNPROVEN: '没能证明采集器对这个集群只读，因此一个资源都没有读',
+  UNRECOGNIZED: '原因不在封闭枚举内',
+}
+
+/** 每种「没能开始」的原因对应的处置。 */
+export const RUN_ERROR_REASON_ACTION: Record<string, string> = {
+  CREDENTIAL_UNAVAILABLE: '检查这个集群登记的 kubeconfig 引用，以及后台设置里的凭据后端。',
+  CLIENT_UNAVAILABLE: '检查 apiserver 地址是否可达，以及它是否被出站地址守卫拒绝。',
+  READ_ONLY_UNPROVEN: '检查采集器凭据的 RBAC：它不得持有任何网络策略的写权限，也必须能做 SelfSubjectAccessReview。',
+  UNRECOGNIZED: '这条记录写进库时用了一个平台不认识的原因，请查服务端日志。',
+}
+
+/**
+ * runErrorNote 把「这一轮没能开始」讲成一句话，正常的一轮返回空串。
+ *
+ * 返回空串而不是一句"一切正常"：这条提示只在有事发生时出现，
+ * 每一轮都顶着一句话会让真正出事的那一轮看起来和平常一样。
+ */
+export function runErrorNote(errorReason?: string): string {
+  if (!errorReason) return ''
+  const label = RUN_ERROR_REASON_LABEL[errorReason] ?? errorReason
+  const action = RUN_ERROR_REASON_ACTION[errorReason] ?? ''
+  return `这一轮没有开始：${label}。这不是「采到了零个资源」—— 平台根本没有看过这个集群。${action}`
 }
 
 /**
@@ -239,5 +290,8 @@ export function collectionSummaryView(s: CollectionSummary) {
     coverageNote: collectionCoverageNote(rows),
     collectedAt: formatCollectedAt(s.finishedAt),
     duration: collectionDuration(s.startedAt, s.finishedAt),
+    // 空串表示这一轮真的读到了集群。页面据此决定要不要出这条提示 ——
+    // 每一轮都顶着一句话，会让真正出事的那一轮看起来和平常一样。
+    errorNote: runErrorNote(s.errorReason),
   }
 }
