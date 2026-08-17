@@ -394,6 +394,112 @@ func TestAnUnparsableCredentialFailsRatherThanFallingBackToPlaintext(t *testing.
 	}
 }
 
+// fillToReadLimit 一直喂互不相同的连接，直到 observe 报告读满为止。
+//
+// 走 observe 而不是直接把 truncated 置上：这一轮的教训正是"守卫被测到、
+// 调用点没有"，把上限那一行也一起钉住才算数。withTime 为 false 时喂的 flow
+// 不带时间戳 —— 那是覆盖窗口说不出停在哪一刻的那种情形。
+func fillToReadLimit(t *testing.T, a *accumulator, withTime bool, at time.Time) int {
+	t.Helper()
+	for i := 0; i < maxFlowsPerIngest+1; i++ {
+		f := &flowpb.Flow{
+			Verdict: flowpb.Verdict_FORWARDED,
+			// 每条一个新的目的地址，于是每条都自成一个 connKey。
+			IP: &flowpb.IP{
+				Source:      "10.0.0.1",
+				Destination: fmt.Sprintf("10.%d.%d.%d", (i>>16)&0xff, (i>>8)&0xff, i&0xff),
+			},
+			L4: &flowpb.Layer4{Protocol: &flowpb.Layer4_TCP{TCP: &flowpb.TCP{DestinationPort: 8080}}},
+		}
+		if withTime {
+			f.Time = timestamppb.New(at)
+		}
+		if a.observe(&observer.GetFlowsResponse{ResponseTypes: &observer.GetFlowsResponse_Flow{Flow: f}}) {
+			return i + 1
+		}
+	}
+	t.Fatalf("observe never reported the read limit after %d flows", maxFlowsPerIngest+1)
+	return 0
+}
+
+// TestReachingTheReadLimitIsAKnownGapNotFullCoverage 钉的是截断 → DEGRADED
+// 这条路，它此前一条用例都没有：把整个截断分支换成 `return flow.Window{}`，
+// 全套测试原本一条都不红。
+//
+// 读到上限就停，意味着这个窗口的后半段我们根本没在看。此时若把请求窗口原样
+// 当作覆盖窗口交出去，完整度就会落到"没有缺口证据"那一档，而那是一句我们
+// 恰恰有反证的话 —— 覆盖窗口必须缩到我们真正看见的最后一刻。
+func TestReachingTheReadLimitIsAKnownGapNotFullCoverage(t *testing.T) {
+	a := newAccumulator()
+	last := testWindow.From.Add(10 * time.Minute)
+
+	if n := fillToReadLimit(t, a, true, last); n != maxFlowsPerIngest {
+		t.Fatalf("observe reported the read limit after %d flows, want %d", n, maxFlowsPerIngest)
+	}
+	if !a.truncated {
+		t.Fatal("the accumulator did not record that it stopped at the read limit")
+	}
+
+	want := flow.Window{From: testWindow.From, To: last}
+	if got := a.covered(testWindow); got != want {
+		t.Fatalf("covered = %+v, want %+v: a truncated read covers only up to the last flow it saw",
+			got, want)
+	}
+
+	res, err := a.result(testWindow)
+	if err != nil {
+		t.Fatalf("result: %v", err)
+	}
+	if _, completeness := res.Connections(); completeness != flow.CompletenessDegraded {
+		t.Fatalf("completeness = %s, want DEGRADED; stopping at the read limit is evidence that "+
+			"traffic in this window was not looked at, and evidence of loss is not the same as "+
+			"no evidence either way", completeness)
+	}
+}
+
+// TestATruncatedReadWithNoMeasuredCutStaysUnknown 记的是一条**裁定**，
+// 不只是当前行为。
+//
+// 截断了、却说不出停在哪一刻（喂进来的 flow 一条都不带时间戳，或最后一条
+// 正落在窗口边界上）时，覆盖窗口留空、完整度 UNKNOWN。
+//
+// 为什么不是 DEGRADED —— spec §5 把"读取达到上限被截断"列为正面的缺口证据：
+// 本层能表达"已知漏了"的通道**只有覆盖窗口**，而说得出 DEGRADED 就得说出一个
+// 具体的截止时刻。没量到那一刻还硬填一个，就是编一个我们没有的事实，与
+// nodeGap 那一支拒绝硬把时间窗截短是同一条理由（也与 TestANodeGapLeavesCoverageUnknown
+// 同一个裁定）。两档对下游一视同仁 —— 都不是完整，都必须降级 —— 差别只在
+// 排查线索，而"编一个截止时刻"会让那条线索指向一段从没被测量过的时间。
+//
+// 要让这一支说得出 DEGRADED，需要的是一个与覆盖窗口无关的证据位（截断标志），
+// 且它必须跟着落库才能活过一次往返；那是一次 schema 变更，不在本次修复范围内。
+func TestATruncatedReadWithNoMeasuredCutStaysUnknown(t *testing.T) {
+	a := newAccumulator()
+
+	if n := fillToReadLimit(t, a, false, time.Time{}); n != maxFlowsPerIngest {
+		t.Fatalf("observe reported the read limit after %d flows, want %d", n, maxFlowsPerIngest)
+	}
+	if !a.truncated {
+		t.Fatal("the accumulator did not record that it stopped at the read limit")
+	}
+
+	if got := a.covered(testWindow); got != (flow.Window{}) {
+		t.Fatalf("covered = %+v, want zero: no flow carried a time, so the moment the read stopped "+
+			"was never measured, and a covered window filled in without one is invented", got)
+	}
+
+	res, err := a.result(testWindow)
+	if err != nil {
+		t.Fatalf("result: %v", err)
+	}
+	_, completeness := res.Connections()
+	if completeness == flow.CompletenessComplete {
+		t.Fatalf("completeness = COMPLETE after a truncated read")
+	}
+	if completeness != flow.CompletenessUnknown {
+		t.Fatalf("completeness = %s, want UNKNOWN", completeness)
+	}
+}
+
 // resolverFunc 让一个函数满足 secrets.Resolver。
 type resolverFunc func(ctx context.Context, ref string) ([]byte, error)
 

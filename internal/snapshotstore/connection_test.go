@@ -1,6 +1,7 @@
 package snapshotstore_test
 
 import (
+	"database/sql"
 	"errors"
 	"testing"
 	"time"
@@ -337,5 +338,275 @@ func TestAnUnknownSampleRateStaysUnknown(t *testing.T) {
 	}
 	if _, got := mustReadWindow(t, s, clusterA, window).Connections(); got != flow.CompletenessUnknown {
 		t.Errorf("completeness = %q, want UNKNOWN", got)
+	}
+}
+
+// storedConnection 是 observed_connection 的一行，逐列读回来。
+//
+// 摊成一个结构体而不是几个抽查的标量：下面那条用例要比的是**每一列**，
+// 而漏掉一列的断言就漏掉了整整一类错误（见该用例的注释）。
+type storedConnection struct {
+	clusterID     string
+	windowStart   time.Time
+	windowEnd     time.Time
+	runID         string
+	seq           int
+	srcIP         string
+	srcKind       string
+	srcNamespace  string
+	srcWorkload   string
+	srcConfidence string
+	dstIP         string
+	dstKind       string
+	dstNamespace  string
+	dstWorkload   string
+	dstConfidence string
+	protocol      string
+	port          int32
+	observedCount int64
+	verdict       string
+	sourceKind    string
+	sampleRate    sql.NullFloat64
+}
+
+func readStoredConnection(t *testing.T, db *sql.DB, clusterID, runID string, seq int) storedConnection {
+	t.Helper()
+	var got storedConnection
+	err := db.QueryRow(
+		`SELECT cluster_id, window_start, window_end, ingest_run_id, seq,
+		        src_ip, src_kind, src_namespace, src_workload, src_identity_confidence,
+		        dst_ip, dst_kind, dst_namespace, dst_workload, dst_identity_confidence,
+		        protocol, port, observed_count, verdict_observed, source_kind, sample_rate
+		   FROM observed_connection
+		  WHERE cluster_id = ? AND ingest_run_id = ? AND seq = ?`,
+		clusterID, runID, seq).Scan(
+		&got.clusterID, &got.windowStart, &got.windowEnd, &got.runID, &got.seq,
+		&got.srcIP, &got.srcKind, &got.srcNamespace, &got.srcWorkload, &got.srcConfidence,
+		&got.dstIP, &got.dstKind, &got.dstNamespace, &got.dstWorkload, &got.dstConfidence,
+		&got.protocol, &got.port, &got.observedCount, &got.verdict, &got.sourceKind, &got.sampleRate)
+	if err != nil {
+		t.Fatalf("read stored connection (run %s seq %d): %v", runID, seq, err)
+	}
+	return got
+}
+
+// 一条连接落库之后必须**逐列**读得回来。
+//
+// 评审用三个探针改坏了 insertConnections 的列映射 —— 把目的地址写进源列、
+// 把端口换成常量、把观测次数换成常量 —— 整个测试套件与 make test-integration
+// 全绿。两端调了个个儿的连接不是一个存储缺陷，是一条**编造出来的事实**：
+// 判定引擎把这一层读作"存在过的连接"，于是它拿反方向的流量去判一条规则，
+// 推荐就跟着错（spec §2 的单向错误）。
+//
+// 因此这里逐列比对，不做抽查：三个探针各只动了一列，漏掉任何一列的断言就
+// 漏掉了整整一类错误。两条路一起走：先直查表钉住列映射本身，再走 FlowWindow
+// 钉住读取路径 —— 只走后者的话，写入与读取同时把两端调换的对称错误会互相
+// 抵消，一次全绿的往返底下躺着一条方向反了的连接。
+//
+// 每一列的取值都刻意互不相同（两端的地址、kind、namespace、负载名都不一样，
+// 端口不是 0/1，次数不是 0/1，采样率不是 1.0），于是任何一次"换成常量"或
+// "拿另一列顶替"都有一条断言接得住。
+func TestAStoredConnectionComesBackColumnForColumn(t *testing.T) {
+	s, db := newTestStore(t)
+
+	const runID = "ingest-roundtrip"
+
+	c := flow.Connection{
+		Source:        flow.Endpoint{IP: "10.4.0.9"},
+		Dest:          flow.Endpoint{IP: "10.4.0.21"},
+		Protocol:      flow.ProtocolSCTP,
+		Port:          8443,
+		ObservedCount: 7,
+	}
+	srcSubject := identity.Identity{
+		Namespace: "shop", PodName: "web-abc",
+		WorkloadKind: "Deployment", WorkloadName: "web",
+	}
+	dstSubject := identity.Identity{
+		Namespace: "payment", PodName: "ledger-0",
+		WorkloadKind: "StatefulSet", WorkloadName: "ledger",
+	}
+	c.Source = c.Source.WithIdentity(srcSubject, identity.OutcomeResolved)
+	c.Dest = c.Dest.WithIdentity(dstSubject, identity.OutcomeResolved)
+	c = c.WithVerdict(flow.VerdictDenied)
+
+	// 第二条只为把两列可信度分开：两条都 RESOLVED 时，src/dst 两列对调
+	// 看不出来。这一条的两端可信度不同，且都不带主体。
+	unresolved := connection("10.4.0.10", "10.4.0.22", 9090)
+	unresolved.Source = unresolved.Source.WithIdentity(srcSubject, identity.OutcomeAmbiguous)
+	unresolved.Dest = unresolved.Dest.WithIdentity(dstSubject, identity.OutcomeNotCovered)
+
+	res, err := flow.NewIngestResult(flow.SourceHubble, window, window, []flow.Connection{c, unresolved})
+	if err != nil {
+		t.Fatalf("NewIngestResult() error = %v", err)
+	}
+	// 采样率取 0.5 而不是 1：1.0 与"把这一列写死成 1.0"分不开。
+	res = res.WithSampleRate(0.5).WithDropped(0)
+	mustSaveIngest(t, s, ingestRun(clusterA, runID, snapshotstore.IngestOK, res))
+
+	want := storedConnection{
+		clusterID:     clusterA,
+		windowStart:   winFrom,
+		windowEnd:     winTo,
+		runID:         runID,
+		seq:           0,
+		srcIP:         "10.4.0.9",
+		srcKind:       "Deployment",
+		srcNamespace:  "shop",
+		srcWorkload:   "web",
+		srcConfidence: string(identity.OutcomeResolved),
+		dstIP:         "10.4.0.21",
+		dstKind:       "StatefulSet",
+		dstNamespace:  "payment",
+		dstWorkload:   "ledger",
+		dstConfidence: string(identity.OutcomeResolved),
+		protocol:      string(flow.ProtocolSCTP),
+		port:          8443,
+		observedCount: 7,
+		verdict:       string(flow.VerdictDenied),
+		sourceKind:    string(flow.SourceHubble),
+		sampleRate:    sql.NullFloat64{Float64: 0.5, Valid: true},
+	}
+	got := readStoredConnection(t, db, clusterA, runID, 0)
+
+	// 时刻单独比：DATETIME(6) 读回来的 time.Time 与写进去的可能带不同的
+	// Location，== 会因此判不等，而那不是列映射错了。
+	if !got.windowStart.Equal(want.windowStart) || !got.windowEnd.Equal(want.windowEnd) {
+		t.Errorf("stored window = [%s, %s), want [%s, %s)",
+			got.windowStart, got.windowEnd, want.windowStart, want.windowEnd)
+	}
+	got.windowStart, got.windowEnd = want.windowStart, want.windowEnd
+
+	if got != want {
+		t.Errorf("stored row = %+v\nwant             %+v\n"+
+			"a connection must land in the columns it was given: a swapped endpoint, a constant "+
+			"port or a constant observation count is not a storage defect but a fabricated fact, "+
+			"and the evaluator reads this layer as connections that existed", got, want)
+	}
+
+	// 两列可信度必须分得开，否则"src/dst 对调"这一类错误没有任何症状。
+	second := readStoredConnection(t, db, clusterA, runID, 1)
+	if second.srcConfidence != string(identity.OutcomeAmbiguous) ||
+		second.dstConfidence != string(identity.OutcomeNotCovered) {
+		t.Errorf("second row confidences = (%q, %q), want (AMBIGUOUS, NOT_COVERED)",
+			second.srcConfidence, second.dstConfidence)
+	}
+
+	// 再走一遍读取路径：列映射对了，还要保证读回来的连接就是写进去的那一条。
+	conns, _ := mustReadWindow(t, s, clusterA, window).Connections()
+	if len(conns) != 2 {
+		t.Fatalf("Connections() = %d rows, want 2", len(conns))
+	}
+	back := conns[0]
+	if back.Source.IP != c.Source.IP || back.Dest.IP != c.Dest.IP {
+		t.Errorf("round trip endpoints = %s -> %s, want %s -> %s",
+			back.Source.IP, back.Dest.IP, c.Source.IP, c.Dest.IP)
+	}
+	if back.Protocol != c.Protocol || back.Port != c.Port || back.ObservedCount != c.ObservedCount {
+		t.Errorf("round trip = %s/%d count %d, want %s/%d count %d",
+			back.Protocol, back.Port, back.ObservedCount, c.Protocol, c.Port, c.ObservedCount)
+	}
+	if v, reported := back.Verdict(); !reported || v != flow.VerdictDenied {
+		t.Errorf("round trip verdict = (%q, %t), want (DENIED, true)", v, reported)
+	}
+
+	// 身份两端各自比。PodName 不落库（评审 M-2）：这里把那个缺口钉成一条
+	// 断言而不是让它悄悄过去 —— 对账一律用 workload 而非 pod（CLAUDE.md §4），
+	// 但类型上仍然承诺了一个往返里会丢的字段。
+	for _, tc := range []struct {
+		side string
+		ep   flow.Endpoint
+		want identity.Identity
+	}{
+		{"source", back.Source, identity.Identity{
+			Namespace: "shop", WorkloadKind: "Deployment", WorkloadName: "web"}},
+		{"dest", back.Dest, identity.Identity{
+			Namespace: "payment", WorkloadKind: "StatefulSet", WorkloadName: "ledger"}},
+	} {
+		subject, outcome := tc.ep.Identity()
+		if outcome != identity.OutcomeResolved {
+			t.Errorf("%s outcome = %q, want RESOLVED", tc.side, outcome)
+		}
+		if subject != tc.want {
+			t.Errorf("%s identity = %+v, want %+v (PodName is not persisted, see review M-2)",
+				tc.side, subject, tc.want)
+		}
+	}
+}
+
+// validateConnection 的**调用点**，不是守卫本身。
+//
+// 本项目已经出现十九次"守卫被单独测到、却没有任何东西证明调用方还在调用
+// 它"。把 SaveIngest 里那个 for 循环删掉，这一条必须变红 —— 与两行之外的
+// TestAFailedIngestWithoutAReasonIsRefused 同一个形状。
+//
+// 每一条都是"落了库就再也分辨不出来"：协议写着 ICMP 的连接读回来时只剩
+// 猜一个协议或让整个窗口读不出来两条路；端口越界会在判定层匹配到别的规则
+// 上；负观测次数是一次没人观测过的次数；缺地址的一端在事实层里指向不了
+// 任何东西。写入侧拒绝，比读取侧容错早一步，也早在这些行被当成事实之前。
+func TestAConnectionThatCannotBeExplainedIsRefused(t *testing.T) {
+	s, db := newTestStore(t)
+
+	// 每条用例一个自己的 run id：共用一个的话，第一条留下的行会让后面几条
+	// 撞主键而"报错"，于是那几条即便守卫没跑也照样绿 —— 一个测不出东西的
+	// 断言比没有断言更糟。
+	bad := []struct {
+		name    string
+		runID   string
+		breakIt func(flow.Connection) flow.Connection
+	}{
+		{"unregistered protocol", "ingest-bad-proto", func(c flow.Connection) flow.Connection {
+			c.Protocol = flow.Protocol("ICMP")
+			return c
+		}},
+		{"negative port", "ingest-bad-port-neg", func(c flow.Connection) flow.Connection {
+			c.Port = -1
+			return c
+		}},
+		{"port above the range", "ingest-bad-port-high", func(c flow.Connection) flow.Connection {
+			c.Port = 65536
+			return c
+		}},
+		{"negative observed count", "ingest-bad-count", func(c flow.Connection) flow.Connection {
+			c.ObservedCount = -1
+			return c
+		}},
+		{"source without an address", "ingest-bad-src", func(c flow.Connection) flow.Connection {
+			c.Source = flow.Endpoint{}
+			return c
+		}},
+		{"dest without an address", "ingest-bad-dst", func(c flow.Connection) flow.Connection {
+			c.Dest = flow.Endpoint{}
+			return c
+		}},
+	}
+
+	for _, tc := range bad {
+		name := tc.name
+		run := ingestRun(clusterA, tc.runID, snapshotstore.IngestOK,
+			completeIngest(t, tc.breakIt(connection("10.4.0.9", "10.4.0.21", 8080))))
+		if err := s.SaveIngest(t.Context(), run); err == nil {
+			t.Errorf("%s: SaveIngest() accepted it, want the connection refused at the write side", name)
+		}
+		// 运行行也不得留下：拒绝必须发生在事务之前或被整体回滚，否则库里
+		// 躺着一次"摄入成功、却一条连接都没有"的运行 —— 与"这段时间真的
+		// 没有流量"分不开。
+		if n := scanInt(t, db,
+			`SELECT COUNT(*) FROM flow_ingest_run WHERE cluster_id = ?`, clusterA); n != 0 {
+			t.Errorf("%s: flow_ingest_run holds %d rows after the refusal, want 0", name, n)
+		}
+		if n := scanInt(t, db,
+			`SELECT COUNT(*) FROM observed_connection WHERE cluster_id = ?`, clusterA); n != 0 {
+			t.Errorf("%s: observed_connection holds %d rows after the refusal, want 0", name, n)
+		}
+	}
+
+	// 反方向：一条解释得了的连接必须落得进去。少了这一半，一个"永远拒绝"
+	// 的实现照样让上面全绿。
+	mustSaveIngest(t, s, ingestRun(clusterA, "ingest-good", snapshotstore.IngestOK,
+		completeIngest(t, connection("10.4.0.9", "10.4.0.21", 8080))))
+	if n := scanInt(t, db,
+		`SELECT COUNT(*) FROM observed_connection WHERE cluster_id = ?`, clusterA); n != 1 {
+		t.Errorf("observed_connection holds %d rows after a valid ingest, want 1", n)
 	}
 }
