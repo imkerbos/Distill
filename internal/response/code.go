@@ -49,6 +49,29 @@ const (
 	// 也不能落回 50001：一个还没有可用采集的集群不是服务故障，
 	// 而"服务内部错误"会把人支去查服务，那里什么问题都没有。
 	CodeNoUsableCollection Code = 20005
+	// CodeClusterRequired 表示这次查询必须点名一个集群。
+	//
+	// 与 20001 分开是必需的，不是细分：一份不点名集群的流量列表在参数校验
+	// 上完全合法，被拒绝的原因是平台上同时存在演示集群与真集群，跨来源的
+	// 一份列表要么半真半假、要么让真集群整体缺席（design doc 2026-08-18 §3.2）。
+	// 回一句"请求参数不合法"说不出这件事，操作者会去逐个检查自己填的筛选项。
+	//
+	// 也不能落回 50001：这不是服务故障，而"服务内部错误"会把人支去查服务。
+	CodeClusterRequired Code = 20006
+	// CodeReadNotWired 表示这条读路径在该集群的数据来源上还没有接通。
+	//
+	// 今天唯一的落点是 EnsureRuleExists —— 写路径的前置校验还没有接到采集
+	// 数据上（collectstore/notyet.go），因此一个 COLLECTED 集群上的覆盖决定
+	// 无法被确认。**它拒绝，不放行**（安全规范 §49），这一点不变；这个码只
+	// 改变操作者读到的那句话。
+	//
+	// 与 20005 分开是必需的，不是细分：20005 说的是"采过了，但这次问到的
+	// 窗口没有可用数据"，处置是去跑一次摄入；这一条说的是"平台还没实现这条
+	// 路"，跑多少次采集都不会变。共用一个码会让操作者反复去跑摄入。
+	//
+	// 也不能落回 50001：平台没接完某条路不是服务故障，而"服务内部错误"会把
+	// 人支去查服务，还会让一次正当的拒绝被计进服务错误率、按故障告警。
+	CodeReadNotWired Code = 20007
 
 	// CodeInternal 表示服务端内部错误。
 	CodeInternal Code = 50001
@@ -73,6 +96,8 @@ var messages = map[Code]string{
 	CodeRateLimited:           "请求过于频繁，请稍后再试",
 	CodeNoCollectionRun:       "该集群还没有过资产采集记录",
 	CodeNoUsableCollection:    "该集群还没有可用的采集数据，请先跑一次采集与流量摄入",
+	CodeClusterRequired:       "请先选择一个集群：流量列表按集群作答，不跨集群合并",
+	CodeReadNotWired:          "该集群的这条读路径尚未接通，暂时无法作答；这不是采集缺失，跑采集不会改变它",
 	CodeInternal:              "服务内部错误",
 	CodeDependencyUnavailable: "依赖服务暂时不可用",
 }
@@ -104,6 +129,8 @@ var registered = []Code{
 	CodeRateLimited,
 	CodeNoCollectionRun,
 	CodeNoUsableCollection,
+	CodeClusterRequired,
+	CodeReadNotWired,
 	CodeInternal,
 	CodeDependencyUnavailable,
 }

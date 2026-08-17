@@ -35,6 +35,23 @@ var ErrClusterNotFound = errors.New("cluster not found")
 // ErrWindowRequired 表示查询缺少必填的时间窗。
 var ErrWindowRequired = errors.New("time window required")
 
+// ErrClusterRequired 表示这次流量查询必须点名一个集群。
+//
+// 库里同时存在两种数据来源之后，一份不点名集群的流量列表只剩三种可能，
+// 前两种都不能要（design doc 2026-08-18 §3.2）：合并两个 Reader 会让演示
+// 流量与真实流量同屏；只答合成数据那一半会让一个真集群的流量整体缺席，
+// 而**缺席在这个平台上读起来是「这条规则没有流量、可以收紧」** —— 唯一
+// 那个单向的失败方向。于是取第三种：要求调用方点名。
+//
+// 放在 store 而不是装配层：它要同时被装配层（产生它）与 httpapi
+// （把它映射成一个说得出原因的响应）认出来，而那两个包唯一共有的
+// 依赖是这份 Reader 契约。
+//
+// 单列一个哨兵而不是复用 ErrWindowRequired 或某个内部错误：这次拒绝要
+// 在界面上说出「请先选一个集群」，而落回 500 会把一次用法问题显示成
+// 服务故障，把人支去查一个没有问题的服务。
+var ErrClusterRequired = errors.New("flow list must name a cluster")
+
 // ErrNamespaceNotFound 表示请求的命名空间在该集群里不存在。
 //
 // 必须报错而不是返回空结果：空结果在界面上与"这个 namespace 一切正常"

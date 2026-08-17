@@ -1,7 +1,9 @@
 package httpapi_test
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"testing"
@@ -298,5 +300,56 @@ func TestFlowsRejectsInvertedWindow(t *testing.T) {
 	env := decodeFlowList(t, rec.Body.Bytes())
 	if env.Code != int(response.CodeInvalidParam) {
 		t.Errorf("code = %d, want %d", env.Code, int(response.CodeInvalidParam))
+	}
+}
+
+// clusterRequiredReader 让不点名集群的流量列表以 store.ErrClusterRequired 结束，
+// 与装配层的分派器一致（cmd/distill-api/dispatch.go）。
+//
+// 包一层 fmt.Errorf 而不是直接返回哨兵：一个只认裸哨兵的映射在真实调用路径上
+// 会失效，而失效之后的症状恰好是它本来要消除的那个 500 —— 与 noCollectionReader
+// 同一处置。
+type clusterRequiredReader struct{ brokenReader }
+
+func (clusterRequiredReader) Flows(_ context.Context, f store.FlowFilter) (store.FlowPage, error) {
+	if f.Cluster == "" {
+		return store.FlowPage{}, fmt.Errorf("%w: dispatcher refused", store.ErrClusterRequired)
+	}
+	return store.FlowPage{Window: f.Window}, nil
+}
+
+// 不点名集群的流量列表要给出一个**说得出原因**的响应，不是 500。
+//
+// 这是 design doc 2026-08-18 §3.2 那条拒绝在边界层的落点：拒绝本身发生在
+// 装配层，而它只有被 writeReaderError 认出来才到得了操作者眼前。少了这条
+// 映射，界面显示的是"服务内部错误"，于是操作者去查一个完全健康的服务，
+// 而该做的只是选一个集群。
+//
+// 三件事一起断言：HTTP 200（用法问题不计进服务错误率）、码 20006、
+// 文案不是内部错误那一句（塌回 500 文案的症状）。
+func TestFlowsWithoutAClusterExplainsItselfInsteadOf500(t *testing.T) {
+	h, _, cookie := newTestRouter(t, clusterRequiredReader{})
+	rec := authedGet(t, h, cookie, "/api/v1/flows")
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 —— 少一个筛选条件不是服务故障", rec.Code)
+	}
+	body := bodyOf(t, rec)
+	if body["code"] != float64(response.CodeClusterRequired) {
+		t.Errorf("code = %v, want %d（请先选择一个集群）；50001 会把操作者支去查一个健康的服务",
+			body["code"], int(response.CodeClusterRequired))
+	}
+	if msg, _ := body["msg"].(string); msg == response.CodeInternal.Message() {
+		t.Errorf("msg = %q，与内部错误同一句话，说明这条路径塌回了 500 的文案", msg)
+	}
+	if body["data"] != nil {
+		t.Errorf("data = %v, want null", body["data"])
+	}
+
+	// 对照组：点名集群之后照常作答。少了这一条，一个对所有 /flows 都回
+	// 20006 的实现也能让上面通过 —— 而那是把流量页整个关掉。
+	named := authedGet(t, h, cookie, "/api/v1/flows?cluster=prod-asia-1")
+	if got := bodyOf(t, named)["code"]; got != float64(response.CodeOK) {
+		t.Errorf("cluster named: code = %v, want 0", got)
 	}
 }

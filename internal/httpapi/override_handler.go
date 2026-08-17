@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/imkerbos/Distill/internal/collectstore"
 	"github.com/imkerbos/Distill/internal/policygen"
 	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/response"
@@ -102,7 +103,14 @@ func handleCreateOverride(d Deps) http.HandlerFunc {
 			// 边界条件两种答案，调用方无法判断到底是"集群不存在"还是
 			// "服务坏了"，而后者会把一次纯输入问题记进服务错误率、按故障
 			// 告警。Reader 的哨兵交给 Reader 那套映射。
-			if errors.Is(err, store.ErrClusterNotFound) || errors.Is(err, store.ErrNamespaceNotFound) {
+			//
+			// ErrReadNotCollectedYet 走同一条：一个 COLLECTED 集群上的前置
+			// 校验今天必然拒绝（collectstore/notyet.go），而那是一次正当的
+			// "这条路还没接通"，不是服务故障。**拒绝本身不变** —— 下面那行
+			// CreateRuleOverride 仍然到不了，覆盖决定仍然不落库。
+			if errors.Is(err, store.ErrClusterNotFound) ||
+				errors.Is(err, store.ErrNamespaceNotFound) ||
+				errors.Is(err, collectstore.ErrReadNotCollectedYet) {
 				writeReaderError(w, r, d, err)
 				return
 			}

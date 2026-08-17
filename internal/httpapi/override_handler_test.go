@@ -1,13 +1,18 @@
 package httpapi_test
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/imkerbos/Distill/internal/collectstore"
+	"github.com/imkerbos/Distill/internal/policygen"
 	"github.com/imkerbos/Distill/internal/registry"
+	"github.com/imkerbos/Distill/internal/response"
 	"github.com/imkerbos/Distill/internal/store"
 )
 
@@ -448,5 +453,60 @@ func TestCreateOverrideReaderFailureIsInternalErrorAndLeaksNothing(t *testing.T)
 				}
 			}
 		}
+	}
+}
+
+// notWiredReader 让写路径的前置校验以「这条读路径还没接通」结束，
+// 与真实的 collectstore 一致（notyet.go 无条件拒绝 EnsureRuleExists）。
+//
+// 只覆盖 EnsureRuleExists，其余方法沿用 fixtureReader：这条用例要走完
+// handler 的全部前置步骤（集群解析、请求体、字段校验、窗口解析），才谈得上
+// 到达那次前置校验。用一个全都失败的桩会在更早的地方被拒，测不到目标那一格。
+type notWiredReader struct{ store.Reader }
+
+func (notWiredReader) EnsureRuleExists(
+	_ context.Context, clusterID, namespace, workload, _ string,
+	_ policygen.OverrideDecision, _ store.TimeWindow,
+) error {
+	// 包一层，与 collectstore 的返回形态一致：只认裸哨兵的映射在真实调用
+	// 路径上会失效，而失效之后的症状恰好是它本来要消除的那个 500。
+	return fmt.Errorf("%w: rule of %s/%s/%s",
+		collectstore.ErrReadNotCollectedYet, clusterID, namespace, workload)
+}
+
+// 「这条路还没接通」要给出说得出原因的响应，**且覆盖决定绝不落库**。
+//
+// 两件事一起断言，缺一不可。只断言码，一个"改了文案顺手把拒绝也去掉"的实现
+// 照样通过 —— 而那是往生产下发链路上写一条对不上任何候选集的决定。这条测试
+// 走的是真实路由（POST /clusters/{id}/rule-overrides），不是直接调
+// writeReaderError：映射被验过、没有东西证明这条路由仍然会走到它，正是本项目
+// 已经出过二十二次的那种测不出来的测试。
+func TestOverrideOnANotWiredReadPathExplainsItselfAndWritesNothing(t *testing.T) {
+	reg := newRegisteredRegistry()
+	// 指纹先用真实 Reader 取一条，确保请求体能走完前面全部校验。
+	fixtureH, _, fixtureCookie := newTestRouterWithRegistry(t, fixtureReader(), newRegisteredRegistry())
+	ns, wl, fp := realFingerprint(t, fixtureH, fixtureCookie)
+
+	h, _, cookie := newTestRouterWithRegistry(t, notWiredReader{Reader: fixtureReader()}, reg)
+	rec := authedPostJSON(t, h, cookie, "/api/v1/clusters/prod-asia-1/rule-overrides",
+		map[string]any{"namespace": ns, "workload": wl, "fingerprint": fp,
+			"decision": "DISABLE", "reason": "not wired yet"})
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 —— 平台没接完某条路不是服务故障，"+
+			"不该计进服务错误率", rec.Code)
+	}
+	body := bodyOf(t, rec)
+	if body["code"] != float64(response.CodeReadNotWired) {
+		t.Errorf("code = %v, want %d（这条读路径尚未接通）；50001 会把操作者支去查服务，"+
+			"而跑多少次采集都不会改变它", body["code"], int(response.CodeReadNotWired))
+	}
+	if msg, _ := body["msg"].(string); msg == response.CodeInternal.Message() {
+		t.Errorf("msg = %q，与内部错误同一句话，说明这条路径塌回了 500 的文案", msg)
+	}
+	// 失败方向仍然朝关：文案变了，拒绝不变。
+	if got := len(reg.overrides["prod-asia-1"]); got != 0 {
+		t.Errorf("stored overrides = %d, want 0 —— 前置校验答不出来时必须拒绝写入"+
+			"（安全规范 §49）", got)
 	}
 }

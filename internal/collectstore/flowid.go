@@ -74,6 +74,25 @@ func flowFingerprint(c flow.Connection) string {
 	return hex.EncodeToString(h.Sum(nil))[:flowFingerprintLen]
 }
 
+// ClusterOfFlowID 取出一个采集侧流量 ID 自带的集群；ID 不是本包发出的
+// 形状时第二个返回值为 false。
+//
+// 装配层按 ID 分派下钻时需要且只需要这一个事实（design doc 2026-08-18 §3.1）。
+// **只回一个字符串，不导出 parseFlowID 或 flowRef**：窗口、序号与指纹是这条
+// 下钻链路上的三道自检 —— 窗口决定重新读哪一段流量、指纹用来发现"这段窗口
+// 被重新摄入过、序号已经不指向当初那一条"。把它们一并交出去，等于给了包外
+// 一个绕开这三道自检自行取数的位置，而它取错时答得出、也不报错。
+//
+// 也不做成"返回一个 Reader"之类更大的形状：选 Reader 是装配层的决定，
+// 本包不该知道有别的 Reader 存在。
+func ClusterOfFlowID(id string) (string, bool) {
+	ref, ok := parseFlowID(id)
+	if !ok {
+		return "", false
+	}
+	return ref.clusterID, true
+}
+
 // parseFlowID 解出一个流量 ID 指向的集群、窗口与位置。
 //
 // 解不开一律 ok=false，由调用方答成"没有这条流量"：一个解不开的 ID 与一条

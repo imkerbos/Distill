@@ -78,22 +78,24 @@ func run(configPath string) error {
 	// 下线一个集群之后 /security 与 /policy-preview 会继续供数直到进程
 	// 重启 —— 操作者收到「已下线」的确认，事实却相反。
 	//
-	// 走 newFixtureReader 而不是直接 store.NewFixtureReader：合成数据集只服务
-	// 登记为 FIXTURE 的集群，一个登记为 COLLECTED 的集群在这个 Reader 的数据源
-	// 里根本不存在（见 reader.go）。今天挂在 Deps 上的仍然只有这一个 Reader。
+	// **这里挂的是分派器，不是某一个 Reader**（design doc 2026-08-18）。它在
+	// 每一次调用上按集群**登记的**来源选出作答的 Reader：FIXTURE 走合成数据集，
+	// COLLECTED 走 collectstore。同一个理由 —— 一个集群的来源在库里改掉之后，
+	// 进程不该继续按旧的答，直到重启。
 	//
-	// **六个读方法在 internal/collectstore 里已经全部接上**（design doc §7 的
-	// 分阶段接入已走完），所以「等六个方法都接上」不再是阻塞条件 —— 但这不
-	// 等于现在就可以把 readerFor 接进来。剩下的前置条件是 docs/TODO.md 那份
-	// 「接 COLLECTED 集群进页面之前必须先做的」清单。后端这两条已经做掉
-	// （2026-08-17 接入前置 §3 / §6）：Security 三个清单的截断回显字段已在契约上，
-	// writeReaderError 也认得 ErrNoCollection 了。仍然缺的是三条前端渲染 ——
-	// 界面上的数据来源标识、缺失清单里的「未评估」标注、DEGRADED 窗口的
-	// WOULD_BREAK 限定语。
+	// 接线之前那一层「页面不会显示错误的生产结论」的保障是不需要代码正确性的：
+	// 装配层只装 FixtureReader，一个真集群的数字到不了屏幕上。**接线之后那层
+	// 没了**（design doc §1）—— 从这一行起，操作者看到的数字是否描述真实集群，
+	// 完全依赖分派、六个读方法、身份解析、完整度传导与前端渲染的正确性。
 	//
-	// 少了它们，后端刚区分出来的东西在界面上重新塌回去 —— 那正是 §7 排除的
-	// 那种半真半假的中间态，只是它这次落在页面上而不是落在读方法上。
-	reader := newFixtureReader(reg)
+	// 回退手段只有一个：回滚这次部署。`data_source` 没有写路径，也不该有 ——
+	// 「把某个集群临时切回演示数据」不是一个安全位置，那是一句关于生产集群的
+	// 假话（design doc §5）。
+	reader := newReader(db, reg)
+
+	// 默认时间窗仍取合成数据集的实际范围，见下方 DefaultWindow 的说明。
+	// 单独装一次 fixture Reader 只为取这个范围，不参与作答。
+	demoWindow := newFixtureReader(reg).DataWindow()
 
 	// 同一个道理，设置也传提供者而不是取出来的一份值：Git 校验相关的
 	// 全部配置都从设置页改，改完必须立即生效（design doc §1.1）。
@@ -132,7 +134,11 @@ func run(configPath string) error {
 		// demo 的默认时间窗取 fixture 数据的实际范围。任何"最近 N 天"
 		// 的取值都会随真实时间推移而在某天返回 0 条 —— demo 会在没有
 		// 人改动代码的情况下自己坏掉。接真实存储时这里换成有界窗口。
-		DefaultWindow: reader.DataWindow(),
+		//
+		// 已知空缺：COLLECTED 集群现在也拿这个窗口作默认值，而它描述的是
+		// 合成数据集的那一天。真实部署要注入一个有界窗口，与事实层的
+		// require_partition_filter 相称 —— 那不在本轮范围内。
+		DefaultWindow: demoWindow,
 	}))
 
 	srv := &http.Server{

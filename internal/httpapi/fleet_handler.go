@@ -71,6 +71,22 @@ func writeReaderError(w http.ResponseWriter, r *http.Request, d Deps, err error)
 		response.WriteBusiness(w, response.CodeNoUsableCollection)
 		return
 	}
+	// "这次查询必须点名一个集群"同样不是服务故障：请求本身格式无误，被拒绝
+	// 的原因是平台上同时存在两种数据来源，一份跨来源的流量列表要么半真半假、
+	// 要么让真集群整体缺席（design doc 2026-08-18 §3.2）。落回 50001 会让
+	// 界面显示"服务内部错误"，而正确的提示是"请先选一个集群"。
+	if errors.Is(err, store.ErrClusterRequired) {
+		response.WriteBusiness(w, response.CodeClusterRequired)
+		return
+	}
+	// "这条读路径还没接通"同样不是服务故障。方向仍然朝关 —— 拒绝的那一半
+	// 不因这条映射而改变（collectstore/notyet.go 无条件拒绝）；改变的只是
+	// 操作者读到的那句话：500 会把他支去查服务，而正确的信息是"平台还没接
+	// 这条路，跑多少次采集都不会变"。同时它也不再被计进服务错误率。
+	if errors.Is(err, collectstore.ErrReadNotCollectedYet) {
+		response.WriteBusiness(w, response.CodeReadNotWired)
+		return
+	}
 	d.Logger.Error("reader failed",
 		"request_id", RequestIDFrom(r.Context()),
 		"path", r.URL.Path,
