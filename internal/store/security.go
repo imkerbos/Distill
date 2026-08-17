@@ -121,8 +121,13 @@ func (r *FixtureReader) Security(ctx context.Context, clusterID string, window T
 		RiskPortCatalog: RiskPortCatalog(),
 	}
 
+	flows, err := r.visibleFlows(ctx)
+	if err != nil {
+		return SecurityReport{}, err
+	}
+
 	targets := map[string]*EgressTarget{}
-	for _, f := range r.fleet.Flows {
+	for _, f := range flows {
 		if !window.Contains(f.Flow.Timestamp) || !involvesCluster(f.Flow, clusterID) {
 			continue
 		}

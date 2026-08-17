@@ -168,8 +168,12 @@ func (r *FixtureReader) generate(
 	assets.Registry = reg.ToSnapshot()
 	assets.APIServers = reg.APIServerSnapshots()
 
-	obs := make([]policygen.Observation, 0, len(r.fleet.Flows))
-	for _, f := range r.fleet.Flows {
+	flows, err := r.visibleFlows(ctx)
+	if err != nil {
+		return candidateSet{}, err
+	}
+	obs := make([]policygen.Observation, 0, len(flows))
+	for _, f := range flows {
 		if !window.Contains(f.Flow.Timestamp) || !involvesCluster(f.Flow, clusterID) {
 			continue
 		}

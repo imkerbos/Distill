@@ -80,10 +80,19 @@ func run(configPath string) error {
 	//
 	// 走 newFixtureReader 而不是直接 store.NewFixtureReader：合成数据集只服务
 	// 登记为 FIXTURE 的集群，一个登记为 COLLECTED 的集群在这个 Reader 的数据源
-	// 里根本不存在（见 reader.go）。今天挂在 Deps 上的仍然只有这一个 Reader：
-	// 采集侧的 internal/collectstore 只接了 Topology 与 Quality，另外四个读方法
-	// 还在后面几轮（design doc 2026-08-17 §7 的分阶段接入）。按来源分派要等六个
-	// 方法都接上 —— 半真半假的中间态是 §7 明确排除的那种状态。
+	// 里根本不存在（见 reader.go）。今天挂在 Deps 上的仍然只有这一个 Reader。
+	//
+	// **六个读方法在 internal/collectstore 里已经全部接上**（design doc §7 的
+	// 分阶段接入已走完），所以「等六个方法都接上」不再是阻塞条件 —— 但这不
+	// 等于现在就可以把 readerFor 接进来。剩下的前置条件是 docs/TODO.md 那份
+	// 「接 COLLECTED 集群进页面之前必须先做的」清单：Security 的截断回显字段、
+	// 缺失清单里的「未评估」标注、DEGRADED 窗口的 WOULD_BREAK 限定语、界面上
+	// 的数据来源标识，以及 writeReaderError 对 ErrNoCollection /
+	// ErrTooManyFindings 的映射（internal/httpapi/fleet_handler.go 至今只认
+	// ErrClusterNotFound 与 ErrNamespaceNotFound，其余一律 500）。
+	//
+	// 少了它们，后端刚区分出来的东西在界面上重新塌回去 —— 那正是 §7 排除的
+	// 那种半真半假的中间态，只是它这次落在页面上而不是落在读方法上。
 	reader := newFixtureReader(reg)
 
 	// 同一个道理，设置也传提供者而不是取出来的一份值：Git 校验相关的

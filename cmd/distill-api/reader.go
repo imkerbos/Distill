@@ -54,10 +54,18 @@ func readerFor(
 //
 // **这是本进程里唯一一处 fixture.Load()**，而它总是把注册表包进
 // fixtureOnlySource。于是「COLLECTED 集群不得通往 fixture」这一条不是靠上面
-// 那个 switch 守住的 —— 那只是一个后人可以拨反的条件。真正守住它的是：这个
-// Reader 的六个读方法都要先从自己的数据源里解析出集群，而一个登记为
-// COLLECTED 的集群在这份数据源里**根本不存在**。把 switch 拨反、把它交给一个
-// COLLECTED 集群，得到的仍然是 ErrClusterNotFound，不是一份合成报告。
+// 那个 switch 守住的 —— 那只是一个后人可以拨反的条件。真正守住它的是这份
+// 收窄后的数据源本身，它同时决定两件事：
+//
+//   - 按集群解析的读方法（Topology / Quality / Security / PolicyPreview /
+//     EnsureRuleExists / Flows(cluster=X)）解析不出这个集群，一律
+//     ErrClusterNotFound；
+//   - 不按集群解析的入口（Flow 按 ID 下钻、Flows 全量列表）取数时经过
+//     FixtureReader.visibleFlows，而它要求一条记录的**两端**都在这份清单
+//     里 —— 一条以 COLLECTED 集群为任一端的合成记录因此根本取不出来。
+//
+// 把 switch 拨反、把它交给一个 COLLECTED 集群，得到的仍然是「没有这个
+// 集群的数据」，不是一份合成报告。
 //
 // 两道各自独立：拆掉任何一道，另一道仍然成立。这是纵深防御在这条链路上的
 // 具体形态，不是重复。
@@ -76,9 +84,9 @@ type fixtureOnlySource struct {
 
 // Clusters 只返回登记为 FIXTURE 的集群。
 //
-// 不带 cluster 参数的读路径（Flows 全量列表、Flow 单条下钻）拿这份清单做门禁，
+// 全部读路径的取数都拿这份清单做门禁（见 FixtureReader.visibleFlows），
 // 因此它必须与 Cluster 用同一条判据收窄 —— 少收窄一处，就是留一个绕开
-// 集群门禁的入口（见 FixtureReader.hasRegisteredEndpoint）。
+// 集群门禁的入口。
 func (s fixtureOnlySource) Clusters(ctx context.Context) ([]registry.Cluster, error) {
 	all, err := s.reg.Clusters(ctx)
 	if err != nil {

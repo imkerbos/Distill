@@ -94,9 +94,15 @@ func (r *Reader) readIntervals(
 		return nil, fmt.Errorf("collectstore: iterate identity intervals: %w", err)
 	}
 	if total > maxIntervalRows {
+		// 不给操作者一个「缩小时间窗」或「缩短保留期」的建议：区间读取不带
+		// 时间条件（见上），而**今天仓库里没有任何回收或老化区间行的代码**，
+		// 所以那两个动作都不存在，指过去只会让人去找一个没有的开关。说清楚
+		// 现状即可 —— 这个集群的六个读方法此刻全部不可用，处置在平台侧
+		// （design doc 2026-08-17 §10）。
 		return nil, fmt.Errorf(
-			"collectstore: cluster %s holds more than %d identity intervals; "+
-				"prune the retention window rather than describing part of it",
+			"collectstore: cluster %s holds more than %d identity intervals; refusing rather "+
+				"than describing part of it — identity intervals are never recycled today, "+
+				"so all reads for this cluster stay unavailable until retention exists",
 			clusterID, maxIntervalRows)
 	}
 	return out, nil
