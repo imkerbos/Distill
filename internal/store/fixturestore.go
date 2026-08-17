@@ -101,31 +101,54 @@ func (r *FixtureReader) registeredIDs(ctx context.Context) (map[string]struct{},
 	return ids, nil
 }
 
-// hasRegisteredEndpoint 判断一条 flow 的两端是否至少有一端属于已注册集群。
+// everyEndpointRegistered 判断一条 flow 的**两端**是否都属于这份数据源
+// 认下的集群。任一端不属于即不可见。
 //
-// 供 Flow 与不带 Cluster 筛选的 Flows 列表使用：这两个入口不像
-// Flows(filter.Cluster=X)、Topology、Quality、PolicyPreview 那样先对一个
-// 具体集群做门禁，必须自己拦住"两端都不属于任何已注册集群"的记录——
-// 否则不传 cluster 参数、或者枚举 flow ID，就能绕开别处都在做的注册校验。
+// 早前的判据是"任一端已注册即放行"，为的是让一个集群看见自己发往未注册
+// 集群的出网敞口。那条判据在这个 Reader 上是一道缝：装配层把数据源收窄
+// 成"只有登记为 FIXTURE 的集群"（见 cmd/distill-api 的 fixtureOnlySource），
+// 于是一个登记为 COLLECTED 的集群在这里就表现为"未注册"，而只要对端仍是
+// FIXTURE，一条写着那个真集群名字的合成记录照样出得来 —— 完整的判定、
+// 合理的数字、走得通的流程，没有任何症状（design doc §2）。
 //
-// 不用 owningCluster：它按目的端优先，会把"本集群已注册、只是流量的
-// 对端集群未注册"错判成不可见。而那条记录恰恰是本集群自己的出网敞口，
-// 不该因为对端没注册就从它自己的视图里消失——Quality 对跨集群流量的
-// 处理就是这个原则（源端集群也要看到自己发出的跨集群流量）。
+// 两端都要在册，失败方向朝关（安全规范 §49）：代价是对端未注册时看不到
+// 那条出网记录，而收益是一条合成记录永远不会挂上一个真集群的名字。前者
+// 少一条待补的登记，后者是这个平台唯一不能出的那种错。
+//
 // 两端都没有集群归属（纯外部到外部，当前数据集不会出现）时不拦截：
 // 那种记录不属于任何集群，谈不上"未注册"。
-func hasRegisteredEndpoint(f replay.Flow, registered map[string]struct{}) bool {
-	var affiliated bool
+func everyEndpointRegistered(f replay.Flow, registered map[string]struct{}) bool {
 	for _, id := range [2]string{f.Source.ClusterID, f.Dest.ClusterID} {
 		if id == "" {
 			continue
 		}
-		affiliated = true
-		if _, ok := registered[id]; ok {
-			return true
+		if _, ok := registered[id]; !ok {
+			return false
 		}
 	}
-	return !affiliated
+	return true
+}
+
+// visibleFlows 返回这份数据源允许本次请求据以作答的流量。
+//
+// **每一个读方法都必须从这里取流量，不得直接读 r.fleet.Flows。** 门禁写在
+// 取数这一步而不是各个方法里，是因为逐个方法加守卫的写法已经漏过一次：
+// Flow 与不带 Cluster 筛选的 Flows 各自拦一遍，Topology / Quality /
+// Security / PolicyPreview 靠"先解析集群"顺带挡住，于是"记录的对端是个
+// COLLECTED 集群"这一类在两边都不归谁管。取数收敛成一处之后，一个新增
+// 的读方法要么拿不到流量，要么拿到的已经过滤过。
+func (r *FixtureReader) visibleFlows(ctx context.Context) ([]fixture.Flow, error) {
+	registered, err := r.registeredIDs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]fixture.Flow, 0, len(r.fleet.Flows))
+	for _, f := range r.fleet.Flows {
+		if everyEndpointRegistered(f.Flow, registered) {
+			out = append(out, f)
+		}
+	}
+	return out, nil
 }
 
 // owningCluster 返回负责对该 flow 求值的集群：优先取目的端集群，目的端
@@ -492,11 +515,13 @@ func recordForeignNode(foreign map[string]TopologyNode, known map[string]bool, e
 // topologyEdges 把该集群相关的 flow 按 (源命名空间, 目的命名空间) 聚合成边，
 // 同时收集边所引用、但不属于 known（本集群自有命名空间）的对端节点，
 // 以及因端点无法定位而没能落到任何一条边上的流量条数。
-func (r *FixtureReader) topologyEdges(clusterID string, known map[string]bool, level TopologyLevel) ([]TopologyEdge, []TopologyNode, int) {
+// flows 由调用方从 visibleFlows 取来后传入：拓扑边同样不得画出一条
+// 端点属于本数据源不认的集群的记录。
+func (r *FixtureReader) topologyEdges(flows []fixture.Flow, clusterID string, known map[string]bool, level TopologyLevel) ([]TopologyEdge, []TopologyNode, int) {
 	acc := make(map[edgeKey]*edgeAccumulator)
 	foreign := make(map[string]TopologyNode)
 	var unplaceable int
-	for _, f := range r.fleet.Flows {
+	for _, f := range flows {
 		if !involvesCluster(f.Flow, clusterID) {
 			continue
 		}
@@ -590,7 +615,11 @@ func (r *FixtureReader) Topology(
 		known[n.ID] = true
 	}
 
-	edges, foreignNodes, unplaceable := r.topologyEdges(c.ID, known, level)
+	flows, err := r.visibleFlows(ctx)
+	if err != nil {
+		return Topology{}, err
+	}
+	edges, foreignNodes, unplaceable := r.topologyEdges(flows, c.ID, known, level)
 	nodes = append(nodes, foreignNodes...)
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].ID < nodes[j].ID })
 
@@ -649,7 +678,11 @@ func (r *FixtureReader) Flows(ctx context.Context, filter FlowFilter) (FlowPage,
 			return FlowPage{}, fmt.Errorf("%w: %s", ErrClusterNotFound, filter.Cluster)
 		}
 	}
-	registered, err := r.registeredIDs(ctx)
+	// 门禁在取数这一步（visibleFlows）：filter.Cluster 非空时它对已解析过的
+	// 那个集群恒真；真正拦截的是不带 Cluster 筛选的全量视图——不这样做，
+	// 不传 cluster 参数就能绕开 Topology/Quality/PolicyPreview 都在做的
+	// 注册校验，看到端点属于未注册（含登记为 COLLECTED）集群的记录。
+	flows, err := r.visibleFlows(ctx)
 	if err != nil {
 		return FlowPage{}, err
 	}
@@ -659,8 +692,8 @@ func (r *FixtureReader) Flows(ctx context.Context, filter FlowFilter) (FlowPage,
 		limit = defaultFlowLimit
 	}
 
-	out := make([]FlowRecord, 0, len(r.fleet.Flows))
-	for _, f := range r.fleet.Flows {
+	out := make([]FlowRecord, 0, len(flows))
+	for _, f := range flows {
 		// involvesCluster，不是 owningCluster：这个筛选器是从 Topology/Quality
 		// 点进来的钻取入口，要用它们同一条"是否算这个集群的"规则，否则跨集群
 		// flow 在概览页被计入源集群，点进列表却因为目的端不是它而被过滤掉。
@@ -668,13 +701,6 @@ func (r *FixtureReader) Flows(ctx context.Context, filter FlowFilter) (FlowPage,
 			continue
 		}
 		if filter.Cluster != "" && !involvesCluster(f.Flow, filter.Cluster) {
-			continue
-		}
-		// filter.Cluster 非空时这一步恒真（上面已经门禁过它，而它是两端
-		// 之一）；真正拦截的是不带 Cluster 筛选的全量视图——不这样做，
-		// 不传 cluster 参数就能绕开 Topology/Quality/PolicyPreview 都在
-		// 做的注册校验，看到只属于未注册集群的记录。
-		if !hasRegisteredEndpoint(f.Flow, registered) {
 			continue
 		}
 		rec, _ := r.toFlowRecord(f)
@@ -705,16 +731,13 @@ func (r *FixtureReader) Flows(ctx context.Context, filter FlowFilter) (FlowPage,
 // "ID 存在但集群已隐藏"合并成同一个响应，调用方才无法靠响应差异探测出
 // 后者的存在。
 func (r *FixtureReader) Flow(ctx context.Context, id string) (Decision, bool, error) {
-	for _, f := range r.fleet.Flows {
+	flows, err := r.visibleFlows(ctx)
+	if err != nil {
+		return Decision{}, false, err
+	}
+	for _, f := range flows {
 		if f.ID != id {
 			continue
-		}
-		registered, err := r.registeredIDs(ctx)
-		if err != nil {
-			return Decision{}, false, err
-		}
-		if !hasRegisteredEndpoint(f.Flow, registered) {
-			return Decision{}, false, nil
 		}
 		rec, d := r.toFlowRecord(f)
 		return Decision{
@@ -769,9 +792,14 @@ func (r *FixtureReader) Quality(ctx context.Context, clusterID string) (Quality,
 		return Quality{}, fmt.Errorf("%w: %s", ErrClusterNotFound, clusterID)
 	}
 
+	flows, err := r.visibleFlows(ctx)
+	if err != nil {
+		return Quality{}, err
+	}
+
 	q := Quality{Cluster: clusterID, UnknownComposition: make(map[string]int)}
 	var trusted, degraded int
-	for _, f := range r.fleet.Flows {
+	for _, f := range flows {
 		if !involvesCluster(f.Flow, clusterID) {
 			continue
 		}

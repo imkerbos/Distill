@@ -293,6 +293,10 @@ func TestClusterSurvivesAFullRoundTripThroughMySQL(t *testing.T) {
 	// 写入时被落成 NOT_VERIFIED（gitbinding.go BindGitRepo），读回来
 	// 因此就是 NOT_VERIFIED 而不是空串。
 	want.Git.VerifyResult = registry.BindingVerifyNotVerified
+	// 数据来源不在写路径上：CreateCluster 不落这一列，新注册的集群一律停在
+	// 列默认值 COLLECTED 上（000014）。它出现在 want 里而不是 sampleCluster
+	// 里，正是因为它是读回来的登记，不是写进去的输入。
+	want.DataSource = registry.DataSourceCollected
 
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("round-tripped cluster =\n%+v\nwant\n%+v", got, want)
@@ -427,5 +431,128 @@ func TestVerifiedGitBindingRoundTripsResultAndTimestamp(t *testing.T) {
 	}
 	if got.Git.VerifiedAt == nil || !got.Git.VerifiedAt.Equal(verifiedAt) {
 		t.Errorf("VerifiedAt = %v, want %v", got.Git.VerifiedAt, verifiedAt)
+	}
+}
+
+// 数据来源是库里**登记的一列**，读路径原样带出来，不由「有没有采集数据」推断。
+//
+// 这个测试要挡的是推断的两个方向，各自都会造成事故：
+//
+//   - 「有采集数据 ⇒ COLLECTED」：一个登记为 FIXTURE 的演示集群一旦被人跑过
+//     一次采集，就会被当成真集群，演示环境在没人改代码的情况下自己坏掉。
+//   - 「没采集数据 ⇒ FIXTURE」：一次采集故障会让一个真集群悄悄变回演示集群，
+//     操作者据一份虚构的报告批准下发（design doc 2026-08-17 §2）。
+//
+// 因此两个集群一起断言，且**故意反着造**：带采集记录的那个登记为 FIXTURE，
+// 一条采集记录都没有的那个登记为 COLLECTED。任何一种推断都会把这两行翻过来。
+//
+// 单条 Cluster() 与列表 Clusters() 都要断言：它们是两份各自维护的 SQL，
+// 而一份列错了列的读路径不会报错，只会把另一个集群的登记安在这个集群头上
+// （事实层列映射那次的教训）。两行的取值互不相同，一个把整列读成常量的
+// 实现也过不去。
+func TestClusterDataSourceIsReadFromTheDeclarationNotInferred(t *testing.T) {
+	s, db := newTestStore(t)
+	ctx := context.Background()
+	actor := registry.Actor{Username: "admin"}
+
+	// 真集群：走正规注册路径，落在列默认值 COLLECTED 上，且一条采集记录都没有。
+	collected := sampleCluster()
+	if err := s.CreateCluster(ctx, actor, collected); err != nil {
+		t.Fatalf("CreateCluster(%s) error = %v", collected.ID, err)
+	}
+
+	// 演示集群：来源由库登记（000014 对种子行做的正是这一句），并且**有**采集记录。
+	demo := sampleCluster()
+	demo.ID = "prod-eu-1"
+	demo.DisplayName = "EU Prod"
+	demo.KubeconfigRef = "prod-eu-1-kubeconfig"
+	if err := s.CreateCluster(ctx, actor, demo); err != nil {
+		t.Fatalf("CreateCluster(%s) error = %v", demo.ID, err)
+	}
+	if _, err := db.Exec(
+		`UPDATE cluster SET data_source = ? WHERE cluster_id = ?`,
+		string(registry.DataSourceFixture), demo.ID); err != nil {
+		t.Fatalf("declare %s as FIXTURE: %v", demo.ID, err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO collection_run
+		   (cluster_id, run_id, observed_at, started_at, finished_at, status)
+		 VALUES (?, 'run-1', UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), 'OK')`,
+		demo.ID); err != nil {
+		t.Fatalf("insert collection_run for %s: %v", demo.ID, err)
+	}
+	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM collection_run`) })
+
+	want := map[string]registry.DataSource{
+		collected.ID: registry.DataSourceCollected,
+		demo.ID:      registry.DataSourceFixture,
+	}
+
+	for id, wantSource := range want {
+		got, ok, err := s.Cluster(ctx, id)
+		if err != nil || !ok {
+			t.Fatalf("Cluster(%s) = %+v, %v, %v", id, got, ok, err)
+		}
+		if got.DataSource != wantSource {
+			t.Errorf("Cluster(%s).DataSource = %q, want the declared %q",
+				id, got.DataSource, wantSource)
+		}
+	}
+
+	list, err := s.Clusters(ctx)
+	if err != nil {
+		t.Fatalf("Clusters() error = %v", err)
+	}
+	if len(list) != len(want) {
+		t.Fatalf("Clusters() returned %d clusters, want %d", len(list), len(want))
+	}
+	for _, c := range list {
+		if c.DataSource != want[c.ID] {
+			t.Errorf("Clusters()[%s].DataSource = %q, want the declared %q",
+				c.ID, c.DataSource, want[c.ID])
+		}
+	}
+}
+
+// 集群的写路径不碰 data_source：带着一个值也不落库。
+//
+// 与 c.Git 同一条纪律。把一个真集群改成 FIXTURE 恰好是本轮要防的那个最坏
+// 结果的手动版本，而平台没有任何针对它的授权与审计设计（规范 §7、§28）；
+// 顺带也挡住「改一次网段把来源一起换掉」这种没人打算做的改动。
+func TestUpdateClusterDoesNotRewriteTheDeclaredDataSource(t *testing.T) {
+	s, db := newTestStore(t)
+	ctx := context.Background()
+	actor := registry.Actor{Username: "admin"}
+
+	in := sampleCluster()
+	if err := s.CreateCluster(ctx, actor, in); err != nil {
+		t.Fatalf("CreateCluster() error = %v", err)
+	}
+	if _, err := db.Exec(
+		`UPDATE cluster SET data_source = ? WHERE cluster_id = ?`,
+		string(registry.DataSourceFixture), in.ID); err != nil {
+		t.Fatalf("declare %s as FIXTURE: %v", in.ID, err)
+	}
+
+	// 请求体里带一个相反的来源：必须被忽略。
+	mutated := sampleCluster()
+	mutated.DataSource = registry.DataSourceCollected
+	mutated.DisplayName = "Asia Prod (renamed)"
+	if err := s.UpdateCluster(ctx, actor, mutated); err != nil {
+		t.Fatalf("UpdateCluster() error = %v", err)
+	}
+
+	got, ok, err := s.Cluster(ctx, in.ID)
+	if err != nil || !ok {
+		t.Fatalf("Cluster() = %+v, %v, %v", got, ok, err)
+	}
+	if got.DataSource != registry.DataSourceFixture {
+		t.Errorf("DataSource = %q after an update that asked for %q, want the declaration untouched",
+			got.DataSource, registry.DataSourceCollected)
+	}
+	// 对照：这次更新确实生效了。少了它，一个整体不生效的 UpdateCluster
+	// 也能让上面那条通过。
+	if got.DisplayName != "Asia Prod (renamed)" {
+		t.Errorf("DisplayName = %q, want the update to have taken effect", got.DisplayName)
 	}
 }

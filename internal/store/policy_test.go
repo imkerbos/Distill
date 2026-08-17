@@ -9,6 +9,7 @@ import (
 
 	"github.com/imkerbos/Distill/internal/baseline"
 	"github.com/imkerbos/Distill/internal/fixture"
+	"github.com/imkerbos/Distill/internal/flow"
 	"github.com/imkerbos/Distill/internal/policygen"
 	"github.com/imkerbos/Distill/internal/predict"
 	"github.com/imkerbos/Distill/internal/registry"
@@ -272,5 +273,59 @@ func TestOverriddenViewReflectsAnEnabledRule(t *testing.T) {
 	if !reflect.DeepEqual(base.Prediction.Counts, pv.Prediction.Counts) {
 		t.Errorf("default prediction changed: %v vs %v",
 			base.Prediction.Counts, pv.Prediction.Counts)
+	}
+}
+
+// 两个 Reader 都要说得出"未评估的 Baseline 有哪些"，而合成数据集五类依据
+// 齐备，因此它恒为空（design doc 2026-08-17 §11）。
+//
+// 断言非 nil 而不只是长度为 0：空清单要读作"我们检查了五类依据，都在"，
+// 与"这个 Reader 根本没回答这个问题"必须能区分 —— 序列化出去前者是 []、
+// 后者是 null，而前端拿到 null 时唯一能做的就是把这一栏藏掉。
+//
+// 对照组是 MissingBaselines 非空：fixture 确实缺 LB 与部分 namespace 的
+// METRICS_SCRAPE（见 TestPolicyPreviewMissingBaselinesContent）。少了它，
+// 一个把两份清单都返回空的实现照样能过 —— 而那正好抹掉这个字段要区分的
+// 那件事：METRICS_SCRAPE 在这里是"依据齐备、推导不出"，不是"没看过"。
+func TestPolicyPreviewFixtureAssessesEveryBaselineKind(t *testing.T) {
+	r := reader()
+	pv, err := r.PolicyPreview(context.Background(), "prod-asia-1", "", fullWindow(r))
+	if err != nil {
+		t.Fatalf("PolicyPreview() error = %v", err)
+	}
+	// 窗口完整度两个 Reader 都要填。fixture 这边它是一个常量 COMPLETE，
+	// 因为合成数据集不是一次观测 —— 没有采样、没有丢弃、没有覆盖不满的
+	// 窗口。这条断言证明的是**字段被填了、且取值在封闭枚举内**（零值
+	// 空串不在 flow.Completeness 里），它证明不了任何推导逻辑；推导那一半
+	// 由 collectstore 的 TestTheReportStatesItsWindowCompleteness 承担。
+	if pv.WindowCompleteness != flow.CompletenessComplete {
+		t.Errorf("WindowCompleteness = %q, want COMPLETE; an empty value is not a registered "+
+			"flow.Completeness and leaves the caller guessing how to read the WOULD_BREAK count",
+			pv.WindowCompleteness)
+	}
+	if pv.NotAssessedBaselines == nil {
+		t.Fatal("NotAssessedBaselines is nil; an empty list says \"we checked all five kinds of " +
+			"evidence and they were all there\", and that sentence must survive serialisation")
+	}
+	if len(pv.NotAssessedBaselines) != 0 {
+		t.Errorf("NotAssessedBaselines = %v, want empty: the synthetic dataset carries all five "+
+			"kinds of evidence", pv.NotAssessedBaselines)
+	}
+	if len(pv.MissingBaselines) == 0 {
+		t.Fatal("MissingBaselines is empty; the fixture genuinely cannot derive LB_HEALTH_CHECK, " +
+			"so an implementation returning two empty lists proves nothing")
+	}
+	var metrics bool
+	for _, m := range pv.MissingBaselines {
+		for _, k := range m.Kinds {
+			if k == baseline.KindMetrics {
+				metrics = true
+			}
+		}
+	}
+	if !metrics {
+		t.Error("METRICS_SCRAPE is not reported missing anywhere in the fixture; here its evidence " +
+			"IS present and simply does not cover every namespace — that is a conclusion about the " +
+			"cluster, and it must not drift into the not-assessed column")
 	}
 }

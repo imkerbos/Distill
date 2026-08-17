@@ -1,0 +1,34 @@
+-- 三张资产表补 (cluster_id, observed_at) 二级索引（design doc 2026-08-17 §9）。
+--
+-- 本文件是新增的第 15 号迁移，不改动 000001–000014 中任何一条已应用的迁移。
+-- golang-migrate 只按版本号判断某个库跑过哪一版：改一个已被记录的版本，那个库
+-- 永远不会重跑修正后的文件，于是它与从零建起来的测试库静默分叉，而分叉本身
+-- 不报任何错（见 docs/superpowers/HANDOFF.md 里 000012 的教训）。
+--
+-- **为什么现在补**：本轮 PolicyPreview 第一次让一次页面请求去读这三张表
+-- （internal/collectstore/assets.go 的 readServicesAt / readEndpointsAt /
+-- readGatewaysAt），条件都是 WHERE cluster_id = ? AND observed_at = ?。
+--
+-- 三张表的主键都是 (cluster_id, namespace, name, observed_at) —— observed_at
+-- 排在最后。于是这个条件只吃得到 cluster_id 一列前缀：InnoDB 把该集群**全部
+-- 代**的行读回来，再在 server 端按 observed_at 丢掉其余的。一个每小时采一次、
+-- 保留 30 天的集群有约 720 代快照，一次刷新就要白读 719 代。
+--
+-- 这不是正确性问题（读回来的结果是对的），是**成本**问题，而 CLAUDE.md §5
+-- 说得很清楚：这个平台失控的方向是账单，不是性能。它又恰好落在一条页面刷新
+-- 会触发的路径上，量级 = 刷新频率 × 保留代数，两个因子都不由查询自己决定。
+--
+-- **为什么不改主键**：主键的列序是为「按 (namespace, name) 定位某个对象的
+-- 某一代」建的，那是写入侧与去重侧的访问形状。加二级索引而不是重排主键，
+-- 是因为两种访问形状都真实存在，而重排主键会把写入侧的代价换到另一边，
+-- 且需要重建整张表 —— 一次可回滚的加索引换不来那个风险。
+--
+-- **为什么不含第三列**：(cluster_id, observed_at) 已经把行数从「该集群全部代」
+-- 收敛到「该集群这一代」，那正是这三个查询要的全部行。再往后加 namespace 只会
+-- 让索引更宽，而这三个查询一个都不按 namespace 过滤（它们要的就是整代）。
+--
+-- 索引名带表名前缀：MySQL 的索引名只在表内唯一，但 information_schema 与
+-- 慢查询日志里是平铺的，同名索引会让「是哪张表慢」这个问题多绕一圈。
+CREATE INDEX idx_service_at ON observed_service (cluster_id, observed_at);
+CREATE INDEX idx_endpoints_at ON observed_endpoints (cluster_id, observed_at);
+CREATE INDEX idx_gateway_at ON observed_gateway (cluster_id, observed_at);

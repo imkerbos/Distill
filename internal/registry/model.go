@@ -44,6 +44,50 @@ func (s OnboardState) Valid() bool {
 	return false
 }
 
+// DataSource 说明一个集群的读取数据来自哪里。封闭枚举。
+//
+// **显式登记，不由「有没有数据」推断**（design doc 2026-08-17 §2）。推断的
+// 后果是：一次采集故障会让一个真集群悄悄变回演示集群，而页面上完全看不出来
+// —— 操作者读到一份写着真集群名字的完整报告，据此批准一次下发，而那些数字
+// 描述的是一个虚构的集群。没有任何症状会暴露它。
+//
+// 也正因为如此，这个字段**不在集群的写路径上**：把一个真集群改成 FIXTURE
+// 恰好是上面那个最坏结果的手动版本，而平台目前没有任何针对它的授权与审计
+// 设计（规范 §7、§28）。取值由数据库登记 —— 新注册的集群走列默认值
+// COLLECTED，两个演示集群由 000014 迁移点名置为 FIXTURE。
+type DataSource string
+
+const (
+	// DataSourceFixture 表示读 internal/fixture 的合成数据集。
+	//
+	// 只有种子里的两个演示集群是它：fixture 是这个仓库里唯一一份完整、
+	// 可控、已知答案的数据集，判定层的回归基准压在它上面（design doc §6）。
+	DataSourceFixture DataSource = "FIXTURE"
+	// DataSourceCollected 表示读该集群真实采集到的资产与流量。
+	//
+	// 没有可用采集时的正确答案是「没有数据」，不是回退到合成数据。
+	DataSourceCollected DataSource = "COLLECTED"
+)
+
+// Valid 判断该来源是否已登记。
+//
+// 空串不合法：一个没有登记来源的集群不该被装配出任何 Reader。用显式
+// switch 而非查表，理由同 BindingVerifyResult.Valid —— 新增取值却忘了加
+// 分支，在 review 里必须是看得见的一行。
+func (s DataSource) Valid() bool {
+	switch s {
+	case DataSourceFixture, DataSourceCollected:
+		return true
+	default:
+		return false
+	}
+}
+
+// AllDataSources 返回全部已登记的数据来源。
+func AllDataSources() []DataSource {
+	return []DataSource{DataSourceFixture, DataSourceCollected}
+}
+
 // ImportRole 决定一条导入的策略进 dry-run 的哪一侧。封闭枚举。
 type ImportRole string
 
@@ -214,6 +258,16 @@ type Cluster struct {
 	KubeconfigRef string `json:"kubeconfigRef"`
 	// State 是接入状态。
 	State OnboardState `json:"state"`
+	// DataSource 是这个集群的读取数据来源，**只读**。
+	//
+	// 由数据库登记，读路径填充；CreateCluster / UpdateCluster 一律不落它
+	// （见 mysqlregistry/cluster.go）。这里带着一个值也不会被写进去 ——
+	// 与 Git 那个字段同一条纪律、同一个理由：一条能绕开正规写入口的路径，
+	// 会让「谁把这个集群改成了演示数据」这个问题事后答不出来。
+	//
+	// 出现在 JSON 里是必须的：界面上必须标出数据来源，一份演示数据与一份
+	// 真实报告长得一样是不可接受的（design doc 2026-08-17 §2）。
+	DataSource DataSource `json:"dataSource"`
 	// APIServers 是 API server 端点。
 	APIServers []APIServer `json:"apiServers"`
 	// HealthCheckSources 是负载均衡健康检查的来源网段。

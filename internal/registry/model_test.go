@@ -161,3 +161,24 @@ func TestAPIServerSnapshotsCarryEveryEndpoint(t *testing.T) {
 		t.Errorf("APIServerSnapshots() =\n%+v\nwant\n%+v", got, want)
 	}
 }
+
+// 数据来源是封闭枚举，空串不在里面。
+//
+// 空串必须不合法：一个没有登记来源的集群不该被装配出任何 Reader，而
+// 「兜底成 FIXTURE」正是本轮要防的那个最坏结果的自动版本（design doc §2）。
+func TestDataSourceValidIsClosed(t *testing.T) {
+	for _, s := range registry.AllDataSources() {
+		if !s.Valid() {
+			t.Errorf("AllDataSources() lists %q but Valid() rejects it", s)
+		}
+	}
+	for _, s := range []registry.DataSource{"", "fixture", "COLLECT", "SYNTHETIC"} {
+		if s.Valid() {
+			t.Errorf("DataSource(%q).Valid() = true, want false", s)
+		}
+	}
+	if got := len(registry.AllDataSources()); got != 2 {
+		t.Errorf("AllDataSources() has %d entries, want 2 — adding one is a change to the "+
+			"frontend copy and the assembly as well", got)
+	}
+}

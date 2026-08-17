@@ -140,3 +140,87 @@ func bindingVerdict(t *testing.T, db *sql.DB, clusterID string) (string, sql.Nul
 	}
 	return verdict, at
 }
+
+// 000014 必须把种子里的两个演示集群点名登记成 FIXTURE，其余一切留在 COLLECTED。
+//
+// 这一条不是在测「ALTER TABLE 有没有执行」，而是在测那个**默认值的方向**：
+// 一次「凡是升级前已存在的行都算 FIXTURE」的迁移，会把 dev 库里的真集群一起
+// 标成演示集群，而症状是一份写着真集群名字、数字合理、流程走得通的假报告，
+// 页面上没有任何地方会显得不对（design doc 2026-08-17 §2）。反过来，漏掉那条
+// UPDATE 则会让演示环境自己坏掉 —— 那个方向难看，但立刻可见。
+//
+// 两个方向一起断言：演示集群必须是 FIXTURE，升级前就存在的其他集群必须是
+// COLLECTED。少了后一条，一句无条件的 `data_source = 'FIXTURE'` 也能通过。
+func TestMigrationDeclaresOnlyTheSeededClustersAsFixture(t *testing.T) {
+	cfg := config.DatabaseConfig{DSN: internalTestDSN(t), MaxOpenConns: 5, MaxIdleConns: 2}
+	db, err := Open(cfg)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	m, err := migrator(cfg, "../../migrations")
+	if err != nil {
+		t.Fatalf("migrator() error = %v", err)
+	}
+	defer func() { _, _ = m.Close() }()
+
+	// 停在 000013：那正是「这一列还不存在」的形态，也是 dev 库此刻的形态。
+	if err := m.Down(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("Down() error = %v", err)
+	}
+	if err := m.Migrate(13); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("Migrate(13) error = %v", err)
+	}
+
+	// 升级前就存在的一个真集群，模拟 dev 库里那一个。
+	const realID = "prod-real-1"
+	if _, err := db.Exec(
+		`INSERT INTO cluster
+		   (cluster_id, display_name, pod_cidr, node_cidr, ccnp_present, onboard_state,
+		    kubeconfig_ref, created_at, updated_at)
+		 VALUES (?, 'Real Prod', '10.60.0.0/14', '10.200.0.0/20', 0, 'REGISTERED', '',
+		         UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))`, realID); err != nil {
+		t.Fatalf("insert pre-migration cluster: %v", err)
+	}
+	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM cluster WHERE cluster_id = ?`, realID) })
+
+	if err := m.Migrate(14); err != nil {
+		t.Fatalf("Migrate(14) error = %v", err)
+	}
+
+	want := map[string]registry.DataSource{
+		"prod-asia-1": registry.DataSourceFixture,
+		"prod-eu-1":   registry.DataSourceFixture,
+		realID:        registry.DataSourceCollected,
+	}
+	for id, wantSource := range want {
+		var got string
+		if err := db.QueryRow(
+			`SELECT data_source FROM cluster WHERE cluster_id = ?`, id).Scan(&got); err != nil {
+			t.Fatalf("query data_source of %s: %v", id, err)
+		}
+		if registry.DataSource(got) != wantSource {
+			t.Errorf("data_source of %s after 000014 = %q, want %q", id, got, wantSource)
+		}
+	}
+
+	// 收尾：库里剩下的每一个取值都在封闭枚举内。
+	rows, err := db.Query(`SELECT cluster_id, data_source FROM cluster`)
+	if err != nil {
+		t.Fatalf("query data sources: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var id, v string
+		if err := rows.Scan(&id, &v); err != nil {
+			t.Fatalf("scan data source: %v", err)
+		}
+		if !registry.DataSource(v).Valid() {
+			t.Errorf("cluster %s holds data source %q, which is not in the enum", id, v)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate data sources: %v", err)
+	}
+}

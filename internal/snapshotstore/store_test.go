@@ -401,7 +401,7 @@ func TestFailedRunLeavesNoRowsAtAll(t *testing.T) {
 // 于是"这个集群没有任何策略"与"我们没被授权看策略"变得无法区分 ——
 // 而前者会让平台推荐一份 default-deny。
 func TestPartialRunIsDistinguishableFromACompleteOne(t *testing.T) {
-	s, _ := newTestStore(t)
+	s, db := newTestStore(t)
 
 	partial := sampleRun(clusterA, "run-partial", runOneAt)
 	partial.Status = snapshot.RunPartial
@@ -433,6 +433,23 @@ func TestPartialRunIsDistinguishableFromACompleteOne(t *testing.T) {
 	// 采到的那部分照常报出来：PARTIAL 不是"整次运行作废"。
 	if n, observed := observedCount(got.Resources, "POD"); !observed || n != 1 {
 		t.Errorf("POD count = %d (observed=%v), want 1", n, observed)
+	}
+
+	// **失败的那一类照样留下计数行。** 这是本层的既有行为（insertRun 无条件
+	// 遍历固定七项的 Observation.Counts()），而它是下游一条判据的地基：
+	// internal/collectstore 靠"有计数行 **且** 无失败行"把「我们没看过」与
+	// 「看过了、集群里就是没有」分开（design doc §11 情形 2）。
+	//
+	// 钉在这一层而不是那一层：改动写入侧的是这个包的人。若哪天有人把
+	// insertRun 改成"失败的那一类不写计数行"—— 那看起来还挺像个修正 ——
+	// 下游那个失败分支会静默变成死代码，答案碰巧仍然对，接着有人"清理死
+	// 代码"删掉那半个 join，缺陷就回来了，而全程没有一个测试变红。
+	if n := scanInt(t, db,
+		`SELECT COUNT(*) FROM collection_run_resource WHERE cluster_id = ? AND resource = ?`,
+		clusterA, string(snapshot.ResourceNetworkPolicy)); n != 1 {
+		t.Errorf("collection_run_resource rows for the FORBIDDEN resource = %d, want 1: a failed "+
+			"resource still gets its count row, and internal/collectstore depends on that to tell "+
+			"\"never looked\" from \"looked and it is not there\"", n)
 	}
 }
 

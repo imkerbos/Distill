@@ -18,7 +18,6 @@ import (
 	"github.com/imkerbos/Distill/internal/auth"
 	"github.com/imkerbos/Distill/internal/buildinfo"
 	"github.com/imkerbos/Distill/internal/config"
-	"github.com/imkerbos/Distill/internal/fixture"
 	"github.com/imkerbos/Distill/internal/gitverify"
 	"github.com/imkerbos/Distill/internal/gitwrite"
 	"github.com/imkerbos/Distill/internal/httpapi"
@@ -30,7 +29,6 @@ import (
 	"github.com/imkerbos/Distill/internal/secrets/gcpsecrets"
 	"github.com/imkerbos/Distill/internal/settings"
 	"github.com/imkerbos/Distill/internal/snapshotstore"
-	"github.com/imkerbos/Distill/internal/store"
 )
 
 func main() {
@@ -79,7 +77,23 @@ func run(configPath string) error {
 	// 集群是否受平台管理必须在每个请求上现查（spec §4.5）。传快照的话，
 	// 下线一个集群之后 /security 与 /policy-preview 会继续供数直到进程
 	// 重启 —— 操作者收到「已下线」的确认，事实却相反。
-	reader := store.NewFixtureReader(fixture.Load(), reg)
+	//
+	// 走 newFixtureReader 而不是直接 store.NewFixtureReader：合成数据集只服务
+	// 登记为 FIXTURE 的集群，一个登记为 COLLECTED 的集群在这个 Reader 的数据源
+	// 里根本不存在（见 reader.go）。今天挂在 Deps 上的仍然只有这一个 Reader。
+	//
+	// **六个读方法在 internal/collectstore 里已经全部接上**（design doc §7 的
+	// 分阶段接入已走完），所以「等六个方法都接上」不再是阻塞条件 —— 但这不
+	// 等于现在就可以把 readerFor 接进来。剩下的前置条件是 docs/TODO.md 那份
+	// 「接 COLLECTED 集群进页面之前必须先做的」清单：Security 的截断回显字段、
+	// 缺失清单里的「未评估」标注、DEGRADED 窗口的 WOULD_BREAK 限定语、界面上
+	// 的数据来源标识，以及 writeReaderError 对 ErrNoCollection /
+	// ErrTooManyFindings 的映射（internal/httpapi/fleet_handler.go 至今只认
+	// ErrClusterNotFound 与 ErrNamespaceNotFound，其余一律 500）。
+	//
+	// 少了它们，后端刚区分出来的东西在界面上重新塌回去 —— 那正是 §7 排除的
+	// 那种半真半假的中间态，只是它这次落在页面上而不是落在读方法上。
+	reader := newFixtureReader(reg)
 
 	// 同一个道理，设置也传提供者而不是取出来的一份值：Git 校验相关的
 	// 全部配置都从设置页改，改完必须立即生效（design doc §1.1）。
