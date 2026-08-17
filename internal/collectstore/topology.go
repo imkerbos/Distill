@@ -192,7 +192,7 @@ func (d described) edges(level store.TopologyLevel) ([]store.TopologyEdge, int) 
 			Source:     k.source,
 			Target:     k.target,
 			Verdict:    string(replay.VerdictUnknown),
-			Confidence: confidenceOf(d.completeness),
+			Confidence: string(confidenceOf(d.completeness)),
 			FlowCount:  a.flowCount,
 			Ports:      ports,
 			Unmanaged:  a.unmanaged,

@@ -1,9 +1,9 @@
 // Package collectstore 用一个集群**真实采集到的**资产与流量回答读请求。
 //
-// 本轮只接两个描述性的方法：Topology 与 Quality（design doc 2026-08-17 §7）。
-// 它们描述而不推荐，错了是难看不是危险，因此拿它们先去对照真实集群校验形状；
-// Flows / Flow / Security / PolicyPreview 留给后面几轮，在这里一律明确拒绝，
-// **不返回空结果**。
+// 接入按"错了有多严重"分阶段（design doc 2026-08-17 §7）：Topology 与 Quality
+// 只描述、不推荐，先接；Flows / Flow / Security 展示逐条判定与风险发现，其次；
+// PolicyPreview 驱动推荐与 dry-run，是唯一一个错了会直接导致生产阻断建议的，
+// 留到最后，在这里明确拒绝，**不返回空结果**。
 //
 // 本包守两条性质，两条各自都有自己的危害：
 //
@@ -98,15 +98,18 @@ var _ store.Reader = (*Reader)(nil)
 // 一个 FIXTURE 集群在这里也只会拿到 ErrClusterNotFound，而不是一份用采集
 // 数据拼出来、却写着演示集群名字的报告。两道各自独立，拆掉任何一道另一道
 // 仍然成立。
-func (r *Reader) collectedCluster(ctx context.Context, clusterID string) error {
+//
+// 顺带把登记内容交回调用方：判定要用到 CCNPPresent，再查一次注册表只会多出
+// 一个"门禁看到的集群"与"判定用到的集群"不是同一行的位置。
+func (r *Reader) collectedCluster(ctx context.Context, clusterID string) (registry.Cluster, error) {
 	c, ok, err := r.src.Cluster(ctx, clusterID)
 	if err != nil {
-		return err
+		return registry.Cluster{}, err
 	}
 	if !ok || c.DataSource != registry.DataSourceCollected {
-		return fmt.Errorf("%w: %s", store.ErrClusterNotFound, clusterID)
+		return registry.Cluster{}, fmt.Errorf("%w: %s", store.ErrClusterNotFound, clusterID)
 	}
-	return nil
+	return c, nil
 }
 
 // described 是一个集群在"最近一次真正观测到流量的那个窗口"里的全部事实。
@@ -135,8 +138,8 @@ type described struct {
 	//
 	// 按地址取**全部**而不只取覆盖 at 的那些：identity.Resolve 要靠一个地址
 	// 的完整区间集合才分得清"那时这个 IP 没有 Pod"（NOT_COVERED）与"平台
-	// 那段时间没在看"（NO_DATA），而这两者在 design doc §3 里落到两个不同
-	// 的 UNKNOWN 原因上。只喂覆盖那一刻的区间，等于把前者全部说成后者。
+	// 那段时间没在看"（NO_DATA），subjectAt 也要靠它才看得出这个地址在窗口
+	// 里换没换过手。只喂覆盖那一刻的区间，两个判断都会退化成"没覆盖"。
 	intervals map[string][]identity.Interval
 	// living 是覆盖 at 的区间，即那一刻活着的 Pod。
 	living []identity.Interval
@@ -147,7 +150,7 @@ type described struct {
 // 顺序是刻意的：先确认集群、再确认有没有可用采集，最后才读事实。任何一步
 // 答不出来都返回 ErrNoCollection，**不进入下一步拼一份空结果**。
 func (r *Reader) describe(ctx context.Context, clusterID string) (described, error) {
-	if err := r.collectedCluster(ctx, clusterID); err != nil {
+	if _, err := r.collectedCluster(ctx, clusterID); err != nil {
 		return described{}, err
 	}
 
@@ -155,6 +158,21 @@ func (r *Reader) describe(ctx context.Context, clusterID string) (described, err
 	if err != nil {
 		return described{}, err
 	}
+	return r.describeAt(ctx, clusterID, window)
+}
+
+// describeAt 解析一段**指定**窗口的全部事实。
+//
+// 与 describe 拆开，是因为 Flows / Security 的接口上带着调用方选定的窗口，
+// 而 Topology / Quality 没有、只能取最近一次观测。两者之后的每一步必须完全
+// 一致：窗口从哪来是调用方的事，"这一段时间里是什么样"只能有一份算法，
+// 各写一份会让同一个集群在概览页与列表页给出两套主体。
+//
+// 调用方必须已经确认过集群登记为 COLLECTED —— 本函数不再查一次注册表，
+// 于是"门禁"只有一个位置，不会出现一条绕过它的路径。
+func (r *Reader) describeAt(
+	ctx context.Context, clusterID string, window flow.Window,
+) (described, error) {
 	at := window.From
 
 	anchor, err := r.assetAnchor(ctx, clusterID, at)

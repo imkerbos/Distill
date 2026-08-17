@@ -2,16 +2,12 @@ package collectstore
 
 import (
 	"context"
-	"fmt"
 	"net/netip"
 
-	networkingv1 "k8s.io/api/networking/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"sigs.k8s.io/yaml"
 
 	"github.com/imkerbos/Distill/internal/cluster"
-	"github.com/imkerbos/Distill/internal/flow"
+	"github.com/imkerbos/Distill/internal/replay"
 	"github.com/imkerbos/Distill/internal/store"
 )
 
@@ -28,53 +24,53 @@ const unspecifiedUnknownReason = "UNSPECIFIED"
 // 没有可用采集时返回 ErrNoCollection，理由与 Topology 相同：一份全零的
 // 质量报告读起来是"这个集群一切正常"。
 //
-// **本轮每一条连接的 verdict 都是 UNKNOWN**，因此 UnknownCount 等于
-// TotalFlows：判定要由回放引擎给出，而它还没有接到采集数据上（design doc
-// §7）。报一个更小的 UNKNOWN 数会让人以为其余那些已经判过了 —— 那是让人
-// 放心的那个方向。构成明细如实说明每一条到底卡在哪里：归属不明的按
-// design doc §3 的封闭枚举归类，归属清楚、只是还没判的落进 UNSPECIFIED。
+// **每一条连接都走 Flows / Security 那一条判定路径**（readLatestTraffic +
+// attribute），计的就是那一次判定的结果。各算各的会让同一个集群同一段窗口
+// 在两屏上对不上账：列表页显示一条 ALLOW，质量页同时报 UnknownRate = 1.0，
+// 而运维无从知道该信哪一屏。构成明细按 design doc §3 的封闭枚举归类，
+// UNKNOWN 却没给出原因的落进 UNSPECIFIED —— 那一桶因此只剩真正的异常。
 func (r *Reader) Quality(ctx context.Context, clusterID string) (store.Quality, error) {
-	d, err := r.describe(ctx, clusterID)
-	if err != nil {
-		return store.Quality{}, err
-	}
-
-	fleet, err := r.fleetRegistry(ctx)
+	t, err := r.readLatestTraffic(ctx, clusterID)
 	if err != nil {
 		return store.Quality{}, err
 	}
 
 	q := store.Quality{
 		Cluster:            clusterID,
-		TotalFlows:         len(d.conns),
+		TotalFlows:         len(t.conns),
 		UnknownComposition: map[string]int{},
 	}
-	for _, c := range d.conns {
-		_, srcOutcome := d.subjectAt(c.Source)
-		_, dstOutcome := d.subjectAt(c.Dest)
+	var trusted, degraded int
+	for _, c := range t.conns {
+		a := t.attribute(c)
 
-		q.UnknownCount++
-		reason := unknownReasonFor(srcOutcome, dstOutcome, d.completeness)
-		if reason == "" {
-			q.UnknownComposition[unspecifiedUnknownReason]++
-		} else {
-			q.UnknownComposition[string(reason)]++
+		if a.decision.Verdict == replay.VerdictUnknown {
+			q.UnknownCount++
+			if a.decision.UnknownReason == replay.ReasonNone {
+				q.UnknownComposition[unspecifiedUnknownReason]++
+			} else {
+				q.UnknownComposition[string(a.decision.UnknownReason)]++
+			}
 		}
-		if crossesCluster(fleet, clusterID, c.Source.IP) || crossesCluster(fleet, clusterID, c.Dest.IP) {
+		// 可信度同样取自那一次判定，不由窗口完整度在这里再算一遍
+		// （design doc §4）：完整度已经传导进每一条判定，而 mesh 与 CCNP
+		// 是另外两条只有求值引擎看得见的降级理由。verdict 与 confidence
+		// 始终是两个字段，上面数的是前者，这里数的是后者。
+		if a.decision.Confidence == replay.ConfidenceTrusted {
+			trusted++
+		} else {
+			degraded++
+		}
+		if crossesCluster(t.fleet, clusterID, c.Source.IP) || crossesCluster(t.fleet, clusterID, c.Dest.IP) {
 			q.CrossClusterCount++
 		}
 	}
 
-	// 完整度是按窗口算的，因此它对这个窗口里的每一条连接一视同仁
-	// （design doc §4）。verdict 与 confidence 是两个字段，这里填的是后者。
-	if d.completeness == flow.CompletenessComplete {
-		q.TrustedRate = safeRate(q.TotalFlows, q.TotalFlows)
-	} else {
-		q.DegradedRate = safeRate(q.TotalFlows, q.TotalFlows)
-	}
+	q.TrustedRate = safeRate(trusted, q.TotalFlows)
+	q.DegradedRate = safeRate(degraded, q.TotalFlows)
 	q.UnknownRate = safeRate(q.UnknownCount, q.TotalFlows)
 
-	if err := r.fillPodQuality(ctx, d, &q); err != nil {
+	if err := t.fillPodQuality(&q); err != nil {
 		return store.Quality{}, err
 	}
 	return q, nil
@@ -83,23 +79,17 @@ func (r *Reader) Quality(ctx context.Context, clusterID string) (store.Quality, 
 // fillPodQuality 填上策略覆盖率与两类 Pod 计数。
 //
 // 这三项要拿标签比 selector，而标签只在快照里 —— 取的是覆盖那一刻的那次
-// 采集，不是最新一次（CLAUDE.md §4）。
-func (r *Reader) fillPodQuality(ctx context.Context, d described, q *store.Quality) error {
-	pods, err := r.readPodsAt(ctx, d)
-	if err != nil {
-		return err
-	}
-	policies, err := r.readPoliciesAt(ctx, d)
-	if err != nil {
-		return err
-	}
-	selectors, err := policySelectors(policies)
+// 采集，不是最新一次（CLAUDE.md §4）。用的是判定路径已经载入的那一份 Pod
+// 与策略：覆盖率与判定必须认同一批策略，各读各的就多出一个"判定认这条
+// 策略、覆盖率不认"的位置（口径与 nakedPods 完全一致）。
+func (t traffic) fillPodQuality(q *store.Quality) error {
+	selectors, err := selectorsByNamespace(t.policies)
 	if err != nil {
 		return err
 	}
 
 	var covered, managed int
-	for _, p := range pods {
+	for _, p := range t.pods {
 		if p.hostNetwork {
 			// hostNetwork 的 Pod 根本不受 NetworkPolicy 管辖，把它算进覆盖率
 			// 的分母会让一个永远封不住的敞口显示成"覆盖率还差一点"。
@@ -115,33 +105,6 @@ func (r *Reader) fillPodQuality(ctx context.Context, d described, q *store.Quali
 	}
 	q.PolicyCoverage = safeRate(covered, managed)
 	return nil
-}
-
-// policySelectors 把落库的策略原文解析成按命名空间分组的 podSelector。
-//
-// 命名空间取自表列而不是 manifest 里的 metadata：那一列是采集当时写下的
-// 事实，而 manifest 是原文证据，两者不一致时该信前者。
-//
-// 解析不了的原文整体报错，**不跳过**：一条读不懂的策略被跳过之后，它覆盖的
-// Pod 会被算成裸 Pod，于是一次解析失败显示成一批没有策略保护的工作负载 ——
-// 一个关于集群的结论，而事实只是我们没读懂那份原文。
-func policySelectors(policies []observedPolicy) (map[string][]labels.Selector, error) {
-	out := map[string][]labels.Selector{}
-	for _, p := range policies {
-		var np networkingv1.NetworkPolicy
-		if err := yaml.Unmarshal([]byte(p.manifest), &np); err != nil {
-			return nil, fmt.Errorf(
-				"collectstore: a stored network policy in namespace %s cannot be parsed: %w", p.namespace, err)
-		}
-		sel, err := metav1.LabelSelectorAsSelector(&np.Spec.PodSelector)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"collectstore: a stored network policy in namespace %s carries an unusable pod selector: %w",
-				p.namespace, err)
-		}
-		out[p.namespace] = append(out[p.namespace], sel)
-	}
-	return out, nil
 }
 
 // coveredBySelector 报告一组标签是否被该命名空间下任意一条策略选中。

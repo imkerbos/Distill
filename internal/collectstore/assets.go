@@ -6,6 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 
+	networkingv1 "k8s.io/api/networking/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"sigs.k8s.io/yaml"
+
 	"github.com/imkerbos/Distill/internal/flow"
 	"github.com/imkerbos/Distill/internal/identity"
 	"github.com/imkerbos/Distill/internal/replay"
@@ -15,9 +20,21 @@ import (
 //
 // 只取用得上的列，不回放整行（安全规范 §20 / §35）。
 type observedPod struct {
-	namespace   string
+	namespace string
+	// name 是 Pod 名。安全发现要点名裸奔的那几个 Pod，只报计数说不清该去看谁。
+	name        string
 	labels      map[string]string
 	hostNetwork bool
+}
+
+// podKey 按 (namespace, name) 索引一次快照里的 Pod。
+//
+// 不含 cluster_id：一份 observedPod 只来自一次读取，而那次读取已经按
+// cluster_id 收窄。跨集群混用要靠调用方不把两个集群的快照并进同一张表，
+// 而本包一次读请求只描述一个集群。
+type podKey struct {
+	namespace string
+	name      string
 }
 
 // observedPolicy 是一条落库的 NetworkPolicy：它在哪个命名空间、原文是什么。
@@ -29,8 +46,7 @@ type observedPolicy struct {
 // readIntervals 读出一个集群的全部身份区间，按地址分组。
 //
 // 按地址取全部而不是只取覆盖某一刻的那些，理由见 described.intervals：
-// identity.Resolve 要靠一个地址的完整区间集合才分得清 NOT_COVERED 与
-// NO_DATA，而这两者落在两个不同的 UNKNOWN 原因上。
+// identity.Resolve 与 subjectAt 都要靠一个地址的完整区间集合才答得准。
 //
 // 每一条查询都带 cluster_id（CLAUDE.md §4）：不同集群 Pod CIDR 可能重叠，
 // 漏掉它会把另一个集群的 Pod 解释成本集群的，且不报错。查询走主键前缀
@@ -92,7 +108,7 @@ func (r *Reader) readIntervals(
 // 且取的是**覆盖那一刻的那次运行**，不是最新一次。
 func (r *Reader) readPodsAt(ctx context.Context, d described) ([]observedPod, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT namespace, labels, host_network
+		`SELECT namespace, name, labels, host_network
 		   FROM observed_pod
 		  WHERE cluster_id = ? AND observed_at = ?
 		  LIMIT ?`,
@@ -108,7 +124,7 @@ func (r *Reader) readPodsAt(ctx context.Context, d described) ([]observedPod, er
 			p   observedPod
 			raw []byte
 		)
-		if err := rows.Scan(&p.namespace, &raw, &p.hostNetwork); err != nil {
+		if err := rows.Scan(&p.namespace, &p.name, &raw, &p.hostNetwork); err != nil {
 			return nil, fmt.Errorf("collectstore: scan observed pod: %w", err)
 		}
 		if err := json.Unmarshal(raw, &p.labels); err != nil {
@@ -161,6 +177,87 @@ func (r *Reader) readPoliciesAt(ctx context.Context, d described) ([]observedPol
 	return out, nil
 }
 
+// readNamespacesAt 读出锚点那一次采集看到的命名空间与它们的标签。
+//
+// 标签是 namespaceSelector 的判据，缺了它，一条按 namespaceSelector 放行的
+// 规则会被判成没有命中，于是一条现网通着的连接显示成会被拦断 —— 那正是
+// 会变成一条错误"收紧"建议的方向。同样取覆盖那一刻的那次运行。
+func (r *Reader) readNamespacesAt(ctx context.Context, d described) ([]replay.NamespaceRef, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT name, labels
+		   FROM observed_namespace
+		  WHERE cluster_id = ? AND observed_at = ?
+		  LIMIT ?`,
+		d.clusterID, d.anchor, maxSnapshotRows+1)
+	if err != nil {
+		return nil, fmt.Errorf("collectstore: read observed namespaces: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []replay.NamespaceRef
+	for rows.Next() {
+		ns := replay.NamespaceRef{ClusterID: d.clusterID}
+		var raw []byte
+		if err := rows.Scan(&ns.Name, &raw); err != nil {
+			return nil, fmt.Errorf("collectstore: scan observed namespace: %w", err)
+		}
+		if err := json.Unmarshal(raw, &ns.Labels); err != nil {
+			// 与 Pod 标签同一条理由：坏掉的列不当成"这个命名空间没有标签"，
+			// 后者会让一条按 namespaceSelector 写的规则安静地判成不命中。
+			return nil, fmt.Errorf(
+				"collectstore: decode namespace labels of cluster %s: %w", d.clusterID, err)
+		}
+		out = append(out, ns)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("collectstore: iterate observed namespaces: %w", err)
+	}
+	if len(out) > maxSnapshotRows {
+		return nil, fmt.Errorf(
+			"collectstore: cluster %s observed more than %d namespaces at %s",
+			d.clusterID, maxSnapshotRows, d.anchor.UTC().Format("2006-01-02T15:04:05Z07:00"))
+	}
+	return out, nil
+}
+
+// parsePolicies 把落库的策略原文解析成求值引擎要的对象。
+//
+// 命名空间**以表列为准**，覆盖 manifest 里的 metadata：那一列是采集当时写下的
+// 事实，manifest 只是原文证据，两者不一致时该信前者。这一步不能省 —— 求值
+// 引擎按 policy.Namespace 决定这条策略选中谁，一个空的命名空间会让整条策略
+// 去选另一批 Pod。
+//
+// 解析不了的原文整体报错，**不跳过**：跳过一条读不懂的策略，它覆盖的 Pod
+// 会被当成没有任何策略管辖，于是一次解析失败变成一句"这些连接没人管"。
+func parsePolicies(policies []observedPolicy) ([]networkingv1.NetworkPolicy, error) {
+	out := make([]networkingv1.NetworkPolicy, 0, len(policies))
+	for _, p := range policies {
+		var np networkingv1.NetworkPolicy
+		if err := yaml.Unmarshal([]byte(p.manifest), &np); err != nil {
+			return nil, fmt.Errorf(
+				"collectstore: a stored network policy in namespace %s cannot be parsed: %w", p.namespace, err)
+		}
+		np.Namespace = p.namespace
+		out = append(out, np)
+	}
+	return out, nil
+}
+
+// selectorsByNamespace 把策略的 podSelector 按命名空间分组。
+func selectorsByNamespace(policies []networkingv1.NetworkPolicy) (map[string][]labels.Selector, error) {
+	out := map[string][]labels.Selector{}
+	for i := range policies {
+		sel, err := metav1.LabelSelectorAsSelector(&policies[i].Spec.PodSelector)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"collectstore: a stored network policy in namespace %s carries an unusable pod selector: %w",
+				policies[i].Namespace, err)
+		}
+		out[policies[i].Namespace] = append(out[policies[i].Namespace], sel)
+	}
+	return out, nil
+}
+
 // subjectAt 回答一条连接的一端在被描述的那个窗口里属于谁。
 //
 // 主体一律由区间表按时刻解出，**不用来源自己报的那份身份**：Hubble 的流量
@@ -202,37 +299,16 @@ func stableAcross(intervals []identity.Interval, w flow.Window) bool {
 	return true
 }
 
-// unknownReasonFor 把两端的解析结果与窗口完整度映射成一个封闭枚举里的原因。
-//
-// 取值与顺序都来自 design doc §3 那张表，**一个都不新增**：这些原因当初就是
-// 为这一刻设计的，新增取值要同步改枚举、前端文案与统计口径。
-//
-// 身份类的原因压过完整度：两端都解不出来时，"这条连接归属不明"是比"这段
-// 观测可能漏了"更靠前的一条线索，而排查方向完全不同。
-func unknownReasonFor(src, dst identity.Outcome, c flow.Completeness) replay.UnknownReason {
-	switch {
-	case src == identity.OutcomeAmbiguous || dst == identity.OutcomeAmbiguous:
-		return replay.ReasonIPAmbiguous
-	case src == identity.OutcomeNotCovered || dst == identity.OutcomeNotCovered:
-		// 锚点那一刻确实有快照（describe 拿不到锚点就不会走到这里），
-		// 因此"那时这个地址上没有 Pod"是一个结论，不是一次弃权。
-		return replay.ReasonExternalNoIdentity
-	case src != identity.OutcomeResolved || dst != identity.OutcomeResolved:
-		return replay.ReasonSnapshotMissing
-	case c != flow.CompletenessComplete:
-		return replay.ReasonLogSampledOut
-	default:
-		return replay.ReasonNone
-	}
-}
-
 // confidenceOf 把窗口完整度传导成判定的可信度（design doc §4）。
 //
 // 完整度不是 COMPLETE 就是 DEGRADED：观测不全时给出的每一句话，与观测完整
 // 时的同一句话含义不同。verdict 与 confidence 始终是两个字段，这里只填后者。
-func confidenceOf(c flow.Completeness) string {
+//
+// 它只回答"这段观测本身可不可信"。窗口完整时可信度改由求值引擎给出 ——
+// mesh 与 CCNP 是另外两条降级理由，与漏没漏采无关，见 replay.confidenceFor。
+func confidenceOf(c flow.Completeness) replay.Confidence {
 	if c == flow.CompletenessComplete {
-		return string(replay.ConfidenceTrusted)
+		return replay.ConfidenceTrusted
 	}
-	return string(replay.ConfidenceDegraded)
+	return replay.ConfidenceDegraded
 }

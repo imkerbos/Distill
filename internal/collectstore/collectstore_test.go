@@ -114,8 +114,28 @@ func testSource() stubSource {
 	}}
 }
 
+// ccnpSource 与 testSource 只差一件事：被采集的那个集群登记了 CCNP。
+//
+// 用来造出"求值引擎自己把可信度降下来"这个情形。集群装没装 CCNP 是登记出来
+// 的（registry.Cluster.CCNPPresent），不由数据推断 —— 与数据来源同一条理由。
+func ccnpSource() stubSource {
+	src := testSource()
+	for i := range src.clusters {
+		if src.clusters[i].ID == collectedID {
+			src.clusters[i].CCNPPresent = true
+		}
+	}
+	return src
+}
+
 // newTestReader 迁移到最新、清空采集相关表、登记两个测试集群。
 func newTestReader(t *testing.T) (*collectstore.Reader, *snapshotstore.Store) {
+	t.Helper()
+	return newTestReaderWithSource(t, testSource())
+}
+
+// newTestReaderWithSource 同上，但由调用方决定注册表里登记了什么。
+func newTestReaderWithSource(t *testing.T, src stubSource) (*collectstore.Reader, *snapshotstore.Store) {
 	t.Helper()
 	cfg := config.DatabaseConfig{DSN: testDSN(t), MaxOpenConns: 5, MaxIdleConns: 2}
 	db, err := mysqlregistry.Open(cfg)
@@ -145,7 +165,7 @@ func newTestReader(t *testing.T) (*collectstore.Reader, *snapshotstore.Store) {
 		clean()
 		_ = db.Close()
 	})
-	return collectstore.New(db, testSource()), snapshotstore.New(db)
+	return collectstore.New(db, src), snapshotstore.New(db)
 }
 
 // seedClusters 写入两行 cluster：collection_run 有指向它的外键。
