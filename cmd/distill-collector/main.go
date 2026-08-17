@@ -25,6 +25,7 @@ import (
 
 	"github.com/imkerbos/Distill/internal/buildinfo"
 	"github.com/imkerbos/Distill/internal/config"
+	"github.com/imkerbos/Distill/internal/flow"
 	"github.com/imkerbos/Distill/internal/kubeclient"
 	applog "github.com/imkerbos/Distill/internal/log"
 	"github.com/imkerbos/Distill/internal/mysqlregistry"
@@ -43,21 +44,41 @@ import (
 // 已经采到的部分照样落库，只是带着 TIMEOUT 的失败记录 —— 见 collectOnce。
 const defaultRunTimeout = 10 * time.Minute
 
+// defaultFlowWindow 是一次摄入默认回看的时间长度。
+//
+// 一小时与 spec §7 的量级估算同一个尺度：500 Pod、平均 8 个对端的集群，
+// 一小时窗口约 4000 条连接。
+const defaultFlowWindow = time.Hour
+
 func main() {
 	configPath := flag.String("config", "configs/demo.yaml", "path to the config file")
 	clusterID := flag.String("cluster", "", "id of the registered cluster to collect")
 	timeout := flag.Duration("timeout", defaultRunTimeout, "upper bound on one collection run")
+	relay := flag.String("flow-relay", "", "host:port of the Hubble relay; empty means no flow ingestion")
+	relayCred := flag.String("flow-relay-ca", "", "short-name reference to the relay TLS CA; empty means a plaintext connection")
+	flowWindow := flag.Duration("flow-window", defaultFlowWindow, "how far back one flow ingestion looks")
 	flag.Parse()
 
-	if err := run(*configPath, *clusterID, *timeout); err != nil {
+	ingest := ingestOptions{
+		relayAddress:  *relay,
+		credentialRef: *relayCred,
+		window:        *flowWindow,
+	}
+	if err := run(*configPath, *clusterID, *timeout, ingest); err != nil {
 		// 日志器可能尚未构造成功，此处直接写 stderr。
-		_, _ = os.Stderr.WriteString("collection failed: " + err.Error() + "\n")
+		//
+		// 措辞不说"采集失败"：这一行同样会承载一次摄入失败，而一次采成功、
+		// 摄入挂掉的运行若报成"采集失败"，操作者会去查一个完全正常的 RBAC。
+		_, _ = os.Stderr.WriteString("collector run failed: " + err.Error() + "\n")
 		os.Exit(1)
 	}
 }
 
 // run 采集一个集群并落库，返回过程中的致命错误。
-func run(configPath, clusterID string, timeout time.Duration) error {
+//
+// ingest 为零值时只采资产。摄入与采集在这里是两件事，各自落自己的运行
+// 记录，失败也不互相冒充 —— 见 collectAndIngest。
+func run(configPath, clusterID string, timeout time.Duration, ingest ingestOptions) error {
 	if clusterID == "" {
 		return errors.New("-cluster is required: name the registered cluster to collect")
 	}
@@ -65,6 +86,11 @@ func run(configPath, clusterID string, timeout time.Duration) error {
 	// 时生效，显式给一个 0 必须被拒绝而不是静默变成无限等待。
 	if timeout <= 0 {
 		return errors.New("-timeout must be positive: an unbounded collection is one nobody can cancel")
+	}
+	// 摄入选项与超时一样，在连库之前就校验：一份写错的编排文件应当让这次
+	// 运行起不来，而不是先采完资产再在最后一步失败。
+	if err := ingest.validate(); err != nil {
+		return err
 	}
 
 	cfg, err := config.Load(configPath)
@@ -133,18 +159,20 @@ func run(configPath, clusterID string, timeout time.Duration) error {
 		logger.Warn("a cluster has an unusable CIDR registration; IP scope will degrade to UNKNOWN", "cluster", id)
 	}
 
-	result, err := collectOnce(ctx, clusterID, client, fleet, store, logger)
-	if err != nil {
-		return err
+	// 摄入器在采集之前装配：装配失败（地址写错、凭据后端是 NONE）是一次
+	// 配置错误，让它在读集群之前就把这一轮拦下来，比采完资产再失败清楚。
+	var src *flowSource
+	if ingest.enabled() {
+		src, err = newFlowSource(ctx, reg, ingest)
+		if err != nil {
+			return err
+		}
 	}
+	// 窗口取到"现在"为止的一段：摄入是跟着这次运行走的，不是补历史。
+	now := time.Now()
+	window := flow.Window{From: now.Add(-ingest.window), To: now}
 
-	logger.Info("collection stored",
-		"cluster", clusterID,
-		"runId", result.Observation.RunID,
-		"status", string(result.Status),
-		"failures", len(result.Failures),
-		"warnings", len(result.Observation.Warnings))
-	return nil
+	return collectAndIngest(ctx, clusterID, client, fleet, store, src, window, logger)
 }
 
 // newClusterClient 把集群登记里的 kubeconfig 引用变成一个受守卫的客户端。

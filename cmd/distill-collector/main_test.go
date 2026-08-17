@@ -10,7 +10,7 @@ import (
 // 没指定集群就没有采集对象。默认采"某一个"集群是这里最坏的落法：
 // 它会在操作者以为自己什么都没做的时候连上一个生产集群。
 func TestRunRequiresACluster(t *testing.T) {
-	if err := run("configs/demo.yaml", "", time.Minute); err == nil {
+	if err := run("configs/demo.yaml", "", time.Minute, ingestOptions{}); err == nil {
 		t.Fatal("run() = nil error without -cluster, want a refusal")
 	}
 }
@@ -19,7 +19,7 @@ func TestRunRequiresACluster(t *testing.T) {
 // 静默换成默认值会让一份写错的编排文件看起来生效了（规范 §30）。
 func TestRunRejectsANonPositiveTimeout(t *testing.T) {
 	for _, d := range []time.Duration{0, -time.Second} {
-		if err := run("configs/demo.yaml", "prod", d); err == nil {
+		if err := run("configs/demo.yaml", "prod", d, ingestOptions{}); err == nil {
 			t.Fatalf("run() = nil error for -timeout=%v, want a refusal", d)
 		}
 	}
