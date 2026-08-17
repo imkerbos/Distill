@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/imkerbos/Distill/internal/fixture"
@@ -139,6 +140,86 @@ func TestNakedPodsExcludeHostNetwork(t *testing.T) {
 		if host[np.Namespace+"/"+np.Name] {
 			t.Errorf("hostNetwork Pod %s/%s 出现在裸奔清单里", np.Namespace, np.Name)
 		}
+	}
+}
+
+// listEchoes 把一份报告的三个清单与各自的回显配成对。
+//
+// 三个都要列进来：少列一个，那一个漏填回显时全套仍然全绿，而漏填的那一份
+// 在界面上读起来正好是"这个集群只有这些"。
+func listEchoes(rep store.SecurityReport) []struct {
+	name string
+	got  int
+	echo store.ListTruncation
+} {
+	return []struct {
+		name string
+		got  int
+		echo store.ListTruncation
+	}{
+		{"riskyFlows", len(rep.RiskyFlows), rep.RiskyFlowsTruncation},
+		{"egressTargets", len(rep.EgressTargets), rep.EgressTargetsTruncation},
+		{"nakedPods", len(rep.NakedPods), rep.NakedPodsTruncation},
+	}
+}
+
+// 合成数据集不越界，因此每个清单的回显恒等于它自己的长度 —— 但回显必须
+// 照样填。两个 Reader 要让前端读到同一句话：只有真实 Reader 回显的话，
+// "共 N 条，此处显示 M 条"这段渲染在演示集群上永远走不到，也就永远没人
+// 发现它是坏的。
+func TestFixtureReportEchoesEveryListLength(t *testing.T) {
+	for _, cluster := range []string{"prod-asia-1", "prod-eu-1"} {
+		rep := newSecurityReport(t, cluster)
+		for _, l := range listEchoes(rep) {
+			if l.echo.Total != l.got {
+				t.Errorf("%s: %s 的回显 Total = %d, want %d（合成数据集不越界，回显即长度）",
+					cluster, l.name, l.echo.Total, l.got)
+			}
+			if l.echo.Limit != store.MaxSecurityFindings {
+				t.Errorf("%s: %s 的回显 Limit = %d, want %d —— 两个 Reader 必须回显同一个上限",
+					cluster, l.name, l.echo.Limit, store.MaxSecurityFindings)
+			}
+		}
+	}
+}
+
+// 空清单必须与"没有这个字段"可区分。
+//
+// 前者是"我们查了，一条都没有"，是一个关于集群的结论；后者是一份老响应，
+// 什么都不说明。断言落在序列化之后的 JSON 上而不是 Go 结构体上：前端读到的
+// 是那份 JSON，而一个漏掉的 tag 在结构体断言里看不出来。
+func TestEmptyListStillCarriesItsEcho(t *testing.T) {
+	// eu 集群没有任何风险流量，正是"空"与"缺失"最容易混起来的那一份。
+	rep := newSecurityReport(t, "prod-eu-1")
+	if len(rep.RiskyFlows) != 0 {
+		t.Fatalf("prod-eu-1 有 %d 条风险流量，这个用例要的是一个空清单", len(rep.RiskyFlows))
+	}
+
+	raw, err := json.Marshal(rep)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, key := range []string{"riskyFlowsTruncation", "egressTargetsTruncation", "nakedPodsTruncation"} {
+		echo, ok := body[key].(map[string]any)
+		if !ok {
+			t.Errorf("响应里没有 %s：调用方无从区分"+
+				"「查过、一条都没有」与「这个字段根本没填」", key)
+			continue
+		}
+		if _, ok := echo["total"]; !ok {
+			t.Errorf("%s 里没有 total", key)
+		}
+		if limit, _ := echo["limit"].(float64); limit <= 0 {
+			t.Errorf("%s.limit = %v, want 正数：上限是 0 读起来就是"+
+				"「这个清单一条都装不下」", key, echo["limit"])
+		}
+	}
+	if got := body["riskyFlowsTruncation"].(map[string]any)["total"]; got != float64(0) {
+		t.Errorf("空清单的 total = %v, want 0", got)
 	}
 }
 

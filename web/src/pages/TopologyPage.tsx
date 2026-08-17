@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { api } from '../api/client'
 import type { Topology, TopologyLevel } from '../api/types'
 import { useResource } from '../api/useResource'
+import DataSourceNotice from '../components/DataSourceNotice'
 import TopologyGraph from '../components/TopologyGraph'
 import { Card, Chip, Field, Notice, PageHeader, Section, Select, TableCard, Toolbar } from '../components/ui'
 
@@ -14,15 +15,24 @@ export default function TopologyPage({ cluster }: { cluster: string }) {
     () => api.topology(cluster, level),
   )
 
-  if (error) return <p style={{ color: 'var(--verdict-deny)' }}>{error}</p>
-  if (loading || !topo) return <p style={{ color: 'var(--text-muted)' }}>加载中…</p>
-
-  return (
-    <div>
+  // 标题与数据来源一起提到早退分支之前，理由见 DataSourceNotice：来源标识
+  // 必须与内容同屏，包括这一屏读不到数据的时候（design doc 2026-08-17 §2）。
+  const head = (
+    <>
       <PageHeader
         title="网络拓扑"
         description="集群内与跨集群的通信关系。NetworkPolicy 是有方向的，因此边上标注了做出判定的是哪一侧的策略。"
       />
+      <DataSourceNotice />
+    </>
+  )
+
+  if (error) return <div>{head}<p style={{ color: 'var(--verdict-deny)' }}>{error}</p></div>
+  if (loading || !topo) return <div>{head}<p style={{ color: 'var(--text-muted)' }}>加载中…</p></div>
+
+  return (
+    <div>
+      {head}
 
       <Toolbar>
         <Field label="粒度">

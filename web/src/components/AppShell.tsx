@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { NavLink, useNavigate } from 'react-router-dom'
 import { api } from '../api/client'
+import { ClusterDataSourceProvider } from './DataSourceNotice'
 import { Select } from './ui'
 import type { RegisteredCluster } from '../api/types'
 import { useSession } from '../auth/SessionContext'
@@ -140,7 +141,16 @@ export default function AppShell({ cluster, onClusterChange, children }: Props) 
         相隔太远，读者无法把它们连成一条记录。
       */}
       <div style={{ padding: 'var(--space-5) var(--space-4)', overflow: 'auto' }}>
-        <div style={{ maxWidth: 'var(--content-max)' }}>{children}</div>
+        {/*
+          数据来源沿这里下发给每一屏的内容区。取的是这一次已经发生的集群
+          列表请求里的字段，不为标识本身再发一次请求（design doc
+          2026-08-17 §2、§9）。选中的 id 不在列表里（还没落地、或列表加载
+          失败）时是 undefined，各屏据此显示「来源未知」——那时我们确实不
+          知道来源。
+        */}
+        <ClusterDataSourceProvider value={clusters.find((c) => c.id === cluster)?.dataSource}>
+          <div style={{ maxWidth: 'var(--content-max)' }}>{children}</div>
+        </ClusterDataSourceProvider>
       </div>
     </div>
   )

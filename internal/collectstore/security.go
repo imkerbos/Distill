@@ -2,8 +2,6 @@ package collectstore
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"sort"
 
 	"github.com/imkerbos/Distill/internal/flow"
@@ -13,38 +11,18 @@ import (
 	"github.com/imkerbos/Distill/internal/store"
 )
 
-// maxSecurityFindings 是这份报告里任意一个清单允许装下的条数上限。
+// 三个清单的条数上限是 store.MaxSecurityFindings，截断由 store.TruncateFindings
+// 完成，截断前的条数与生效上限随报告回显（design doc 2026-08-17 §3）。
 //
-// 三个清单此前一条上限都没有：上界只来自事实层的 maxWindowConnections，
-// 于是一个把数据库端口用满的集群能让一次 /security 在内存里组出几万条
-// RiskyFlow（每条含完整 FlowRecord）并整份序列化。调用方选不了这个规模，
-// 页面刷新频率乘以单次代价正是 design doc §9 点名的那个失控方向
-// （安全规范 §23 / §24）。
+// 上限本身是必需的：三个清单的上界原本只来自事实层的 maxWindowConnections，
+// 一个把数据库端口用满的集群能让一次 /security 整份序列化几万条 RiskyFlow
+// （每条含完整 FlowRecord），而调用方选不了这个规模（安全规范 §23 / §24）。
 //
-// 取值与 Flows 那道 maxFlowLimit 一致：同一个平台上"一屏能装多少"只该有
-// 一个量级。
-const maxSecurityFindings = 1000
-
-// ErrTooManyFindings 表示这份报告装不下这么多发现。
-//
-// **超出即拒绝，不截断** —— 与事实层的 maxWindowConnections、本包的
-// maxIntervalRows 同一条理由，而在这里更硬：一份被悄悄截到 1000 条的风险
-// 清单读起来就是"这个集群只有这些风险"，而这正是这个平台唯一不能出的那种
-// 错。SecurityReport 上没有回显截断的字段（那是 store 契约的事，两个 Reader
-// 与前端要一起改），因此现在唯一"可见"的截断就是不截断。
-//
-// **这个取舍的代价与解决方向记在 design doc §10**，包括裸奔清单那一道为什么
-// 缩小窗口也绕不开、以及接 httpapi 时这个哨兵必须映射成说得出原因的响应。
-var ErrTooManyFindings = errors.New("collectstore: this security report holds more findings than it can show")
-
-// tooManyFindings 拼出一句说得出"多的是哪一类、该怎么办"的拒绝。
-//
-// 不含 SQL、路径与内部地址（安全规范 §22）：这句话会被渲染给操作者，
-// 而它要回答的是"我该做什么"，不是"这个查询长什么样"。
-func tooManyFindings(clusterID, what, advice string) error {
-	return fmt.Errorf("%w: cluster %s holds more than %d %s; %s",
-		ErrTooManyFindings, clusterID, maxSecurityFindings, what, advice)
-}
+// **这里此前是超出即拒绝**，理由是报告上没有任何字段说得出自己被截过 ——
+// 一份被悄悄截到 1000 条的风险清单读起来就是"这个集群只有这些风险"。
+// 回显字段落地之后那条理由消失了，而拒绝的代价还在：一个 4000 Pod、覆盖率
+// 60% 的健康集群会被整份拒绝，且 NakedPods 来自锚点快照，缩小窗口救不了
+// （real-reader design §10 记的那笔账）。因此现在截断、并把截断说出来。
 
 // Security 汇总一个集群在指定窗口里的安全发现。
 //
@@ -87,10 +65,6 @@ func (r *Reader) Security(
 				Position:   t.riskPosition(a),
 				PortName:   rp.Name,
 			})
-			if len(rep.RiskyFlows) > maxSecurityFindings {
-				return store.SecurityReport{}, tooManyFindings(
-					clusterID, "connections on a risky port", "narrow the window")
-			}
 		}
 
 		if !t.externalAddress(c.Dest.IP) {
@@ -100,10 +74,6 @@ func (r *Reader) Security(
 		if !seen {
 			target = &store.EgressTarget{Address: c.Dest.IP}
 			targets[c.Dest.IP] = target
-			if len(targets) > maxSecurityFindings {
-				return store.SecurityReport{}, tooManyFindings(
-					clusterID, "distinct addresses outside every registered range", "narrow the window")
-			}
 		}
 		target.FlowCount++
 		switch rec.Verdict {
@@ -133,6 +103,12 @@ func (r *Reader) Security(
 		return store.SecurityReport{}, err
 	}
 	rep.NakedPods = naked
+
+	// 三个清单都在排序之后才截：留下哪一批取决于内容，不取决于事实层的
+	// 读取顺序，否则同一次查询在两次刷新之间会换一批发现，而调用方无从察觉。
+	rep.RiskyFlows, rep.RiskyFlowsTruncation = store.TruncateFindings(rep.RiskyFlows)
+	rep.EgressTargets, rep.EgressTargetsTruncation = store.TruncateFindings(rep.EgressTargets)
+	rep.NakedPods, rep.NakedPodsTruncation = store.TruncateFindings(rep.NakedPods)
 	return rep, nil
 }
 
@@ -170,10 +146,6 @@ func (t traffic) nakedPods() ([]store.NakedPod, error) {
 			continue
 		}
 		out = append(out, store.NakedPod{Cluster: t.clusterID, Namespace: p.namespace, Name: p.name})
-		if len(out) > maxSecurityFindings {
-			return nil, tooManyFindings(t.clusterID, "pods not selected by any policy",
-				"the coverage figure on the quality page still answers how bad it is")
-		}
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Namespace != out[j].Namespace {

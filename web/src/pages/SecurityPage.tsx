@@ -1,8 +1,10 @@
 import { api } from '../api/client'
 import { RISK_CATEGORY_LABEL, type RiskPosition, type RiskyFlow, type SecurityReport } from '../api/types'
 import { useResource } from '../api/useResource'
+import DataSourceNotice from '../components/DataSourceNotice'
 import { VerdictBadge } from '../components/Verdict'
 import { Card, Chip, EmptyState, PageHeader, Section, TableCard } from '../components/ui'
+import { listTruncationView, type ListTruncationView } from './preconditionsView'
 
 /**
  * 位置按紧迫度从高到低排列，报告即按此顺序分组。
@@ -32,20 +34,53 @@ const POSITIONS: { key: RiskPosition; label: string; hint: string }[] = [
 export default function SecurityPage({ cluster }: { cluster: string }) {
   const { data: rep, error, loading } = useResource(cluster, () => api.security(cluster))
 
-  if (error) return <p style={{ color: 'var(--verdict-deny)' }}>{error}</p>
-  if (loading || !rep) return <p style={{ color: 'var(--text-muted)' }}>加载中…</p>
-
-  return (
-    <div>
+  // 标题与数据来源一起提到早退分支之前，理由见 DataSourceNotice：来源标识
+  // 必须与内容同屏，包括这一屏读不到数据的时候（design doc 2026-08-17 §2）。
+  const head = (
+    <>
       <PageHeader
         title="安全发现"
         description="按风险位置分组的可疑连接、公网出向目标，以及未被任何策略选中的 Pod。被策略拒绝的连接同样列出 —— 挡住了不等于没有人在连。"
       />
+      <DataSourceNotice />
+    </>
+  )
+
+  if (error) return <div>{head}<p style={{ color: 'var(--verdict-deny)' }}>{error}</p></div>
+  if (loading || !rep) return <div>{head}<p style={{ color: 'var(--text-muted)' }}>加载中…</p></div>
+
+  return (
+    <div>
+      {head}
 
       <RiskySection rep={rep} />
       <EgressSection rep={rep} />
       <NakedSection rep={rep} />
     </div>
+  )
+}
+
+/**
+ * 一个清单的条数与截断说明，放在区块标题右侧的 meta 位。
+ *
+ * 句式与结构都照搬 FlowsPage 的 total / limit 那一处：条数是正文、截断是
+ * 一句必须被读到的补充，用 UNKNOWN 的琥珀色强调。同一件事两种写法迟早
+ * 各自漂一点，而读的人要靠它们说出同一句话（design doc 2026-08-17 §3）。
+ *
+ * 截断时一并给出处置：缩小时间窗对前两个清单有用，对「无策略覆盖的 Pod」
+ * 无用——那份清单来自锚点快照，与流量窗口无关。哪一条适用由
+ * listTruncationView 决定，这里不做判断。
+ */
+function TruncationMeta({ view }: { view: ListTruncationView }) {
+  return (
+    <>
+      {view.countText}
+      {view.truncated && (
+        <strong style={{ color: 'var(--verdict-unknown)', marginLeft: 6 }}>
+          （已按上限截断）{view.remedy}
+        </strong>
+      )}
+    </>
   )
 }
 
@@ -58,7 +93,7 @@ function RiskySection({ rep }: { rep: SecurityReport }) {
     <Section
       title="高风险端口连接"
       description="风险来自端口背后的协议语义，不来自端口是否常见。同一个端口在不同位置的处置方式完全不同，因此按位置分组，不合成单一评分。"
-      meta={`${rep.riskyFlows.length} 条`}
+      meta={<TruncationMeta view={listTruncationView('RISKY_FLOWS', rep.riskyFlows.length, rep.riskyFlowsTruncation)} />}
     >
       {groups.length === 0 ? (
         <EmptyState
@@ -127,7 +162,7 @@ function EgressSection({ rep }: { rep: SecurityReport }) {
     <Section
       title="公网出向目标"
       description="离开集群的连接去了哪里。放行数与总数分列 —— 一条畅通的外联与一条已被策略挡住的外联，只报总数会长得一样。"
-      meta={`${rep.egressTargets.length} 个目标`}
+      meta={<TruncationMeta view={listTruncationView('EGRESS_TARGETS', rep.egressTargets.length, rep.egressTargetsTruncation)} />}
     >
       {rep.egressTargets.length === 0 ? (
         <EmptyState
@@ -177,7 +212,7 @@ function NakedSection({ rep }: { rep: SecurityReport }) {
     <Section
       title="无策略覆盖的 Pod"
       description="来自资产快照，不受上方时间窗约束。hostNetwork Pod 不在此列 —— 那是 NetworkPolicy 管不到，与没被策略选中是两回事。"
-      meta={`${rep.nakedPods.length} 个`}
+      meta={<TruncationMeta view={listTruncationView('NAKED_PODS', rep.nakedPods.length, rep.nakedPodsTruncation)} />}
     >
       {rep.nakedPods.length === 0 ? (
         <EmptyState

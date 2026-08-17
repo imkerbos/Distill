@@ -4,13 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/imkerbos/Distill/internal/collectstore"
 	"github.com/imkerbos/Distill/internal/policygen"
 	"github.com/imkerbos/Distill/internal/registry"
+	"github.com/imkerbos/Distill/internal/response"
 	"github.com/imkerbos/Distill/internal/store"
 )
 
@@ -72,6 +75,91 @@ func TestRouterRecoversPanics(t *testing.T) {
 	for _, secret := range []string{"exploded", "10.0.0.5", "9050"} {
 		if strings.Contains(rec.Body.String(), secret) {
 			t.Errorf("panic response leaked %q: %s", secret, rec.Body.String())
+		}
+	}
+}
+
+// noCollectionReader 让每个查询都以「这个集群还没有可用的采集」结束。
+//
+// 包一层 fmt.Errorf 而不是直接返回哨兵：真实的 collectstore 也是这么返回的
+// （它要在文案里点名集群与缺的是哪一步），一个只认裸哨兵的映射在真实调用
+// 路径上会失效，而失效之后的症状恰好是它本来要消除的那个 500。
+type noCollectionReader struct{ brokenReader }
+
+func (noCollectionReader) Topology(
+	context.Context, string, store.TopologyLevel,
+) (store.Topology, error) {
+	return store.Topology{}, noCollection()
+}
+
+func (noCollectionReader) Flows(context.Context, store.FlowFilter) (store.FlowPage, error) {
+	return store.FlowPage{}, noCollection()
+}
+
+func (noCollectionReader) Flow(context.Context, string) (store.Decision, bool, error) {
+	return store.Decision{}, false, noCollection()
+}
+
+func (noCollectionReader) Quality(context.Context, string) (store.Quality, error) {
+	return store.Quality{}, noCollection()
+}
+
+func (noCollectionReader) Security(
+	context.Context, string, store.TimeWindow,
+) (store.SecurityReport, error) {
+	return store.SecurityReport{}, noCollection()
+}
+
+func (noCollectionReader) PolicyPreview(
+	context.Context, string, string, store.TimeWindow,
+) (store.PolicyPreview, error) {
+	return store.PolicyPreview{}, noCollection()
+}
+
+func noCollection() error {
+	return fmt.Errorf("%w: cluster prod-asia-1 has no flow ingest", collectstore.ErrNoCollection)
+}
+
+// 「还没有可用的采集」不是服务故障，必须说得出原因。
+//
+// 落回 50001 时操作者读到的是「服务内部错误」，于是他去查一个完全健康的
+// 服务；而事实是这个集群还没被采过，该做的是去跑采集器与摄入。两条处置
+// 完全不同，而 500 那句话把人指向了错的那一条（design doc §6）。
+//
+// 六个读端点一条不落：writeReaderError 是共用的，但共用的不是路由 ——
+// 只测其中一条，另外五条改走别的错误处理时全套仍然全绿。
+func TestNoUsableCollectionSaysSoInsteadOf500(t *testing.T) {
+	h, _, cookie := newTestRouter(t, noCollectionReader{})
+
+	for _, path := range []string{
+		"/api/v1/clusters/prod-asia-1/topology",
+		"/api/v1/clusters/prod-asia-1/quality",
+		"/api/v1/clusters/prod-asia-1/security",
+		"/api/v1/clusters/prod-asia-1/policy-preview",
+		"/api/v1/flows",
+		"/api/v1/flows/flow-0001/decision",
+	} {
+		rec := authedGet(t, h, cookie, path)
+
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s status = %d, want 200 —— 一个还没采过的集群不是服务故障，"+
+				"不该计进服务错误率", path, rec.Code)
+		}
+		body := bodyOf(t, rec)
+		if body["code"] != float64(20005) {
+			t.Errorf("%s code = %v, want 20005（该集群还没有可用的采集数据）；"+
+				"50001 会把操作者支去查一个健康的服务", path, body["code"])
+		}
+		if msg, _ := body["msg"].(string); msg == response.CodeInternal.Message() {
+			t.Errorf("%s msg = %q，与内部错误同一句话，说明这条路径塌回了 500 的文案", path, msg)
+		}
+		// 采集器没跑（20004）与摄入没跑（20005）是两件事，处置不同。
+		if body["code"] == float64(response.CodeNoCollectionRun) {
+			t.Errorf("%s 用了 20004：那一条说的是「从没采过资产」，"+
+				"与「采过、但这段窗口没有可用数据」不是同一句话", path)
+		}
+		if body["data"] != nil {
+			t.Errorf("%s data = %v, want null", path, body["data"])
 		}
 	}
 }
