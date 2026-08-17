@@ -86,6 +86,10 @@ func wantClusterNotFound(err error) string {
 
 func sourceGuardCases(ctx context.Context, window store.TimeWindow) []sourceGuardCase {
 	return []sourceGuardCase{
+		{method: "DefaultWindow", name: "DefaultWindow", refusal: func(r *collectstore.Reader, id string) string {
+			_, err := r.DefaultWindow(ctx, id)
+			return wantClusterNotFound(err)
+		}},
 		{method: "Topology", name: "Topology", refusal: func(r *collectstore.Reader, id string) string {
 			_, err := r.Topology(ctx, id, store.LevelNamespace)
 			return wantClusterNotFound(err)

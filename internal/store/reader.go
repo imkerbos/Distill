@@ -215,6 +215,19 @@ type Quality struct {
 // handler 依赖本接口而非具体实现：将来接入 BigQuery 时实现同一接口，
 // handler 一行不动。
 type Reader interface {
+	// DefaultWindow 返回调用方没有指定 from/to 时，这个集群适用的默认时间窗。
+	//
+	// **按集群问，而不是取一个装配时算好的常量**（design doc 2026-08-18 §3.1）。
+	// 默认窗口是一个关于集群的结论 ——「我们实际能回答的是哪一段时间」—— 因此
+	// 它必须由回答这个集群的那份数据自己给出：合成数据集给出自己的范围，采集
+	// 数据给出这个集群最近一次摄入的窗口。一个跨来源共用的常量窗口会让某一类
+	// 集群被问到一段与它无关的时间，而窗口里没被观测到的连接在下游读起来是
+	// 「这条规则没有流量、可以收紧」—— 这个平台唯一那个单向的失败方向。
+	//
+	// 答不出窗口时返回错误，**不返回一个兜底区间**：兜底的那一段时间没有任何
+	// 证据支持，而它算出来的判定与一份有证据的判定在界面上长得一模一样。
+	// 一个还没有摄入过的集群的正确答案是「还没有可用的采集数据」。
+	DefaultWindow(ctx context.Context, clusterID string) (TimeWindow, error)
 	// Topology 返回指定集群的通信拓扑。集群不存在时返回错误。
 	Topology(ctx context.Context, clusterID string, level TopologyLevel) (Topology, error)
 	// Flows 按条件返回流量列表。筛选条件指向不存在的集群时返回错误。

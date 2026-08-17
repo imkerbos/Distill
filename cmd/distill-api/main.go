@@ -91,11 +91,13 @@ func run(configPath string) error {
 	// 回退手段只有一个：回滚这次部署。`data_source` 没有写路径，也不该有 ——
 	// 「把某个集群临时切回演示数据」不是一个安全位置，那是一句关于生产集群的
 	// 假话（design doc §5）。
+	//
+	// 默认时间窗也从这里出（design doc 2026-08-18 §3.1）。此前它在这一行下面
+	// 被算成一个常量（`newFixtureReader(reg).DataWindow()`）并注入
+	// httpapi.Deps.DefaultWindow —— 合成数据集自己的那段约 36 秒。分派器现在
+	// 按集群现答：FIXTURE 仍是那段固定范围，COLLECTED 是它最近一次摄入窗口，
+	// 没摄入过则答不出、于是页面说「还没有可用的采集数据」。
 	reader := newReader(db, reg)
-
-	// 默认时间窗仍取合成数据集的实际范围，见下方 DefaultWindow 的说明。
-	// 单独装一次 fixture Reader 只为取这个范围，不参与作答。
-	demoWindow := newFixtureReader(reg).DataWindow()
 
 	// 同一个道理，设置也传提供者而不是取出来的一份值：Git 校验相关的
 	// 全部配置都从设置页改，改完必须立即生效（design doc §1.1）。
@@ -131,14 +133,6 @@ func run(configPath string) error {
 		// 资产采集的只读摘要。写入侧属于 cmd/distill-collector —— 这里
 		// 只拿读的那一面，主服务不持有任何 Kubernetes 凭据。
 		Collection: snapshotstore.New(db),
-		// demo 的默认时间窗取 fixture 数据的实际范围。任何"最近 N 天"
-		// 的取值都会随真实时间推移而在某天返回 0 条 —— demo 会在没有
-		// 人改动代码的情况下自己坏掉。接真实存储时这里换成有界窗口。
-		//
-		// 已知空缺：COLLECTED 集群现在也拿这个窗口作默认值，而它描述的是
-		// 合成数据集的那一天。真实部署要注入一个有界窗口，与事实层的
-		// require_partition_filter 相称 —— 那不在本轮范围内。
-		DefaultWindow: demoWindow,
 	}))
 
 	srv := &http.Server{

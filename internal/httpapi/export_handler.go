@@ -56,12 +56,16 @@ const (
 // （spec §9.1）。唯一的写入是审计。
 func handlePolicyExport(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		window, ok := parseWindow(r.URL.Query(), d.DefaultWindow)
+		clusterID := chi.URLParam(r, "clusterID")
+		window, ok, err := parseWindow(r.Context(), r.URL.Query(), d.Reader, clusterID)
+		if err != nil {
+			writeReaderError(w, r, d, err)
+			return
+		}
 		if !ok {
 			response.WriteBusiness(w, response.CodeInvalidParam)
 			return
 		}
-		clusterID := chi.URLParam(r, "clusterID")
 		namespace := r.URL.Query().Get("namespace")
 		// 筛选后的导出一律拒绝（design doc 2026-08-14 §4）。生成与预测恒按
 		// 整集群跑，namespace 只裁展示；一份被裁剪的文件配上注释头里那四个

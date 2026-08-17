@@ -218,6 +218,32 @@ func (r *Reader) describeAt(
 	return d, nil
 }
 
+// DefaultWindow 返回这个集群最近一次摄入窗口，作为未指定 from/to 时的默认。
+//
+// **直接复用 describe / readLatestTraffic 已经在用的那一个取窗口的地方**
+// （latestFlowWindow），不另写一条查 flow_ingest_run 的 SQL：两条各自演化的
+// 查询会让「页面按最近一次摄入作答」与「默认窗口是最近一次摄入」在某次改动
+// 之后指向两段不同的时间，而两边都答得出、都不报错（design doc 2026-08-18
+// §3.1）。所以这里只是把那个既有取法在包外露出来。
+//
+// 先过来源门禁：一个登记为 FIXTURE 的集群在这里也只会拿到 ErrClusterNotFound，
+// 与本包其余读方法同一条判据 —— 装配层那个 switch 被拨反时，这一道仍然成立。
+//
+// 一次摄入都没有时返回 ErrNoCollection（由 latestFlowWindow 给出），调用方
+// 据此答「这个集群还没有可用的采集数据」。**不回退到任何别的窗口**：一段
+// 没有摄入证据的时间里，"没有观测到连接"会被下游读成"这条规则没有流量、
+// 可以收紧"，而那是这个平台唯一那个单向的失败方向。
+func (r *Reader) DefaultWindow(ctx context.Context, clusterID string) (store.TimeWindow, error) {
+	if _, err := r.collectedCluster(ctx, clusterID); err != nil {
+		return store.TimeWindow{}, err
+	}
+	w, err := r.latestFlowWindow(ctx, clusterID)
+	if err != nil {
+		return store.TimeWindow{}, err
+	}
+	return store.TimeWindow{From: w.From, To: w.To}, nil
+}
+
 // latestFlowWindow 取这个集群最近一次**真正观测到流量**的窗口。
 //
 // Topology 与 Quality 的接口上没有时间窗参数，而一个描述性的答案必须说得出

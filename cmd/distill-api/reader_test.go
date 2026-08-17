@@ -264,6 +264,14 @@ func TestACollectedClusterNeverGetsTheFixtureReader(t *testing.T) {
 	leakedIDs := flowIDsInvolving(fixtureBackedID)
 
 	refusals := []leakCase{
+		{method: "DefaultWindow", name: "DefaultWindow(collected cluster)", leak: func() string {
+			// 合成数据集自己的那段约 36 秒不得成为一个 COLLECTED 集群的
+			// 默认时间窗（design doc 2026-08-18 §3.1）。这一格泄漏的形态
+			// 尤其安静：拿到窗口的调用方会照常算出一份数字合理的报告，
+			// 而它的全部证据是去年那半分钟的观测。
+			_, err := fr.DefaultWindow(ctx, fixtureBackedID)
+			return wantClusterNotFound(err)
+		}},
 		{method: "Topology", name: "Topology(collected cluster)", leak: func() string {
 			_, err := fr.Topology(ctx, fixtureBackedID, store.LevelNamespace)
 			return wantClusterNotFound(err)

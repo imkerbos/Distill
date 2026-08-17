@@ -318,6 +318,20 @@ func (clusterRequiredReader) Flows(_ context.Context, f store.FlowFilter) (store
 	return store.FlowPage{Window: f.Window}, nil
 }
 
+// DefaultWindow 同样在不点名集群时拒绝，与分派器一致：默认窗口是**按集群**
+// 推出来的结论，没有集群就没有这个结论（design doc 2026-08-18 §3.1）。
+//
+// 拒绝在这里先发生 —— /flows 现在要先问出这个集群的默认窗口才谈得上查询 ——
+// 所以这个替身若在这里放行，测的就不再是那条拒绝了。
+func (clusterRequiredReader) DefaultWindow(
+	_ context.Context, clusterID string,
+) (store.TimeWindow, error) {
+	if clusterID == "" {
+		return store.TimeWindow{}, fmt.Errorf("%w: dispatcher refused", store.ErrClusterRequired)
+	}
+	return fixtureDataWindow(), nil
+}
+
 // 不点名集群的流量列表要给出一个**说得出原因**的响应，不是 500。
 //
 // 这是 design doc 2026-08-18 §3.2 那条拒绝在边界层的落点：拒绝本身发生在

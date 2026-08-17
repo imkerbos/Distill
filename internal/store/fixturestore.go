@@ -674,6 +674,31 @@ func (r *FixtureReader) DataWindow() TimeWindow {
 	return TimeWindow{From: first, To: last.Add(time.Second)}
 }
 
+// DefaultWindow 返回合成数据集自己的范围，与集群无关。
+//
+// **它必须是固定的**（design doc 2026-08-18 §3.1）：fixture 的数据钉在
+// baseTime 那一天，任何"最近 N 天"的相对窗口都会随真实时间推移而在某天悄悄
+// 返回 0 条 —— demo 会在没有人改动代码的情况下自己坏掉。这也是本方法直接
+// 转发 DataWindow 而不是自己算一段区间的全部理由。
+//
+// 集群仍然要解析，判据与 Flows 逐字相同：点名了就必须是一个已注册的集群，
+// 否则 ErrClusterNotFound；不点名（全量流量列表那条路）才回答整个数据集的
+// 范围。少了这一步，一个登记为 COLLECTED 的集群就能从这里拿到合成数据集的
+// 那段时间 —— 正是本轮要消除的那件事，而且它不会有任何症状。
+func (r *FixtureReader) DefaultWindow(ctx context.Context, clusterID string) (TimeWindow, error) {
+	if clusterID == "" {
+		return r.DataWindow(), nil
+	}
+	_, ok, err := r.registeredCluster(ctx, clusterID)
+	if err != nil {
+		return TimeWindow{}, err
+	}
+	if !ok {
+		return TimeWindow{}, fmt.Errorf("%w: %s", ErrClusterNotFound, clusterID)
+	}
+	return r.DataWindow(), nil
+}
+
 // Flows 按条件返回流量列表。筛选条件指向不存在的集群时返回错误。
 func (r *FixtureReader) Flows(ctx context.Context, filter FlowFilter) (FlowPage, error) {
 	// 先于集群校验：缺时间窗是调用方用错了接口，与查哪个集群无关。

@@ -20,6 +20,10 @@ import (
 // brokenReader 让每个查询都失败，用来锁住内部错误的处理方式。
 type brokenReader struct{}
 
+func (brokenReader) DefaultWindow(context.Context, string) (store.TimeWindow, error) {
+	return store.TimeWindow{}, errors.New("bigquery: connection refused at 10.0.0.5:9050")
+}
+
 func (brokenReader) Topology(context.Context, string, store.TopologyLevel) (store.Topology, error) {
 	return store.Topology{}, errors.New("bigquery: connection refused at 10.0.0.5:9050")
 }
@@ -85,6 +89,10 @@ func TestRouterRecoversPanics(t *testing.T) {
 // （它要在文案里点名集群与缺的是哪一步），一个只认裸哨兵的映射在真实调用
 // 路径上会失效，而失效之后的症状恰好是它本来要消除的那个 500。
 type noCollectionReader struct{ brokenReader }
+
+func (noCollectionReader) DefaultWindow(context.Context, string) (store.TimeWindow, error) {
+	return store.TimeWindow{}, noCollection()
+}
 
 func (noCollectionReader) Topology(
 	context.Context, string, store.TopologyLevel,

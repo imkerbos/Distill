@@ -75,6 +75,31 @@ func (d *dispatchReader) readerOf(ctx context.Context, clusterID string) (store.
 	return readerFor(c, d.src, d.collected)
 }
 
+// DefaultWindow 转发给这个集群登记的来源对应的 Reader。
+//
+// 默认时间窗走**这个**分派器，而不是在装配时算一个常量交给边界层
+// （design doc 2026-08-18 §3.1）。判据与六个读方法逐字相同 —— 「这个集群
+// 登记的来源是什么」—— 因此它属于同一个分派，不该在旁边另起一个形状不同的。
+// 装配时算一次的那个常量取的是合成数据集自己的范围，于是一个 COLLECTED
+// 集群的每一屏都被钉在去年那几十秒上，而窗口里没被观测到的连接在推荐里
+// 就是「没有流量、可以收紧」。
+//
+// 不点名集群时拒绝，与 Flows 同一个哨兵：默认窗口是**按集群**推出来的结论，
+// 没有集群就没有这个结论，而任何一个跨集群的兜底窗口都会让某一类集群被问到
+// 一段与它无关的时间。落到 readerOf 上会答成「没有这个集群」，那是另一句话。
+func (d *dispatchReader) DefaultWindow(
+	ctx context.Context, clusterID string,
+) (store.TimeWindow, error) {
+	if clusterID == "" {
+		return store.TimeWindow{}, store.ErrClusterRequired
+	}
+	r, err := d.readerOf(ctx, clusterID)
+	if err != nil {
+		return store.TimeWindow{}, err
+	}
+	return r.DefaultWindow(ctx, clusterID)
+}
+
 // Topology 转发给这个集群登记的来源对应的 Reader。
 func (d *dispatchReader) Topology(
 	ctx context.Context, clusterID string, level store.TopologyLevel,

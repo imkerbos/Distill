@@ -14,14 +14,19 @@ import (
 // 不持有日常 Kubernetes 策略写权限（spec §9.1），这里是结构性成立。
 func handlePolicyPreview(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		window, ok := parseWindow(r.URL.Query(), d.DefaultWindow)
+		clusterID := chi.URLParam(r, "clusterID")
+		window, ok, err := parseWindow(r.Context(), r.URL.Query(), d.Reader, clusterID)
+		if err != nil {
+			writeReaderError(w, r, d, err)
+			return
+		}
 		if !ok {
 			response.WriteBusiness(w, response.CodeInvalidParam)
 			return
 		}
 		pv, err := d.Reader.PolicyPreview(
 			r.Context(),
-			chi.URLParam(r, "clusterID"),
+			clusterID,
 			r.URL.Query().Get("namespace"),
 			window,
 		)

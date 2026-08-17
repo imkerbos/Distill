@@ -2,6 +2,7 @@ package httpapi_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -45,19 +46,21 @@ func newTestRouterWithRegistry(
 ) (http.Handler, *auth.SessionStore, *http.Cookie) {
 	t.Helper()
 
-	return newTestRouterWithWindow(t, reader, reg, fixtureWindow(reader))
+	return buildTestRouter(t, reader, reg, nil)
 }
 
-// fixtureWindow 取 fixture 数据的全量时间窗。
+// windowedReader 把一个 Reader 答出的默认时间窗换成指定的那一段。
 //
-// reader 允许为 nil（见上），因此默认窗口只在拿到 fixture 实现时取。
-// 走类型断言而非扩展 store.Reader：数据窗口是 fixture 特有的概念，
-// 真实存储没有"全部数据的时间范围"这回事。
-func fixtureWindow(reader store.Reader) store.TimeWindow {
-	if fr, ok := reader.(*store.FixtureReader); ok {
-		return fr.DataWindow()
-	}
-	return store.TimeWindow{}
+// 装配层不再注入常量窗口（httpapi.Deps 上那个字段已经删掉，design doc
+// 2026-08-18 §3.1），默认窗口一律由 Reader 按集群现答。要让某个用例跑在一段
+// 自定义的默认窗口上，就只能从 Reader 这一侧给 —— 这正是被测形状本身。
+type windowedReader struct {
+	store.Reader
+	window store.TimeWindow
+}
+
+func (r windowedReader) DefaultWindow(context.Context, string) (store.TimeWindow, error) {
+	return r.window, nil
 }
 
 // newTestRouterWithGitVerifier 是 newTestRouterWithRegistry 的变体，
@@ -70,7 +73,7 @@ func newTestRouterWithGitVerifier(
 	t *testing.T, reader store.Reader, reg registry.Store, gv httpapi.GitVerifier,
 ) (http.Handler, *auth.SessionStore, *http.Cookie) {
 	t.Helper()
-	return buildTestRouter(t, reader, reg, fixtureWindow(reader), gv)
+	return buildTestRouter(t, reader, reg, gv)
 }
 
 // newTestRouterWithCollection 是 newTestRouterWithRegistry 的变体，额外注入
@@ -84,7 +87,7 @@ func newTestRouterWithCollection(
 	t *testing.T, reg registry.Store, cr httpapi.CollectionReader,
 ) (http.Handler, *auth.SessionStore, *http.Cookie) {
 	t.Helper()
-	return buildTestRouterWithLog(t, nil, reg, store.TimeWindow{}, nil, nil, cr, "ERROR", io.Discard)
+	return buildTestRouterWithLog(t, nil, reg, nil, nil, cr, "ERROR", io.Discard)
 }
 
 // newTestRouterWithWindow 是 newTestRouterWithRegistry 的底层版本，
@@ -104,7 +107,7 @@ func newTestRouterWithWindow(
 	t.Helper()
 	// 校验器为 nil：未配置 secrets 是绝大多数用例要的形态，也是部署上
 	// 真实存在的一种 —— 结论一律 NOT_VERIFIED，而不是"校验都通过"。
-	return buildTestRouter(t, reader, reg, window, nil)
+	return buildTestRouter(t, windowedReader{Reader: reader, window: window}, reg, nil)
 }
 
 // newTestRouterWithLog 是 newTestRouterWithRegistry 的变体，额外把请求日志
@@ -118,25 +121,24 @@ func newTestRouterWithLog(
 ) (http.Handler, *auth.SessionStore, *http.Cookie, *bytes.Buffer) {
 	t.Helper()
 	var buf bytes.Buffer
-	h, sessions, cookie := buildTestRouterWithLog(t, nil, reg, store.TimeWindow{}, nil, nil, nil, "INFO", &buf)
+	h, sessions, cookie := buildTestRouterWithLog(t, nil, reg, nil, nil, nil, "INFO", &buf)
 	return h, sessions, cookie, &buf
 }
 
 // buildTestRouter 是全部装配入口的底层实现。
 func buildTestRouter(
-	t *testing.T, reader store.Reader, reg registry.Store,
-	window store.TimeWindow, gv httpapi.GitVerifier,
+	t *testing.T, reader store.Reader, reg registry.Store, gv httpapi.GitVerifier,
 ) (http.Handler, *auth.SessionStore, *http.Cookie) {
 	t.Helper()
 	// 写入器为 nil：绝大多数用例装配的是"没有写回这条路径"的形态，也是
 	// 部署上真实存在的一种。写回用例走 newTestRouterForWriteback。
-	return buildTestRouterWithLog(t, reader, reg, window, gv, nil, nil, "ERROR", io.Discard)
+	return buildTestRouterWithLog(t, reader, reg, gv, nil, nil, "ERROR", io.Discard)
 }
 
 // buildTestRouterWithLog 是 buildTestRouter 多带一个日志去处的版本。
 func buildTestRouterWithLog(
 	t *testing.T, reader store.Reader, reg registry.Store,
-	window store.TimeWindow, gv httpapi.GitVerifier, pw httpapi.PolicyWriter,
+	gv httpapi.GitVerifier, pw httpapi.PolicyWriter,
 	cr httpapi.CollectionReader, level string, logOut io.Writer,
 ) (http.Handler, *auth.SessionStore, *http.Cookie) {
 	t.Helper()
@@ -171,9 +173,9 @@ func buildTestRouterWithLog(
 		// 去处"的形态，而写回在那种形态下必须拒绝。
 		Writeback:    writebackStoreOf(reg),
 		PolicyWriter: pw,
-		// 流量查询的时间窗是必填的；测试装配方与 cmd 一样注入覆盖
-		// 全量数据的窗口，使不关心时间维的用例无须逐个传 from/to。
-		DefaultWindow: window,
+		// 这里不再有 DefaultWindow：未指定 from/to 时的时间窗由 Reader 按
+		// 集群现答（design doc 2026-08-18 §3.1）。要跑在一段自定义默认窗口
+		// 上的用例把 Reader 包一层 windowedReader。
 	})
 
 	login := postJSON(t, h, "/api/v1/sessions", map[string]string{

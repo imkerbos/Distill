@@ -215,8 +215,7 @@ func newWritebackFixture(t *testing.T) *writebackFixture {
 		Branches: []string{"distill/prod-asia-1-20260801T090000Z"},
 	}}
 	var logs bytes.Buffer
-	h, _, cookie := buildTestRouterWithLog(t, reader, reg,
-		fixtureWindow(reader), gv, writer, nil, "ERROR", &logs)
+	h, _, cookie := buildTestRouterWithLog(t, reader, reg, gv, writer, nil, "ERROR", &logs)
 
 	return &writebackFixture{
 		h: h, cookie: cookie, reg: reg, reader: reader,
@@ -866,8 +865,7 @@ func TestWritebackRefusesWithoutAVerifier(t *testing.T) {
 	writer := &fakePolicyWriter{}
 	// 校验器为 nil，写入器装着：拒绝必须来自"没校验过"，不是来自"没装
 	// 写入器"，否则这条用例证明不了它想证明的那件事。
-	h, _, cookie := buildTestRouterWithLog(t, reader, reg,
-		fixtureWindow(reader), nil, writer, nil, "ERROR", io.Discard)
+	h, _, cookie := buildTestRouterWithLog(t, reader, reg, nil, writer, nil, "ERROR", io.Discard)
 
 	rec := authedPostJSON(t, h, cookie, writebackPlanPath, map[string]any{})
 	body := bodyOf(t, rec)

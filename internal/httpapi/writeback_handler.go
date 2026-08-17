@@ -277,7 +277,12 @@ func handlePolicyWritebackPush(d Deps) http.HandlerFunc {
 func planWriteback(
 	w http.ResponseWriter, r *http.Request, d Deps, at time.Time,
 ) (plannedWriteback, bool) {
-	window, ok := parseWindow(r.URL.Query(), d.DefaultWindow)
+	clusterID := chi.URLParam(r, "clusterID")
+	window, ok, err := parseWindow(r.Context(), r.URL.Query(), d.Reader, clusterID)
+	if err != nil {
+		writeReaderError(w, r, d, err)
+		return plannedWriteback{}, false
+	}
 	if !ok {
 		response.WriteBusiness(w, response.CodeInvalidParam)
 		return plannedWriteback{}, false
@@ -290,7 +295,6 @@ func planWriteback(
 		return plannedWriteback{}, false
 	}
 
-	clusterID := chi.URLParam(r, "clusterID")
 	c, found, err := d.Registry.Cluster(r.Context(), clusterID)
 	if err != nil {
 		writeRegistryError(w, r, d, err)

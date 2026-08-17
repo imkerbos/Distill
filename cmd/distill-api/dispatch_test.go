@@ -55,6 +55,10 @@ type dispatchCase struct {
 // 它会照常作答，只是答的是另一份数据，而页面上没有任何症状。
 func dispatchCasesFor(ctx context.Context, clusterID string, window store.TimeWindow) []dispatchCase {
 	return []dispatchCase{
+		{method: "DefaultWindow", name: "DefaultWindow", call: func(d *dispatchReader) error {
+			_, err := d.DefaultWindow(ctx, clusterID)
+			return err
+		}},
 		{method: "Topology", name: "Topology", call: func(d *dispatchReader) error {
 			_, err := d.Topology(ctx, clusterID, store.LevelNamespace)
 			return err
@@ -134,6 +138,65 @@ func TestEveryReadMethodDispatchesOnTheRegisteredSource(t *testing.T) {
 	if len(topo.Nodes) == 0 {
 		t.Errorf("Topology(%s declared FIXTURE) returned no nodes; a declared demo cluster "+
 			"must still be served through the dispatcher", fixtureBackedPeer)
+	}
+}
+
+// 一个登记为 FIXTURE 的集群的默认窗口是合成数据集自己的范围，而且它是**固定的**。
+//
+// 期望值不取 DataWindow()，而是从 fixture.Load() 自己扫一遍最早与最晚那条
+// flow：拿被测对象的答案当期望，等于让测试自问自答 —— DataWindow 整个换成
+// 一个"最近 N 天"的相对区间时，那种写法照样全绿。
+//
+// 固定这件事本身就是要求（design doc 2026-08-18 §3.1）：fixture 的数据钉在
+// 过去某一天，任何相对窗口都会随真实时间推移而在某天返回 0 条 —— demo 会在
+// 没有人改动代码的情况下自己坏掉，而症状是"页面上什么都没有"。
+func TestDefaultWindowOfAFixtureClusterIsTheDatasetRange(t *testing.T) {
+	src := mixedFleet()
+	d := newDispatchReader(src, collectstore.New(nil, src))
+
+	got, err := d.DefaultWindow(context.Background(), fixtureBackedPeer)
+	if err != nil {
+		t.Fatalf("DefaultWindow(%s declared FIXTURE) error = %v", fixtureBackedPeer, err)
+	}
+
+	flows := fixture.Load().Flows
+	if len(flows) == 0 {
+		t.Fatal("the fixture holds no flows; this test would prove nothing")
+	}
+	first, last := flows[0].Flow.Timestamp, flows[0].Flow.Timestamp
+	for _, f := range flows {
+		if f.Flow.Timestamp.Before(first) {
+			first = f.Flow.Timestamp
+		}
+		if f.Flow.Timestamp.After(last) {
+			last = f.Flow.Timestamp
+		}
+	}
+	// 上界是末条之后一秒：窗口左闭右开，取末条时间戳本身会把最后一条排除在外。
+	want := store.TimeWindow{From: first, To: last.Add(time.Second)}
+	if got != want {
+		t.Errorf("DefaultWindow(%s declared FIXTURE) = %v–%v, want the dataset's own range %v–%v — "+
+			"a demo cluster's window must stay pinned to the data, not slide with wall-clock time",
+			fixtureBackedPeer, got.From, got.To, want.From, want.To)
+	}
+	if !got.To.Before(time.Now()) {
+		t.Errorf("DefaultWindow(%s declared FIXTURE) ends at %v, which is not in the fixture's "+
+			"fixed past; a relative window makes the demo break by itself on some future day",
+			fixtureBackedPeer, got.To)
+	}
+}
+
+// 不点名集群时答不出默认窗口，且拒绝要说得出原因。
+//
+// 与 Flows 同一个哨兵（store.ErrClusterRequired → 20006）：默认窗口是**按
+// 集群**推出来的结论，没有集群就没有这个结论。落到 readerOf 上会答成"没有
+// 这个集群"，那是另一句话，会把操作者支去查一个集群 ID 拼写问题。
+func TestDefaultWindowWithoutAClusterIsRefused(t *testing.T) {
+	src := mixedFleet()
+	d := newDispatchReader(src, collectstore.New(nil, src))
+
+	if _, err := d.DefaultWindow(context.Background(), ""); !errors.Is(err, store.ErrClusterRequired) {
+		t.Errorf("DefaultWindow(no cluster) error = %v, want store.ErrClusterRequired", err)
 	}
 }
 

@@ -53,13 +53,17 @@ type Deps struct {
 	// NOT_VERIFIED。nil 表示"没有校验这回事"，**不是**"校验都通过"——
 	// 见 verifyBinding。
 	GitVerifier GitVerifier
-	// DefaultWindow 是流量查询未指定 from/to 时使用的时间窗。
+	// 这里曾经有一个 DefaultWindow store.TimeWindow：装配时算一次、六条路径
+	// 共用的常量时间窗。它取的是合成数据集自己的范围（2026-07-31 上的约 36
+	// 秒），于是接线之后每个 COLLECTED 集群的每一屏都被钉在去年那几十秒上，
+	// 而前端从不发 from/to。删掉它是本轮的核心改动，不是清理
+	// （design doc 2026-08-18 §3.1）——默认窗口现在由 Reader 按集群现答
+	// （store.Reader.DefaultWindow），与六个读方法走同一个按来源的分派。
 	//
-	// 由装配方注入而非在此取默认值：合适的默认窗口取决于部署形态。
-	// demo 用覆盖 fixture 全量的窗口（数据固定在过去某一天，任何
-	// "最近 N 天"都会在某天悄悄返回 0 条）；真实部署应注入一个有界
-	// 窗口，与事实层的 require_partition_filter 相称。
-	DefaultWindow store.TimeWindow
+	// **不要把它加回来**，包括加成一个「最近 N 小时」的配置项：那样的取值
+	// 要有人填对才安全，而填错了没有任何症状 —— 填长了扫过量数据，填短了
+	// 漏掉真实流量并把它读成「这条规则没有流量、可以收紧」。「我们实际能
+	// 回答的是哪一段时间」是库里现成的事实，不是一个待填的参数。
 }
 
 // 登录限流的参数。

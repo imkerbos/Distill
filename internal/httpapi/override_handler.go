@@ -79,8 +79,12 @@ func handleCreateOverride(d Deps) http.HandlerFunc {
 		// 这是最常见的路径，必须继续可用。只填一个是半成品，与
 		// parseWindow 在 /flows、/policy-preview 上的既有判据一致，
 		// 当成调用方的输入错误，不当默认值处理。
-		window, ok := parseWindow(
-			map[string][]string{"from": {p.From}, "to": {p.To}}, d.DefaultWindow)
+		window, ok, err := parseWindow(
+			r.Context(), map[string][]string{"from": {p.From}, "to": {p.To}}, d.Reader, clusterID)
+		if err != nil {
+			writeReaderError(w, r, d, err)
+			return
+		}
 		if !ok {
 			response.WriteBusiness(w, response.CodeInvalidParam)
 			return
