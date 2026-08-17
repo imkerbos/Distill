@@ -20,12 +20,16 @@ import (
 // 一个只数"落了几行"的断言依旧是绿的。
 type recordingCollectorStore struct {
 	*recordingStore
+	*recordingDeriveStore
 	ingests   []snapshotstore.IngestRun
 	ingestErr error
 }
 
 func newCollectorStore() *recordingCollectorStore {
-	return &recordingCollectorStore{recordingStore: &recordingStore{}}
+	return &recordingCollectorStore{
+		recordingStore:       &recordingStore{},
+		recordingDeriveStore: &recordingDeriveStore{},
+	}
 }
 
 func (s *recordingCollectorStore) SaveIngest(_ context.Context, run snapshotstore.IngestRun) error {

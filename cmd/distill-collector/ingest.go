@@ -40,6 +40,7 @@ type ingestStore interface {
 type collectorStore interface {
 	runStore
 	ingestStore
+	deriveStore
 }
 
 // flowSource 把一个摄入器与它的来源种类绑在一起。
@@ -124,17 +125,33 @@ func newFlowSource(
 	return &flowSource{source: src, kind: flow.SourceHubble}, nil
 }
 
-// collectAndIngest 跑完一次采集，再跑一次摄入，两者各自落自己的运行记录。
+// collectAndIngest 跑完一次采集、摄一次流量、再推一次身份区间，三者各自落
+// 自己的运行记录。
 //
 // **顺序与失败传播是这个函数存在的理由。**
 //
-// 采集失败就不摄入：那一轮连集群都没读到，一行"摄入成功"落进库里会让
+// 采集失败就不往下走：那一轮连集群都没读到，一行"摄入成功"落进库里会让
 // 界面显示出一份有流量、没有资产的半张图，而那半张图看起来像是资产侧
 // "这次什么都没采到"，不像"这次根本没采成"。
 //
-// 摄入失败**不撤销**已经落库的采集：一次采成功、摄入挂掉是一个真实且有用的
-// 结果，资产值得留下。但它不得读成一次完整的运行 —— 摄入那一行落成 FAILED
-// 带封闭枚举的原因，且这个函数返回错误，于是进程以非零码退出。两件事
+// **摄入排在推导之前，按三者失败的可挽回性排（spec §2.2）：**
+//
+//   - 资产可以重采 —— 再跑一次采集器就拿到当前状态；
+//   - 推导可以重跑 —— 它读的是一次**已经落库**的采集运行，原料还在库里；
+//   - 流量不能重来 —— Hubble 从环形缓冲区供数，一个没摄到的窗口就是没了，
+//     而"没观测到的流量"恰恰会被这个平台读成"这条规则没有流量、可以收紧"。
+//
+// 让可挽回的那次失败毁掉不可挽回的证据是反的，因此推导排在最后，且**摄入
+// 失败不跳过推导** —— 两者互不为前置条件（推导读的是库里的 Pod 观测，
+// 与流量无关；摄入不读区间表，见 spec §2.2 的核对）。
+//
+// 两个结果用 errors.Join 一起返回，**先到的失败不得盖住后到的**：只报第一个
+// 会让一次"摄入挂了、推导也挂了"的运行在日志里看起来只坏了一半，于是另一半
+// 无人处置。errors.Join(nil, nil) 是 nil，因此全成功仍然返回 nil。
+//
+// 摄入与推导失败都**不撤销**已经落库的采集：一次采成功、后续挂掉是一个真实
+// 且有用的结果，资产值得留下。但它们不得读成一次完整的运行 —— 各自那一行落成
+// FAILED 带封闭枚举的原因，且这个函数返回错误，于是进程以非零码退出。两件事
 // 都要：只落行不返错，编排系统会把这一轮当成功；只返错不落行，界面上
 // 这个集群看起来"从来没有摄入过流量"，与一个还没接 relay 的集群一模一样。
 func collectAndIngest(
@@ -158,25 +175,34 @@ func collectAndIngest(
 		"failures", len(result.Failures),
 		"warnings", len(result.Observation.Warnings))
 
+	// 摄入的错误先接住而不是立刻返回：推导不依赖这一步，而提前返回会让一次
+	// relay 故障顺带取消掉一次本来跑得成的推导 —— 那是把一个故障变成两个。
+	var ingestErr error
 	if src == nil {
 		// 没配置摄入是一个合法的部署形态，不是一次失败。说出来，是因为
 		// 一次"只采了资产"的运行与一次"摄入器坏了"的运行在库里长得不一样，
 		// 但在日志里很容易被读成同一件事。
 		logger.Info("flow ingestion is not configured; only assets were collected", "cluster", clusterID)
-		return nil
+	} else {
+		run, err := ingestOnce(ctx, clusterID, src, window, store, logger)
+		ingestErr = err
+		if err == nil {
+			logger.Info("flow ingestion stored",
+				"cluster", clusterID,
+				"ingestRunId", run.RunID,
+				"status", string(run.Status),
+				"connections", ingestedConnections(run),
+				"completeness", string(ingestedCompleteness(run)))
+		}
 	}
 
-	run, err := ingestOnce(ctx, clusterID, src, window, store, logger)
-	if err != nil {
-		return err
+	deriveErr := deriveOnce(ctx, clusterID, result.Observation.RunID, store, logger)
+	if deriveErr == nil {
+		logger.Info("identity intervals derived",
+			"cluster", clusterID, "runId", result.Observation.RunID)
 	}
-	logger.Info("flow ingestion stored",
-		"cluster", clusterID,
-		"ingestRunId", run.RunID,
-		"status", string(run.Status),
-		"connections", ingestedConnections(run),
-		"completeness", string(ingestedCompleteness(run)))
-	return nil
+
+	return errors.Join(ingestErr, deriveErr)
 }
 
 // ingestOnce 跑完一次摄入并落库，返回落下的那一行。
