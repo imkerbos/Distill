@@ -14,6 +14,7 @@ import (
 	"github.com/imkerbos/Distill/internal/flow"
 	"github.com/imkerbos/Distill/internal/identity"
 	"github.com/imkerbos/Distill/internal/replay"
+	"github.com/imkerbos/Distill/internal/snapshot"
 )
 
 // observedPod 是一次快照里与本轮有关的那几列。
@@ -215,6 +216,130 @@ func (r *Reader) readNamespacesAt(ctx context.Context, d described) ([]replay.Na
 	if len(out) > maxSnapshotRows {
 		return nil, fmt.Errorf(
 			"collectstore: cluster %s observed more than %d namespaces at %s",
+			d.clusterID, maxSnapshotRows, d.anchor.UTC().Format("2006-01-02T15:04:05Z07:00"))
+	}
+	return out, nil
+}
+
+// readServicesAt 读出锚点那一次采集看到的 Service。
+//
+// 只取 Baseline 推导用得上的四列（安全规范 §20 / §35）：selector 是 DNS
+// 规则的 peer，ports 里的 targetPort 是健康检查规则的端口。ClusterIP 与
+// Type 不取 —— 它们只供展示，而 ClusterIP 恰恰是最容易被误当成 peer 的
+// 那个值（NetworkPolicy 的 peer 只能是 selector 或 ipBlock）。
+func (r *Reader) readServicesAt(ctx context.Context, d described) ([]snapshot.Service, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT namespace, name, selector, ports
+		   FROM observed_service
+		  WHERE cluster_id = ? AND observed_at = ?
+		  LIMIT ?`,
+		d.clusterID, d.anchor, maxSnapshotRows+1)
+	if err != nil {
+		return nil, fmt.Errorf("collectstore: read observed services: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []snapshot.Service
+	for rows.Next() {
+		s := snapshot.Service{ClusterID: d.clusterID}
+		var selector, ports []byte
+		if err := rows.Scan(&s.Namespace, &s.Name, &selector, &ports); err != nil {
+			return nil, fmt.Errorf("collectstore: scan observed service: %w", err)
+		}
+		// 坏掉的列整体报错，不当成"这个 Service 没有 selector"：后者会让
+		// DNS 的 Baseline 悄悄推导不出来，于是一条本来齐备的必备规则显示成
+		// 缺失，而缺失清单正是这份报告最该说准的那一栏。
+		if err := json.Unmarshal(selector, &s.Selector); err != nil {
+			return nil, fmt.Errorf(
+				"collectstore: decode service selector of cluster %s: %w", d.clusterID, err)
+		}
+		if err := json.Unmarshal(ports, &s.Ports); err != nil {
+			return nil, fmt.Errorf(
+				"collectstore: decode service ports of cluster %s: %w", d.clusterID, err)
+		}
+		out = append(out, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("collectstore: iterate observed services: %w", err)
+	}
+	if len(out) > maxSnapshotRows {
+		return nil, fmt.Errorf(
+			"collectstore: cluster %s observed more than %d services at %s",
+			d.clusterID, maxSnapshotRows, d.anchor.UTC().Format("2006-01-02T15:04:05Z07:00"))
+	}
+	return out, nil
+}
+
+// readEndpointsAt 读出锚点那一次采集看到的 Service 后端地址。
+//
+// 后端非空是 DNS Baseline 的前置条件：一个存在但没有后端的 kube-dns
+// 会生成一条指向空集的放行规则，看起来齐备、实际什么都没放行。
+func (r *Reader) readEndpointsAt(ctx context.Context, d described) ([]snapshot.Endpoints, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT namespace, name, addresses
+		   FROM observed_endpoints
+		  WHERE cluster_id = ? AND observed_at = ?
+		  LIMIT ?`,
+		d.clusterID, d.anchor, maxSnapshotRows+1)
+	if err != nil {
+		return nil, fmt.Errorf("collectstore: read observed endpoints: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []snapshot.Endpoints
+	for rows.Next() {
+		e := snapshot.Endpoints{ClusterID: d.clusterID}
+		var addresses []byte
+		if err := rows.Scan(&e.Namespace, &e.Name, &addresses); err != nil {
+			return nil, fmt.Errorf("collectstore: scan observed endpoints: %w", err)
+		}
+		if err := json.Unmarshal(addresses, &e.Addresses); err != nil {
+			return nil, fmt.Errorf(
+				"collectstore: decode endpoint addresses of cluster %s: %w", d.clusterID, err)
+		}
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("collectstore: iterate observed endpoints: %w", err)
+	}
+	if len(out) > maxSnapshotRows {
+		return nil, fmt.Errorf(
+			"collectstore: cluster %s observed more than %d service backends at %s",
+			d.clusterID, maxSnapshotRows, d.anchor.UTC().Format("2006-01-02T15:04:05Z07:00"))
+	}
+	return out, nil
+}
+
+// readGatewaysAt 读出锚点那一次采集看到的入口暴露对象。
+//
+// 一个后端 Service 一行（migrations/000009）：健康检查 Baseline 是按后端
+// Service 数的，按 Ingress 去重会让同一个 Ingress 的其余后端拿不到规则。
+func (r *Reader) readGatewaysAt(ctx context.Context, d described) ([]snapshot.Gateway, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT namespace, name, backend_service, gateway_kind
+		   FROM observed_gateway
+		  WHERE cluster_id = ? AND observed_at = ?
+		  LIMIT ?`,
+		d.clusterID, d.anchor, maxSnapshotRows+1)
+	if err != nil {
+		return nil, fmt.Errorf("collectstore: read observed gateways: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []snapshot.Gateway
+	for rows.Next() {
+		g := snapshot.Gateway{ClusterID: d.clusterID}
+		if err := rows.Scan(&g.Namespace, &g.Name, &g.BackendService, &g.Kind); err != nil {
+			return nil, fmt.Errorf("collectstore: scan observed gateway: %w", err)
+		}
+		out = append(out, g)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("collectstore: iterate observed gateways: %w", err)
+	}
+	if len(out) > maxSnapshotRows {
+		return nil, fmt.Errorf(
+			"collectstore: cluster %s observed more than %d ingress objects at %s",
 			d.clusterID, maxSnapshotRows, d.anchor.UTC().Format("2006-01-02T15:04:05Z07:00"))
 	}
 	return out, nil

@@ -8,6 +8,7 @@ import (
 
 	"github.com/imkerbos/Distill/internal/baseline"
 	"github.com/imkerbos/Distill/internal/fixture"
+	"github.com/imkerbos/Distill/internal/flow"
 	"github.com/imkerbos/Distill/internal/policygen"
 	"github.com/imkerbos/Distill/internal/predict"
 	"github.com/imkerbos/Distill/internal/registry"
@@ -26,13 +27,59 @@ type PolicyPreview struct {
 	Namespace string `json:"namespace"`
 	// Window 是实际生效的查询时间窗，必须回显。
 	Window TimeWindow `json:"window"`
+	// WindowCompleteness 是这段观测窗口的完整度，必须回显。
+	//
+	// **它决定 Prediction 的计数该怎么读，因此不能靠推断。** 窗口不是
+	// COMPLETE 时，policygen 会把每一条观测判为 DEGRADED_EVIDENCE 而学不出
+	// 任何放行规则（internal/policygen/aggregate.go 的 classify），于是候选集
+	// 只剩 Baseline，`Counts[WOULD_BREAK]` 会逼近整个窗口的连接数。
+	//
+	// 那个数字**不是一次关于上线影响的预测**：它量的是"候选集为空时有多少
+	// 连接会被 Baseline 拦下"。方向朝关（不会造成一次不安全的批准），但把它
+	// 当成"上线会断多少条"去读会得出一个大得离谱又毫无依据的结论。
+	//
+	// 在这个字段之前，调用方要判断这件事只能去数
+	// `Prediction.DegradedCount == TotalEvaluated` —— 那是一条**推断**，
+	// 而一条前端必须自己推对的结论不是契约说出来的事实。两个 Reader 都填。
+	//
+	// 复用 flow.Completeness 而不是另起一套：完整度只该有一个封闭枚举，
+	// 同值枚举并存迟早漂移（与 baseline.Rule.Direction 复用 replay.Direction
+	// 同一条理由）。
+	WindowCompleteness flow.Completeness `json:"windowCompleteness"`
 	// Candidates 是候选策略。
 	Candidates []policygen.CandidatePolicy `json:"candidates"`
 	// MissingBaselines 是尚未齐备的 Baseline 类型。
 	//
 	// 五类齐备是进入 Enforcing 的前提（spec §7.3 G3）。缺失必须与
 	// 候选策略同屏，否则一份"看起来完整"的推荐会掩盖入口中断的风险。
+	//
+	// **这份清单装的是全部尚未齐备的类，一个都不减。** 其中哪几类是因为
+	// 我们压根没看过依据，由 NotAssessedBaselines 单独标注 —— 那是一个
+	// **叠加的**说明，不是一次从本清单里的摘除。理由见那个字段。
 	MissingBaselines []policygen.MissingBaseline `json:"missingBaselines"`
+	// NotAssessedBaselines 是依据资源这次采集没有拿回来、因而无从判断
+	// 缺不缺的 Baseline 类型（design doc 2026-08-17 §11）。
+	//
+	// **它与 MissingBaselines 重叠，这是刻意的。** 一个未评估的类同时出现在
+	// 两栏：缺失清单回答"还差哪几类"，本清单回答"其中哪几类是我们没看过"。
+	// 操作者据此仍然分得清「没看过」与「看过了、集群里就是没有」，也仍然
+	// 知道该去补 RBAC 还是补策略 —— §11 那个区分完整保留。
+	//
+	// **为什么是叠加而不是摘除。** 摘除会让只读 MissingBaselines 的消费方
+	// 看见比实际更少的阻塞项。而依据采集一旦 403 或超时，DNS 这种要紧的类
+	// 会**间歇性**地离开那份清单 —— 一个从没验证过 DNS 依据的集群于是被
+	// 放行进 Enforcing，方向从"多报一条该修的"翻成"少报一条该挡的"。
+	//
+	// 门禁代码今天还不存在，而写它的人最自然的写法就是只读缺失清单。
+	// 因此这条不能留给未来的实现者去记得 —— 它必须在数据形状上成立。
+	//
+	// **恒为非 nil。** 一份空清单是"五类依据我们都检查过，都在"，与
+	// "这个 Reader 根本没回答过这个问题"必须能区分：前者序列化成 []，
+	// 后者是 null。两个 Reader 都要说得出这同一句话。
+	//
+	// 不随 namespace 裁剪：它讲的是那一次采集拿回了什么，与在看哪个
+	// namespace 无关 —— 与 Ungeneratable / ExcludedWorkloads 同理。
+	NotAssessedBaselines []baseline.Kind `json:"notAssessedBaselines"`
 	// Ungeneratable 是无法表达为规则的流量。
 	Ungeneratable []policygen.UngeneratableItem `json:"ungeneratable"`
 	// ExcludedWorkloads 是从未进入候选策略花名册的 Pod（hostNetwork、
@@ -195,18 +242,27 @@ func (r *FixtureReader) PolicyPreview(
 
 	// 一份裁剪结果，两处使用：屏幕上的候选集与导出的文件必须是同一个
 	// 切片渲染出来的，各裁一次就又有了两个可以互相分歧的选择点。
-	overriddenCandidates := filterCandidates(overridden.Policies, namespace)
+	overriddenCandidates := FilterCandidates(overridden.Policies, namespace)
 
 	return PolicyPreview{
 		Cluster: clusterID, Namespace: namespace, Window: window,
-		Candidates:        filterCandidates(gen.Policies, namespace),
-		MissingBaselines:  filterMissing(gen.MissingBaselines, namespace),
-		Ungeneratable:     gen.Ungeneratable,
-		ExcludedWorkloads: gen.ExcludedWorkloads,
-		Prediction:        report,
-		Kinds:             baseline.AllKinds(),
-		Overrides:         stored,
-		StaleOverrides:    stale,
+		// 合成数据集不是一次观测，没有采样、没有丢弃、没有覆盖不满的窗口 ——
+		// 它就是完整的。填 COMPLETE 而不是留空：空值不在 flow.Completeness
+		// 的封闭枚举里，前端拿到它只能猜，而这个字段存在的理由正是不让人猜。
+		WindowCompleteness: flow.CompletenessComplete,
+		Candidates:         FilterCandidates(gen.Policies, namespace),
+		MissingBaselines:   FilterMissing(gen.MissingBaselines, namespace),
+		// 合成数据集把五类依据都带齐了（Services / Endpoints / Gateways /
+		// ScrapeTargets / NodeAgents 都在 fixture.Cluster.Assets 里），因此
+		// 这里恒为空。**非 nil**：空清单要读作"五类都检查过、都在"，而不是
+		// 读作"这个 Reader 没回答"（见字段说明）。
+		NotAssessedBaselines: []baseline.Kind{},
+		Ungeneratable:        gen.Ungeneratable,
+		ExcludedWorkloads:    gen.ExcludedWorkloads,
+		Prediction:           report,
+		Kinds:                baseline.AllKinds(),
+		Overrides:            stored,
+		StaleOverrides:       stale,
 		Overridden: OverriddenView{
 			Candidates: overriddenCandidates,
 			Prediction: overriddenReport,
@@ -262,8 +318,13 @@ func hasNamespace(nss []replay.NamespaceRef, name string) bool {
 	return false
 }
 
-// filterCandidates 按 namespace 裁剪候选策略的展示范围；空表示全集群。
-func filterCandidates(in []policygen.CandidatePolicy, namespace string) []policygen.CandidatePolicy {
+// FilterCandidates 按 namespace 裁剪候选策略的展示范围；空表示全集群。
+//
+// 导出给别的 Reader 用，而不是各自再写一份：生成恒为全集群、namespace
+// 只裁展示，这条规则若在两个 Reader 里各写一次，其中一次哪天顺手把
+// namespace 传进生成器，预测就会拿全量流量配一份被裁剪过的策略集 ——
+// 凭空造出 WOULD_OPEN，同时低估 WOULD_BREAK（spec §5）。
+func FilterCandidates(in []policygen.CandidatePolicy, namespace string) []policygen.CandidatePolicy {
 	if namespace == "" {
 		return in
 	}
@@ -276,11 +337,11 @@ func filterCandidates(in []policygen.CandidatePolicy, namespace string) []policy
 	return out
 }
 
-// filterMissing 按 namespace 裁剪缺失清单的展示范围；空表示全集群。
+// FilterMissing 按 namespace 裁剪缺失清单的展示范围；空表示全集群。
 //
 // 与候选策略一样只裁展示：缺失是按整个集群算出来的，筛选视图不该改变
 // 某个 namespace 到底缺不缺什么。
-func filterMissing(in []policygen.MissingBaseline, namespace string) []policygen.MissingBaseline {
+func FilterMissing(in []policygen.MissingBaseline, namespace string) []policygen.MissingBaseline {
 	if namespace == "" {
 		return in
 	}

@@ -3,7 +3,8 @@
 // 接入按"错了有多严重"分阶段（design doc 2026-08-17 §7）：Topology 与 Quality
 // 只描述、不推荐，先接；Flows / Flow / Security 展示逐条判定与风险发现，其次；
 // PolicyPreview 驱动推荐与 dry-run，是唯一一个错了会直接导致生产阻断建议的，
-// 留到最后，在这里明确拒绝，**不返回空结果**。
+// 留到最后 —— 现已接上（policy.go）。仍未接的只剩写路径的前置校验
+// EnsureRuleExists，它在 notyet.go 里**明确拒绝**，不返回空结果。
 //
 // 本包守两条性质，两条各自都有自己的危害：
 //

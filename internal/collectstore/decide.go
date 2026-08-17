@@ -39,6 +39,18 @@ type traffic struct {
 	// 留一份而不是让安全发现自己再读一次：覆盖率与判定必须认同一批策略，
 	// 各读各的就多出一个"判定认这条策略、裸奔统计不认"的位置。
 	policies []networkingv1.NetworkPolicy
+	// namespaces 是锚点那一刻的命名空间快照，与 eval 出自同一次读取。
+	//
+	// 留一份而不是让策略预览自己再读一次：候选策略的生成与回放、以及
+	// "这个 namespace 存不存在"这句拒绝，必须认同一批 namespace 标签 ——
+	// 各读各的会让预览页按一份标签生成、按另一份判定。
+	namespaces []replay.NamespaceRef
+	// registered 是注册表里的那一行，与门禁 collectedCluster 看到的是同一行。
+	//
+	// 带下来而不是再查一次：候选策略的 Baseline 依据（网段登记、apiserver
+	// 端点）与判定的 CCNPPresent 都出自它，再查一次只会多出一个"门禁看到
+	// 的集群"与"生成用到的集群"不是同一行的位置。
+	registered registry.Cluster
 	// fleet 是当前的网段登记，用来认出跨集群与出公网的对端。
 	fleet *cluster.Registry
 }
@@ -121,11 +133,13 @@ func (r *Reader) trafficOf(
 		opts = append(opts, replay.WithCCNPPresent(true))
 	}
 	return traffic{
-		described: d,
-		eval:      replay.NewEvaluator(d.clusterID, parsed, namespaces, opts...),
-		pods:      byKey,
-		policies:  parsed,
-		fleet:     fleet,
+		described:  d,
+		eval:       replay.NewEvaluator(d.clusterID, parsed, namespaces, opts...),
+		pods:       byKey,
+		policies:   parsed,
+		namespaces: namespaces,
+		registered: c,
+		fleet:      fleet,
 	}, nil
 }
 
@@ -142,6 +156,16 @@ type attributed struct {
 	srcOutcome identity.Outcome
 	dstOutcome identity.Outcome
 	decision   replay.Decision
+	// flow 是这条连接送进求值引擎的那个形状，**每条都有**，包括判不出来的。
+	//
+	// 存下来而不是让策略预览再拼一次：预览要把同一批连接喂给 policygen 与
+	// predict，各拼一次就有了第二条构造路径，而两条路径分歧时屏幕上没有
+	// 任何迹象 —— 那正是本轮反复点名的那个缺陷。
+	//
+	// 判不出来的那些同样带 flow（两端只有地址、Pod 为 nil）：不带就没法
+	// 进观测清单，而丢掉它们会让观测集合小于真实集合，于是覆盖它们的规则
+	// 被判"无流量、可收紧"（design doc §3）。
+	flow replay.Flow
 }
 
 // attribute 解析一条连接的两端并给出判定。
@@ -158,6 +182,15 @@ func (t traffic) attribute(c flow.Connection) attributed {
 	a := attributed{conn: c}
 	a.src, a.srcOutcome = t.subjectAt(c.Source)
 	a.dst, a.dstOutcome = t.subjectAt(c.Dest)
+	// 先拼出那个形状，两端暂时只有地址。求值只在两端都解得开时才发生，
+	// 但**每一条**都要留下 flow —— 判不出来的那些也要进观测清单。
+	a.flow = replay.Flow{
+		Source:    replay.Endpoint{ClusterID: t.clusterID, IP: c.Source.IP},
+		Dest:      replay.Endpoint{ClusterID: t.clusterID, IP: c.Dest.IP},
+		Protocol:  replay.Protocol(c.Protocol),
+		Port:      c.Port,
+		Timestamp: t.at,
+	}
 
 	if reason := t.unknownReasonFor(a); reason != replay.ReasonNone {
 		a.decision = t.unknown(reason, "")
@@ -174,15 +207,9 @@ func (t traffic) attribute(c flow.Connection) attributed {
 			"the interval and the snapshot covering that moment disagree about this endpoint")
 		return a
 	}
+	a.flow.Source.Pod, a.flow.Dest.Pod = srcPod, dstPod
 
-	decision := t.eval.Evaluate(replay.Flow{
-		Source:    replay.Endpoint{ClusterID: t.clusterID, IP: c.Source.IP, Pod: srcPod},
-		Dest:      replay.Endpoint{ClusterID: t.clusterID, IP: c.Dest.IP, Pod: dstPod},
-		Protocol:  replay.Protocol(c.Protocol),
-		Port:      c.Port,
-		Timestamp: t.at,
-	})
-	a.decision = t.transmitCompleteness(decision)
+	a.decision = t.transmitCompleteness(t.eval.Evaluate(a.flow))
 	return a
 }
 
