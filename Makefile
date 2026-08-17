@@ -31,7 +31,8 @@ test-integration:
 	  -e "CREATE DATABASE IF NOT EXISTS distill_test CHARACTER SET utf8mb4;"
 	docker compose exec -T \
 	  -e DISTILL_TEST_MYSQL_DSN='root:distill-local@tcp(mysql:3306)/distill_test?parseTime=true&loc=UTC' \
-	  distill-api go test ./internal/mysqlregistry/ ./internal/snapshotstore/ -count=1 -p 1
+	  distill-api go test ./internal/mysqlregistry/ ./internal/snapshotstore/ ./internal/collectstore/ \
+	  -count=1 -p 1
 
 # conformance-up/-down 起停 test/conformance/setup.sh 管理的 kind 集群；
 # conformance 跑 harness 本身，默认连 setup.sh 建出来的 kind-distill。

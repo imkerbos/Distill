@@ -5,13 +5,14 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/imkerbos/Distill/internal/collectstore"
 	"github.com/imkerbos/Distill/internal/fixture"
 	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/store"
 )
 
-// ErrNoCollectedReader 表示这个集群登记为 COLLECTED，而读取采集数据的
-// Reader 还没有落地（design doc 2026-08-17 §7 的分阶段接入）。
+// ErrNoCollectedReader 表示这个集群登记为 COLLECTED，而装配方没有交来读取
+// 采集数据的 Reader。
 //
 // **单列一个哨兵，而不是退回 fixture。** 一个没有可用采集的集群，正确答案是
 // 「没有数据」；回退到合成数据的后果是这个平台能造成的最严重后果 —— 操作者
@@ -26,14 +27,24 @@ var ErrNoCollectedReader = errors.New("no reader for a collected cluster yet")
 // 反过来也一样 —— 一个恰好在 fixture 里有数据的集群 ID，只要登记为 COLLECTED，
 // 就不该拿到 fixture 的那份数据。
 //
+// collected 是采集侧的 Reader，取具体类型而不是 store.Reader：一个 nil 的
+// 接口值与一个装着 nil 指针的接口值在 `== nil` 上不是一回事，而这里判空的
+// 后果是「这个集群到底能不能被服务」。为 nil 时拒绝装配 —— 装配方没接上
+// 采集侧读取面时，正确答案仍然是「没有数据」，不是 fixture（规范 §49）。
+//
 // default 分支拒绝而不是兜底：来源是封闭枚举，落到这里说明库里存着一个没有
 // 登记过的取值，或者根本没登记。**失败方向朝关**（规范 §49）。
-func readerFor(c registry.Cluster, reg store.ClusterSource) (store.Reader, error) {
+func readerFor(
+	c registry.Cluster, reg store.ClusterSource, collected *collectstore.Reader,
+) (store.Reader, error) {
 	switch c.DataSource {
 	case registry.DataSourceFixture:
 		return newFixtureReader(reg), nil
 	case registry.DataSourceCollected:
-		return nil, fmt.Errorf("%w: cluster %s", ErrNoCollectedReader, c.ID)
+		if collected == nil {
+			return nil, fmt.Errorf("%w: cluster %s", ErrNoCollectedReader, c.ID)
+		}
+		return collected, nil
 	default:
 		return nil, fmt.Errorf("cluster %s has an unregistered data source %q", c.ID, c.DataSource)
 	}

@@ -80,9 +80,10 @@ func run(configPath string) error {
 	//
 	// 走 newFixtureReader 而不是直接 store.NewFixtureReader：合成数据集只服务
 	// 登记为 FIXTURE 的集群，一个登记为 COLLECTED 的集群在这个 Reader 的数据源
-	// 里根本不存在（见 reader.go）。今天挂在 Deps 上的仍然只有这一个 Reader ——
-	// 采集侧的 Reader 还没落地，按来源分派的 readerFor 也就还没有生产调用方
-	// （design doc 2026-08-17 §7 的分阶段接入）。
+	// 里根本不存在（见 reader.go）。今天挂在 Deps 上的仍然只有这一个 Reader：
+	// 采集侧的 internal/collectstore 只接了 Topology 与 Quality，另外四个读方法
+	// 还在后面几轮（design doc 2026-08-17 §7 的分阶段接入）。按来源分派要等六个
+	// 方法都接上 —— 半真半假的中间态是 §7 明确排除的那种状态。
 	reader := newFixtureReader(reg)
 
 	// 同一个道理，设置也传提供者而不是取出来的一份值：Git 校验相关的

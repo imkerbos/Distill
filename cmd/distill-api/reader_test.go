@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/imkerbos/Distill/internal/collectstore"
 	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/store"
 )
@@ -60,22 +61,24 @@ const emptyID = "prod-new-1"
 // 前一半通过。
 func TestSourceIsDeclaredNotInferred(t *testing.T) {
 	src := stubClusterSource{}
+	collected := collectstore.New(nil, src)
 
 	// 有数据，却登记为 COLLECTED：不得因为 fixture 里找得到它就给它 fixture。
 	withData := registry.Cluster{ID: fixtureBackedID, DataSource: registry.DataSourceCollected}
-	r, err := readerFor(withData, src)
-	if !errors.Is(err, ErrNoCollectedReader) {
-		t.Errorf("readerFor(%s declared COLLECTED) error = %v, want ErrNoCollectedReader: "+
-			"the source is declared, not inferred from the fixture happening to hold that ID",
+	r, err := readerFor(withData, src, collected)
+	if err != nil {
+		t.Fatalf("readerFor(%s declared COLLECTED) error = %v, want the collected reader",
 			fixtureBackedID, err)
 	}
-	if r != nil {
-		t.Errorf("readerFor(%s declared COLLECTED) returned reader %T, want none", fixtureBackedID, r)
+	if r != store.Reader(collected) {
+		t.Errorf("readerFor(%s declared COLLECTED) = %T, want *collectstore.Reader: "+
+			"the source is declared, not inferred from the fixture happening to hold that ID",
+			fixtureBackedID, r)
 	}
 
 	// 没数据，却登记为 FIXTURE：仍然装 fixture 的 Reader。
 	withoutData := registry.Cluster{ID: emptyID, DataSource: registry.DataSourceFixture}
-	r, err = readerFor(withoutData, src)
+	r, err = readerFor(withoutData, src, collected)
 	if err != nil {
 		t.Fatalf("readerFor(%s declared FIXTURE) error = %v, want none: "+
 			"an empty fixture is not a reason to treat a declared demo cluster as collected",
@@ -86,14 +89,30 @@ func TestSourceIsDeclaredNotInferred(t *testing.T) {
 	}
 }
 
+// 装配方没接上采集侧读取面时，COLLECTED 集群仍然不得拿到 fixture。
+//
+// 这是同一条纪律在"装配漏了一半"这种情形下的落点：正确答案是「没有数据」，
+// 而不是"既然没有采集侧 Reader，就先用合成数据顶着"（规范 §49）。
+func TestACollectedClusterWithoutACollectedReaderIsRefused(t *testing.T) {
+	c := registry.Cluster{ID: fixtureBackedID, DataSource: registry.DataSourceCollected}
+	r, err := readerFor(c, stubClusterSource{}, nil)
+	if !errors.Is(err, ErrNoCollectedReader) {
+		t.Errorf("readerFor(COLLECTED, no collected reader) error = %v, want ErrNoCollectedReader", err)
+	}
+	if r != nil {
+		t.Errorf("readerFor(COLLECTED, no collected reader) = %T, want no reader at all", r)
+	}
+}
+
 // 没登记来源的集群一律拒绝装配。
 //
 // 失败方向朝关（规范 §49）：一个来源为空的集群多半是新增了写路径却没同步
 // 登记，而此时任何一种兜底都是在替一个没人做过的决定作答。
 func TestAnUnregisteredDataSourceGetsNoReader(t *testing.T) {
+	src := stubClusterSource{}
 	for _, ds := range []registry.DataSource{"", "FIXTURES", "collected"} {
 		c := registry.Cluster{ID: "prod-x", DataSource: ds}
-		r, err := readerFor(c, stubClusterSource{})
+		r, err := readerFor(c, src, collectstore.New(nil, src))
 		if err == nil {
 			t.Errorf("readerFor(data source %q) error = nil, want a refusal", ds)
 		}
@@ -107,7 +126,7 @@ func TestAnUnregisteredDataSourceGetsNoReader(t *testing.T) {
 //
 // 两半各自独立，两半都要成立：
 //
-//  1. 装配层不选它 —— readerFor 对 COLLECTED 不返回任何 Reader。
+//  1. 装配层不选它 —— readerFor 对 COLLECTED 只会返回采集侧的 Reader。
 //  2. **即便有人把上面那个开关拨反**，装出来的 fixture Reader 也答不出这个
 //     集群：它的数据源被 fixtureOnlySource 收窄过，一个登记为 COLLECTED 的
 //     集群在里面根本不存在，于是六个读方法一律 ErrClusterNotFound，而不是
@@ -125,15 +144,12 @@ func TestACollectedClusterNeverGetsTheFixtureReader(t *testing.T) {
 	ctx := context.Background()
 
 	collected := registry.Cluster{ID: fixtureBackedID, DataSource: registry.DataSourceCollected}
-	r, err := readerFor(collected, src)
-	if err == nil {
-		t.Errorf("readerFor(COLLECTED) error = nil, want a refusal")
+	r, err := readerFor(collected, src, collectstore.New(nil, src))
+	if err != nil {
+		t.Errorf("readerFor(COLLECTED) error = %v, want the collected reader", err)
 	}
 	if _, isFixture := r.(*store.FixtureReader); isFixture {
 		t.Errorf("readerFor(COLLECTED) handed back the fixture reader")
-	}
-	if r != nil {
-		t.Errorf("readerFor(COLLECTED) = %T, want no reader at all", r)
 	}
 
 	// 第二半：直接拿 fixture Reader 去问那个 COLLECTED 集群。
