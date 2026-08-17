@@ -88,6 +88,23 @@ func TestAnIncompleteRunClosesNothing(t *testing.T) {
 				Status: identity.RunOK, PodsCollected: false,
 			},
 		},
+		// 未登记的取值：枚举加了一个状态、这里没跟上时就是这个形状。
+		// 它必须什么都关不了 —— "读不懂的状态"不是"可信的运行"。
+		{
+			name: "status unregistered",
+			run: identity.RunFacts{
+				ClusterID: "cluster-a", RunID: "run-2", ObservedAt: tLater,
+				Status: identity.RunStatus("DEGRADED"), PodsCollected: true,
+			},
+		},
+		// 零值：RunFacts 少填一个字段就编译得过，而它同样不得关任何区间。
+		{
+			name: "status left unset",
+			run: identity.RunFacts{
+				ClusterID: "cluster-a", RunID: "run-2", ObservedAt: tLater,
+				PodsCollected: true,
+			},
+		},
 	}
 	for _, c := range untrusted {
 		t.Run(c.name, func(t *testing.T) {
@@ -177,6 +194,81 @@ func TestDeriveOpensANewIntervalWhenTheIPChangesHands(t *testing.T) {
 	if id, out := identity.Resolve(got, tLater); out != identity.OutcomeResolved || id != workerIdentity() {
 		t.Fatalf("at the handover: (%+v, %s), want batch/worker RESOLVED", id, out)
 	}
+}
+
+// degradedAPIIdentity 是 ReplicaSet 那一步没采到时，同一个 Pod 的样子：
+// ownerRef 链走不到 Deployment，归属退化成那个 ReplicaSet 自己。
+func degradedAPIIdentity() identity.Identity {
+	id := apiIdentity()
+	id.WorkloadKind = "ReplicaSet"
+	id.WorkloadName = "api-7d9f"
+	return id
+}
+
+// partialRun 是一次 ReplicaSet 采集失败的运行：Pod 采到了，整体是 PARTIAL。
+func partialRun(runID string, at time.Time) identity.RunFacts {
+	return identity.RunFacts{
+		ClusterID:     "cluster-a",
+		RunID:         runID,
+		ObservedAt:    at,
+		Status:        identity.RunPartial,
+		PodsCollected: true,
+	}
+}
+
+// TestADegradedWorkloadLabelDoesNotForkAPod —— 一个 Pod 的主体是它的 UID。
+//
+// workload_kind / workload_name 是采集当时解出来的属性，ReplicaSet 这一类采
+// 不到时它们会退化。把退化算成"另一个主体"，同一个 Pod 会在同一个地址上多
+// 出一个区间，于是这个地址从此答 AMBIGUOUS；而权限一直不恢复时每次运行都是
+// PARTIAL，没有一次运行有资格关掉它们，退化就成了永久的。
+func TestADegradedWorkloadLabelDoesNotForkAPod(t *testing.T) {
+	pod := func(id identity.Identity) []identity.ObservedPod {
+		return []identity.ObservedPod{{PodIP: "10.4.1.7", Identity: id}}
+	}
+
+	// 权限缺口从一开始就在：第一次运行就是退化的那次，区间带着 ReplicaSet 开出来。
+	t.Run("a later trustworthy run corrects the label in place", func(t *testing.T) {
+		opened := identity.Derive(nil, pod(degradedAPIIdentity()), partialRun("run-1", tSeen))
+		if len(opened) != 1 {
+			t.Fatalf("a degraded run opened %d intervals, want 1: %+v", len(opened), opened)
+		}
+
+		restored := identity.Derive(opened, pod(apiIdentity()), trustworthyRun())
+		if len(restored) != 1 {
+			t.Fatalf("after ReplicaSet access came back the pod holds %d intervals, want 1 "+
+				"(a degraded label is not a second subject): %+v", len(restored), restored)
+		}
+		iv := restored[0]
+		if !iv.ValidFrom.Equal(tSeen) || !iv.Open() || iv.FirstRunID != "run-1" {
+			t.Fatalf("interval = %+v, want the original one still open from %v, first_run_id run-1", iv, tSeen)
+		}
+		if iv.Identity != apiIdentity() {
+			t.Fatalf("workload = %s/%s, want Deployment/api: a trustworthy run resolved it, "+
+				"and leaving the RBAC gap's answer in place would pin this pod to a ReplicaSet for its whole life",
+				iv.Identity.WorkloadKind, iv.Identity.WorkloadName)
+		}
+		if id, out := identity.Resolve(restored, tLater); out != identity.OutcomeResolved || id != apiIdentity() {
+			t.Fatalf("Resolve at %v = (%+v, %s), want payment/api RESOLVED", tLater, id, out)
+		}
+	})
+
+	// 反方向：不可信的那次运行不得把更准的归属覆盖成退化的那个。
+	t.Run("a degraded run never overwrites a resolved label", func(t *testing.T) {
+		got := identity.Derive([]identity.Interval{openAPIInterval()},
+			pod(degradedAPIIdentity()), partialRun("run-2", tLater))
+		if len(got) != 1 {
+			t.Fatalf("a degraded run forked the pod into %d intervals, want 1: %+v", len(got), got)
+		}
+		if got[0].Identity != apiIdentity() {
+			t.Fatalf("workload = %s/%s, want Deployment/api unchanged: a run that could not read "+
+				"ReplicaSets must not write its degraded answer over a better one",
+				got[0].Identity.WorkloadKind, got[0].Identity.WorkloadName)
+		}
+		if !got[0].Open() || got[0].LastRunID != "run-2" {
+			t.Fatalf("interval = %+v, want it still open and last seen by run-2", got[0])
+		}
+	})
 }
 
 // TestDeriveNeverClosesAnotherClustersInterval —— 不同集群 Pod CIDR 可能重叠，

@@ -19,14 +19,18 @@ import (
 //
 // 幂等：重试、补跑与并发都会让同一次运行被推导多次，第二遍必须让表逐字节
 // 不变，而不是再追加一行。这里的做法是让第二遍**一条写语句都不发** ——
-// 已存在的行只在三个可变列真的变了时才 UPDATE。
+// 已存在的行只在可变列真的变了时才 UPDATE。
 //
 // 不写审计行（spec §8）：审计记的是人做了什么，一次自动推导写一行只会稀释
 // 审计的信噪比。可追溯性由 first_run_id / last_run_id 承担。
 //
-// 整个过程在单个事务里：读出的开区间与随后写回之间若被另一次推导插进来，
-// 两边都会以为自己看到的是全部开区间（安全规范 §25）。并发的第二次推导会
-// 在主键上撞停并整体回滚 —— 失败方向是"没推导成"，不是"推导出一半"。
+// 整个过程在单个事务里：一次推导要么整体生效要么整体回滚，不会留下推了一半
+// 的区间表（安全规范 §25）。事务给到的只有这一条 —— **并发的两次推导没有被
+// 挡住**：它们都会读到同一批开区间，各自以为看到的是全部。同一次运行被推导
+// 两遍时，两边的 INSERT 撞主键，后到的整体回滚，失败方向是"没推导成"；而
+// 同一集群两次**不同**运行并发时走的是 UPDATE，它只在行锁上排队，随后
+// 后写的赢，不报任何错 —— 失败方向是"关在了错的时刻"。要真正互斥，得由
+// 调用方按集群串行化推导，眼下没有生产调用点（spec §9），也就还没有那一层。
 func (s *Store) DeriveIdentityIntervals(ctx context.Context, clusterID, runID string) (err error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -293,9 +297,9 @@ func keyOf(iv identity.Interval) intervalKey {
 //
 // prev 是本次推导读到的那批开区间，settled 是起点与本次相同、但已经关闭的
 // 那些。拿两者做对照而不是无脑 upsert：已存在的行只在 valid_to /
-// last_run_id / closed_reason 真的变了时才发一条 UPDATE，已关闭的行一个字
-// 都不改。于是"对同一次运行重跑"在第二遍一条写语句都不发 —— 幂等不是靠
-// 事后比对得出的，是靠没有写发生。
+// last_run_id / closed_reason / workload_* 真的变了时才发一条 UPDATE，
+// 已关闭的行一个字都不改。于是"对同一次运行重跑"在第二遍一条写语句都不发
+// —— 幂等不是靠事后比对得出的，是靠没有写发生。
 func writeIntervals(ctx context.Context, tx *sql.Tx, prev []identity.Interval,
 	settled map[intervalKey]identity.Identity, next []identity.Interval) error {
 	before := make(map[intervalKey]identity.Interval, len(prev))
@@ -316,8 +320,10 @@ func writeIntervals(ctx context.Context, tx *sql.Tx, prev []identity.Interval,
 		key := keyOf(iv)
 		if was, done := settled[key]; done {
 			// 已经关掉的那一段就是这次观测的产物，补跑不带来新事实。
+			// 比主体而不比整个 Identity：补跑的那次运行可能正是工作负载归属
+			// 退化的那次，而已关闭的区间是历史，不因为补跑而改写。
 			// 主体对不上则是另一回事：同一时刻同一地址上的两个主体。
-			if was != iv.Identity {
+			if !was.SameSubject(iv.Identity) {
 				return conflictingIntervals(iv, was)
 			}
 			continue
@@ -331,7 +337,9 @@ func writeIntervals(ctx context.Context, tx *sql.Tx, prev []identity.Interval,
 			}
 		case stored.ValidTo.Equal(iv.ValidTo) &&
 			stored.LastRunID == iv.LastRunID &&
-			stored.ClosedReason == iv.ClosedReason:
+			stored.ClosedReason == iv.ClosedReason &&
+			stored.Identity.WorkloadKind == iv.Identity.WorkloadKind &&
+			stored.Identity.WorkloadName == iv.Identity.WorkloadName:
 			// 逐字节相同，不写。
 		default:
 			if err := updateInterval(ctx, tx, iv); err != nil {
@@ -345,10 +353,10 @@ func writeIntervals(ctx context.Context, tx *sql.Tx, prev []identity.Interval,
 // conflictingIntervals 说明同一个 Pod UID 在同一时刻带着两个不同的主体。
 //
 // 多个主体共用一个地址是常态（hostNetwork），主键里的 pod_uid 把它们分开了。
-// 剩下能撞在一起的只有"同一个 UID、同一个地址、同一时刻，namespace 或
-// workload 却不一样"—— UID 是 Kubernetes 给出的唯一标识，这种情形意味着
-// 观测本身坏了。静默留下其中一个仍然答得出、仍然不报错，因此整次推导在
-// 写库之前就拒绝。
+// 剩下能撞在一起的只有"同一个 UID、同一个地址、同一时刻，namespace 之类
+// 不可变项却不一样"—— UID 是 Kubernetes 给出的唯一标识，这种情形意味着
+// 观测本身坏了。workload_* 不在此列：它会随采集退化，退化不是主体变了。
+// 静默留下其中一个仍然答得出、仍然不报错，因此整次推导在写库之前就拒绝。
 func conflictingIntervals(iv identity.Interval, other identity.Identity) error {
 	return fmt.Errorf(
 		"snapshotstore: refusing to derive intervals for cluster %s: address %s at %s carries pod uid %s "+
@@ -375,17 +383,26 @@ func insertInterval(ctx context.Context, tx *sql.Tx, iv identity.Interval) error
 	return nil
 }
 
-// updateInterval 只改会变的那三列。
+// updateInterval 只改会变的那几列。
 //
-// 身份列与 first_run_id 一律不动：它们是这个区间开启那一刻的事实，
-// 事后重写就是拿当前状态改写历史（CLAUDE.md §4）。一个 IP 换了主体时该
-// 开一个新区间，而不是把旧区间的主体改掉。
+// 主体列（namespace / pod_name / pod_uid / host_network / in_mesh）与
+// first_run_id 一律不动：它们是这个区间开启那一刻的事实，事后重写就是拿当前
+// 状态改写历史（CLAUDE.md §4）。一个 IP 换了主体时该开一个新区间，而不是把
+// 旧区间的主体改掉。
+//
+// workload_* 是例外，因为它们不是主体而是主体的标签：ReplicaSet 那一步没采到
+// 时它们会退化成 ReplicaSet 自己，一次可信运行把归属解回 Deployment 后就地
+// 订正，好过让一次 RBAC 缺口把这个 Pod 的归属钉死一辈子。订正只发生在这一个
+// 方向上（identity.Derive 里只让可信运行写），且区间的起止与主体都不动，
+// 中途读到的那个答案因此是同一个主体的粗粒度版本，不是另一个答案。
 func updateInterval(ctx context.Context, tx *sql.Tx, iv identity.Interval) error {
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE pod_identity_interval
-		    SET valid_to = ?, last_run_id = ?, closed_reason = ?
+		    SET valid_to = ?, last_run_id = ?, closed_reason = ?,
+		        workload_kind = ?, workload_name = ?
 		  WHERE cluster_id = ? AND pod_ip = ? AND valid_from = ? AND pod_uid = ?`,
 		validTo(iv), iv.LastRunID, string(iv.ClosedReason),
+		iv.Identity.WorkloadKind, iv.Identity.WorkloadName,
 		iv.ClusterID, iv.PodIP, iv.ValidFrom, iv.Identity.PodUID); err != nil {
 		return fmt.Errorf("snapshotstore: update interval for %s: %w", iv.PodIP, err)
 	}

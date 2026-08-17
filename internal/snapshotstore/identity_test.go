@@ -315,6 +315,67 @@ func TestEveryStoredRunStatusIsMappedNotCast(t *testing.T) {
 	}
 }
 
+// 归属退化不得让同一个 Pod 在表里多出一行（spec §2）。
+//
+// ReplicaSet 这一类采不到时（一次 PARTIAL 运行），Pod 的归属从 Deployment/web
+// 退化成 ReplicaSet/web-6d4f。区间的主体是 pod_uid，不是那两个标签：多出来的
+// 那一行会让这个地址从此答 AMBIGUOUS，而权限不恢复时每次运行都是 PARTIAL，
+// 没有一次运行有资格关掉它们 —— 一次 RBAC 缺口伪装成"采集间隔太长"。
+//
+// 走库而不只走 identity 包：订正落在 UPDATE 的列清单上，那份清单只有真的
+// 发到 MySQL 才算证到。
+func TestADegradedWorkloadLabelDoesNotForkAPodInTheTable(t *testing.T) {
+	s, db := newTestStore(t)
+
+	degraded := samplePod(clusterA, "web-1", "10.4.0.9")
+	degraded.WorkloadKind = "ReplicaSet"
+	degraded.WorkloadName = "web-6d4f"
+
+	blind := podRun(clusterA, "run-blind", runOneAt, degraded)
+	blind.Status = snapshot.RunPartial
+	blind.Failures = []snapshot.Failure{{
+		Resource: snapshot.ResourceReplicaSet,
+		Reason:   snapshot.FailureForbidden,
+		Detail:   "replicasets is forbidden",
+	}}
+	mustSave(t, s, blind)
+	derive(t, s, clusterA, "run-blind")
+
+	// 权限恢复：同一个 Pod，归属解回 Deployment/web。
+	mustSave(t, s, podRun(clusterA, "run-ok", runTwoAt, samplePod(clusterA, "web-1", "10.4.0.9")))
+	derive(t, s, clusterA, "run-ok")
+
+	if n := intervalCount(t, db, clusterA); n != 1 {
+		t.Fatalf("a pod whose workload label degraded holds %d interval rows, want 1: %v",
+			n, dumpIntervals(t, db))
+	}
+
+	var (
+		validFrom             time.Time
+		validTo               sql.NullTime
+		kind, name            string
+		firstRunID, lastRunID string
+	)
+	if err := db.QueryRow(
+		`SELECT valid_from, valid_to, workload_kind, workload_name, first_run_id, last_run_id
+		   FROM pod_identity_interval WHERE cluster_id = ?`, clusterA).
+		Scan(&validFrom, &validTo, &kind, &name, &firstRunID, &lastRunID); err != nil {
+		t.Fatalf("read the interval: %v", err)
+	}
+	if !validFrom.UTC().Equal(runOneAt) || validTo.Valid || firstRunID != "run-blind" {
+		t.Errorf("interval = [%v,%v) first=%s, want the original one still open from %v",
+			validFrom, validTo.Time, firstRunID, runOneAt)
+	}
+	if kind != "Deployment" || name != "web" {
+		t.Errorf("workload = %s/%s, want Deployment/web: a trustworthy run resolved it, and leaving "+
+			"the RBAC gap's answer in place would pin this pod to a ReplicaSet for its whole life",
+			kind, name)
+	}
+	if lastRunID != "run-ok" {
+		t.Errorf("last_run_id = %q, want run-ok", lastRunID)
+	}
+}
+
 // hostNetworkPod 是一个跑在节点地址上的 Pod，UID 各不相同。
 //
 // UID 必须显式给：samplePod 对所有 Pod 用同一个 UID，而 pod_uid 现在在主键里，

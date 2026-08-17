@@ -73,6 +73,18 @@ type Identity struct {
 	InMesh bool
 }
 
+// SameSubject 判断两条记录说的是不是同一个通信主体。
+//
+// 不比 WorkloadKind / WorkloadName：那两项是采集当时沿 ownerRef 链解出来的
+// 属性，ReplicaSet 这一类没采到时会退化成 ReplicaSet 自己，而一个 Pod 不会
+// 因为标签退化就变成另一个 Pod。其余各项对一个 UID 而言在 Pod 的一生里不
+// 变，对不上意味着观测本身坏了，不能静默留下其中一个。
+func (id Identity) SameSubject(other Identity) bool {
+	id.WorkloadKind, id.WorkloadName = "", ""
+	other.WorkloadKind, other.WorkloadName = "", ""
+	return id == other
+}
+
 // ObservedPod 是一次采集运行里看到的一个 Pod。
 //
 // 不带 ClusterID：一次运行只采一个集群，集群挂在 RunFacts 上。放进每条
@@ -165,9 +177,21 @@ func (r RunFacts) closesIntervals() bool {
 }
 
 // intervalKey 是"同一个 IP 上的同一个主体"，推导用它判断区间是否延续。
+//
+// 主体取 Pod UID，不取整个 Identity：workload_kind / workload_name 会随采集
+// 退化 —— ReplicaSet 那一步失败时（运行为 PARTIAL），同一个 Pod 的归属从
+// Deployment/web 变成 ReplicaSet/web-6d4f。把退化的标签算进主体，等于认定
+// 这是另一个 Pod，于是同一个地址上再开一个区间，该地址从此答 AMBIGUOUS；
+// 而权限一直不恢复时每次运行都是 PARTIAL，谁也关不掉那两个区间，退化就成了
+// 永久的。一次 RBAC 缺口因此伪装成 §4 那个"采集间隔太长"的真信号。
+// UID 才是 Kubernetes 给出的主体标识，落库主键里放 pod_uid 正是为此。
 type intervalKey struct {
-	podIP    string
-	identity Identity
+	podIP  string
+	podUID string
+}
+
+func keyOf(podIP string, id Identity) intervalKey {
+	return intervalKey{podIP: podIP, podUID: id.PodUID}
 }
 
 // Derive 由已有区间、一次运行的 Pod 观测与这次运行的事实，推导出新的区间集合。
@@ -180,30 +204,38 @@ type intervalKey struct {
 // 让一个集群的运行去关另一个集群的区间，正是"join 到错误的 Pod 上且不
 // 报错"的那种错法。
 func Derive(prev []Interval, obs []ObservedPod, run RunFacts) []Interval {
-	observed := make(map[intervalKey]struct{}, len(obs))
+	observed := make(map[intervalKey]Identity, len(obs))
 	for _, o := range obs {
 		// IP 为空的 Pod（Pending）没有可归属的地址，不产生区间。
 		if o.PodIP == "" {
 			continue
 		}
-		observed[intervalKey{podIP: o.PodIP, identity: o.Identity}] = struct{}{}
+		observed[keyOf(o.PodIP, o.Identity)] = o.Identity
 	}
 
 	closes := run.closesIntervals()
 	out := make([]Interval, 0, len(prev)+len(obs))
 	// covered 记下已经有开区间的 (IP, 主体)，它同时挡掉两件事：为一个已在
 	// 延续的区间再开一个，以及同一次观测里的重复条目各开一个。
-	covered := make(map[intervalKey]struct{}, len(prev)+len(obs))
+	covered := make(map[intervalKey]Identity, len(prev)+len(obs))
 
 	for _, iv := range prev {
 		if iv.ClusterID != run.ClusterID || !iv.Open() {
 			out = append(out, iv)
 			continue
 		}
-		k := intervalKey{podIP: iv.PodIP, identity: iv.Identity}
-		if _, seen := observed[k]; seen {
-			covered[k] = struct{}{}
+		k := keyOf(iv.PodIP, iv.Identity)
+		if seen, ok := observed[k]; ok {
 			iv.LastRunID = run.RunID
+			// 工作负载归属是区间的属性，可以被订正，但只有一次可信运行有
+			// 资格订正它 —— 会让归属退化的那种运行恰恰是 PARTIAL，让它写
+			// 回去等于用一次采不全的观测覆盖掉一个更准的答案。订正是就地
+			// 改，不开新区间：主体（UID）没变，变的只是它的标签精度。
+			if closes {
+				iv.Identity.WorkloadKind = seen.WorkloadKind
+				iv.Identity.WorkloadName = seen.WorkloadName
+			}
+			covered[k] = iv.Identity
 			out = append(out, iv)
 			continue
 		}
@@ -230,11 +262,14 @@ func Derive(prev []Interval, obs []ObservedPod, run RunFacts) []Interval {
 		if o.PodIP == "" {
 			continue
 		}
-		k := intervalKey{podIP: o.PodIP, identity: o.Identity}
-		if _, done := covered[k]; done {
+		k := keyOf(o.PodIP, o.Identity)
+		// 主体相同才算已经有区间了。同一个 UID 在同一个地址上带着两个对不上
+		// 的主体是观测坏了，这时照样开出第二个区间，让存储层撞在主键上整次
+		// 拒绝 —— 静默留下其中一个仍然答得出、仍然不报错。
+		if was, done := covered[k]; done && was.SameSubject(o.Identity) {
 			continue
 		}
-		covered[k] = struct{}{}
+		covered[k] = o.Identity
 		out = append(out, Interval{
 			ClusterID:  run.ClusterID,
 			PodIP:      o.PodIP,
