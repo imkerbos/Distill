@@ -85,11 +85,11 @@ func run(configPath string) error {
 	// **六个读方法在 internal/collectstore 里已经全部接上**（design doc §7 的
 	// 分阶段接入已走完），所以「等六个方法都接上」不再是阻塞条件 —— 但这不
 	// 等于现在就可以把 readerFor 接进来。剩下的前置条件是 docs/TODO.md 那份
-	// 「接 COLLECTED 集群进页面之前必须先做的」清单：Security 的截断回显字段、
-	// 缺失清单里的「未评估」标注、DEGRADED 窗口的 WOULD_BREAK 限定语、界面上
-	// 的数据来源标识，以及 writeReaderError 对 ErrNoCollection /
-	// ErrTooManyFindings 的映射（internal/httpapi/fleet_handler.go 至今只认
-	// ErrClusterNotFound 与 ErrNamespaceNotFound，其余一律 500）。
+	// 「接 COLLECTED 集群进页面之前必须先做的」清单。后端这两条已经做掉
+	// （2026-08-17 接入前置 §3 / §6）：Security 三个清单的截断回显字段已在契约上，
+	// writeReaderError 也认得 ErrNoCollection 了。仍然缺的是三条前端渲染 ——
+	// 界面上的数据来源标识、缺失清单里的「未评估」标注、DEGRADED 窗口的
+	// WOULD_BREAK 限定语。
 	//
 	// 少了它们，后端刚区分出来的东西在界面上重新塌回去 —— 那正是 §7 排除的
 	// 那种半真半假的中间态，只是它这次落在页面上而不是落在读方法上。

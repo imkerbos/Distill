@@ -6,6 +6,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/imkerbos/Distill/internal/collectstore"
 	"github.com/imkerbos/Distill/internal/response"
 	"github.com/imkerbos/Distill/internal/store"
 )
@@ -55,9 +56,19 @@ func handleQuality(d Deps) http.HandlerFunc {
 // 不存在的 namespace 与不存在的集群同码：两者都是"你问的东西不在"，
 // 而不是"一切正常"。少了这一条，一次 namespace 拼写错误会得到一份
 // 全绿的空报告。
+//
+// "还没有可用的采集"也不是服务故障，因此不落回 50001：那句"服务内部错误"
+// 会把操作者支去查服务，而事实是这个集群还没被采过（design doc §6）。
+// 这里认的是 collectstore 的哨兵而不是一个字符串前缀 —— 靠文本匹配的映射
+// 会在改一句错误文案的时候悄悄失效，而失效之后的症状恰好就是它原本要
+// 消除的那个 500。
 func writeReaderError(w http.ResponseWriter, r *http.Request, d Deps, err error) {
 	if errors.Is(err, store.ErrClusterNotFound) || errors.Is(err, store.ErrNamespaceNotFound) {
 		response.WriteBusiness(w, response.CodeNotFound)
+		return
+	}
+	if errors.Is(err, collectstore.ErrNoCollection) {
+		response.WriteBusiness(w, response.CodeNoUsableCollection)
 		return
 	}
 	d.Logger.Error("reader failed",

@@ -37,6 +37,18 @@ const (
 	// 就会得到"还没有采集记录"，于是操作者去查采集器为什么没跑，
 	// 而真正的原因是他打错了字。
 	CodeNoCollectionRun Code = 20004
+	// CodeNoUsableCollection 表示该集群采过资产，但这次要读的东西没有可用的
+	// 采集数据 —— 覆盖那一刻的采集运行不存在，或这段窗口没有流量摄入。
+	//
+	// 与 20004 分开是必需的，不是细分，理由同 20004 自己：20004 说的是
+	// "这个集群从来没被采过"，处置是去跑一次资产采集；这一条说的是
+	// "采过了，但这次问到的时刻/窗口没有可用数据"，处置是去补那次采集或
+	// 跑一次流量摄入。共用一个码会把"采集器没跑"与"摄入没跑"读成同一句话，
+	// 于是操作者去看一个已经在正常运行的采集器。
+	//
+	// 也不能落回 50001：一个还没有可用采集的集群不是服务故障，
+	// 而"服务内部错误"会把人支去查服务，那里什么问题都没有。
+	CodeNoUsableCollection Code = 20005
 
 	// CodeInternal 表示服务端内部错误。
 	CodeInternal Code = 50001
@@ -60,6 +72,7 @@ var messages = map[Code]string{
 	CodeNotFound:              "请求的资源不存在",
 	CodeRateLimited:           "请求过于频繁，请稍后再试",
 	CodeNoCollectionRun:       "该集群还没有过资产采集记录",
+	CodeNoUsableCollection:    "该集群还没有可用的采集数据，请先跑一次采集与流量摄入",
 	CodeInternal:              "服务内部错误",
 	CodeDependencyUnavailable: "依赖服务暂时不可用",
 }
@@ -90,6 +103,7 @@ var registered = []Code{
 	CodeNotFound,
 	CodeRateLimited,
 	CodeNoCollectionRun,
+	CodeNoUsableCollection,
 	CodeInternal,
 	CodeDependencyUnavailable,
 }

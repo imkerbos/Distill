@@ -2,12 +2,10 @@ package collectstore_test
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"testing"
 	"time"
 
-	"github.com/imkerbos/Distill/internal/collectstore"
 	"github.com/imkerbos/Distill/internal/flow"
 	"github.com/imkerbos/Distill/internal/snapshot"
 	"github.com/imkerbos/Distill/internal/snapshotstore"
@@ -44,7 +42,7 @@ const (
 // overFindingsCap 刚好比安全发现的清单上限多一条。
 //
 // 写死而不是从包里导出常量：上限被人调小时这个测试必须仍然证明"越界会被
-// 拒绝"，而一个跟着实现走的期望值证明不了任何事。
+// 截断、且截断前的条数被如实回显"，而一个跟着实现走的期望值证明不了任何事。
 const overFindingsCap = 1001
 
 var (
@@ -534,25 +532,38 @@ func TestQualityAndTheFlowListAgreeOnOneWindow(t *testing.T) {
 	}
 }
 
-// 安全发现的三个清单都必须有上限，而上限必须是可见的。
+// 安全发现的三个清单都必须有上限，而截断必须是可见的。
 //
 // 一个把数据库端口用满的集群会让一次 /security 在内存里组出几万条风险流量
 // 并整份序列化（design doc §9 点名的唯一失控方向，安全规范 §23 / §24）。
-// 这里选择超出即拒绝而不是截断：一份被悄悄截到 1000 条的风险清单读起来
-// 就是「这个集群只有这些风险」，而报告上没有任何字段能说出它被截过。
-func TestASecurityReportRefusesToShowATruncatedList(t *testing.T) {
-	// 三个清单各有各的上限，一条都不能少：只测其中一个，另外两个的上限
-	// 被删掉时全套仍然全绿。
-	assertRefused := func(t *testing.T, rep store.SecurityReport, err error, list string) {
+// 上限因此是必需的，但**越界不再整份拒绝**：拒绝会连带砸掉另外两个远未越界
+// 的清单，而 NakedPods 来自锚点快照，缩小窗口也救不回来（design doc §3）。
+// 改成截断的前提是截断说得出自己 —— 每个清单各回显截断前的条数与生效上限。
+func TestASecurityReportTruncatesEachListAndSaysSo(t *testing.T) {
+	// 三个清单各回显各的，一条都不能少：只测其中一个，另外两个漏填回显时
+	// 全套仍然全绿，而漏填的那一份在界面上读起来正好是"这个集群只有这些"。
+	assertTruncated := func(
+		t *testing.T, rep store.SecurityReport, err error,
+		got, wantTotal int, echo store.ListTruncation, list string,
+	) {
 		t.Helper()
-		if !errors.Is(err, collectstore.ErrTooManyFindings) {
-			t.Fatalf("Security() error = %v, want ErrTooManyFindings: more than %d %s must not come "+
-				"back as one response", err, overFindingsCap-1, list)
+		if err != nil {
+			t.Fatalf("Security() error = %v; %d %s must come back truncated, not refused —— "+
+				"一次整份拒绝会把另外两个清单一起砸掉", err, wantTotal, list)
 		}
-		if len(rep.RiskyFlows) != 0 || len(rep.EgressTargets) != 0 || len(rep.NakedPods) != 0 {
-			t.Errorf("Security() returned %d risky flows / %d egress targets / %d naked pods alongside "+
-				"the refusal; a partial report is exactly the thing being refused",
-				len(rep.RiskyFlows), len(rep.EgressTargets), len(rep.NakedPods))
+		if len(rep.RiskPortCatalog) == 0 {
+			t.Errorf("报告里没有端口清单，说明返回的不是一份真报告")
+		}
+		if got != store.MaxSecurityFindings {
+			t.Errorf("got %d %s, want the cap %d", got, list, store.MaxSecurityFindings)
+		}
+		if echo.Total != wantTotal {
+			t.Errorf("%s 的回显 Total = %d, want %d：回显必须是截断**前**的条数，"+
+				"报截断后的长度等于把一份被截过的清单说成这个集群的全部",
+				list, echo.Total, wantTotal)
+		}
+		if echo.Limit != store.MaxSecurityFindings {
+			t.Errorf("%s 的回显 Limit = %d, want %d", list, echo.Limit, store.MaxSecurityFindings)
 		}
 	}
 
@@ -568,7 +579,8 @@ func TestASecurityReportRefusesToShowATruncatedList(t *testing.T) {
 		saveIngest(t, s, conns)
 
 		rep, err := r.Security(context.Background(), collectedID, describedWindow())
-		assertRefused(t, rep, err, "connections on a risky port")
+		assertTruncated(t, rep, err, len(rep.RiskyFlows), overFindingsCap, rep.RiskyFlowsTruncation,
+			"connections on a risky port")
 	})
 
 	t.Run("出网目标", func(t *testing.T) {
@@ -583,7 +595,8 @@ func TestASecurityReportRefusesToShowATruncatedList(t *testing.T) {
 		saveIngest(t, s, conns)
 
 		rep, err := r.Security(context.Background(), collectedID, describedWindow())
-		assertRefused(t, rep, err, "distinct addresses outside every registered range")
+		assertTruncated(t, rep, err, len(rep.EgressTargets), overFindingsCap, rep.EgressTargetsTruncation,
+			"distinct addresses outside every registered range")
 	})
 
 	t.Run("裸奔 Pod", func(t *testing.T) {
@@ -600,7 +613,10 @@ func TestASecurityReportRefusesToShowATruncatedList(t *testing.T) {
 		saveIngest(t, s, []flow.Connection{conn(recycledIP, peerIP, portResolved)})
 
 		rep, err := r.Security(context.Background(), collectedID, describedWindow())
-		assertRefused(t, rep, err, "pods not selected by any policy")
+		// 比种下的多一个：这次采集里还有 stablePods 的 shop/web-1，它同样
+		// 没有被任何策略选中（allow-api 只选 payment 里带 api 标签的那个）。
+		assertTruncated(t, rep, err, len(rep.NakedPods), overFindingsCap+1, rep.NakedPodsTruncation,
+			"pods not selected by any policy")
 	})
 }
 

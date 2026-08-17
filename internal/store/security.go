@@ -76,6 +76,45 @@ type NakedPod struct {
 	Name      string `json:"name"`
 }
 
+// MaxSecurityFindings 是这份报告里任意一个清单能装下的条数上限。
+//
+// 放在契约上而不是某个 Reader 内部：这个数随报告回显给调用方（每个清单的
+// Limit），两个 Reader 必须回显同一个数。各写一份的话，界面上那句"共 N 条，
+// 此处显示 M 条"会在换一个数据源之后开始说假话，而它没有任何症状。
+const MaxSecurityFindings = 1000
+
+// ListTruncation 是一个清单的条数回显：截断前的条数与生效上限。
+//
+// 与 FlowPage 的 Total / Limit 同形，且刻意沿用同两个名字：三个清单加上
+// 流量列表是同一件事的四个实例，两种形状迟早会各自漂一点，而消费方要靠
+// 它们说出同一句话。
+//
+// 两个字段恒定填写（Limit 永远大于 0），因此"空清单"与"没有这个字段"
+// 可区分：前者是"我们查了，一条都没有"，是一个关于集群的结论；后者是一份
+// 老响应或一个没填这个字段的 Reader，什么结论都支撑不了。
+type ListTruncation struct {
+	// Total 是截断前的条数。
+	Total int `json:"total"`
+	// Limit 是生效的条数上限。
+	Limit int `json:"limit"`
+}
+
+// TruncateFindings 把一个清单截到 MaxSecurityFindings，并给出它的回显。
+//
+// 截断与回显必须由同一个函数产出：分成两处就会出现"截了、但 Total 报的是
+// 截断后的长度"这种没有任何症状的错法 —— 那样的清单读起来就是"这个集群
+// 只有这些"，而那是本平台唯一不能出的那种错。
+//
+// 调用方必须先排序再截：留下哪一批取决于内容，而不是取决于读取顺序，
+// 否则同一次查询在两次刷新之间会换一批发现（与 sortFlowRecords 同一条理由）。
+func TruncateFindings[T any](items []T) ([]T, ListTruncation) {
+	echo := ListTruncation{Total: len(items), Limit: MaxSecurityFindings}
+	if len(items) > MaxSecurityFindings {
+		items = items[:MaxSecurityFindings]
+	}
+	return items, echo
+}
+
 // SecurityReport 是一个集群的安全发现汇总。
 type SecurityReport struct {
 	Cluster string `json:"cluster"`
@@ -84,11 +123,19 @@ type SecurityReport struct {
 	// NakedPods 来自资产快照而非流量，不受本窗口约束 —— 两类数据
 	// 时间语义不同，放在同一响应里必须说明，否则使用者会以为
 	// "这段时间内有 6 个裸奔 Pod"。
-	Window          TimeWindow     `json:"window"`
-	RiskyFlows      []RiskyFlow    `json:"riskyFlows"`
-	EgressTargets   []EgressTarget `json:"egressTargets"`
-	NakedPods       []NakedPod     `json:"nakedPods"`
-	RiskPortCatalog []RiskPort     `json:"riskPortCatalog"`
+	Window     TimeWindow  `json:"window"`
+	RiskyFlows []RiskyFlow `json:"riskyFlows"`
+	// RiskyFlowsTruncation 回显 RiskyFlows 截断前的条数与生效上限。
+	//
+	// 三个清单各回显各的，不合并成一个：被截的是哪一份决定了该怎么办 ——
+	// 前两个清单缩小窗口就能拿全，NakedPods 来自锚点那一次快照，与流量
+	// 窗口无关，缩窗对它毫无用处。
+	RiskyFlowsTruncation    ListTruncation `json:"riskyFlowsTruncation"`
+	EgressTargets           []EgressTarget `json:"egressTargets"`
+	EgressTargetsTruncation ListTruncation `json:"egressTargetsTruncation"`
+	NakedPods               []NakedPod     `json:"nakedPods"`
+	NakedPodsTruncation     ListTruncation `json:"nakedPodsTruncation"`
+	RiskPortCatalog         []RiskPort     `json:"riskPortCatalog"`
 }
 
 // Security 汇总一个集群的安全发现。集群不存在时返回错误。
@@ -188,6 +235,13 @@ func (r *FixtureReader) Security(ctx context.Context, clusterID string, window T
 		}
 		return a.Name < b.Name
 	})
+
+	// 合成数据集不越界，因此这三次调用只是把回显填上、一条都不截。仍然走
+	// 同一个 TruncateFindings：两个 Reader 填的必须是同一句话，各写各的
+	// 就会出现"演示集群从不回显、真集群才回显"这种前端分不清的差别。
+	rep.RiskyFlows, rep.RiskyFlowsTruncation = TruncateFindings(rep.RiskyFlows)
+	rep.EgressTargets, rep.EgressTargetsTruncation = TruncateFindings(rep.EgressTargets)
+	rep.NakedPods, rep.NakedPodsTruncation = TruncateFindings(rep.NakedPods)
 
 	return rep, nil
 }
