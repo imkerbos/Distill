@@ -54,6 +54,37 @@ export interface Account {
   updatedAt: string
 }
 
+/**
+ * 一个集群的读取数据来源。封闭枚举，与后端 registry.DataSource 逐值对齐。
+ *
+ * 联合而不是 string：这两个取值在界面上一一对应到两句完全不同的话
+ * （「这是演示数据」与「这是这个集群真实采集到的东西」），用 string 就等于
+ * 允许后端某天多一个取值而界面照旧渲染出一个空格 —— 而一份没有来源标注的
+ * 报告，读起来就是一份生产报告。
+ */
+export type DataSource = 'FIXTURE' | 'COLLECTED'
+
+/**
+ * 一段观测窗口的完整度。封闭枚举，与后端 flow.Completeness 逐值对齐。
+ *
+ * 非 COMPLETE 时 policygen 学不出任何放行规则，dry-run 的 WOULD_BREAK 会
+ * 逼近整窗连接数 —— 那个数字量的是「候选集为空时有多少连接被 Baseline
+ * 拦下」，不是「上线会打断多少条」（design doc 2026-08-17 §5）。
+ */
+export type Completeness = 'COMPLETE' | 'DEGRADED' | 'UNKNOWN'
+
+/**
+ * 一个清单的条数回显：截断前的条数与生效上限。与后端 store.ListTruncation
+ * 同形，也与 FlowPage 的 total / limit 是同一件事的另外几个实例。
+ *
+ * 两个字段恒定填写（limit 永远大于 0），因此「空清单」与「没有这个字段」
+ * 可区分：前者是一个关于集群的结论，后者是一份老响应，什么结论都支撑不了。
+ */
+export interface ListTruncation {
+  total: number
+  limit: number
+}
+
 export interface TopologyNode {
   id: string
   cluster: string
@@ -237,8 +268,21 @@ export interface SecurityReport {
   /** 流量类发现的时间窗。nakedPods 来自资产快照，不受此窗口约束。 */
   window: TimeWindow
   riskyFlows: RiskyFlow[]
+  /**
+   * riskyFlows 截断前的条数与生效上限。
+   *
+   * 三个清单各回显各的，不合并成一个：被截的是哪一份决定了该怎么办——
+   * 前两个清单缩小时间窗就能拿全，nakedPods 来自锚点快照，缩窗对它无用。
+   *
+   * 可选：老响应里根本没有这个键。**缺席不得渲染成「共 0 条」，也不得
+   * 当作「没被截断」**——一份读起来像"这个集群只有这些"的清单，正是这三个
+   * 字段存在的理由（design doc 2026-08-17 §3）。
+   */
+  riskyFlowsTruncation?: ListTruncation
   egressTargets: EgressTarget[]
+  egressTargetsTruncation?: ListTruncation
   nakedPods: NakedPod[]
+  nakedPodsTruncation?: ListTruncation
   /** 判定所用的端口清单。报告为空时靠它区分"查过没发现"与"没查"。 */
   riskPortCatalog: RiskPort[]
 }
@@ -535,6 +579,17 @@ export interface RegisteredCluster {
    */
   kubeconfigRef?: string
   state: OnboardState
+  /**
+   * 这个集群的读取数据来源，**只读**（后端 registry.Cluster.DataSource 不在
+   * 写路径上，ClusterWrite 里因此也没有它）。
+   *
+   * 可选，而且这个可选是本字段的要害：老响应、未注册的集群、字段改名，
+   * 都会让它缺席。**缺席必须显示成「来源未知」，不得默认成 COLLECTED**——
+   * 把一件我们不知道的事说成最令人放心的那个方向，正是这个平台整体在
+   * 防的失败方向（design doc 2026-08-17 §2）。判定写在
+   * pages/preconditionsView.ts 的 dataSourceView 里，各页不自己拼。
+   */
+  dataSource?: DataSource
   apiServers?: APIServer[] | null
   healthCheckSources?: string[] | null
   git?: GitBinding
@@ -651,6 +706,21 @@ export interface PolicyPreview {
   window: TimeWindow
   candidates: CandidatePolicy[]
   missingBaselines: MissingBaseline[]
+  /**
+   * 这段观测窗口的完整度。**不得由 degradedCount === totalEvaluated 反推**——
+   * 那是一个推断，而这个字段的全部意义就是把推断换成事实（design doc §5）。
+   */
+  windowCompleteness: Completeness
+  /**
+   * missingBaselines 里哪几类其实是「没看过」而不是「真缺失」。
+   *
+   * **叠加，不是另一栏**：未评估的类型仍然留在 missingBaselines 里，只读
+   * 前一栏的消费方因此天然 fail-closed（design doc §4）。两者的区别在处置——
+   * 真缺失去写策略，未评估去修采集——而不在门禁：两栏都照旧挡住 Enforcing。
+   *
+   * 带 `| null`：后端零条时可能序列化成 `null` 而不是 `[]`（同 overrides）。
+   */
+  notAssessedBaselines: Kind[] | null
   ungeneratable: UngeneratableItem[]
   /**
    * 从未进入候选策略花名册的 Pod。

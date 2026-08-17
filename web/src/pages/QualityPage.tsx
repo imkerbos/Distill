@@ -1,6 +1,7 @@
 import { api } from '../api/client'
 import { UNKNOWN_REASON_LABEL } from '../api/types'
 import { useResource } from '../api/useResource'
+import DataSourceNotice from '../components/DataSourceNotice'
 import { EmptyState, PageHeader, Section, StatTile, TableCard } from '../components/ui'
 
 const pct = (v: number) => `${(v * 100).toFixed(1)}%`
@@ -8,15 +9,25 @@ const pct = (v: number) => `${(v * 100).toFixed(1)}%`
 export default function QualityPage({ cluster }: { cluster: string }) {
   const { data: q, error, loading } = useResource(cluster, () => api.quality(cluster))
 
-  if (error) return <p style={{ color: 'var(--verdict-deny)' }}>{error}</p>
-  if (loading || !q) return <p style={{ color: 'var(--text-muted)' }}>加载中…</p>
-
-  return (
-    <div>
+  // 标题与数据来源一起提到早退分支之前：来源标识必须与内容同屏，包括这一
+  // 屏读不到数据的时候——一句"加载失败"同样要说清它说的是哪一种集群
+  // （design doc 2026-08-17 §2）。
+  const head = (
+    <>
       <PageHeader
         title="数据质量"
         description="平台能力边界的如实报告。覆盖率与无法判定比例必须同屏 —— 单独展示一个好看的覆盖率，会让人以为剩下的部分都是安全的。"
       />
+      <DataSourceNotice />
+    </>
+  )
+
+  if (error) return <div>{head}<p style={{ color: 'var(--verdict-deny)' }}>{error}</p></div>
+  if (loading || !q) return <div>{head}<p style={{ color: 'var(--text-muted)' }}>加载中…</p></div>
+
+  return (
+    <div>
+      {head}
 
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 'var(--space-3)' }}>
         <StatTile label="策略覆盖率" value={pct(q.policyCoverage)}

@@ -9,9 +9,11 @@ import {
   type WritebackPlanResult, type WritebackPushResult,
 } from '../api/types'
 import { useResource } from '../api/useResource'
+import DataSourceNotice from '../components/DataSourceNotice'
 import { DryRunDetail } from './DryRunDetail'
 import { dryRunView, type DryRunView } from './dryRunView'
 import { policyExportView, type PolicyExportView } from './policyExportView'
+import { baselineGapViews, notAssessedNote, wouldBreakQualifier } from './preconditionsView'
 import {
   writebackCountDrift, writebackPushBody, writebackView,
   type WritebackPushBody, type WritebackView,
@@ -67,10 +69,22 @@ export default function PolicyPage({ cluster }: { cluster: string }) {
     cluster ? `${cluster}:${refreshKey}` : '', () => api.policyPreview(cluster),
   )
 
+  // 标题与数据来源一起提到早退分支之前，理由见 DataSourceNotice：来源标识
+  // 必须与内容同屏，包括这一屏读不到数据的时候（design doc 2026-08-17 §2）。
+  const head = (
+    <>
+      <PageHeader
+        title="候选策略"
+        description="dry-run 预测置顶：先看这条推荐会拦掉多少条当前正在工作的连接，再看策略本身长什么样。顺序即优先级。"
+      />
+      <DataSourceNotice />
+    </>
+  )
+
   if (current?.state === 'REGISTERED') return <NoTrafficNotice />
 
-  if (error) return <p style={{ color: 'var(--verdict-deny)' }}>{error}</p>
-  if (loading || !pv) return <p style={{ color: 'var(--text-muted)' }}>加载中…</p>
+  if (error) return <div>{head}<p style={{ color: 'var(--verdict-deny)' }}>{error}</p></div>
+  if (loading || !pv) return <div>{head}<p style={{ color: 'var(--text-muted)' }}>加载中…</p></div>
 
   // 零条覆盖时后端把 overrides 序列化成 null（见 types.ts 里的注释）——
   // 在这唯一一处兜底成 []，下游所有组件都能假设它是数组，不必每处重复判空。
@@ -78,10 +92,7 @@ export default function PolicyPage({ cluster }: { cluster: string }) {
 
   return (
     <div>
-      <PageHeader
-        title="候选策略"
-        description="dry-run 预测置顶：先看这条推荐会拦掉多少条当前正在工作的连接，再看策略本身长什么样。顺序即优先级。"
-      />
+      {head}
 
       {/* 两套预测在整个前端只在这一处同时出现：dryRunView 收下它们，
           往下传的是一个已经选定的视图。哪一套该被强调、哪一套该出现在
@@ -89,6 +100,10 @@ export default function PolicyPage({ cluster }: { cluster: string }) {
       <DryRunSection
         view={dryRunView(pv.prediction, pv.overridden.prediction, overrides.length)}
         overrideCount={overrides.length}
+        // 窗口完整度是后端说出来的事实，页面不再拿 degradedCount ===
+        // totalEvaluated 反推——把推断换成事实正是这个字段存在的理由
+        // （design doc 2026-08-17 §5）。
+        breakQualifier={wouldBreakQualifier(pv.windowCompleteness)}
         // 导出入口与 dry-run 同屏，取数同样只来自这一个 pv 对象：文件对应的
         // 时间窗与上面那四个数字来自同一次预览响应（design doc §2、§6）。
         exportView={policyExportView(pv)}
@@ -102,7 +117,13 @@ export default function PolicyPage({ cluster }: { cluster: string }) {
       <CandidateSection candidates={pv.candidates} overrides={overrides} cluster={cluster} onChanged={onChanged} />
       <PendingSection candidates={pv.candidates} overrides={overrides} cluster={cluster} onChanged={onChanged} />
       <StaleOverridesSection staleOverrides={pv.staleOverrides} />
-      <MissingBaselineSection missing={pv.missingBaselines} baselineKinds={pv.baselineKinds} />
+      <MissingBaselineSection
+        missing={pv.missingBaselines}
+        baselineKinds={pv.baselineKinds}
+        // 未评估是叠加在缺失清单上的标注，不是第二份清单：它改的是处置
+        // （去修采集，而不是去写策略），不改门禁（design doc §4）。
+        notAssessed={pv.notAssessedBaselines}
+      />
       <ExcludedWorkloadSection items={pv.excludedWorkloads ?? []} />
       <UngeneratableSection items={pv.ungeneratable} />
     </div>
@@ -121,6 +142,9 @@ function NoTrafficNotice() {
         title="候选策略"
         description="dry-run 预测置顶：先看这条推荐会拦掉多少条当前正在工作的连接，再看策略本身长什么样。顺序即优先级。"
       />
+      {/* 整页替换态同样要说清来源：一个「尚未采集到流量」的演示集群与一个
+          真集群，下一步动作完全不同（design doc 2026-08-17 §2）。 */}
+      <DataSourceNotice />
 
       <Notice>尚未采集到流量，无法产出候选策略。</Notice>
 
@@ -154,9 +178,11 @@ function NoTrafficNotice() {
  * Apply 对空覆盖列表是恒等变换——此时只显示一组数：否则每个集群第一次
  * 打开都要看一堆 `→ 0`，噪声掩盖了真正有覆盖时该看的差值。
  */
-function DryRunSection({ view, overrideCount, exportView, writeback, pageCounts }: {
+function DryRunSection({ view, overrideCount, breakQualifier, exportView, writeback, pageCounts }: {
   view: DryRunView
   overrideCount: number
+  /** 窗口非 COMPLETE 时对 WOULD_BREAK 的限定语；完整时为空串。 */
+  breakQualifier: string
   exportView: PolicyExportView
   writeback: WritebackView
   pageCounts: Record<ChangeKind, number>
@@ -179,6 +205,12 @@ function DryRunSection({ view, overrideCount, exportView, writeback, pageCounts 
       title="dry-run 影响"
       description="按当前候选策略重放同一段观测流量得到的四类变化。WOULD_BREAK 是本页最重要的数字——它是这条推荐一旦下发会拦断的、当前正在工作的连接数。"
     >
+      {/* 限定语在四个 tile 之前，不在下方脚注里：它说的是紧接着那个大字
+          该怎么读——「候选集为空时有多少连接被 Baseline 拦下」，不是
+          「上线会打断多少条」。读完数字才读到限定语，等于没有限定语
+          （design doc 2026-08-17 §5）。 */}
+      {breakQualifier !== '' && <Notice>{breakQualifier}</Notice>}
+
       {showDelta && !allZero && (
         <Notice>{summarizeDeltas(breakDelta, openDelta, overrideCount)}</Notice>
       )}
@@ -1184,16 +1216,31 @@ function StaleOverridesSection({ staleOverrides }: { staleOverrides: StaleOverri
 /* 6. 缺失 Baseline                                                       */
 /* ---------------------------------------------------------------------- */
 
-function MissingBaselineSection({ missing, baselineKinds }: {
+/**
+ * 缺失 Baseline，以及其中哪几类其实是「我们没看过」。
+ *
+ * 未评估**不单列一栏**：那几类仍然留在缺失清单里，只是多带一条不同的处置
+ * （design doc 2026-08-17 §4）。摘出去等于让一个"没看过"悄悄读成"这里没
+ * 问题"；不标注则等于塌回普通缺失，运维会去写一条 DNS 策略，而真正该做的
+ * 是改 RBAC。两种缺口都照旧挡住 Enforcing——标注不放宽任何门禁。
+ */
+function MissingBaselineSection({ missing, baselineKinds, notAssessed }: {
   missing: MissingBaseline[]
   baselineKinds: Kind[]
+  notAssessed: Kind[] | null
 }) {
+  const note = notAssessedNote(notAssessed)
   return (
     <Section
       title="缺失 Baseline"
       description="按 namespace 列出缺失的基础设施事实类型。下方同时列出本轮检查过的全部类型，用来区分「确认没缺」与「根本没查」。"
       meta={`${missing.length} 个 namespace`}
     >
+      {/* 「未评估」在清单之前、且在空清单上同样出现：读完清单才读到"其中
+          有几类我们压根没看过"，那份清单已经被当成结论读过一遍了；而一句
+          没有任何限定的「没有 namespace 缺失 baseline」，正是这条标注要
+          挡住的读法。 */}
+      {note !== '' && <Notice>{note}</Notice>}
       {missing.length === 0 ? (
         <EmptyState
           message="没有 namespace 缺失 baseline。"
@@ -1203,19 +1250,36 @@ function MissingBaselineSection({ missing, baselineKinds }: {
         <>
           <TableCard>
             <thead>
-              <tr><th>namespace</th><th>缺失类型</th></tr>
+              <tr><th>namespace</th><th>缺失类型</th><th>处置</th></tr>
             </thead>
             <tbody>
-              {missing.map((m) => (
-                <tr key={m.namespace}>
-                  <td className="mono">{m.namespace}</td>
-                  <td>
-                    <span style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                      {m.kinds.map((k) => <Chip key={k} strong>{k}</Chip>)}
-                    </span>
-                  </td>
-                </tr>
-              ))}
+              {missing.map((m) => {
+                const gaps = baselineGapViews(m.kinds, notAssessed)
+                return (
+                  <tr key={m.namespace}>
+                    <td className="mono">{m.namespace}</td>
+                    <td>
+                      <span style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                        {gaps.map((g) => (
+                          <span key={g.kind} style={{ display: 'inline-flex', gap: 4 }}>
+                            <Chip strong>{g.kind}</Chip>
+                            {/* 未评估的类型仍然挂在同一格里，不移出清单：
+                                它照旧是一个缺口，区别只在下一步做什么。 */}
+                            {g.notAssessed && <Chip>未评估</Chip>}
+                          </span>
+                        ))}
+                      </span>
+                    </td>
+                    <td style={{ fontSize: 'var(--text-xs)' }}>
+                      {gaps.map((g) => (
+                        <div key={g.kind}>
+                          <span className="mono">{g.kind}</span>：{g.remedy}
+                        </div>
+                      ))}
+                    </td>
+                  </tr>
+                )
+              })}
             </tbody>
           </TableCard>
           <p style={{ marginTop: 'var(--space-2)', fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>

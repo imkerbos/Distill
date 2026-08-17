@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { api } from '../api/client'
 import type { Confidence, TimeWindow, Verdict } from '../api/types'
 import { useResource } from '../api/useResource'
+import DataSourceNotice from '../components/DataSourceNotice'
 import DecisionDrawer from '../components/DecisionDrawer'
 import { CrossClusterMark, UnmanagedMark, VerdictBadge } from '../components/Verdict'
 import { Chip, Field, PageHeader, Section, Select, TableCard, Toolbar } from '../components/ui'
@@ -42,6 +43,10 @@ export default function FlowsPage({ cluster }: { cluster: string }) {
         title="流量与判定"
         description="点击任意一行，查看求值引擎当场算出的判定与理由。判定与可信度是两个独立维度，可分别筛选。"
       />
+
+      {/* 来源标识在内容区、且在筛选与列表之前：截图与转发带走的是这一块，
+          不是侧边栏（design doc 2026-08-17 §2）。 */}
+      <DataSourceNotice />
 
       <Toolbar>
         <Field label="判定">
