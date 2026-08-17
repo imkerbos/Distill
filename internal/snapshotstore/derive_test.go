@@ -88,7 +88,7 @@ func TestTheDeriveLockExcludesASecondDerivationOfTheSameCluster(t *testing.T) {
 // 一条谁也不知道正持有它的连接上，直到进程退出。换一个池就换了一个会话，
 // 泄漏立刻表现为拿不到锁。
 func TestReleasingTheDeriveLockFreesItForOtherSessions(t *testing.T) {
-	s, _ := newTestStore(t)
+	s, db := newTestStore(t)
 	other := newSecondPoolStore(t)
 	ctx := t.Context()
 
@@ -98,6 +98,18 @@ func TestReleasingTheDeriveLockFreesItForOtherSessions(t *testing.T) {
 	}
 	if err := release(ctx); err != nil {
 		t.Fatalf("release(%s) error = %v", clusterA, err)
+	}
+
+	// **这条用例的前提，显式断言而不是默默依赖 newTestStore 的池设置。**
+	// 它要证的是 RELEASE_LOCK 真的发了，而证法是"另一个会话随后拿得到锁"。
+	// 只有当放锁那条连接在 Close() 之后仍然**空闲地活着**（会话还在），
+	// 少发一次 RELEASE_LOCK 才会表现为另一个会话拿不到。若 MaxIdleConns 被
+	// 调成 0，底层连接会被真的关掉、会话随之结束、MySQL 自动放锁 —— 于是
+	// 拿掉 RELEASE_LOCK 这条用例又会变绿，退回它替换掉的那一版的处境。
+	if idle := db.Stats().Idle; idle < 1 {
+		t.Fatalf("the pool kept %d idle connections after release; this test's premise is that the "+
+			"session survives conn.Close(), and with none idle a missing RELEASE_LOCK would be "+
+			"masked by MySQL freeing the lock on disconnect", idle)
 	}
 
 	again, err := other.LockCluster(ctx, clusterA)

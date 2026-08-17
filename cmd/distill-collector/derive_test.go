@@ -20,6 +20,31 @@ type derivedRun struct {
 	runID     string
 }
 
+// callTrace 记下几件不可逆的动作各自发生在什么时候。
+//
+// 只记**发生过**与**先后**两件事，不记一条完整的期望序列：一条手写的完整
+// 序列在加入第四段编排时要么漏改、要么被顺手改成新的实际顺序，两种都让它
+// 不再守着任何东西。按名字问下标的形式在这两种情况下都还答得对，而问到一个
+// 没发生过的动作时是致命失败，不是 -1 与 -1 比大小。
+type callTrace struct {
+	steps []string
+}
+
+func (t *callTrace) mark(step string) { t.steps = append(t.steps, step) }
+
+// indexOf 返回某个动作第一次发生的位置；没发生过即致命。
+func (t *callTrace) indexOf(tb *testing.T, step string) int {
+	tb.Helper()
+	for i, s := range t.steps {
+		if s == step {
+			return i
+		}
+	}
+	tb.Fatalf("%q never happened; the trace is %v — an ordering assertion between two things, "+
+		"one of which did not occur, is not an ordering assertion", step, t.steps)
+	return -1
+}
+
 // recordingDeriveStore 记下推导侧收到的东西，以及每一次推导发生的那一刻
 // 互斥是不是真的握在手里。
 //
@@ -27,6 +52,8 @@ type derivedRun struct {
 // 去撞是不可复现的，而"推导时手里没有锁"是同一件事的可判定形式 —— 拿掉串行化
 // 之后它立刻非零。
 type recordingDeriveStore struct {
+	trace *callTrace
+
 	lockedFor  []string
 	held       bool
 	releases   int
@@ -36,6 +63,8 @@ type recordingDeriveStore struct {
 	derived         []derivedRun
 	derivedUnlocked int
 	deriveErr       error
+	// beforeDerive 在推导真正开始之前跑，用来模拟一次把上下文耗光的推导。
+	beforeDerive func()
 
 	deriveRuns   []snapshotstore.DeriveRun
 	deriveRunErr error
@@ -57,9 +86,13 @@ func (s *recordingDeriveStore) LockCluster(
 }
 
 func (s *recordingDeriveStore) DeriveIdentityIntervals(_ context.Context, clusterID, runID string) error {
+	if s.beforeDerive != nil {
+		s.beforeDerive()
+	}
 	if !s.held {
 		s.derivedUnlocked++
 	}
+	s.trace.mark("derive")
 	s.derived = append(s.derived, derivedRun{clusterID: clusterID, runID: runID})
 	return s.deriveErr
 }
@@ -309,6 +342,95 @@ func TestADerivationFailureDoesNotCostTheFlowWindow(t *testing.T) {
 	}
 	if row := store.onlyDeriveRun(t); row.Status != snapshotstore.DeriveFailed {
 		t.Errorf("recorded derive status = %q, want %q", row.Status, snapshotstore.DeriveFailed)
+	}
+}
+
+// ctxProbeSource 记下摄入被调用那一刻上下文的状态。
+//
+// 与 stubSource 分开：那个不看 ctx，而这里要断言的恰恰是"摄入拿到的上下文
+// 还活着"。
+type ctxProbeSource struct {
+	result flow.IngestResult
+	called bool
+	ctxErr error
+}
+
+func (s *ctxProbeSource) Ingest(ctx context.Context, _ string, _ flow.Window) (flow.IngestResult, error) {
+	s.called = true
+	s.ctxErr = ctx.Err()
+	return s.result, nil
+}
+
+// 摄入必须发生在推导之前。
+//
+// **这条钉的是顺序本身。** 上一轮把顺序改对了，却没有留下任何会因为对调而
+// 变红的东西：断言"推导跑了"、"两个失败都浮上来"、"推导失败时摄入仍然落库"
+// 的用例，在两行对调之后全部照样绿。
+//
+// 顺序按三者失败的可挽回性排（spec §2.2.1）：资产可以重采，推导可以重跑
+// （原料是一次已经落库的采集运行），而流量不能重来 —— Hubble 从环形缓冲区
+// 供数，没摄到的窗口就是没了，而没观测到的流量会被下游读成"这条规则没有
+// 流量、可以收紧"。
+//
+// 断言写成"按名字问两个动作的下标再比大小"，不是比对一条完整的期望序列：
+// 后者在加入第四段编排时要么漏改、要么被顺手改成新的实际顺序。问不到的动作
+// 是致命失败，因此它也不会退化成两个 -1 相比。
+func TestFlowIngestionIsRecordedBeforeDerivationRuns(t *testing.T) {
+	store := newCollectorStore()
+	src := hubbleSource(hubbleResult(t, testWindow(), oneConnection()), nil)
+
+	if err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testFleet(),
+		store, src, testWindow(), quietLogger()); err != nil {
+		t.Fatalf("collectAndIngest() error = %v", err)
+	}
+
+	ingest := store.trace.indexOf(t, "ingest")
+	derive := store.trace.indexOf(t, "derive")
+	if ingest > derive {
+		t.Errorf("derivation happened before the flow ingestion (trace %v); the order is not "+
+			"arbitrary: a derivation that stalls until the deadline takes the flow window down "+
+			"with it, and that traffic is gone for good — while both a collection and a "+
+			"derivation can simply be run again (spec §2.2.1)", store.trace.steps)
+	}
+}
+
+// 推导不得先把摄入要用的上下文耗光。
+//
+// 与上一条同一件事的因果面，两条一起才挡得住：只有轨迹断言时，一个"顺序对、
+// 却把 context.WithoutCancel 递给来源"的实现照样绿；只有这条时，一个"顺序
+// 反了、但来源恰好不看 ctx"的实现照样绿。
+//
+// 场景取自 spec §2.2.1 写下的那个：一次推导因为库上的锁等待或慢查询挂到
+// ctx 到期。顺序若被对调，摄入拿到的就是一个已经过期的上下文，relay 那一次
+// 请求立刻失败，那个窗口的流量永久丢失。
+func TestDerivationCannotBurnTheContextTheIngestionNeeds(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	probe := &ctxProbeSource{result: hubbleResult(t, testWindow(), oneConnection())}
+	store := newCollectorStore()
+	store.beforeDerive = cancel
+	store.deriveErr = context.DeadlineExceeded
+
+	err := collectAndIngest(ctx, testClusterID, readOnlyCluster(), testFleet(),
+		store, &flowSource{source: probe, kind: flow.SourceHubble}, testWindow(), quietLogger())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("collectAndIngest() error = %v, want it to carry the derivation timeout", err)
+	}
+
+	if !probe.called {
+		t.Fatal("the flow source was never asked for this window: a derivation that ran out of " +
+			"time took the ingestion down with it, and the relay's ring buffer does not keep history")
+	}
+	if probe.ctxErr != nil {
+		t.Errorf("the flow source was handed a context already in error (%v): the derivation ran "+
+			"first and spent the deadline the ingestion needed", probe.ctxErr)
+	}
+	if got := store.onlyIngest(t); got.Status != snapshotstore.IngestOK {
+		t.Errorf("stored ingest status = %q, want %q", got.Status, snapshotstore.IngestOK)
+	}
+	if row := store.onlyDeriveRun(t); row.ErrorReason != snapshotstore.DeriveErrorTimeout {
+		t.Errorf("recorded derive reason = %q, want %q", row.ErrorReason, snapshotstore.DeriveErrorTimeout)
 	}
 }
 

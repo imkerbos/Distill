@@ -21,18 +21,24 @@ import (
 type recordingCollectorStore struct {
 	*recordingStore
 	*recordingDeriveStore
+	// trace 与 recordingDeriveStore 里那条是同一个，见 newCollectorStore。
+	trace     *callTrace
 	ingests   []snapshotstore.IngestRun
 	ingestErr error
 }
 
 func newCollectorStore() *recordingCollectorStore {
+	// 两侧共用同一条轨迹：先后关系只有在同一把尺子上量才成立。
+	trace := &callTrace{}
 	return &recordingCollectorStore{
 		recordingStore:       &recordingStore{},
-		recordingDeriveStore: &recordingDeriveStore{},
+		recordingDeriveStore: &recordingDeriveStore{trace: trace},
+		trace:                trace,
 	}
 }
 
 func (s *recordingCollectorStore) SaveIngest(_ context.Context, run snapshotstore.IngestRun) error {
+	s.trace.mark("ingest")
 	s.ingests = append(s.ingests, run)
 	return s.ingestErr
 }
