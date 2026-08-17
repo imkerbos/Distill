@@ -14,7 +14,7 @@ import (
 func (s *Store) Clusters(ctx context.Context) ([]registry.Cluster, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT cluster_id, display_name, pod_cidr, node_cidr, ccnp_present, onboard_state,
-		        kubeconfig_ref
+		        kubeconfig_ref, data_source
 		   FROM cluster WHERE deleted_at IS NULL ORDER BY cluster_id`)
 	if err != nil {
 		return nil, fmt.Errorf("query clusters: %w", err)
@@ -25,7 +25,7 @@ func (s *Store) Clusters(ctx context.Context) ([]registry.Cluster, error) {
 	for rows.Next() {
 		var c registry.Cluster
 		if err := rows.Scan(&c.ID, &c.DisplayName, &c.PodCIDR, &c.NodeCIDR,
-			&c.CCNPPresent, &c.State, &c.KubeconfigRef); err != nil {
+			&c.CCNPPresent, &c.State, &c.KubeconfigRef, &c.DataSource); err != nil {
 			return nil, fmt.Errorf("scan cluster: %w", err)
 		}
 		out = append(out, c)
@@ -46,10 +46,10 @@ func (s *Store) Cluster(ctx context.Context, id string) (registry.Cluster, bool,
 	var c registry.Cluster
 	err := s.db.QueryRowContext(ctx,
 		`SELECT cluster_id, display_name, pod_cidr, node_cidr, ccnp_present, onboard_state,
-		        kubeconfig_ref
+		        kubeconfig_ref, data_source
 		   FROM cluster WHERE cluster_id = ? AND deleted_at IS NULL`, id).
 		Scan(&c.ID, &c.DisplayName, &c.PodCIDR, &c.NodeCIDR, &c.CCNPPresent, &c.State,
-			&c.KubeconfigRef)
+			&c.KubeconfigRef, &c.DataSource)
 	if errors.Is(err, sql.ErrNoRows) {
 		return registry.Cluster{}, false, nil
 	}
@@ -125,6 +125,11 @@ func (s *Store) loadChildren(ctx context.Context, c *registry.Cluster) error {
 }
 
 // CreateCluster 注册一个集群，同事务写审计。
+//
+// **不写 data_source。** 新注册的集群一律落在列默认值 COLLECTED 上：通过这条
+// 路径登记的集群按定义是一个真集群，而 FIXTURE 只属于 000002 种下的两个演示
+// 集群（design doc 2026-08-17 §2、§6）。让调用方指定来源，等于给出一条把真
+// 集群标成演示集群的入口，而那正是本轮要防的那个最坏结果的手动版本。
 func (s *Store) CreateCluster(ctx context.Context, actor registry.Actor, c registry.Cluster) error {
 	if err := registry.ValidateCluster(c); err != nil {
 		return err
@@ -151,6 +156,10 @@ func (s *Store) CreateCluster(ctx context.Context, actor registry.Actor, c regis
 //
 // 子表整体重写而非逐条 diff：网段清单是一个整体，
 // 逐条 diff 会在漏删一条时留下一个没人知道来源的旧网段。
+//
+// **data_source 不在 SET 清单里**，理由同 CreateCluster：改一次网段顺手把
+// 数据来源换掉，是这个字段一旦进了写路径就必然会发生的事。c.DataSource 上
+// 即便带着值也不落库 —— 与 c.Git 同一条纪律。
 func (s *Store) UpdateCluster(ctx context.Context, actor registry.Actor, c registry.Cluster) error {
 	if err := registry.ValidateCluster(c); err != nil {
 		return err
