@@ -154,11 +154,29 @@ export function listTruncationView(
 /* §4 未评估的 Baseline                                                     */
 /* ---------------------------------------------------------------------- */
 
+/**
+ * 一个缺失类型的「依据我们看过没有」的三种取值。
+ *
+ * 是三值而不是布尔：后端契约（internal/store/policy.go 的
+ * NotAssessedBaselines）把 `[]` 与 `null` 定义成**两件不同的事** ——
+ * `[]` 是"五类依据我们都检查过、都在"，`null` 是"这个 Reader 根本没
+ * 回答过这个问题"。一个布尔只能把后者折成前者，而那正好是朝"一切正常"
+ * 的方向折（design doc §4）。
+ */
+export type BaselineAssessment = 'ASSESSED' | 'NOT_ASSESSED' | 'UNKNOWN'
+
 export interface BaselineGapView {
   readonly kind: Kind
-  /** true：这一类的依据资产我们压根没看过，不是集群真的缺一条策略。 */
-  readonly notAssessed: boolean
-  /** 处置——两种缺口的区别全在这里。 */
+  /** 这一类的依据资产：看过（真缺失）/ 没看过 / 服务端没说。 */
+  readonly assessment: BaselineAssessment
+  /**
+   * 徽标文案；ASSESSED 时为空串。
+   *
+   * 文案在这里而不在 .tsx 里：三种状态各自显示什么是本模块能被测试钉住的
+   * 唯一一层，写进 JSX 就只剩浏览器能回答（design doc §7）。
+   */
+  readonly badge: string
+  /** 处置——三种缺口的区别全在这里。 */
   readonly remedy: string
 }
 
@@ -168,32 +186,54 @@ const NOT_ASSESSED_REMEDY =
   '未评估：这一类的依据资产从没采到过，或那次采集被拒绝/超时。'
   + '处置是去修采集（权限、采集器），不是去写策略。'
 
+const UNKNOWN_REMEDY =
+  '服务端没有说明这一类的依据评估过没有（老响应，或字段改了名）。'
+  + '因此现在还断不出该做什么：真缺失要去写策略，未评估要去修采集，两条处置相反。'
+  + '先弄清服务端为什么没回答这个问题。'
+
 /**
- * 把一个 namespace 的缺失类型标注成「真缺失」与「未评估」。
+ * 把一个 namespace 的缺失类型标注成「真缺失」/「未评估」/「无从判断」。
  *
  * **叠加，不是分栏**：未评估的类型仍然出现在返回值里，只是多带一条不同的
  * 处置（design doc §4）。把它们从清单里摘出去，等于让一个"我们没看过"
- * 悄悄变成"这里没问题"。两种都照旧挡住 Enforcing，标注不放宽任何门禁。
+ * 悄悄变成"这里没问题"。三种都照旧挡住 Enforcing，标注不放宽任何门禁。
+ *
+ * **`null` / 缺席一律落到 UNKNOWN，不落到"一条都没未评估"**，与
+ * dataSourceView、wouldBreakQualifier 同一条纪律：后端契约要求这个字段恒为
+ * 非 nil，因此真拿到 `null` 只说明这不是一份守约的响应 —— 把它读成"五类
+ * 依据都检查过了"，就是把一个我们不知道的事情说成最让人安心的那个方向。
  */
 export function baselineGapViews(
   kinds: Kind[], notAssessed: Kind[] | null | undefined,
 ): BaselineGapView[] {
-  const blind = new Set<Kind>(notAssessed ?? [])
+  if (notAssessed == null) {
+    return kinds.map((kind) => ({
+      kind, assessment: 'UNKNOWN' as const, badge: '评估情况未知', remedy: UNKNOWN_REMEDY,
+    }))
+  }
+  const blind = new Set<Kind>(notAssessed)
   return kinds.map((kind) => blind.has(kind)
-    ? { kind, notAssessed: true, remedy: NOT_ASSESSED_REMEDY }
-    : { kind, notAssessed: false, remedy: MISSING_REMEDY })
+    ? { kind, assessment: 'NOT_ASSESSED' as const, badge: '未评估', remedy: NOT_ASSESSED_REMEDY }
+    : { kind, assessment: 'ASSESSED' as const, badge: '', remedy: MISSING_REMEDY })
 }
 
 /**
- * 缺失清单下方那句总说明；没有任何未评估类型时为空串。
+ * 缺失清单上方那句总说明；服务端答了"一类都没未评估"时为空串。
  *
  * 不标注就等于塌回普通缺失，运维会去写一条 DNS 策略，而真正该做的是改
- * RBAC（design doc §4）。
+ * RBAC（design doc §4）。**服务端根本没回答时同样要出一句话** —— 那一句
+ * 不是"没有未评估的类型"，而是"我们不知道有没有"。
  */
 export function notAssessedNote(notAssessed: Kind[] | null | undefined): string {
-  const kinds = notAssessed ?? []
-  if (kinds.length === 0) return ''
-  return `其中 ${kinds.join('、')} 属于「未评估」：平台从没拿到过这几类的依据资产`
+  if (notAssessed == null) {
+    return '服务端没有说明这些缺失类型的依据评估过没有（notAssessedBaselines 缺席，'
+      + '按契约它恒为非 nil，因此这是一份老响应或字段改了名）。'
+      + '缺席不等于"都评估过"：下面每一类都可能是「真缺失」，也可能是「平台压根没看过」，'
+      + '而两者的处置相反（写策略 / 修采集）。在服务端答上来之前，不得把下表当作关于集群的结论读。'
+      + '三种缺口都照旧挡住 Enforcing —— 这条标注不放宽任何门禁。'
+  }
+  if (notAssessed.length === 0) return ''
+  return `其中 ${notAssessed.join('、')} 属于「未评估」：平台从没拿到过这几类的依据资产`
     + '（从未采集，或那次采集被拒绝、超时），因此无从判断它们是不是真的缺。'
     + '处置是去修采集，不是去写策略。两种缺口都照旧挡住 Enforcing —— 这条标注不放宽任何门禁。'
 }

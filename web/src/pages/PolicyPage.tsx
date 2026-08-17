@@ -1263,9 +1263,11 @@ function MissingBaselineSection({ missing, baselineKinds, notAssessed }: {
                         {gaps.map((g) => (
                           <span key={g.kind} style={{ display: 'inline-flex', gap: 4 }}>
                             <Chip strong>{g.kind}</Chip>
-                            {/* 未评估的类型仍然挂在同一格里，不移出清单：
-                                它照旧是一个缺口，区别只在下一步做什么。 */}
-                            {g.notAssessed && <Chip>未评估</Chip>}
+                            {/* 未评估、以及「服务端没说评估过没有」的类型都仍然挂在
+                                同一格里，不移出清单：它照旧是一个缺口，区别只在下一步
+                                做什么。徽标文案由 baselineGapViews 给出，不在这里拼——
+                                三种状态各自显示什么必须落在能被测试钉住的那一层。 */}
+                            {g.badge !== '' && <Chip>{g.badge}</Chip>}
                           </span>
                         ))}
                       </span>

@@ -117,8 +117,12 @@ test('未评估是叠加：那几类仍然留在缺失清单里', () => {
   assert.deepEqual(gaps.map((g) => g.kind), ALL_KINDS,
     '未评估的类型被从缺失清单里摘掉了——一个「我们没看过」于是读起来像「这里没问题」')
   assert.deepEqual(
-    gaps.filter((g) => g.notAssessed).map((g) => g.kind),
+    gaps.filter((g) => g.assessment === 'NOT_ASSESSED').map((g) => g.kind),
     ['METRICS_SCRAPE', 'NODE_AGENT'])
+  assert.deepEqual(
+    gaps.filter((g) => g.badge !== '').map((g) => g.kind),
+    ['METRICS_SCRAPE', 'NODE_AGENT'],
+    '徽标与判定分了家：屏幕上带标注的类型于是不再是被判为未评估的那几类')
 })
 
 test('两种缺口的处置不同：一个去写策略，一个去修采集', () => {
@@ -136,10 +140,47 @@ test('两种缺口的处置不同：一个去写策略，一个去修采集', ()
   assert.notEqual(dns.remedy, nodeAgent.remedy)
 })
 
-test('没有未评估类型时不标注任何东西', () => {
-  for (const na of [null, undefined, [] as Kind[]]) {
-    assert.equal(baselineGapViews(ALL_KINDS, na).some((g) => g.notAssessed), false)
-    assert.equal(notAssessedNote(na), '')
+test('服务端答了"一类都没未评估"时不标注任何东西', () => {
+  // 只有 `[]` 算这个答案。`null` / 缺席是另一件事，见下一条。
+  assert.equal(baselineGapViews(ALL_KINDS, []).every((g) => g.assessment === 'ASSESSED'), true)
+  assert.equal(baselineGapViews(ALL_KINDS, []).some((g) => g.badge !== ''), false)
+  assert.equal(notAssessedNote([]), '')
+})
+
+test('notAssessedBaselines 缺席落到 UNKNOWN，不落到「一条都没未评估」', () => {
+  // 后端契约（internal/store/policy.go 的 NotAssessedBaselines）：`[]` 是
+  // "五类都检查过"，`null` 是"这个 Reader 根本没回答"。把 null 折进 []（一个
+  // `?? []`）会让 METRICS_SCRAPE / NODE_AGENT 与 DNS 在屏幕上长得一模一样，
+  // 运维于是去写三条策略，而其中两条真正的处置是改 RBAC（design doc §4）。
+  for (const na of [null, undefined]) {
+    const gaps = baselineGapViews(['DNS', 'METRICS_SCRAPE', 'NODE_AGENT'], na)
+    assert.deepEqual(gaps.map((g) => g.kind), ['DNS', 'METRICS_SCRAPE', 'NODE_AGENT'],
+      '缺席时清单被改动了：叠加标注不得因为服务端没回答就变成一次摘除')
+    for (const g of gaps) {
+      assert.equal(g.assessment, 'UNKNOWN',
+        `${g.kind} 在 notAssessedBaselines 缺席时被判成了一个确定的结论：`
+        + '缺席不等于"都评估过"，而这个方向是朝"一切正常"折的')
+      assert.notEqual(g.badge, '',
+        `${g.kind} 缺席时没有任何标注：屏幕上它于是与一条确认过的真缺失完全一样`)
+      assert.equal(/^去写一条/.test(g.remedy), false,
+        `${g.kind} 缺席时仍然教人去写策略——真缺失才写策略，未评估要修采集，`
+        + '而现在我们两者都还分不出来')
+      assert.match(g.remedy, /未评估|修采集/)
+    }
+  }
+})
+
+test('notAssessedBaselines 缺席时的总说明说的是"不知道"，不是"没有"', () => {
+  for (const na of [null, undefined]) {
+    const note = notAssessedNote(na)
+    assert.notEqual(note, '',
+      '缺席时一句话都不说：那与"五类依据都检查过、都在"在屏幕上无从区分')
+    assert.match(note, /不等于|无从|可能/,
+      '缺席的说明没有把"不知道"说出来')
+    assert.match(note, /Enforcing/,
+      '标注没有说清它不放宽任何门禁——一条读起来像豁免的注释比不标注更糟')
+    assert.equal(/^其中/.test(note), false,
+      '缺席被渲染成了一份点名的未评估清单：我们并不知道是哪几类')
   }
 })
 
@@ -278,6 +319,12 @@ test('未评估叠加在缺失清单上，不另开一栏', () => {
   assert.match(POLICY_SOURCE, /baselineGapViews\(m\.kinds, notAssessed\)/,
     '标注不再由 baselineGapViews 产出：哪几类是"没看过"于是另有一份判断')
   assert.match(POLICY_SOURCE, /notAssessedNote\(notAssessed\)/)
+  // 徽标必须由视图给出。写死 `{g.notAssessed && <Chip>未评估</Chip>}` 时，
+  // 上面那条三值判定形同虚设：`null` 照样一个标注都不挂（design doc §4）。
+  assert.match(POLICY_SOURCE, /\{g\.badge !== ''\s*&& <Chip>\{g\.badge\}<\/Chip>\}/,
+    '徽标不再取自 baselineGapViews 的 badge：UNKNOWN 于是在屏幕上与"确认过、真缺失"一样')
+  assert.equal(/<Chip>未评估<\/Chip>/.test(POLICY_SOURCE), false,
+    '页面自己写死了「未评估」文案：三种状态各显示什么于是又回到了测不到的那一层')
   assert.equal(/title="未评估/.test(POLICY_SOURCE), false,
     '未评估被单列成了另一节：那几类必须留在缺失清单里，只读缺失一栏的人才是 fail-closed 的')
 })

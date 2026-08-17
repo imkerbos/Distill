@@ -718,7 +718,16 @@ export interface PolicyPreview {
    * 前一栏的消费方因此天然 fail-closed（design doc §4）。两者的区别在处置——
    * 真缺失去写策略，未评估去修采集——而不在门禁：两栏都照旧挡住 Enforcing。
    *
-   * 带 `| null`：后端零条时可能序列化成 `null` 而不是 `[]`（同 overrides）。
+   * 带 `| null`，但**理由与 overrides / excludedWorkloads 完全不同**：那两个
+   * 字段是后端零条时 Go nil 切片序列化成了 `null`，`null` 就是「零条」。这个
+   * 字段不是 —— 后端契约（internal/store/policy.go 的 NotAssessedBaselines）
+   * 把两者定义成两件事：`[]` 是「五类依据我们都检查过、都在」，`null` 是
+   * 「这个 Reader 根本没回答过这个问题」，并要求恒为非 nil。
+   *
+   * 因此 `null` **不得读成「零条未评估」**：那是把一个我们不知道的事情说成
+   * 最让人安心的方向。渲染层（preconditionsView 的 baselineGapViews /
+   * notAssessedNote）把它落到第三种状态 UNKNOWN，与 dataSource 缺席落到
+   * 「来源未知」同一条纪律。
    */
   notAssessedBaselines: Kind[] | null
   ungeneratable: UngeneratableItem[]
