@@ -47,6 +47,8 @@ func testDSN(t *testing.T) string {
 // 写成完整语句而非表名再拼接：拼接 SQL 需要一条 //nolint 才能过 gosec，
 // 而那条注释在后来的人眼里与"这里的拼接是安全的"无法区分。
 var cleanupStatements = []string{
+	"DELETE FROM observed_connection",
+	"DELETE FROM flow_ingest_run",
 	"DELETE FROM pod_identity_interval",
 	"DELETE FROM observed_gateway",
 	"DELETE FROM observed_network_policy",

@@ -51,6 +51,21 @@ func newFromConfig(cfg *rest.Config) (kubernetes.Interface, error) {
 	return client, nil
 }
 
+// GuardedDialContext 是 guardedDial 的导出入口，供集群内的其他出站路径复用。
+//
+// 存在的理由是**不让这份网段策略出现第二份**。集群内还有别的东西要拨号 ——
+// 第一个是 internal/hubble 直连 Hubble relay 的 gRPC。它需要的判定与
+// apiserver 完全一致：relay 和 apiserver 一样在集群内，照搬 internal/gitssh
+// 那套"拒绝一切私有地址"会把正常情况整个挡掉（见 destination.go 的注释）。
+// 而在第二个包里重抄一遍 blockedPrefixes，两份必然漂移，且漂移的那一天没有
+// 任何症状 —— 守卫仍然存在、仍然被测到，只是守的不是同一件事。
+//
+// 签名与 net.Dialer.DialContext 一致，因此 rest.Config.Dial 与
+// grpc.WithContextDialer 都能直接接上。
+func GuardedDialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	return guardedDial(ctx, network, address)
+}
+
 // guardedDial 解析一次主机名，逐个判定候选地址，只拨通过判定的那一个。
 //
 // 自己解析而非先判定主机名再交给传输层解析：两次解析之间就是 DNS
