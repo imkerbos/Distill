@@ -17,7 +17,9 @@ import (
 
 	"github.com/imkerbos/Distill/internal/auth"
 	"github.com/imkerbos/Distill/internal/buildinfo"
+	"github.com/imkerbos/Distill/internal/cluster"
 	"github.com/imkerbos/Distill/internal/config"
+	"github.com/imkerbos/Distill/internal/fleet"
 	"github.com/imkerbos/Distill/internal/gitverify"
 	"github.com/imkerbos/Distill/internal/gitwrite"
 	"github.com/imkerbos/Distill/internal/httpapi"
@@ -130,9 +132,37 @@ func run(configPath string) error {
 		// 是为了让边界层只拿到它真正需要的那几个方法，不是为了换实现。
 		Writeback:    reg,
 		PolicyWriter: newSettingsPolicyWriter(settingsProvider, logger),
-		// 资产采集的只读摘要。写入侧属于 cmd/distill-collector —— 这里
-		// 只拿读的那一面，主服务不持有任何 Kubernetes 凭据。
+		// 资产采集的只读摘要。拉取式采集的写入侧属于 cmd/distill-collector
+		// —— 这里只拿读的那一面，主服务不持有任何 Kubernetes 凭据。
 		Collection: snapshotstore.New(db),
+		// 推送式接入的落库口（design doc 2026-08-18）。
+		//
+		// 这里出现一条写路径，与上面那句「只拿读的那一面」并不矛盾：写进来
+		// 的是**被管集群自己推上来的观测**，主服务依然没有任何 Kubernetes
+		// 凭据，也依然不会去连那个集群。方向反了 —— 这正是推送式接入的
+		// 全部意义。
+		AgentSink: snapshotstore.New(db),
+		// 归属判定所需的 fleet 登记，**每次请求现读**。
+		//
+		// 装配时抄一份等于把判定钉在进程启动那一刻：那之后接入的集群，
+		// 它网段里的每一个地址都会被判成 EXTERNAL —— 一个答得出、又不报错
+		// 的错误结论（design doc §3.4）。
+		Fleet: func(ctx context.Context) (*cluster.Registry, error) {
+			clusters, err := reg.Clusters(ctx)
+			if err != nil {
+				return nil, err
+			}
+			// 网段登记坏掉的集群照样进判定表，只是没有网段：让它消失会让
+			// Classify 把它的 Pod IP 判成 EXTERNAL 或另一个集群的，而带着
+			// 空网段留下来只会让判定退化成 UNKNOWN 并附上缺口原因。
+			// 失败方向朝「答不出」，不朝「自信地答错」。
+			out, unusable := fleet.FromRegistry(clusters)
+			for _, id := range unusable {
+				logger.Warn("a cluster has an unusable CIDR registration; ingest classification will degrade to UNKNOWN",
+					"cluster", id)
+			}
+			return out, nil
+		},
 	}))
 
 	srv := &http.Server{
