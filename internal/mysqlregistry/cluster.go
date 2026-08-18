@@ -15,7 +15,7 @@ import (
 func (s *Store) Clusters(ctx context.Context) ([]registry.Cluster, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT cluster_id, display_name, pod_cidr, node_cidr, ccnp_present, onboard_state,
-		        kubeconfig_ref, data_source
+		        kubeconfig_ref, data_source, no_node_agents_reason
 		   FROM cluster WHERE deleted_at IS NULL ORDER BY cluster_id`)
 	if err != nil {
 		return nil, fmt.Errorf("query clusters: %w", err)
@@ -26,7 +26,8 @@ func (s *Store) Clusters(ctx context.Context) ([]registry.Cluster, error) {
 	for rows.Next() {
 		var c registry.Cluster
 		if err := rows.Scan(&c.ID, &c.DisplayName, &c.PodCIDR, &c.NodeCIDR,
-			&c.CCNPPresent, &c.State, &c.KubeconfigRef, &c.DataSource); err != nil {
+			&c.CCNPPresent, &c.State, &c.KubeconfigRef, &c.DataSource,
+			&c.NoNodeAgentsReason); err != nil {
 			return nil, fmt.Errorf("scan cluster: %w", err)
 		}
 		out = append(out, c)
@@ -47,10 +48,10 @@ func (s *Store) Cluster(ctx context.Context, id string) (registry.Cluster, bool,
 	var c registry.Cluster
 	err := s.db.QueryRowContext(ctx,
 		`SELECT cluster_id, display_name, pod_cidr, node_cidr, ccnp_present, onboard_state,
-		        kubeconfig_ref, data_source
+		        kubeconfig_ref, data_source, no_node_agents_reason
 		   FROM cluster WHERE cluster_id = ? AND deleted_at IS NULL`, id).
 		Scan(&c.ID, &c.DisplayName, &c.PodCIDR, &c.NodeCIDR, &c.CCNPPresent, &c.State,
-			&c.KubeconfigRef, &c.DataSource)
+			&c.KubeconfigRef, &c.DataSource, &c.NoNodeAgentsReason)
 	if errors.Is(err, sql.ErrNoRows) {
 		return registry.Cluster{}, false, nil
 	}
@@ -127,6 +128,26 @@ func (s *Store) loadChildren(ctx context.Context, c *registry.Cluster) error {
 		return fmt.Errorf("iterate metrics scrapers: %w", err)
 	}
 
+	// 节点级 agent：与 metrics 抓取端同源，端口只有人知道
+	// （design doc 2026-08-18-node-agent-applicability §3）。
+	naRows, err := s.db.QueryContext(ctx,
+		`SELECT namespace, app, host_network, target_port FROM cluster_node_agent
+		  WHERE cluster_id = ? ORDER BY namespace, app`, c.ID)
+	if err != nil {
+		return fmt.Errorf("query node agents: %w", err)
+	}
+	defer func() { _ = naRows.Close() }()
+	for naRows.Next() {
+		var a registry.NodeAgentRegistration
+		if err := naRows.Scan(&a.Namespace, &a.App, &a.HostNetwork, &a.TargetPort); err != nil {
+			return fmt.Errorf("scan node agent: %w", err)
+		}
+		c.NodeAgents = append(c.NodeAgents, a)
+	}
+	if err := naRows.Err(); err != nil {
+		return fmt.Errorf("iterate node agents: %w", err)
+	}
+
 	var g registry.GitBinding
 	var lastCommit, verifyResult sql.NullString
 	var verifiedAt sql.NullTime
@@ -169,10 +190,11 @@ func (s *Store) CreateCluster(ctx context.Context, actor registry.Actor, c regis
 			if _, err := tx.ExecContext(ctx,
 				`INSERT INTO cluster
 				   (cluster_id, display_name, pod_cidr, node_cidr, ccnp_present,
-				    onboard_state, kubeconfig_ref, created_at, updated_at)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				    no_node_agents_reason, onboard_state, kubeconfig_ref,
+				    created_at, updated_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				c.ID, c.DisplayName, c.PodCIDR, c.NodeCIDR, c.CCNPPresent,
-				string(c.State), c.KubeconfigRef, now, now,
+				c.NoNodeAgentsReason, string(c.State), c.KubeconfigRef, now, now,
 			); err != nil {
 				return writeFailure("insert cluster",
 					fmt.Sprintf("集群 ID %q 已被注册，请换一个或先下线原集群", c.ID), "", err)
@@ -204,11 +226,11 @@ func (s *Store) UpdateCluster(ctx context.Context, actor registry.Actor, c regis
 		func(tx *sql.Tx) error {
 			res, err := tx.ExecContext(ctx,
 				`UPDATE cluster SET display_name = ?, pod_cidr = ?, node_cidr = ?,
-				        ccnp_present = ?, onboard_state = ?, kubeconfig_ref = ?,
-				        updated_at = ?
+				        ccnp_present = ?, no_node_agents_reason = ?,
+				        onboard_state = ?, kubeconfig_ref = ?, updated_at = ?
 				  WHERE cluster_id = ? AND deleted_at IS NULL`,
 				c.DisplayName, c.PodCIDR, c.NodeCIDR, c.CCNPPresent,
-				string(c.State), c.KubeconfigRef, s.now(), c.ID,
+				c.NoNodeAgentsReason, string(c.State), c.KubeconfigRef, s.now(), c.ID,
 			)
 			if err != nil {
 				return fmt.Errorf("update cluster: %w", err)
@@ -231,6 +253,7 @@ func (s *Store) UpdateCluster(ctx context.Context, actor registry.Actor, c regis
 				`DELETE FROM cluster_apiserver WHERE cluster_id = ?`,
 				`DELETE FROM cluster_health_check_source WHERE cluster_id = ?`,
 				`DELETE FROM cluster_metrics_scraper WHERE cluster_id = ?`,
+				`DELETE FROM cluster_node_agent WHERE cluster_id = ?`,
 			} {
 				if _, err := tx.ExecContext(ctx, stmt, c.ID); err != nil {
 					return fmt.Errorf("clear children: %w", err)
@@ -308,6 +331,16 @@ func insertChildren(ctx context.Context, tx *sql.Tx, c registry.Cluster) error {
 		); err != nil {
 			return writeFailure("insert metrics scraper",
 				fmt.Sprintf("metrics 抓取端 %q 在本集群下重复", sc.Namespace), "", err)
+		}
+	}
+	for _, a := range c.NodeAgents {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO cluster_node_agent (cluster_id, namespace, app, host_network, target_port)
+			 VALUES (?, ?, ?, ?, ?)`,
+			c.ID, a.Namespace, a.App, a.HostNetwork, a.TargetPort,
+		); err != nil {
+			return writeFailure("insert node agent",
+				fmt.Sprintf("节点 agent %s/%s 在本集群下重复", a.Namespace, a.App), "", err)
 		}
 	}
 	return nil

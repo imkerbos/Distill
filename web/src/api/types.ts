@@ -607,7 +607,16 @@ export interface RegisteredCluster {
    * METRICS_SCRAPE Baseline 依据的一半 —— Pod 上的 prometheus.io/scrape 注解
    * 只说了"谁愿意被抓"，说不出"谁来抓"，而后者观测不出来。
    */
-  metricsScrapers?: Array<{ namespace: string; labels: Record<string, string> }> | null
+  metricsScrapers?: Array<{ namespace: string; labels: Record<string, string> }>
+  /** 需要被放行的节点级 agent。 */
+  nodeAgents?: Array<{ namespace: string; app: string; hostNetwork: boolean; targetPort: number }>
+  /**
+   * 非空表示已显式声明这个集群没有需要放行的节点 agent。
+   *
+   * NODE_AGENT 因此"不适用"而非"缺失"。存理由而不是布尔：判错的方向是
+   * 监控在下发之后静默中断，事后要答得出当初凭什么说不需要。
+   */
+  noNodeAgentsReason?: string | null
   git?: GitBinding
 }
 

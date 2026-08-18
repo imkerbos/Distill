@@ -121,6 +121,16 @@ func ValidateCluster(c Cluster) error {
 	// secrets.ValidateRef，不另写一份字符集校验：两份安全相关的字符类
 	// 定义迟早会走样，而走样的那一份放行的是一个能指向凭据目录之外的
 	// 引用，丢了不会有任何症状，直到有人用它读到别的东西。
+	for i, a := range c.NodeAgents {
+		if err := ValidateNodeAgent(a); err != nil {
+			return wrapInvalid(fmt.Sprintf("nodeAgents[%d] 不合法", i), err)
+		}
+	}
+	// 登记了 agent 又声明"没有需要放行的 agent"：一次自相矛盾的登记。
+	// 收下它之后，缺失清单该不该有这一类没有答案（design doc §8）。
+	if len(c.NodeAgents) > 0 && c.NoNodeAgentsReason != "" {
+		return invalid("已经登记了节点 agent，就不能同时声明这个集群没有需要放行的节点 agent")
+	}
 	for i, sc := range c.MetricsScrapers {
 		if err := ValidateMetricsScraper(sc); err != nil {
 			return wrapInvalid(fmt.Sprintf("metricsScrapers[%d] 不合法", i), err)

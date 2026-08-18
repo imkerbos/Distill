@@ -95,6 +95,14 @@ export interface ClusterFormValues {
    * 选不中任何 Pod 的规则 —— 看起来齐备、实际什么都没放行。
    */
   metricsScrapers: string
+  /** 节点 agent，每行一个 `namespace  app  hostNetwork  端口`。 */
+  nodeAgents: string
+  /**
+   * 声明"这个集群没有需要放行的节点 agent"的理由；为空表示没有声明过。
+   *
+   * 与 nodeAgents 互斥，服务端会拒绝两者并存。
+   */
+  noNodeAgentsReason: string
 }
 
 /** 绑定表单的初始值：全空，对应"这个集群还没有绑定"。 */
@@ -106,6 +114,7 @@ export function blankFormValues(): ClusterFormValues {
     id: '', displayName: '', podCidr: '', nodeCidr: '', ccnpPresent: false,
     kubeconfigRef: '',
     apiServerRows: [emptyApiServerRow()], healthChecks: '', metricsScrapers: '',
+    nodeAgents: '', noNodeAgentsReason: '',
   }
 }
 
@@ -136,6 +145,8 @@ export function formValuesOf(c: RegisteredCluster): ClusterFormValues {
     apiServerRows: rows.length > 0 ? rows : [emptyApiServerRow()],
     healthChecks: (c.healthCheckSources ?? []).join('\n'),
     metricsScrapers: (c.metricsScrapers ?? []).map(scraperToLine).join('\n'),
+    nodeAgents: (c.nodeAgents ?? []).map(nodeAgentToLine).join('\n'),
+    noNodeAgentsReason: c.noNodeAgentsReason ?? '',
   }
 }
 
@@ -336,6 +347,8 @@ export function buildClusterWrite(values: ClusterFormValues): BuildResult {
       apiServers: servers.apiServers,
       healthCheckSources: values.healthChecks.split('\n').map((s) => s.trim()).filter(Boolean),
       metricsScrapers: parseScraperLines(values.metricsScrapers),
+      nodeAgents: parseNodeAgentLines(values.nodeAgents),
+      noNodeAgentsReason: values.noNodeAgentsReason.trim(),
     },
   }
 }
@@ -396,4 +409,42 @@ export function parseScraperLines(text: string): Array<{ namespace: string; labe
 export function scraperToLine(s: { namespace: string; labels: Record<string, string> }): string {
   const pairs = Object.keys(s.labels).sort().map((k) => `${k}=${s.labels[k]}`)
   return `${s.namespace}  ${pairs.join(',')}`
+}
+
+/* ---------------------------------------------------------------------- */
+/* 节点 agent 的文本形式                                                     */
+/* ---------------------------------------------------------------------- */
+
+/**
+ * 一行一个节点 agent：`namespace  app  hostNetwork  端口`。
+ *
+ * hostNetwork 写成 `host` 或 `pod` —— true/false 在这一栏里读起来是
+ * 「这个 agent 存在吗」，而它问的是「它用谁的网络栈」。这个区别不是措辞：
+ * hostNetwork 的 agent 必须走 node CIDR，写成 podSelector 会得到一条看起来
+ * 正确、实际从不匹配的规则。
+ *
+ * **端口解析不出来的行整行丢弃**：不补默认值。一条放行到猜出来的端口的规则，
+ * 看起来齐备、实际什么都没放行。
+ */
+export function parseNodeAgentLines(
+  text: string,
+): Array<{ namespace: string; app: string; hostNetwork: boolean; targetPort: number }> {
+  const out: Array<{ namespace: string; app: string; hostNetwork: boolean; targetPort: number }> = []
+  for (const raw of text.split('\n')) {
+    const parts = raw.trim().split(/\s+/).filter(Boolean)
+    if (parts.length !== 4) continue
+    const [namespace, app, net, rawPort] = parts
+    if (net !== 'host' && net !== 'pod') continue
+    const targetPort = Number(rawPort)
+    if (!Number.isInteger(targetPort) || targetPort <= 0 || targetPort > 65535) continue
+    out.push({ namespace, app, hostNetwork: net === 'host', targetPort })
+  }
+  return out
+}
+
+/** 把一个节点 agent 渲染回一行，供编辑表单预填。 */
+export function nodeAgentToLine(
+  a: { namespace: string; app: string; hostNetwork: boolean; targetPort: number },
+): string {
+  return `${a.namespace}  ${a.app}  ${a.hostNetwork ? 'host' : 'pod'}  ${a.targetPort}`
 }

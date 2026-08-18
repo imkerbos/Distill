@@ -12,6 +12,7 @@ import (
 	"github.com/imkerbos/Distill/internal/flow"
 	"github.com/imkerbos/Distill/internal/policygen"
 	"github.com/imkerbos/Distill/internal/predict"
+	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/replay"
 	"github.com/imkerbos/Distill/internal/snapshot"
 	"github.com/imkerbos/Distill/internal/store"
@@ -33,6 +34,11 @@ type candidateSet struct {
 	result          policygen.Result
 	// notAssessed 是依据资源这次采集根本没有枚举的那几类 Baseline。
 	notAssessed []baseline.Kind
+	// inapplicable 是被操作者显式声明"这个集群不需要"的那几类。
+	//
+	// 与 notAssessed 是两件事：那一栏说"我们没看过"，这一栏说"看过了、
+	// 不需要"，而后者是一次有记录的人工判断（登记在集群上，写审计）。
+	inapplicable []baseline.Kind
 }
 
 // PolicyPreview 用真实采集到的资产与流量生成候选策略并回放预测。
@@ -87,8 +93,13 @@ func (r *Reader) PolicyPreview(
 		// 消失 —— 一个从没验证过 DNS 依据的集群于是被放行进 Enforcing。
 		// 两栏重叠是刻意的：缺失清单回答"还差哪几类"，未评估清单回答
 		// "其中哪几类是我们没看过"，后者不减少前者。
-		MissingBaselines:     store.FilterMissing(gen.MissingBaselines, namespace),
-		NotAssessedBaselines: cs.notAssessed,
+		// 被显式声明"不适用"的那一类从两栏同时摘掉（design doc
+		// 2026-08-18-node-agent-applicability §2）。**这是两栏里唯一允许的
+		// 摘除**：未评估那条纪律说的是"不减少缺失"，而它针对的是
+		// 「我们没看过」—— 那时缺口仍然存在，只是我们不知道。这里不同：
+		// 有人看过了，并且写下了为什么不需要，那条记录在审计里。
+		MissingBaselines:     dropInapplicable(store.FilterMissing(gen.MissingBaselines, namespace), cs.inapplicable),
+		NotAssessedBaselines: dropKinds(cs.notAssessed, cs.inapplicable),
 		Ungeneratable:        gen.Ungeneratable,
 		ExcludedWorkloads:    gen.ExcludedWorkloads,
 		Prediction:           report,
@@ -177,7 +188,8 @@ func (r *Reader) generate(
 			Pods:         t.roster(),
 			Observations: obs,
 		}),
-		notAssessed: notAssessedBaselines(evidence),
+		notAssessed:  notAssessedBaselines(evidence),
+		inapplicable: inapplicableBaselines(c),
 	}, nil
 }
 
@@ -236,10 +248,10 @@ func (t traffic) roster() []replay.PodRef {
 // 被抓端登记不出来，两半各有各的来源。没有登记抓取端时它是空的，
 // METRICS_SCRAPE 照旧进缺失清单 —— 不补占位数据。
 //
-// **NodeAgents 仍然留空**：那一类的依据（agent 实际访问的端口）不在任何资产
-// 里，而且它今天报的"缺失"有一部分可能根本不适用（filebeat / promtail 读文件，
-// 不往工作负载建连接）。「不适用」与「缺失」是两件事，平台今天说不出前者 ——
-// 单独一轮（同 spec §6）。留空是如实，由 NotAssessedBaselines 说出"我们没看过"。
+// **NodeAgents 同样来自登记**（design doc 2026-08-18-node-agent-applicability §3）：
+// 平台看得见集群里有哪些 hostNetwork DaemonSet，但看不见它们往哪连 —— agent
+// 连不连工作负载、连哪个端口，写在它自己的配置里。没有登记时它是空的，
+// NODE_AGENT 照旧进缺失清单，除非操作者显式声明了这个集群不需要（§4.3）。
 func (r *Reader) assetsAt(ctx context.Context, t traffic) (snapshot.Assets, error) {
 	services, err := r.readServicesAt(ctx, t.described)
 	if err != nil {
@@ -276,6 +288,7 @@ func (r *Reader) assetsAt(ctx context.Context, t traffic) (snapshot.Assets, erro
 		Gateways:      gateways,
 		APIServers:    t.registered.APIServerSnapshots(),
 		ScrapeTargets: t.registered.ScrapeTargetSnapshots(declared),
+		NodeAgents:    t.registered.NodeAgentSnapshots(),
 		Registry:      t.registered.ToSnapshot(),
 	}, nil
 }
@@ -309,4 +322,52 @@ func degradeByCompleteness(c flow.Completeness, rep predict.Report) predict.Repo
 	rep.DegradedCount += rep.TrustedCount
 	rep.TrustedCount = 0
 	return rep
+}
+
+// inapplicableBaselines 挑出被这个集群显式声明"不需要"的那几类 Baseline。
+//
+// 今天只有 NODE_AGENT 有这条路径（design doc 2026-08-18-node-agent-applicability）。
+// 别的类都推得出依据，或者依据缺失本身就是要修的东西 —— 只有节点 agent 这一类，
+// 「这个集群根本没有需要放行的 agent」是一个合理且常见的事实，而平台观测不出来。
+//
+// **判据是理由非空，不是一个布尔**：一次没有理由的声明在写入侧就会被拒
+// （registry.ValidateCluster），因此这里读到非空就意味着有人写下过为什么。
+func inapplicableBaselines(c registry.Cluster) []baseline.Kind {
+	if c.NoNodeAgentsReason == "" {
+		return nil
+	}
+	return []baseline.Kind{baseline.KindNodeAgent}
+}
+
+// dropKinds 从一份清单里去掉指定的那几类。
+func dropKinds(in, drop []baseline.Kind) []baseline.Kind {
+	if len(drop) == 0 {
+		return in
+	}
+	out := make([]baseline.Kind, 0, len(in))
+	for _, k := range in {
+		if !slices.Contains(drop, k) {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// dropInapplicable 从缺失清单里去掉不适用的那几类。
+//
+// 逐个 namespace 处理并**丢掉变空的那一项**：一个"缺失 0 类"的条目在界面上
+// 与"这个命名空间有缺口"长得一样，而它什么缺口都没有。
+func dropInapplicable(in []policygen.MissingBaseline, drop []baseline.Kind) []policygen.MissingBaseline {
+	if len(drop) == 0 {
+		return in
+	}
+	out := make([]policygen.MissingBaseline, 0, len(in))
+	for _, m := range in {
+		kinds := dropKinds(m.Kinds, drop)
+		if len(kinds) == 0 {
+			continue
+		}
+		out = append(out, policygen.MissingBaseline{Namespace: m.Namespace, Kinds: kinds})
+	}
+	return out
 }

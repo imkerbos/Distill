@@ -272,6 +272,21 @@ type Cluster struct {
 	APIServers []APIServer `json:"apiServers"`
 	// HealthCheckSources 是负载均衡健康检查的来源网段。
 	HealthCheckSources []string `json:"healthCheckSources"`
+	// NodeAgents 是需要被放行的节点级 agent。
+	//
+	// 与 MetricsScrapers 同源：agent 连不连工作负载、连哪个端口只有人知道
+	// （design doc 2026-08-18-node-agent-applicability §3）。
+	NodeAgents []NodeAgentRegistration `json:"nodeAgents"`
+	// NoNodeAgentsReason 非空表示操作者**显式声明**这个集群没有需要放行的
+	// 节点 agent，NODE_AGENT 这一类因此"不适用"而非"缺失"。
+	//
+	// 存理由而不是一个布尔：这是一次有后果的判断 —— 判错的方向是监控在
+	// 下发之后静默中断。事后要答得出「当初凭什么说不需要」，一个 true
+	// 答不出来。
+	//
+	// 与 NodeAgents 互斥：同时给出两者是一次自相矛盾的登记，收下之后没有
+	// 任何一屏知道该信哪一半（见 ValidateCluster）。
+	NoNodeAgentsReason string `json:"noNodeAgentsReason,omitempty"`
 	// MetricsScrapers 是这个集群里的 metrics 抓取端。
 	//
 	// 与 HealthCheckSources 并列、理由同源：它是 METRICS_SCRAPE Baseline

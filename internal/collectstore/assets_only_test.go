@@ -362,3 +362,94 @@ func TestNoMetricsBaselineWithoutARegisteredScraper(t *testing.T) {
 		}
 	}
 }
+
+// 登记了节点 agent → NODE_AGENT 生成规则，且离开缺失清单。
+func TestNodeAgentBaselineAppearsOnceRegistered(t *testing.T) {
+	src := testSource()
+	for i := range src.clusters {
+		if src.clusters[i].ID == collectedID {
+			src.clusters[i].NodeAgents = []registry.NodeAgentRegistration{{
+				Namespace: "logging", App: "filebeat", HostNetwork: true, TargetPort: 9200,
+			}}
+		}
+	}
+	r, s := newTestReaderWithSource(t, src)
+	ctx := context.Background()
+	saveRunWithDNS(t, s, "run-agent", firstRunAt, assetOnlyPods())
+
+	pv, err := r.PolicyPreview(ctx, collectedID, "", store.TimeWindow{})
+	if err != nil {
+		t.Fatalf("PolicyPreview() error = %v", err)
+	}
+	var agents int
+	for _, p := range pv.Candidates {
+		for _, rule := range p.Rules {
+			if rule.Baseline != nil && *rule.Baseline == baseline.KindNodeAgent {
+				agents++
+			}
+		}
+	}
+	if agents == 0 {
+		t.Error("no NODE_AGENT rule was generated although one is registered")
+	}
+}
+
+// **声明「不适用」之后，这一类既不在缺失清单，也不在未评估清单里。**
+//
+// 这是整轮的落点：UAT 上 42 个命名空间每一个都报 NODE_AGENT 缺失，而那个集群
+// 的 agent（filebeat / promtail）读文件、不往工作负载建连接 —— 报的是一条永远
+// 在喊而且喊错的告警，而一条那样的告警会让整类告警被整体忽略。
+func TestDeclaringNoNodeAgentsRemovesTheKindFromBothLists(t *testing.T) {
+	src := testSource()
+	for i := range src.clusters {
+		if src.clusters[i].ID == collectedID {
+			src.clusters[i].NoNodeAgentsReason = "本集群的 agent 只读文件，不向工作负载建连接"
+		}
+	}
+	r, s := newTestReaderWithSource(t, src)
+	ctx := context.Background()
+	saveRunWithDNS(t, s, "run-none", firstRunAt, assetOnlyPods())
+
+	pv, err := r.PolicyPreview(ctx, collectedID, "", store.TimeWindow{})
+	if err != nil {
+		t.Fatalf("PolicyPreview() error = %v", err)
+	}
+	for _, m := range pv.MissingBaselines {
+		for _, k := range m.Kinds {
+			if k == baseline.KindNodeAgent {
+				t.Errorf("NODE_AGENT is still listed as missing in %s after it was "+
+					"declared inapplicable", m.Namespace)
+			}
+		}
+	}
+	for _, k := range pv.NotAssessedBaselines {
+		if k == baseline.KindNodeAgent {
+			t.Error("NODE_AGENT is still listed as not-assessed after it was declared " +
+				"inapplicable: 「我们没看过」与「看过了、不需要」是两件事")
+		}
+	}
+}
+
+// 没登记、也没声明 → 照旧缺失。**不得因为本轮改动而静默消失。**
+func TestNodeAgentStaysMissingWithoutRegistrationOrDeclaration(t *testing.T) {
+	r, s := newTestReader(t)
+	ctx := context.Background()
+	saveRunWithDNS(t, s, "run-plain", firstRunAt, assetOnlyPods())
+
+	pv, err := r.PolicyPreview(ctx, collectedID, "", store.TimeWindow{})
+	if err != nil {
+		t.Fatalf("PolicyPreview() error = %v", err)
+	}
+	var listed bool
+	for _, m := range pv.MissingBaselines {
+		for _, k := range m.Kinds {
+			if k == baseline.KindNodeAgent {
+				listed = true
+			}
+		}
+	}
+	if !listed {
+		t.Error("NODE_AGENT vanished from the missing list although nothing was registered " +
+			"and nothing was declared")
+	}
+}

@@ -490,6 +490,44 @@ function ClusterFields({ values, patch, mode }: {
         />
       </div>
 
+      <div style={{ marginTop: 'var(--space-4)' }}>
+        <SubHeading>节点级 agent（可选，每行一个）</SubHeading>
+        <p style={{
+          margin: '0 0 6px', fontSize: 'var(--text-xs)', color: 'var(--text-muted)',
+        }}>
+          格式 <code>命名空间&nbsp;&nbsp;app&nbsp;&nbsp;host|pod&nbsp;&nbsp;端口</code>，例如{' '}
+          <code>logging&nbsp;&nbsp;filebeat&nbsp;&nbsp;host&nbsp;&nbsp;9200</code>。
+          只填**会向工作负载建连接**的那些 —— 读文件的日志 agent（filebeat、promtail）
+          不需要放行。端口只有你知道，平台不猜。
+        </p>
+        <textarea
+          className="ctl"
+          aria-label="节点级 agent"
+          value={values.nodeAgents}
+          onChange={(e) => patch({ nodeAgents: e.target.value })}
+          rows={3}
+          style={textareaStyle}
+        />
+      </div>
+
+      <div style={{ marginTop: 'var(--space-3)' }}>
+        <SubHeading>或：声明这个集群没有需要放行的节点 agent</SubHeading>
+        <p style={{
+          margin: '0 0 6px', fontSize: 'var(--text-xs)', color: 'var(--text-muted)',
+        }}>
+          填了理由，NODE_AGENT 这一类会标为「不适用」而不再报缺失。
+          它是一次会被记进审计的判断：判错的方向是监控在下发之后静默中断，
+          而那要到事故发生时才显现。**与上面那一栏互斥。**
+        </p>
+        <input
+          className="ctl"
+          aria-label="没有节点 agent 的理由"
+          value={values.noNodeAgentsReason}
+          onChange={(e) => patch({ noNodeAgentsReason: e.target.value })}
+          placeholder="例如：本集群的 agent 只读文件，不向工作负载建连接"
+        />
+      </div>
+
     </>
   )
 }

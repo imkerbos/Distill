@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import {
   ALL_PATH_VERIFY_RESULTS, blankFormValues, blankGitValues, buildClusterWrite,
   describePathVerifyOutcome, describePathVerifyStatus, formValuesOf, gitFormValuesOf,
-  resolveGitBinding, parseScraperLines, scraperToLine,
+  resolveGitBinding, parseScraperLines, scraperToLine, parseNodeAgentLines, nodeAgentToLine,
 } from '../src/pages/clusterForm.ts'
 import { formatUtcTime } from '../src/pages/verifyView.ts'
 import type { GitBinding, PathVerifyResult, RegisteredCluster } from '../src/api/types.ts'
@@ -48,7 +48,7 @@ const CLUSTER_WRITE_KEYS = [
   // metricsScrapers 2026-08-18 加入：它与 healthCheckSources 同类 —— 一份
   // 观测不出来、只能由人登记的 Baseline 依据。
   'apiServers', 'ccnpPresent', 'displayName', 'healthCheckSources', 'id', 'kubeconfigRef',
-  'metricsScrapers', 'nodeCidr', 'podCidr',
+  'metricsScrapers', 'noNodeAgentsReason', 'nodeAgents', 'nodeCidr', 'podCidr',
 ]
 
 /* ---------------------------------------------------------------------- */
@@ -680,4 +680,41 @@ test('页面真的把这个字段渲染出来了', () => {
     join(import.meta.dirname, '..', 'src', 'pages', 'ClustersPage.tsx'), 'utf8')
   assert.ok(page.includes('metricsScrapers'),
     'ClustersPage 没有渲染 metrics 抓取端：运维填不了，那一类 Baseline 永远缺失')
+})
+
+test('节点 agent 一行解析成四段', () => {
+  assert.deepEqual(parseNodeAgentLines('logging  filebeat  host  9200'), [
+    { namespace: 'logging', app: 'filebeat', hostNetwork: true, targetPort: 9200 },
+  ])
+  assert.deepEqual(parseNodeAgentLines('obs  vector  pod  8686'), [
+    { namespace: 'obs', app: 'vector', hostNetwork: false, targetPort: 8686 },
+  ])
+})
+
+test('节点 agent 端口解析不出来的行整行丢弃，不补默认值', () => {
+  // 一条放行到猜出来的端口的规则，看起来齐备、实际什么都没放行，
+  // 而症状要到监控中断时才出现。
+  for (const line of [
+    'logging  filebeat  host',        // 缺端口
+    'logging  filebeat  host  metrics', // 端口不是数字
+    'logging  filebeat  host  0',       // 越界
+    'logging  filebeat  host  70000',
+    'logging  filebeat  yes  9200',     // 网络栈写法不认
+  ]) {
+    assert.deepEqual(parseNodeAgentLines(line), [], `line ${JSON.stringify(line)} should be dropped`)
+  }
+})
+
+test('节点 agent 往返', () => {
+  const a = { namespace: 'logging', app: 'filebeat', hostNetwork: true, targetPort: 9200 }
+  assert.deepEqual(parseNodeAgentLines(nodeAgentToLine(a)), [a])
+})
+
+test('页面把节点 agent 与不适用声明都渲染出来了', () => {
+  const page = readFileSync(
+    join(import.meta.dirname, '..', 'src', 'pages', 'ClustersPage.tsx'), 'utf8')
+  for (const field of ['nodeAgents', 'noNodeAgentsReason']) {
+    assert.ok(page.includes(field),
+      `ClustersPage 没有渲染 ${field}：那一类 Baseline 要么永远缺失，要么永远无法声明不适用`)
+  }
 })

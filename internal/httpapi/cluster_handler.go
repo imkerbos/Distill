@@ -46,6 +46,13 @@ type clusterPayload struct {
 	// 漏掉它的后果与漏掉 kubeconfigRef 同形 —— 请求成功、登记没落下，
 	// 而那一类 Baseline 继续报缺失，没有任何东西指向登记。
 	MetricsScrapers []registry.MetricsScraper `json:"metricsScrapers"`
+	// NodeAgents 是需要被放行的节点级 agent。
+	NodeAgents []registry.NodeAgentRegistration `json:"nodeAgents"`
+	// NoNodeAgentsReason 非空表示显式声明这个集群没有需要放行的节点 agent。
+	//
+	// 收下理由而不是一个布尔：判错的方向是监控在下发之后静默中断，事后要
+	// 答得出「当初凭什么说不需要」（design doc 2026-08-18-node-agent-applicability §3）。
+	NoNodeAgentsReason string `json:"noNodeAgentsReason"`
 }
 
 // toCluster 把请求体转成领域对象。
@@ -70,6 +77,8 @@ func (p clusterPayload) toCluster() registry.Cluster {
 		APIServers:         p.APIServers,
 		HealthCheckSources: p.HealthCheckSources,
 		MetricsScrapers:    p.MetricsScrapers,
+		NodeAgents:         p.NodeAgents,
+		NoNodeAgentsReason: p.NoNodeAgentsReason,
 	}
 }
 
