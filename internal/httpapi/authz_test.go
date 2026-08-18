@@ -194,6 +194,7 @@ func TestAdminReachesEveryRegisteredRoute(t *testing.T) {
 		"{flowID}":    "no-such-flow",
 		"{repoID}":    "policies",
 		"{username}":  "target-user",
+		"{agentID}":   "0011223344556677",
 	}
 
 	walked := 0

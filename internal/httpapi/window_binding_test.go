@@ -126,6 +126,7 @@ var routeParams = map[string]string{
 	"{flowID}":    "no-such-flow",
 	"{repoID}":    "policies",
 	"{username}":  "target-user",
+	"{agentID}":   "0011223344556677",
 }
 
 // routeBody 是某些路由走到时间窗之前必须先通过的请求体。

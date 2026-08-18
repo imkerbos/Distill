@@ -193,6 +193,21 @@ func NewRouter(d Deps) http.Handler {
 			// 判定都用错了网段分类，且没有任何报错。
 			az.route(protected, http.MethodPut, "/clusters/{clusterID}", accessAdmin, handleUpdateCluster(d))
 			az.route(protected, http.MethodDelete, "/clusters/{clusterID}", accessAdmin, handleDeleteCluster(d))
+
+			// 集群 agent 的签发、台账与吊销（design doc 2026-08-18 §3）。
+			//
+			// 三条都要管理员，列表也不例外：它回答的是「这个集群有几把能往
+			// 平台写数据的钥匙、上次什么时候用的」，那是凭据台账，不是只读
+			// 业务数据（规范 §28）。
+			//
+			// 这三条是**人**用的，挂在会话子树里。agent 自己用的那几条走
+			// 独立子树、独立认证，两者互不相通（design doc §3.3）。
+			az.route(protected, http.MethodPost, "/clusters/{clusterID}/agents",
+				accessAdmin, handleIssueClusterAgent(d))
+			az.route(protected, http.MethodGet, "/clusters/{clusterID}/agents",
+				accessAdmin, handleListClusterAgents(d))
+			az.route(protected, http.MethodDelete, "/clusters/{clusterID}/agents/{agentID}",
+				accessAdmin, handleRevokeClusterAgent(d))
 			// 绑定是有自己生命周期的资源，因此有自己的地址与动词
 			// （design doc 2026-08-13 §5）。PUT 而非 PATCH，理由与集群
 			// 那条一样：repoId 与 policyPath 是绑定的全部可写内容，
