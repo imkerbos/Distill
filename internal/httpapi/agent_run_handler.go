@@ -26,6 +26,16 @@ import (
 // 覆盖等于让后到的推送改写历史。
 type AgentSink interface {
 	Save(ctx context.Context, run snapshot.Run) error
+	// SaveAbortedRun 记下一次**在读到集群之前就失败**的运行。
+	//
+	// 与 Save 分开而不是给它传一个空 Observation，理由同
+	// snapshotstore.SaveAbortedRun：Save 会为每一类资源写一行计数、值为 0，
+	// 而那些 0 在这里全是假话 —— 一个资源都没被尝试过。落成一排 0 会让
+	// 界面显示「采到了零个 Pod、零个 Service」，读起来像一个空集群。
+	SaveAbortedRun(
+		ctx context.Context, clusterID, runID string,
+		startedAt, finishedAt time.Time, reason snapshot.RunErrorReason,
+	) error
 }
 
 // FleetSource 现读全 fleet 的网段登记，供归属判定使用。
@@ -72,13 +82,20 @@ type agentObservationPayload struct {
 // 期望行为：忽略那个字段会让一个装错 token 的 agent 静默地把数据写进别的
 // 集群，而它自己以为写对了。
 type agentRunPayload struct {
-	SchemaVersion int                     `json:"schemaVersion"`
-	RunID         string                  `json:"runId"`
-	Status        string                  `json:"status"`
-	StartedAt     time.Time               `json:"startedAt"`
-	FinishedAt    time.Time               `json:"finishedAt"`
-	ObservedAt    time.Time               `json:"observedAt"`
-	Observation   agentObservationPayload `json:"observation"`
+	SchemaVersion int    `json:"schemaVersion"`
+	RunID         string `json:"runId"`
+	Status        string `json:"status"`
+	// ErrorReason 非空表示这一轮**根本没能开始采集**（凭据取不到、客户端
+	// 建不起来、只读自证没过）。此时 Observation 里不会有任何资产。
+	//
+	// 上报它而不是让 agent 干脆不上报：不留痕迹的话，界面显示「这个集群
+	// 还没有过任何一次资产采集」—— 与一个 agent 压根没被拉起来的集群
+	// 一模一样，操作者会去等一次永远不会成功的采集。
+	ErrorReason string                  `json:"errorReason,omitempty"`
+	StartedAt   time.Time               `json:"startedAt"`
+	FinishedAt  time.Time               `json:"finishedAt"`
+	ObservedAt  time.Time               `json:"observedAt"`
+	Observation agentObservationPayload `json:"observation"`
 }
 
 // handleAgentCollectionRun 收下一次由集群自己推上来的资产采集结果。
@@ -103,6 +120,26 @@ func handleAgentCollectionRun(d Deps) http.HandlerFunc {
 
 		payload, ok := decodeAgentRun(w, r, d, clusterID)
 		if !ok {
+			return
+		}
+
+		// 中止的运行走另一条落库路径：它没有观测，也就没有可判定的归属。
+		// 走 Save 会为每一类资源写一行 0，而那些 0 全是假话。
+		if payload.ErrorReason != "" {
+			if err := d.AgentSink.SaveAbortedRun(r.Context(), clusterID, payload.RunID,
+				payload.StartedAt, payload.FinishedAt,
+				snapshot.RunErrorReason(payload.ErrorReason)); err != nil {
+				if errors.Is(err, snapshotstore.ErrRunExists) {
+					response.WriteOK(w, map[string]string{"runId": payload.RunID})
+					return
+				}
+				d.Logger.Error("cannot store a pushed aborted run",
+					"err", err, "cluster", clusterID, "runId", payload.RunID,
+					"request_id", RequestIDFrom(r.Context()))
+				response.WriteSystem(w, http.StatusInternalServerError, response.CodeInternal)
+				return
+			}
+			response.WriteOK(w, map[string]string{"runId": payload.RunID})
 			return
 		}
 
@@ -171,6 +208,22 @@ func decodeAgentRun(
 		response.WriteBusiness(w, response.CodeInvalidParam)
 		return agentRunPayload{}, false
 	}
+	if payload.ErrorReason != "" {
+		// 两条约束缺一不可。**原因必须在封闭枚举内**：它落进
+		// collection_run.error_reason，那一列的封闭性只由 Go 侧保证
+		// （CLAUDE.md §3），而这个取值来自别人集群里的进程。
+		if !validRunErrorReason(payload.ErrorReason) {
+			response.WriteBusiness(w, response.CodeInvalidParam)
+			return agentRunPayload{}, false
+		}
+		// **一轮没能开始的运行不可能带着资产。** 两者同时出现说明报文自相
+		// 矛盾，而收下它会让一份「失败但有数据」的运行进库 —— 之后没有
+		// 任何一屏知道该信哪一半。
+		if len(payload.Observation.Pods) != 0 || payload.Status != string(snapshot.RunFailed) {
+			response.WriteBusiness(w, response.CodeInvalidParam)
+			return agentRunPayload{}, false
+		}
+	}
 	return payload, true
 }
 
@@ -222,6 +275,25 @@ func (p agentRunPayload) toRun(clusterID string) snapshot.Run {
 func validRunStatus(s string) bool {
 	switch snapshot.RunStatus(s) {
 	case snapshot.RunOK, snapshot.RunPartial, snapshot.RunFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+// validRunErrorReason 判断上报的中止原因是否在封闭枚举内。
+//
+// 理由同 validRunStatus：error_reason 在库里只是一列 VARCHAR，而这个取值
+// 来自别人集群里的进程。放进去一个不认识的字符串，统计口径上就再也看不出
+// 有一类原因被漏登记了。
+//
+// 空串不算合法取值：调用方用「非空」来判断这是不是一次中止运行，让空串
+// 从这里通过等于让那个判断多一个含义。
+func validRunErrorReason(s string) bool {
+	switch snapshot.RunErrorReason(s) {
+	case snapshot.RunErrorCredentialUnavailable,
+		snapshot.RunErrorClientUnavailable,
+		snapshot.RunErrorReadOnlyUnproven:
 		return true
 	default:
 		return false

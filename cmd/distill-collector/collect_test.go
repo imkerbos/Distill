@@ -415,3 +415,27 @@ func podInPodCIDR() *corev1.Pod {
 		Status:     corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.4.1.7"},
 	}
 }
+
+// 推送模式不带 fleet：归属由平台判定（design doc 2026-08-18 §3.4）。
+//
+// 这条与上一条是同一个不变式的两半 —— 上一条钉住「PULL 必须分类」，这一条
+// 钉住「PUSH 必须不分类」。少了后者，有人给推送路径顺手传一个 fleet 进去
+// 就不会有任何东西变红，而那等于把整个 fleet 的网段发到被管集群里。
+func TestPushCollectionLeavesOwnershipToThePlatform(t *testing.T) {
+	cs := readOnlyCluster()
+	if err := cs.Tracker().Add(podInPodCIDR()); err != nil {
+		t.Fatalf("seed pod: %v", err)
+	}
+	store := &recordingStore{}
+
+	if _, err := collectOnce(context.Background(), testClusterID, cs,
+		nil, store, quietLogger()); err != nil {
+		t.Fatalf("collectOnce = %v", err)
+	}
+
+	pod := store.only(t).Observation.Pods[0]
+	if pod.IPScope != "" {
+		t.Errorf("stored pod IPScope = %q, want empty — 采集器在推送模式下"+
+			"判了归属，那需要它看得见别的集群的网段", pod.IPScope)
+	}
+}

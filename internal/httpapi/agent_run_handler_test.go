@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/imkerbos/Distill/internal/cluster"
 	"github.com/imkerbos/Distill/internal/response"
@@ -19,12 +20,28 @@ var errStorage = errors.New("storage is down")
 
 // recordingSink 记下平台收下并准备落库的每一次运行。
 type recordingSink struct {
-	runs []snapshot.Run
-	err  error
+	runs    []snapshot.Run
+	aborted []abortedPush
+	err     error
 }
 
 func (s *recordingSink) Save(_ context.Context, run snapshot.Run) error {
 	s.runs = append(s.runs, run)
+	return s.err
+}
+
+// abortedPush 是一次中止运行的落库参数。
+type abortedPush struct {
+	clusterID string
+	runID     string
+	reason    snapshot.RunErrorReason
+}
+
+func (s *recordingSink) SaveAbortedRun(
+	_ context.Context, clusterID, runID string,
+	_, _ time.Time, reason snapshot.RunErrorReason,
+) error {
+	s.aborted = append(s.aborted, abortedPush{clusterID: clusterID, runID: runID, reason: reason})
 	return s.err
 }
 
@@ -239,5 +256,76 @@ func TestIngestRequiresAnAgentToken(t *testing.T) {
 	}
 	if len(sink.runs) != 0 {
 		t.Errorf("the sink received %d runs from an unauthenticated call", len(sink.runs))
+	}
+}
+
+func TestIngestStoresAnAbortedRunWithoutFakingAnEmptyCluster(t *testing.T) {
+	sink := &recordingSink{}
+	h, _, cookie := newTestRouterWithAgentSink(t, sink)
+	_, token := issueAgent(t, h, cookie, "prod-asia-1")
+
+	// 一次在读到集群之前就失败的运行走另一条落库路径：它没有观测，走
+	// Save 会为每一类资源写一行 0，而那些 0 全是假话 —— 界面会显示
+	// 「采到了零个 Pod、零个 Service」，读起来像一个空集群。
+	body := `{"schemaVersion":1,"runId":"r-aborted","status":"FAILED",
+	          "errorReason":"CREDENTIAL_UNAVAILABLE",
+	          "startedAt":"2026-08-18T00:00:00Z","finishedAt":"2026-08-18T00:00:01Z",
+	          "observedAt":"2026-08-18T00:00:01Z","observation":{"pods":[]}}`
+	rec := postRun(t, h, token, body)
+	if got := bodyOf(t, rec)["code"]; got != float64(response.CodeOK) {
+		t.Fatalf("code = %v, want 0: %s", got, rec.Body.String())
+	}
+	if len(sink.runs) != 0 {
+		t.Errorf("the sink stored %d ordinary runs, want none", len(sink.runs))
+	}
+	if len(sink.aborted) != 1 {
+		t.Fatalf("the sink stored %d aborted runs, want 1", len(sink.aborted))
+	}
+	got := sink.aborted[0]
+	if got.clusterID != "prod-asia-1" {
+		t.Errorf("aborted run cluster = %q, want prod-asia-1", got.clusterID)
+	}
+	if got.reason != snapshot.RunErrorCredentialUnavailable {
+		t.Errorf("reason = %q, want %q", got.reason, snapshot.RunErrorCredentialUnavailable)
+	}
+}
+
+func TestIngestRejectsAnAbortedRunThatContradictsItself(t *testing.T) {
+	sink := &recordingSink{}
+	h, _, cookie := newTestRouterWithAgentSink(t, sink)
+	_, token := issueAgent(t, h, cookie, "prod-asia-1")
+
+	cases := map[string]string{
+		// 一轮没能开始的运行不可能带着资产：两者同时出现说明报文自相矛盾，
+		// 而收下它会让一份「失败但有数据」的运行进库 —— 之后没有任何一屏
+		// 知道该信哪一半。
+		"carries assets": `{"schemaVersion":1,"runId":"r-x","status":"FAILED",
+		  "errorReason":"CREDENTIAL_UNAVAILABLE",
+		  "startedAt":"2026-08-18T00:00:00Z","finishedAt":"2026-08-18T00:00:01Z",
+		  "observedAt":"2026-08-18T00:00:01Z",
+		  "observation":{"pods":[{"namespace":"app","name":"web-1","ip":"10.128.0.5","uid":"u","phase":"Running"}]}}`,
+		// 带着原因却说自己成功，同样自相矛盾。
+		"claims success": `{"schemaVersion":1,"runId":"r-y","status":"OK",
+		  "errorReason":"CREDENTIAL_UNAVAILABLE",
+		  "startedAt":"2026-08-18T00:00:00Z","finishedAt":"2026-08-18T00:00:01Z",
+		  "observedAt":"2026-08-18T00:00:01Z","observation":{"pods":[]}}`,
+		// 原因不在封闭枚举内：它落进 collection_run.error_reason，那一列的
+		// 封闭性只由 Go 侧保证，而这个取值来自别人集群里的进程。
+		"an unregistered reason": `{"schemaVersion":1,"runId":"r-z","status":"FAILED",
+		  "errorReason":"SOMETHING_ELSE",
+		  "startedAt":"2026-08-18T00:00:00Z","finishedAt":"2026-08-18T00:00:01Z",
+		  "observedAt":"2026-08-18T00:00:01Z","observation":{"pods":[]}}`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			rec := postRun(t, h, token, body)
+			if got := bodyOf(t, rec)["code"]; got != float64(response.CodeInvalidParam) {
+				t.Errorf("code = %v, want %d: %s", got, response.CodeInvalidParam, rec.Body.String())
+			}
+		})
+	}
+	if len(sink.aborted) != 0 || len(sink.runs) != 0 {
+		t.Errorf("the sink received %d runs and %d aborted runs, want none",
+			len(sink.runs), len(sink.aborted))
 	}
 }

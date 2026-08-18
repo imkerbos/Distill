@@ -148,10 +148,16 @@ func collectOnce(
 	}
 
 	// 归属判定紧跟在采集之后，用全 fleet 的登记（design doc 2026-08-18 §3.4）。
-	// PUSH 模式下这一步由平台在收下推送时做 —— 调的是同一个函数，不是
-	// 两份实现。少了这一行，落库的 Pod 一律没有归属，而症状要到求值阶段
+	//
+	// **fleet 为 nil 表示这一步不归这里做**，那是推送模式：采集器跑在被管
+	// 集群里，看不见别的集群的网段，判定由平台在收下推送时完成 —— 调的是
+	// 同一个函数，不是两份实现。
+	//
+	// PULL 模式下少了这一行，落库的 Pod 一律没有归属，而症状要到求值阶段
 	// 才会以「这个 IP 属于哪个集群答不出来」的形式冒出来。
-	run = collect.Classify(run, fleet)
+	if fleet != nil {
+		run = collect.Classify(run, fleet)
+	}
 
 	for _, f := range run.Failures {
 		// 只记资源与封闭枚举的原因，**不记 Detail**：那段文本是 apiserver
