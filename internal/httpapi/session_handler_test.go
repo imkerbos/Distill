@@ -142,7 +142,19 @@ func newTestRouterWithAgentSink(
 	// 配一个什么都不做的推导端：这些用例盯的是摄入本身，而没有推导端的
 	// 部署会在依赖检查那一步就被挡下（那是另一条用例的事）。「推导到底
 	// 有没有被调」由 newTestRouterWithAgentPipeline 那几条盯着。
-	return buildTestRouterWithAgent(t, fixtureSource(), sink, nopDeriver{})
+	return buildTestRouterWithAgent(t, fixtureSource(), sink, nopDeriver{}, nil)
+}
+
+// newTestRouterWithFlowSink 装一个只接流量摄入的部署。
+//
+// 资产那条 sink 一并配上：两条路由挂在同一棵 agent 子树上，而「没有资产
+// sink 的部署收不下推送」是另一条用例的事。传 nil 装出「没有摄入端」那种
+// 形态 —— 它在生产上真实存在（没接流量来源的部署）。
+func newTestRouterWithFlowSink(
+	t *testing.T, flowSink httpapi.AgentFlowSink,
+) (http.Handler, *auth.SessionStore, *http.Cookie) {
+	t.Helper()
+	return buildTestRouterWithAgent(t, fixtureSource(), &recordingSink{}, nopDeriver{}, flowSink)
 }
 
 // nopDeriver 是一个成功但什么都不做的推导端。
@@ -163,12 +175,13 @@ func newTestRouterWithAgentPipeline(
 	t *testing.T, sink httpapi.AgentSink, deriver httpapi.AgentDeriver,
 ) (http.Handler, *auth.SessionStore, *http.Cookie) {
 	t.Helper()
-	return buildTestRouterWithAgent(t, fixtureSource(), sink, deriver)
+	return buildTestRouterWithAgent(t, fixtureSource(), sink, deriver, nil)
 }
 
 // buildTestRouterWithAgent 装配一个带 agent 摄入端的路由器。
 func buildTestRouterWithAgent(
 	t *testing.T, reg registry.Store, sink httpapi.AgentSink, deriver httpapi.AgentDeriver,
+	flowSink httpapi.AgentFlowSink,
 ) (http.Handler, *auth.SessionStore, *http.Cookie) {
 	t.Helper()
 	hash, err := bcrypt.GenerateFromPassword([]byte(testPassword), bcrypt.MinCost)
@@ -182,12 +195,13 @@ func buildTestRouterWithAgent(
 	}
 
 	h := httpapi.NewRouter(httpapi.Deps{
-		Sessions:     sessions,
-		Verifier:     auth.NewVerifier(config.User{Username: "demo", PasswordHash: string(hash)}, reg),
-		Logger:       logger,
-		Registry:     reg,
-		AgentSink:    sink,
-		AgentDeriver: deriver,
+		Sessions:      sessions,
+		Verifier:      auth.NewVerifier(config.User{Username: "demo", PasswordHash: string(hash)}, reg),
+		Logger:        logger,
+		Registry:      reg,
+		AgentSink:     sink,
+		AgentDeriver:  deriver,
+		AgentFlowSink: flowSink,
 		// fleet 登记从注册表现读：网段判定是平台的事，而登记随时会变
 		// （新集群接入、网段改了）。抄一份进装配等于把判定钉在启动那一刻。
 		Fleet: func(ctx context.Context) (*cluster.Registry, error) {

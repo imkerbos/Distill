@@ -147,6 +147,12 @@ func run(configPath string) error {
 		// —— 页面上显示「这个集群还没有可用的采集数据」，而资产其实已经
 		// 在库里了（design doc 2026-08-18）。
 		AgentDeriver: snapshotstore.New(db),
+		// 推送式接入的流量落库口（design doc 2026-08-18-agent-flow-ingest）。
+		//
+		// 与 AgentSink 分开装：资产与流量是两条独立的链路，一个集群可以只推
+		// 资产（还没接上流量来源）。两条都指向同一个 Store 不等于它们该共用
+		// 一个字段 —— 装配上分得开，才谈得上"这个部署收不下流量"这种形态。
+		AgentFlowSink: snapshotstore.New(db),
 		// 归属判定所需的 fleet 登记，**每次请求现读**。
 		//
 		// 装配时抄一份等于把判定钉在进程启动那一刻：那之后接入的集群，

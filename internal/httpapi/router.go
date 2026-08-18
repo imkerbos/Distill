@@ -58,6 +58,15 @@ type Deps struct {
 	//
 	// 允许为 nil：与 AgentSink 一样，没有部署 agent 的形态下没有推送这回事。
 	AgentDeriver AgentDeriver
+	// AgentFlowSink 落库一次由集群 agent 推上来的流量摄入。
+	//
+	// 与 AgentSink 分开而不是共用一个：资产与流量是两条独立的链路，各自
+	// 会失败、各自重试。一个只推资产的部署形态是真实存在的（还没接上流量
+	// 来源的集群），而共用一个字段会让它必须提供一个假的摄入端。
+	//
+	// 允许为 nil：nil 表示「本部署收不下流量」，摄入端点据此答依赖不可用 ——
+	// **不是**静默成功，那会让 agent 把这一轮当成已经交付。
+	AgentFlowSink AgentFlowSink
 	// Fleet 现读全 fleet 的网段登记，供摄入路径判定地址归属。
 	//
 	// 与 AgentSink 一起为 nil 或一起非 nil：判不出归属的落库比不落库更糟，
@@ -165,6 +174,9 @@ func NewRouter(d Deps) http.Handler {
 			agent.Use(RequireAgent(d))
 			agent.Get("/config", handleAgentConfig())
 			agent.Post("/collection-runs", handleAgentCollectionRun(d))
+			// 流量与资产是两条独立的链路：一个集群可以只推资产（还没接上
+			// 流量来源），也可以两条都推。因此是两条路由、两个 sink。
+			agent.Post("/flow-ingests", handleAgentFlowIngest(d))
 		})
 
 		api.Group(func(protected chi.Router) {
