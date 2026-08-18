@@ -108,6 +108,21 @@ func (c Cluster) ScrapeTargetSnapshots(pods []snapshot.Pod) []snapshot.ScrapeTar
 	if len(c.MetricsScrapers) == 0 {
 		return nil
 	}
+	// 按 (抓取端, 被抓命名空间, 端口) 去重。
+	//
+	// **规则的内容只有「谁来抓」与「抓哪个端口」，声明它的是哪个 Pod 不进
+	// 规则。** 不去重的话，一个 16 个 Pod 都声明同一端口的命名空间会让每个
+	// 工作负载拿到 16 条一模一样的 ingress —— UAT 实测 506 条规则里只有 20 个
+	// 不同的指纹，导出的文件被灌满重复，候选清单也读不下去。
+	//
+	// 在这里去重而不是等 policygen 或界面收拾：那两处各去一次就有了两个
+	// 可能分歧的定义，而分歧的症状是同一个集群在两屏上给出不同的规则条数。
+	type key struct {
+		scraper string
+		ns      string
+		port    int32
+	}
+	seen := map[key]bool{}
 	var out []snapshot.ScrapeTarget
 	for _, s := range c.MetricsScrapers {
 		for _, p := range pods {
@@ -115,6 +130,12 @@ func (c Cluster) ScrapeTargetSnapshots(pods []snapshot.Pod) []snapshot.ScrapeTar
 			if !ok {
 				continue
 			}
+			k := key{scraper: s.Namespace + "\x00" + s.LabelsKey(), ns: p.Namespace, port: port}
+			if seen[k] {
+				continue
+			}
+			seen[k] = true
+
 			labels := make(map[string]string, len(s.Labels))
 			for k, v := range s.Labels {
 				labels[k] = v

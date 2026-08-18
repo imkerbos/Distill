@@ -148,3 +148,55 @@ func TestScrapeTargetsAreEmptyWithoutARegisteredScraper(t *testing.T) {
 		t.Errorf("ScrapeTargetSnapshots() = %+v, want none without a registered scraper", got)
 	}
 }
+
+// 同一个 (抓取端, 被抓命名空间, 端口) 只是一个事实，不管多少个 Pod 声明了它。
+//
+// **这条来自一次真集群实测**：UAT 的 kube-system 里 16 个 Pod 都声明 9253 端口，
+// 于是一个工作负载拿到了 36 条 METRICS ingress，其中只有几条互不相同 ——
+// 导出的文件被灌满重复规则，候选清单也读不下去（实测 506 条规则里只有 20 个
+// 不同的指纹）。
+//
+// 规则的内容只有「谁来抓」与「抓哪个端口」，声明它的是哪个 Pod 不进规则。
+// 因此这里去重，而不是等到 policygen 或界面上再收拾。
+func TestScrapeTargetsAreDeduplicatedByScraperAndPort(t *testing.T) {
+	c := registry.Cluster{ID: "c", MetricsScrapers: []registry.MetricsScraper{validScraper()}}
+	pods := []snapshot.Pod{
+		scrapablePod("kube-system", "coredns-1", "9253"),
+		scrapablePod("kube-system", "coredns-2", "9253"),
+		scrapablePod("kube-system", "coredns-3", "9253"),
+		// 同一命名空间的另一个端口是另一个事实。
+		scrapablePod("kube-system", "kubelet-x", "10054"),
+		// 另一个命名空间的同一个端口也是另一个事实。
+		scrapablePod("istio-system", "istiod-1", "9253"),
+	}
+
+	got := c.ScrapeTargetSnapshots(pods)
+
+	if len(got) != 3 {
+		t.Fatalf("ScrapeTargetSnapshots() returned %d targets, want 3 distinct facts: %+v",
+			len(got), got)
+	}
+	seen := map[string]bool{}
+	for _, target := range got {
+		key := target.ScraperNamespace + "|" + target.TargetNamespace + "|" + string(rune(target.TargetPort))
+		if seen[key] {
+			t.Errorf("duplicate target: %+v", target)
+		}
+		seen[key] = true
+	}
+}
+
+func TestScrapeTargetsKeepEachScraperSeparate(t *testing.T) {
+	// 两个抓取端抓同一个端口是两条规则：它们的 podSelector 不同。
+	c := registry.Cluster{ID: "c", MetricsScrapers: []registry.MetricsScraper{
+		{Namespace: "monitoring", Labels: map[string]string{"app.kubernetes.io/name": "prometheus"}},
+		{Namespace: "monitoring", Labels: map[string]string{"app.kubernetes.io/name": "vmagent"}},
+	}}
+	got := c.ScrapeTargetSnapshots([]snapshot.Pod{
+		scrapablePod("shop", "web-1", "9102"),
+		scrapablePod("shop", "web-2", "9102"),
+	})
+	if len(got) != 2 {
+		t.Fatalf("ScrapeTargetSnapshots() = %d targets, want one per scraper: %+v", len(got), got)
+	}
+}
