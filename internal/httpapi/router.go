@@ -260,6 +260,13 @@ func NewRouter(d Deps) http.Handler {
 			// 或前端的重试逻辑当成可以随手重放的东西。
 			az.route(protected, http.MethodPost, "/clusters/{clusterID}/git-binding/verify",
 				accessAdmin, handleVerifyGitBinding(d))
+			// 漂移检测是 GET：它只读 —— 不写仓库、不改绑定、不动锚点，
+			// 也不落结论（design doc 2026-08-18-drift-detection §4）。
+			//
+			// 仍然要管理员：它会真的发起一次出站克隆，且回传的是策略下发
+			// 链路的内部状态，与 verify 同一档。
+			az.route(protected, http.MethodGet, "/clusters/{clusterID}/git-binding/drift",
+				accessAdmin, handleGitBindingDrift(d))
 			// 导入清单的读取按管理员算，不是按只读算：它回传的是导入的
 			// NetworkPolicy 原文与校验状态，属于策略下发链路的内部状态，
 			// 而只读账号的用途是看拓扑与流量。分类存疑时取更严的那一侧

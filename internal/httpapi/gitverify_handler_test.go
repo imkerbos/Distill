@@ -37,6 +37,23 @@ type stubGitVerifier struct {
 	seenPath       string
 	// trace 与 memRegistry 共用一份调用序列，用于确认校验发生在落库之前。
 	trace *[]string
+	// drift 是 Drift 的返回值；driftCalls 与 seenAnchor 记下它被调用的
+	// 次数与拿到的锚点 —— 一个把结论写死的 handler 也能让"结论正确"
+	// 那条断言通过。
+	drift      registry.DriftResult
+	driftCalls int
+	seenAnchor string
+}
+
+func (s *stubGitVerifier) Drift(
+	_ context.Context, _ registry.GitRepo, _, lastWrittenCommit string,
+) registry.DriftResult {
+	s.driftCalls++
+	s.seenAnchor = lastWrittenCommit
+	if s.drift == "" {
+		return registry.DriftUnknown
+	}
+	return s.drift
 }
 
 func (s *stubGitVerifier) VerifyRepo(

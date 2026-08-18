@@ -32,6 +32,13 @@ type GitVerifier interface {
 		ctx context.Context, r registry.GitRepo,
 		repoResult registry.RepoVerifyResult, policyPath string,
 	) (registry.BindingVerifyResult, *time.Time)
+	// Drift 报告写进去的那份策略现在还在不在。
+	//
+	// 只读、不落库（design doc 2026-08-18-drift-detection §4）。任何读不出来
+	// 的情形答 UNKNOWN，**绝不落到 IN_SYNC**。
+	Drift(
+		ctx context.Context, r registry.GitRepo, policyPath, lastWrittenCommit string,
+	) registry.DriftResult
 }
 
 // repoVerifyStatus 是仓库级校验结论的响应形状。

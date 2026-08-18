@@ -6,6 +6,7 @@ import type {
   PathVerifyStatus, PlatformSettingView, PlatformSettingWrite, PolicyImportItem, PolicyPreview,
   Quality, RegisteredCluster, RepoVerifyStatus, Role, SecurityReport, Topology, TopologyLevel,
   WritebackPlanResult, WritebackPushResult,
+  DriftStatus,
 } from './types'
 
 /** ApiError 同时携带 HTTP 状态与业务码，调用方两者都可能需要判断。 */
@@ -305,6 +306,15 @@ export const api = {
     request<PathVerifyStatus>(
       `/api/v1/clusters/${encodeURIComponent(cluster)}/git-binding/verify`,
       { method: 'POST' },
+    ),
+
+  // 漂移检测：写进去的那份策略现在还在不在。
+  //
+  // GET 而非 POST：它只读 —— 不写仓库、不改绑定、不动锚点，也不落结论
+  // （design doc 2026-08-18-drift-detection §4）。
+  gitBindingDrift: (cluster: string) =>
+    request<DriftStatus>(
+      `/api/v1/clusters/${encodeURIComponent(cluster)}/git-binding/drift`,
     ),
 
   policyImports: (cluster: string) =>

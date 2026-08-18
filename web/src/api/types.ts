@@ -483,6 +483,19 @@ export type RepoVerifyResult =
   | 'REPO_UNREACHABLE' | 'BRANCH_MISSING'
 
 /**
+ * 漂移检测的结论。封闭枚举，与后端 registry.DriftResult 逐值对齐。
+ *
+ * 漂移指的是**我们写进去的那条路径下的内容变了**，不是分支往前走了。
+ */
+export type DriftResult =
+  | 'IN_SYNC' | 'DRIFTED' | 'NEVER_WRITTEN' | 'ANCHOR_MISSING' | 'UNKNOWN'
+
+/** 漂移检测端点的响应。 */
+export interface DriftStatus {
+  driftResult: DriftResult
+}
+
+/**
  * 路径级只读校验的结论。封闭枚举，与后端 registry.BindingVerifyResult 逐值对齐。
  *
  * 只回答一个问题：policyPath 在仓库的那个分支上是否存在。仓库级的四个

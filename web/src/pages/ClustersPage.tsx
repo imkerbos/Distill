@@ -1,4 +1,5 @@
 import { Fragment, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react'
+import { driftView } from './driftView.ts'
 import { api, ApiError } from '../api/client'
 import {
   IMPORT_ROLE_LABEL, IMPORT_SOURCE_LABEL, ONBOARD_STATE_LABEL,
@@ -291,9 +292,70 @@ function GitBindingCell({ clusterId, git, repo, onChanged }: {
         {busy ? '校验中…' : '重新校验路径（只读）'}
       </button>
       {outcome && <VerifyOutcomeNote outcome={outcome} />}
+      <DriftCheck clusterId={clusterId} />
       {error && <FormError>{error}</FormError>}
     </div>
   )
+}
+
+/**
+ * 「我们写进去的那份策略现在还在吗」。
+ *
+ * 与路径校验分开一格：那一格问的是「这个绑定指得对不对」，这一格问的是
+ * 「上次下发的东西还在不在」——两者可以一个 OK 一个漂移，合成一句话就
+ * 说不清该去修哪一个。
+ *
+ * 按需触发而不是进页面就查：每次检测都是一次真实的出站克隆。
+ */
+function DriftCheck({ clusterId }: { clusterId: string }) {
+  const [result, setResult] = useState<DriftResult | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  async function check() {
+    setBusy(true)
+    setError('')
+    try {
+      const status = await api.gitBindingDrift(clusterId)
+      setResult(status.driftResult)
+    } catch (err) {
+      // 请求本身失败与「查了、够不到仓库」是两件事：后者由服务端答
+      // UNKNOWN，前者连服务端都没答上。两者都不得读成"一致"。
+      setResult(null)
+      setError(err instanceof ApiError ? err.msg : '漂移检测失败，请稍后重试')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const view = result === null ? null : driftView(result)
+  return (
+    <>
+      <button
+        type="button"
+        onClick={check}
+        disabled={busy}
+        style={{ ...secondaryButtonStyle, marginTop: 'var(--space-1)' }}
+      >
+        {busy ? '检测中…' : '检测漂移（只读）'}
+      </button>
+      {view && (
+        <div style={{ fontSize: 'var(--text-xs)', marginTop: 2 }}>
+          <div style={{ color: DRIFT_TONE_COLOR[view.tone] }}>{view.label}</div>
+          <div style={{ color: 'var(--text-secondary)' }}>{view.action}</div>
+        </div>
+      )}
+      {error && <FormError>{error}</FormError>}
+    </>
+  )
+}
+
+/** 四档轻重对应的颜色。 */
+const DRIFT_TONE_COLOR: Record<string, string> = {
+  ok: 'var(--verdict-allow)',
+  warn: 'var(--verdict-unknown)',
+  danger: 'var(--verdict-deny)',
+  muted: 'var(--text-muted)',
 }
 
 /**

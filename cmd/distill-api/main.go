@@ -252,6 +252,21 @@ func (v *settingsGitVerifier) VerifyPath(
 	return gv.VerifyPath(ctx, r, repoResult, policyPath)
 }
 
+// Drift 用当前设置做一次只读的漂移检测。
+//
+// 装不出校验器时答 UNKNOWN，**不是 IN_SYNC**：未配置 secrets 的部署根本
+// 没去看过仓库，而"一致"会让操作者以为下发的东西还在
+// （design doc 2026-08-18-drift-detection §3）。
+func (v *settingsGitVerifier) Drift(
+	ctx context.Context, r registry.GitRepo, policyPath, lastWrittenCommit string,
+) registry.DriftResult {
+	gv, ok := v.current(ctx)
+	if !ok {
+		return registry.DriftUnknown
+	}
+	return gv.Drift(ctx, r, policyPath, lastWrittenCommit)
+}
+
 // current 按当前设置现装一个校验器；装不出来时第二个返回值为 false。
 //
 // 两个方法共用它，而不是各写一遍读设置与装配：分成两份之后，「设置改完
