@@ -14,8 +14,26 @@ import (
 
 // collectorWith 构造一个只带登记表的采集器。classifyPodIP 与 toPod
 // 都不碰 client，这里不需要一个集群。
-func collectorWith(registry *cluster.Registry) *Collector {
-	return New(testClusterID, nil, registry, nil)
+// podClassifier 是分类用例的薄壳。
+//
+// 分类已经从 Collector 上搬走（design doc 2026-08-18 §3.4）：它要看全 fleet
+// 的网段，而推送式接入下 agent 只看得见自己那个集群。下面这些用例验的仍然
+// 是同一段判定逻辑，因此保持调用形状不变 —— 断言里挂着实测结论（例如
+// hostNetwork 那条：不区分的话 kind 上 28 个 Pod 会报 12 条误报），改写它们
+// 等于把那次实测作废。
+type podClassifier struct {
+	*Collector
+	registry *cluster.Registry
+}
+
+func (c podClassifier) classifyPodIP(
+	ip, subject string, hostNetwork bool,
+) (cluster.Classification, []snapshot.Warning) {
+	return classifyPodIP(c.registry, testClusterID, ip, subject, hostNetwork)
+}
+
+func collectorWith(registry *cluster.Registry) podClassifier {
+	return podClassifier{Collector: New(testClusterID, nil, nil), registry: registry}
 }
 
 func kinds(ws []snapshot.Warning) []snapshot.WarningKind {
@@ -255,7 +273,13 @@ func TestToPodRecordsTheClassifiedScopeOnTheSnapshotRow(t *testing.T) {
 		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
 		Status:     corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "172.20.0.7"},
 	}
-	got, _ := c.toPod(p, nil)
+	// 归属落到快照行上这件事，现在由 Classify 负责（design doc §3.4）：
+	// toPod 只搬运观测。断言的内容不变 —— 一份缺 Service 网段的登记，
+	// 判不出这个地址属于哪一类，必须留 UNKNOWN 并说出是哪一处登记缺失，
+	// 而不是猜一个。
+	row, _ := c.toPod(p, nil)
+	out := Classify(runWithPods(row), incomplete)
+	got := out.Observation.Pods[0]
 	if got.IPScope != cluster.ScopeUnknown {
 		t.Errorf("IPScope = %q, want %q on the snapshot row", got.IPScope, cluster.ScopeUnknown)
 	}
@@ -304,7 +328,6 @@ func TestToPodCopiesEveryFieldTheEvaluationLayerNeeds(t *testing.T) {
 		{"UID", got.UID, "uid-1"},
 		{"Phase", got.Phase, "Running"},
 		{"IP", got.IP, "192.168.0.10"},
-		{"IPScope", got.IPScope, cluster.ScopeNode},
 		{"HostNetwork", got.HostNetwork, true},
 		{"NodeName", got.NodeName, "node-a"},
 		{"ServiceAccount", got.ServiceAccount, "db-sa"},
@@ -321,6 +344,14 @@ func TestToPodCopiesEveryFieldTheEvaluationLayerNeeds(t *testing.T) {
 	}
 	if got.Labels["app"] != "db" {
 		t.Errorf("Labels = %v, want app=db", got.Labels)
+	}
+
+	// 归属不再由 toPod 填（design doc §3.4），但它仍然必须落到这一行上 ——
+	// 求值层读的就是这个字段。断言挪到 Classify 之后，内容不变：hostNetwork
+	// Pod 用的就是它所在节点的地址，判成 NODE 是正确答案。
+	classified := Classify(runWithPods(got), fleetRegistry(t)).Observation.Pods[0]
+	if classified.IPScope != cluster.ScopeNode {
+		t.Errorf("Classify().IPScope = %v, want %v", classified.IPScope, cluster.ScopeNode)
 	}
 }
 
@@ -431,6 +462,11 @@ func TestCollectPodsAttachesWarningsToTheObservation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Collect = %v", err)
 	}
+	// 归属判定已经从 Collect 里搬走（design doc 2026-08-18 §3.4）：它要看
+	// 全 fleet 的网段，而推送式接入下采集器看不见别的集群。真实调用方
+	// （PULL 的采集器、PUSH 的平台）都在采完之后调 Classify，这里照做 ——
+	// 断言要验的仍然是「两类告警都挂在这次运行上」。
+	run = Classify(run, fleetRegistry(t))
 
 	got := kinds(run.Observation.Warnings)
 	wantEach := []snapshot.WarningKind{

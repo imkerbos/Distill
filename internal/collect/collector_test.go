@@ -140,7 +140,7 @@ func stubClock(start time.Time) func() time.Time {
 func newTestCollector(t *testing.T, objs ...runtime.Object) (*Collector, *fake.Clientset) {
 	t.Helper()
 	cs := fake.NewClientset(objs...)
-	return New(testClusterID, cs, fleetRegistry(t), stubClock(time.Unix(1700000000, 0).UTC())), cs
+	return New(testClusterID, cs, stubClock(time.Unix(1700000000, 0).UTC())), cs
 }
 
 // failList 让某类资源的 List 直接失败。resource 用 "*" 表示所有类型。

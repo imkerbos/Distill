@@ -30,19 +30,22 @@ const listPageSize = 500
 type Collector struct {
 	clusterID string
 	client    kubernetes.Interface
-	registry  *cluster.Registry
 	now       func() time.Time
 }
 
 // New 构造针对指定集群的采集器。
 //
-// registry 是全 Fleet 的网段登记而非仅本集群：判断一个 Pod IP 是否落在
-// 别的集群网段里，恰恰需要看得见别的集群。now 可注入以保证测试确定性。
-func New(clusterID string, client kubernetes.Interface, registry *cluster.Registry, now func() time.Time) *Collector {
+// **不再接收 fleet 的网段登记**（design doc 2026-08-18 §3.4）：归属判定要看
+// 全 fleet 才答得出「这个 IP 落在别的集群网段里」，而推送式接入下采集器
+// 跑在被管集群内，给它 fleet 登记等于把整个 fleet 的拓扑发出去。判定挪到
+// 采集之后的 Classify，PULL 与 PUSH 共用同一份实现。
+//
+// now 可注入以保证测试确定性。
+func New(clusterID string, client kubernetes.Interface, now func() time.Time) *Collector {
 	if now == nil {
 		now = time.Now
 	}
-	return &Collector{clusterID: clusterID, client: client, registry: registry, now: now}
+	return &Collector{clusterID: clusterID, client: client, now: now}
 }
 
 // resourceCollector 是一类资源的采集动作。

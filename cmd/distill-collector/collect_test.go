@@ -11,7 +11,9 @@ import (
 	"time"
 
 	authv1 "k8s.io/api/authorization/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
@@ -370,5 +372,46 @@ func TestRunIDsDoNotRepeat(t *testing.T) {
 			t.Fatalf("newRunID() returned %q twice", id)
 		}
 		seen[id] = true
+	}
+}
+
+// 落库的每一行都必须带着归属，而归属由 Classify 填上（design doc 2026-08-18 §3.4）。
+//
+// **这条用例存在的理由是一次证伪跑出了绿灯**：把 collectOnce 里那句
+// `run = collect.Classify(run, fleet)` 整个删掉，全套测试依然全绿 ——
+// 分类本身在 internal/collect 里测得很细，但「PULL 模式到底有没有调它」
+// 那时没有任何东西绑住。而它的失败方式是安静的：落库的 Pod 一律没有归属，
+// 症状要到求值阶段才以「这个 IP 属于哪个集群答不出来」的形式冒出来。
+//
+// 断言取一个**落在本集群 Pod 网段内**的地址：它的正确答案是 POD，而未分类
+// 的零值是空串 —— 两者不可能因为别的原因相等。
+func TestCollectedRunReachesTheStoreWithItsAddressesClassified(t *testing.T) {
+	cs := readOnlyCluster()
+	if err := cs.Tracker().Add(podInPodCIDR()); err != nil {
+		t.Fatalf("seed pod: %v", err)
+	}
+	store := &recordingStore{}
+
+	if _, err := collectOnce(context.Background(), testClusterID, cs,
+		testFleet(), store, quietLogger()); err != nil {
+		t.Fatalf("collectOnce = %v", err)
+	}
+
+	run := store.only(t)
+	if len(run.Observation.Pods) != 1 {
+		t.Fatalf("stored pods = %d, want 1", len(run.Observation.Pods))
+	}
+	if got := run.Observation.Pods[0].IPScope; got != cluster.ScopePod {
+		t.Errorf("stored pod IPScope = %q, want %q — 采集结果没有经过 Classify，"+
+			"落库的 Pod 不带归属", got, cluster.ScopePod)
+	}
+}
+
+// podInPodCIDR 是一个地址落在 testFleet 登记的 Pod 网段内的 Pod。
+func podInPodCIDR() *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-1", Namespace: "default"},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.4.1.7"},
 	}
 }
