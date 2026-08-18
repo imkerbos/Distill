@@ -340,6 +340,17 @@ func planWriteback(
 		return plannedWriteback{}, false
 	}
 
+	// Enforcing 门禁：Baseline 不齐备就不出计划，也就不可能推
+	// （design doc 2026-08-18-enforcing-gate）。两个端点共用这一道门 ——
+	// 出一份看起来齐备、确认之后必被拒的计划，是在训练人忽略它。
+	//
+	// 排在"没有可写内容"之后：一条规则都不推时没有任何 default-deny 落地，
+	// 那句话更准确。
+	if blockers := enforcingBlockers(pv); blockers != "" {
+		response.WriteInvalid(w, blockers)
+		return plannedWriteback{}, false
+	}
+
 	actor := actorOf(r)
 	// **与导出同一段渲染**，不是第二次渲染（design doc §7）：写进 Git 的
 	// 必须就是操作者能下载下来的那份内容。另起一段渲染，两份会慢慢分家，
