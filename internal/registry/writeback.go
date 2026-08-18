@@ -347,3 +347,44 @@ func cleanRepoPath(field, p string) (string, error) {
 	}
 	return p, nil
 }
+
+// DriftResult 是一次漂移检测的结论，封闭枚举。
+//
+// 漂移的定义是「**我们写进去的那条路径下的内容**，与我们写的时候不一样了」，
+// 不是「分支往前走了」（design doc 2026-08-18-drift-detection §2）：别人在别的
+// 路径上提交是常态，把它报成漂移会让这个信号每天都在响 —— 而一个每天都响的
+// 信号会被整体忽略。
+type DriftResult string
+
+const (
+	// DriftInSync 表示那条路径下的内容与我们写的时候一致。
+	DriftInSync DriftResult = "IN_SYNC"
+	// DriftDrifted 表示内容变了。
+	DriftDrifted DriftResult = "DRIFTED"
+	// DriftNeverWritten 表示这个绑定从来没被推送过，没有可比对的锚点。
+	DriftNeverWritten DriftResult = "NEVER_WRITTEN"
+	// DriftAnchorMissing 表示锚点那个提交在仓库里找不到了。
+	//
+	// 与 DriftDrifted 分开：这说明有人改写过历史（force push / rebase），
+	// 那条历史里我们那次提交连同它的审计线索一起没了 —— 处置是去查谁改写了
+	// 历史，不是重推一次。
+	DriftAnchorMissing DriftResult = "ANCHOR_MISSING"
+	// DriftUnknown 表示够不到仓库、认证失败、或读不出那棵树。
+	//
+	// **绝不能塌成 DriftInSync。** 一次网络抖动读成"一致"，操作者就以为
+	// 下发的东西还在，而它可能早被人删了（安全规范 §49）。
+	DriftUnknown DriftResult = "UNKNOWN"
+)
+
+// Valid 判断该结论是否已登记。
+//
+// 用显式 switch 而非查表：新增一个常量却忘了加进这里，switch 让这处遗漏在
+// review 时是看得见的一行。
+func (d DriftResult) Valid() bool {
+	switch d {
+	case DriftInSync, DriftDrifted, DriftNeverWritten, DriftAnchorMissing, DriftUnknown:
+		return true
+	default:
+		return false
+	}
+}
