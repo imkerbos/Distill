@@ -67,18 +67,93 @@ type agentPodPayload struct {
 	WorkloadName   string            `json:"workloadName,omitempty"`
 }
 
+// 以下各类与平台侧的报文结构一一对应，唯独**一律没有 ClusterID**：
+// 归属只来自 token（design doc §2），带上会被平台按未知字段整体拒。
+
+type agentNamespacePayload struct {
+	Name       string            `json:"name"`
+	Labels     map[string]string `json:"labels,omitempty"`
+	InMesh     bool              `json:"inMesh,omitempty"`
+	MeshSource string            `json:"meshSource,omitempty"`
+	MeshDetail string            `json:"meshDetail,omitempty"`
+}
+
+type agentNodePayload struct {
+	Name        string   `json:"name"`
+	PodCIDRs    []string `json:"podCidrs,omitempty"`
+	InternalIPs []string `json:"internalIps,omitempty"`
+}
+
+type agentServicePortPayload struct {
+	Name           string `json:"name,omitempty"`
+	Port           int32  `json:"port"`
+	TargetPort     int32  `json:"targetPort,omitempty"`
+	TargetPortName string `json:"targetPortName,omitempty"`
+	Protocol       string `json:"protocol,omitempty"`
+}
+
+type agentServicePayload struct {
+	Namespace string                    `json:"namespace"`
+	Name      string                    `json:"name"`
+	Type      string                    `json:"type,omitempty"`
+	Selector  map[string]string         `json:"selector,omitempty"`
+	ClusterIP string                    `json:"clusterIp,omitempty"`
+	Ports     []agentServicePortPayload `json:"ports,omitempty"`
+}
+
+type agentEndpointsPayload struct {
+	Namespace string   `json:"namespace"`
+	Name      string   `json:"name"`
+	Addresses []string `json:"addresses,omitempty"`
+	Ports     []int32  `json:"ports,omitempty"`
+}
+
+type agentPolicyPayload struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	UID       string `json:"uid"`
+	Manifest  string `json:"manifest"`
+}
+
+type agentGatewayPayload struct {
+	Namespace      string `json:"namespace"`
+	Name           string `json:"name"`
+	Kind           string `json:"kind"`
+	BackendService string `json:"backendService,omitempty"`
+}
+
+type agentWarningPayload struct {
+	Kind    string `json:"kind"`
+	Subject string `json:"subject"`
+	Detail  string `json:"detail,omitempty"`
+}
+
+// agentObservationPayload 是一次采集观测到的全部资产。
+//
+// **每一类都要带上。** 少带一类不是「那一类没有数据」，而是平台落库时为它
+// 写一个 0，而 0 的含义是「尝试了、集群里就是没有」—— 一个 push 集群会显示
+// 成没有任何 NetworkPolicy，策略生成据此把它当作裸集群处理。
+type agentObservationPayload struct {
+	Namespaces []agentNamespacePayload `json:"namespaces,omitempty"`
+	Pods       []agentPodPayload       `json:"pods,omitempty"`
+	Nodes      []agentNodePayload      `json:"nodes,omitempty"`
+	Services   []agentServicePayload   `json:"services,omitempty"`
+	Endpoints  []agentEndpointsPayload `json:"endpoints,omitempty"`
+	Policies   []agentPolicyPayload    `json:"policies,omitempty"`
+	Gateways   []agentGatewayPayload   `json:"gateways,omitempty"`
+	Warnings   []agentWarningPayload   `json:"warnings,omitempty"`
+}
+
 // agentRunPayload 是一次上报的报文，形状与平台侧一一对应。
 type agentRunPayload struct {
-	SchemaVersion int       `json:"schemaVersion"`
-	RunID         string    `json:"runId"`
-	Status        string    `json:"status"`
-	ErrorReason   string    `json:"errorReason,omitempty"`
-	StartedAt     time.Time `json:"startedAt"`
-	FinishedAt    time.Time `json:"finishedAt"`
-	ObservedAt    time.Time `json:"observedAt"`
-	Observation   struct {
-		Pods []agentPodPayload `json:"pods"`
-	} `json:"observation"`
+	SchemaVersion int                     `json:"schemaVersion"`
+	RunID         string                  `json:"runId"`
+	Status        string                  `json:"status"`
+	ErrorReason   string                  `json:"errorReason,omitempty"`
+	StartedAt     time.Time               `json:"startedAt"`
+	FinishedAt    time.Time               `json:"finishedAt"`
+	ObservedAt    time.Time               `json:"observedAt"`
+	Observation   agentObservationPayload `json:"observation"`
 }
 
 // Save 上报一次采集运行。
@@ -90,6 +165,73 @@ func (s *httpSink) Save(ctx context.Context, run snapshot.Run) error {
 		StartedAt:     run.StartedAt,
 		FinishedAt:    run.FinishedAt,
 		ObservedAt:    run.Observation.ObservedAt,
+	}
+	for _, n := range run.Observation.Namespaces {
+		payload.Observation.Namespaces = append(payload.Observation.Namespaces, agentNamespacePayload{
+			Name:       n.Name,
+			Labels:     n.Labels,
+			InMesh:     n.InMesh,
+			MeshSource: string(n.MeshSource),
+			MeshDetail: n.MeshDetail,
+		})
+	}
+	for _, n := range run.Observation.Nodes {
+		payload.Observation.Nodes = append(payload.Observation.Nodes, agentNodePayload{
+			Name:        n.Name,
+			PodCIDRs:    n.PodCIDRs,
+			InternalIPs: n.InternalIPs,
+		})
+	}
+	for _, svc := range run.Observation.Services {
+		ports := make([]agentServicePortPayload, 0, len(svc.Ports))
+		for _, sp := range svc.Ports {
+			ports = append(ports, agentServicePortPayload{
+				Name:           sp.Name,
+				Port:           sp.Port,
+				TargetPort:     sp.TargetPort,
+				TargetPortName: sp.TargetPortName,
+				Protocol:       sp.Protocol,
+			})
+		}
+		payload.Observation.Services = append(payload.Observation.Services, agentServicePayload{
+			Namespace: svc.Namespace,
+			Name:      svc.Name,
+			Type:      svc.Type,
+			Selector:  svc.Selector,
+			ClusterIP: svc.ClusterIP,
+			Ports:     ports,
+		})
+	}
+	for _, e := range run.Observation.Endpoints {
+		payload.Observation.Endpoints = append(payload.Observation.Endpoints, agentEndpointsPayload{
+			Namespace: e.Namespace,
+			Name:      e.Name,
+			Addresses: e.Addresses,
+			Ports:     e.Ports,
+		})
+	}
+	for _, pol := range run.Observation.Policies {
+		payload.Observation.Policies = append(payload.Observation.Policies, agentPolicyPayload{
+			Namespace: pol.Namespace,
+			Name:      pol.Name,
+			UID:       pol.UID,
+			Manifest:  pol.Manifest,
+		})
+	}
+	for _, g := range run.Observation.Gateways {
+		payload.Observation.Gateways = append(payload.Observation.Gateways, agentGatewayPayload{
+			Namespace:      g.Namespace,
+			Name:           g.Name,
+			Kind:           g.Kind,
+			BackendService: g.BackendService,
+		})
+	}
+	for _, w := range run.Observation.Warnings {
+		payload.Observation.Warnings = append(payload.Observation.Warnings, agentWarningPayload{
+			Kind:    string(w.Kind),
+			Subject: w.Subject,
+			Detail:  w.Detail,
+		})
 	}
 	for _, p := range run.Observation.Pods {
 		payload.Observation.Pods = append(payload.Observation.Pods, agentPodPayload{

@@ -306,3 +306,51 @@ func TestReadTokenTrimsWhatTheSecretMountAdds(t *testing.T) {
 		t.Errorf("readToken() = %q, want it trimmed", got)
 	}
 }
+
+// 推送必须带上每一类资源，不只是 Pod。
+//
+// **这条用例来自一次真集群演练**：agent 装进 kind 跑通之后，
+// collection_run_resource 里 POD=30 而 NAMESPACE / SERVICE / NETWORKPOLICY /
+// NODE 全是 0 —— 那些 0 是假话，agent 采到了，是报文丢掉了。而按本项目的
+// 口径，写 0 的含义是「尝试了、集群里就是没有」：一个 push 集群会显示成
+// 「没有任何 NetworkPolicy」，策略生成据此把它当作裸集群处理。
+func TestSinkPushesEveryResourceKind(t *testing.T) {
+	var got captured
+	srv := stubPlatform(t, http.StatusOK, okReply, &got)
+	defer srv.Close()
+
+	run := sampleRunForPush()
+	run.Observation.Namespaces = []snapshot.Namespace{{Name: "shop", Labels: map[string]string{"team": "x"}}}
+	run.Observation.Nodes = []snapshot.Node{{Name: "node-a", InternalIPs: []string{"10.128.0.5"}}}
+	run.Observation.Services = []snapshot.Service{{
+		Namespace: "shop", Name: "web", Type: "ClusterIP",
+		Selector: map[string]string{"app": "web"},
+		Ports:    []snapshot.ServicePort{{Name: "http", Port: 80, TargetPort: 8080, Protocol: "TCP"}},
+	}}
+	run.Observation.Endpoints = []snapshot.Endpoints{{Namespace: "shop", Name: "web", Addresses: []string{"10.4.0.9"}}}
+	run.Observation.Policies = []snapshot.NetworkPolicy{{Namespace: "shop", Name: "deny", UID: "p-1", Manifest: "kind: NetworkPolicy"}}
+	run.Observation.Gateways = []snapshot.Gateway{{Namespace: "shop", Name: "ing", Kind: "Ingress", BackendService: "web"}}
+	run.Observation.Warnings = []snapshot.Warning{{Kind: snapshot.WarningWorkloadUnresolved, Subject: "shop/web-1"}}
+
+	if err := newHTTPSink(srv.URL, "dstl_x_y").Save(context.Background(), run); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	obs, ok := got.body["observation"].(map[string]any)
+	if !ok {
+		t.Fatalf("the payload has no observation: %s", got.rawGot)
+	}
+	for _, kind := range []string{
+		"namespaces", "pods", "nodes", "services", "endpoints", "policies", "gateways", "warnings",
+	} {
+		list, ok := obs[kind].([]any)
+		if !ok || len(list) != 1 {
+			t.Errorf("%s in the payload = %v, want one record — 这一类被丢掉了，"+
+				"平台落库时会写成一个 0，而 0 的含义是「集群里就是没有」", kind, obs[kind])
+		}
+	}
+	// 每一类都不得自称集群：归属只来自 token，带上会被平台整体拒。
+	if strings.Contains(got.rawGot, "clusterId") || strings.Contains(got.rawGot, "ClusterID") {
+		t.Errorf("the payload claimed a cluster: %s", got.rawGot)
+	}
+}

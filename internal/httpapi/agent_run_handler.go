@@ -82,7 +82,85 @@ type agentPodPayload struct {
 // 其余资源类型跟着 G2 的分批上报一起加。少带一类的后果是那一类没有数据，
 // 而**不是**一个看起来完整的错误结果。
 type agentObservationPayload struct {
-	Pods []agentPodPayload `json:"pods"`
+	Namespaces []agentNamespacePayload `json:"namespaces,omitempty"`
+	Pods       []agentPodPayload       `json:"pods,omitempty"`
+	Nodes      []agentNodePayload      `json:"nodes,omitempty"`
+	Services   []agentServicePayload   `json:"services,omitempty"`
+	Endpoints  []agentEndpointsPayload `json:"endpoints,omitempty"`
+	Policies   []agentPolicyPayload    `json:"policies,omitempty"`
+	Gateways   []agentGatewayPayload   `json:"gateways,omitempty"`
+	// Warnings 是采集当时发现的、事实与登记不符的地方。
+	//
+	// 一并上报而不是丢掉：它们的条数与构成要进可见面与统计口径，而 agent
+	// 是唯一看见过那一刻的人。归属判定产生的告警由平台在 Classify 里另外
+	// 追加，两批合在一起才是这次运行的全貌。
+	Warnings []agentWarningPayload `json:"warnings,omitempty"`
+}
+
+// 以下各类的字段与 internal/snapshot 一一对应，唯独**一律没有 ClusterID**：
+// 集群归属只来自 token，由平台在 toRun 里逐条填上（design doc §2）。
+
+type agentNamespacePayload struct {
+	Name       string            `json:"name"`
+	Labels     map[string]string `json:"labels,omitempty"`
+	InMesh     bool              `json:"inMesh,omitempty"`
+	MeshSource string            `json:"meshSource,omitempty"`
+	MeshDetail string            `json:"meshDetail,omitempty"`
+}
+
+type agentNodePayload struct {
+	Name        string   `json:"name"`
+	PodCIDRs    []string `json:"podCidrs,omitempty"`
+	InternalIPs []string `json:"internalIps,omitempty"`
+}
+
+type agentServicePortPayload struct {
+	Name string `json:"name,omitempty"`
+	Port int32  `json:"port"`
+	// TargetPort 与 TargetPortName 分成两个字段，理由同 snapshot.ServicePort：
+	// 命名端口合成一个 int32 会静默记成 0，而 0 是合法端口值 —— 一条指向
+	// 端口 0 的规则永远匹配不上，外观却完全正常。
+	TargetPort     int32  `json:"targetPort,omitempty"`
+	TargetPortName string `json:"targetPortName,omitempty"`
+	Protocol       string `json:"protocol,omitempty"`
+}
+
+type agentServicePayload struct {
+	Namespace string                    `json:"namespace"`
+	Name      string                    `json:"name"`
+	Type      string                    `json:"type,omitempty"`
+	Selector  map[string]string         `json:"selector,omitempty"`
+	ClusterIP string                    `json:"clusterIp,omitempty"`
+	Ports     []agentServicePortPayload `json:"ports,omitempty"`
+}
+
+type agentEndpointsPayload struct {
+	Namespace string   `json:"namespace"`
+	Name      string   `json:"name"`
+	Addresses []string `json:"addresses,omitempty"`
+	Ports     []int32  `json:"ports,omitempty"`
+}
+
+type agentPolicyPayload struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	UID       string `json:"uid"`
+	// Manifest 是策略的 YAML 原文 —— 「集群当时是什么样」的证据。解析可以
+	// 重做，丢掉的字段找不回来。
+	Manifest string `json:"manifest"`
+}
+
+type agentGatewayPayload struct {
+	Namespace      string `json:"namespace"`
+	Name           string `json:"name"`
+	Kind           string `json:"kind"`
+	BackendService string `json:"backendService,omitempty"`
+}
+
+type agentWarningPayload struct {
+	Kind    string `json:"kind"`
+	Subject string `json:"subject"`
+	Detail  string `json:"detail,omitempty"`
 }
 
 // agentRunPayload 是一次资产上报的报文。
@@ -279,6 +357,87 @@ func (p agentRunPayload) toRun(clusterID string) snapshot.Run {
 			WorkloadName:   in.WorkloadName,
 		})
 	}
+	namespaces := make([]snapshot.Namespace, 0, len(p.Observation.Namespaces))
+	for _, in := range p.Observation.Namespaces {
+		namespaces = append(namespaces, snapshot.Namespace{
+			ClusterID:  clusterID,
+			Name:       in.Name,
+			Labels:     in.Labels,
+			InMesh:     in.InMesh,
+			MeshSource: cluster.MeshSource(in.MeshSource),
+			MeshDetail: in.MeshDetail,
+		})
+	}
+	nodes := make([]snapshot.Node, 0, len(p.Observation.Nodes))
+	for _, in := range p.Observation.Nodes {
+		nodes = append(nodes, snapshot.Node{
+			ClusterID:   clusterID,
+			Name:        in.Name,
+			PodCIDRs:    in.PodCIDRs,
+			InternalIPs: in.InternalIPs,
+		})
+	}
+	services := make([]snapshot.Service, 0, len(p.Observation.Services))
+	for _, in := range p.Observation.Services {
+		ports := make([]snapshot.ServicePort, 0, len(in.Ports))
+		for _, sp := range in.Ports {
+			ports = append(ports, snapshot.ServicePort{
+				Name:           sp.Name,
+				Port:           sp.Port,
+				TargetPort:     sp.TargetPort,
+				TargetPortName: sp.TargetPortName,
+				Protocol:       sp.Protocol,
+			})
+		}
+		services = append(services, snapshot.Service{
+			ClusterID: clusterID,
+			Namespace: in.Namespace,
+			Name:      in.Name,
+			Type:      in.Type,
+			Selector:  in.Selector,
+			ClusterIP: in.ClusterIP,
+			Ports:     ports,
+		})
+	}
+	endpoints := make([]snapshot.Endpoints, 0, len(p.Observation.Endpoints))
+	for _, in := range p.Observation.Endpoints {
+		endpoints = append(endpoints, snapshot.Endpoints{
+			ClusterID: clusterID,
+			Namespace: in.Namespace,
+			Name:      in.Name,
+			Addresses: in.Addresses,
+			Ports:     in.Ports,
+		})
+	}
+	policies := make([]snapshot.NetworkPolicy, 0, len(p.Observation.Policies))
+	for _, in := range p.Observation.Policies {
+		policies = append(policies, snapshot.NetworkPolicy{
+			ClusterID: clusterID,
+			Namespace: in.Namespace,
+			Name:      in.Name,
+			UID:       in.UID,
+			Manifest:  in.Manifest,
+		})
+	}
+	gateways := make([]snapshot.Gateway, 0, len(p.Observation.Gateways))
+	for _, in := range p.Observation.Gateways {
+		gateways = append(gateways, snapshot.Gateway{
+			ClusterID:      clusterID,
+			Namespace:      in.Namespace,
+			Name:           in.Name,
+			Kind:           in.Kind,
+			BackendService: in.BackendService,
+		})
+	}
+	warnings := make([]snapshot.Warning, 0, len(p.Observation.Warnings))
+	for _, in := range p.Observation.Warnings {
+		warnings = append(warnings, snapshot.Warning{
+			Kind:    snapshot.WarningKind(in.Kind),
+			Subject: in.Subject,
+			Detail:  in.Detail,
+		})
+	}
+
 	return snapshot.Run{
 		Status:     snapshot.RunStatus(p.Status),
 		StartedAt:  p.StartedAt,
@@ -287,7 +446,14 @@ func (p agentRunPayload) toRun(clusterID string) snapshot.Run {
 			ClusterID:  clusterID,
 			RunID:      p.RunID,
 			ObservedAt: p.ObservedAt,
+			Namespaces: namespaces,
 			Pods:       pods,
+			Nodes:      nodes,
+			Services:   services,
+			Endpoints:  endpoints,
+			Policies:   policies,
+			Gateways:   gateways,
+			Warnings:   warnings,
 		},
 	}
 }
