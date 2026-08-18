@@ -126,6 +126,15 @@ export interface Topology {
   unplaceableFlowCount: number
   /** 实际生效的聚合粒度，回显给界面。 */
   level: TopologyLevel
+  /**
+   * 这份拓扑的边是不是基于真实观测。
+   *
+   * 为 false 时，空的 edges **不是**「这些工作负载之间没有通信」，而是
+   * 「平台一条流量都还没观测过」。两者必须在界面上长得不一样：把后者画成
+   * 一张干净的图，读者会得出「这里没有通信」的结论，而那正是这个平台
+   * 最不能给出的那种错觉。
+   */
+  trafficObserved: boolean
 }
 
 export interface FlowRecord {

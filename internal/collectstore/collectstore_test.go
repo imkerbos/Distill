@@ -299,11 +299,17 @@ func seedRecycledAddress(t *testing.T, s *snapshotstore.Store) {
 	})
 }
 
-// 没有可用采集时必须给出明确的「没有数据」，而不是一份空结果。
+// 一无所知时必须给出明确的「没有数据」，而不是一份空结果。
 //
 // 空拓扑读起来是"这个集群里什么都没有"，那是一句没有人确认过的话，而且它是
-// 让人放心的那个方向（design doc §2）。这里三种"没有"都要落到同一个答案上：
-// 什么都没采过、只采了资产没摄入流量、只有一次失败的摄入。
+// 让人放心的那个方向（design doc 2026-08-17 §2）。
+//
+// **2026-08-18 收窄**：原先「只采了资产、没摄入流量」也落在这里，因为拓扑与
+// 流量被绑在一起。那条挡住的东西比它该挡的多 —— 「一个 Pod 都没有」与「有
+// 652 个 Pod、一条流量都没观测过」是两件完全不同的事，而当时它们给出同一个
+// 答案。现在前者仍然整份拒绝（本用例），后者按资产作答并把「没有观测」写进
+// 结构里（assets_only_test.go）。**Quality 三种情形都仍然拒绝**：它数的是每条
+// 连接的判定构成，没有连接就没有分母。
 //
 // 对照组是同一个 Reader 对一个真有采集的集群照常供数 —— 少了它，一个
 // 什么都答不出来的 Reader 也能让上面全部通过。
@@ -311,7 +317,8 @@ func TestNoCollectionIsNotAnEmptyCluster(t *testing.T) {
 	r, s := newTestReader(t)
 	ctx := context.Background()
 
-	assertNoCollection := func(t *testing.T, stage string) {
+	// topologyRefused 只在「这个集群一无所知」那一档成立。
+	topologyRefused := func(t *testing.T, stage string) {
 		t.Helper()
 		topo, err := r.Topology(ctx, silentID, store.LevelNamespace)
 		if !errors.Is(err, collectstore.ErrNoCollection) {
@@ -321,6 +328,11 @@ func TestNoCollectionIsNotAnEmptyCluster(t *testing.T) {
 			t.Errorf("%s: Topology() returned %d nodes / %d edges alongside the refusal",
 				stage, len(topo.Nodes), len(topo.Edges))
 		}
+	}
+
+	// qualityRefused 在三种情形下都成立：这一屏问的就是流量。
+	qualityRefused := func(t *testing.T, stage string) {
+		t.Helper()
 		q, err := r.Quality(ctx, silentID)
 		if !errors.Is(err, collectstore.ErrNoCollection) {
 			t.Errorf("%s: Quality() error = %v, want ErrNoCollection", stage, err)
@@ -330,7 +342,8 @@ func TestNoCollectionIsNotAnEmptyCluster(t *testing.T) {
 		}
 	}
 
-	assertNoCollection(t, "从未采集过")
+	topologyRefused(t, "从未采集过")
+	qualityRefused(t, "从未采集过")
 
 	// 采了资产、没摄入过流量：仍然不是一个安静的集群，是一个我们没看过
 	// 流量的集群。
@@ -345,7 +358,9 @@ func TestNoCollectionIsNotAnEmptyCluster(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Save() error = %v", err)
 	}
-	assertNoCollection(t, "采了资产、没有流量")
+	// **这一档变了**：资产在库里，拓扑的节点就算得出来。仍然要拒绝的是
+	// Quality —— 它数的是判定构成，没有连接就没有分母。
+	qualityRefused(t, "采了资产、没有流量")
 
 	// 唯一一次摄入是失败的：它带着一个窗口，但一条连接都没拿到。就着它的
 	// 窗口去查会得到零条连接，而零条会被读成"这段时间没有流量"。
@@ -363,7 +378,7 @@ func TestNoCollectionIsNotAnEmptyCluster(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("SaveIngest() error = %v", err)
 	}
-	assertNoCollection(t, "唯一一次摄入失败了")
+	qualityRefused(t, "唯一一次摄入失败了")
 
 	// 对照组：一个真有采集的集群必须照常被描述出来。
 	seedRecycledAddress(t, s)

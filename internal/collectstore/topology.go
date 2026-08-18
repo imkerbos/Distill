@@ -2,6 +2,7 @@ package collectstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 
@@ -34,7 +35,15 @@ func (r *Reader) Topology(
 		// 以为自己在看 workload 粒度。
 		return store.Topology{}, fmt.Errorf("collectstore: unregistered topology level %q", string(level))
 	}
+	// 先按有流量的路子来；没有摄入过就退回只用资产作答
+	// （design doc 2026-08-18 §4.1）。**不是降级**：节点本来就只依赖身份区间
+	// 与锚点快照的策略，边才需要观测。
+	trafficObserved := true
 	d, err := r.describe(ctx, clusterID)
+	if errors.Is(err, ErrNoFlowIngest) {
+		trafficObserved = false
+		d, err = r.describeAssets(ctx, clusterID)
+	}
 	if err != nil {
 		return store.Topology{}, err
 	}
@@ -51,6 +60,7 @@ func (r *Reader) Topology(
 		Edges:                edges,
 		UnplaceableFlowCount: unplaceable,
 		Level:                string(level),
+		TrafficObserved:      trafficObserved,
 	}, nil
 }
 

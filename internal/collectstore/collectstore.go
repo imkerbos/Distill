@@ -47,6 +47,17 @@ import (
 // 也就写不出"先取结果、再顺手忽略那个布尔"的代码。
 var ErrNoCollection = errors.New("collectstore: no usable collection for this cluster")
 
+// ErrNoFlowIngest 表示这个集群采过资产，但一次流量摄入都没有。
+//
+// **包着 ErrNoCollection**（用 %w 构造），因此原先用 errors.Is 判 ErrNoCollection
+// 的调用方行为不变；要区分的那几处再多判一次这一个。
+//
+// 分出来是因为「一无所知」与「资产有、流量没有」的处置完全不同：前者只能拒绝，
+// 我们对这个集群什么都不知道；后者答得出资产已经能回答的那部分
+// （design doc 2026-08-18 §3）。合并之后，前者会走上按资产作答那条路，而那条
+// 路上没有资产可用 —— 失败方式会从一次明确的拒绝变成一份空报告。
+var ErrNoFlowIngest = fmt.Errorf("%w: no flow ingest", ErrNoCollection)
+
 // ErrReadNotCollectedYet 表示这个读方法还没有接到采集数据上。
 //
 // 分阶段接入的中间态必须是一次明确的拒绝，不是一份空结果，也不是一份
@@ -164,6 +175,50 @@ func (r *Reader) describe(ctx context.Context, clusterID string) (described, err
 	return r.describeAt(ctx, clusterID, window)
 }
 
+// describeAssets 解析一个集群**最近一次采集**那一刻的资产事实。
+//
+// 与 describe 的区别只有一处：不要求有过流量摄入。用于回答那些本来就只依赖
+// 资产的问题（拓扑的节点、裸奔 Pod）——它们今天被挡住，只是因为同一屏上
+// 另一部分没有数据（design doc 2026-08-18 §1）。
+//
+// 锚点取**最近一次成功的采集运行**，不是「不晚于某个时刻的最近一次」：没有
+// 窗口，也就没有「那时候」，要描述的就是最新的现状。
+//
+// 集群从没被采过时仍然返回 ErrNoCollection —— 那时我们一无所知，给什么都是编的。
+func (r *Reader) describeAssets(ctx context.Context, clusterID string) (described, error) {
+	if _, err := r.collectedCluster(ctx, clusterID); err != nil {
+		return described{}, err
+	}
+	anchor, err := r.assetAnchor(ctx, clusterID, time.Now())
+	if err != nil {
+		return described{}, err
+	}
+
+	intervals, err := r.readIntervals(ctx, clusterID)
+	if err != nil {
+		return described{}, err
+	}
+
+	d := described{
+		clusterID: clusterID,
+		at:        anchor,
+		anchor:    anchor,
+		// conns 为空、completeness 为 UNKNOWN：**不是** COMPLETE。
+		// 一次都没观测过，说不出这段时间漏没漏 —— 而 UNKNOWN 正是
+		// 「证据本身取不到」那一档（flow-ingestion spec §2）。
+		completeness: flow.CompletenessUnknown,
+		intervals:    intervals,
+	}
+	for _, ivs := range intervals {
+		for _, iv := range ivs {
+			if iv.Covers(anchor) {
+				d.living = append(d.living, iv)
+			}
+		}
+	}
+	return d, nil
+}
+
 // describeAt 解析一段**指定**窗口的全部事实。
 //
 // 与 describe 拆开，是因为 Flows / Security 的接口上带着调用方选定的窗口，
@@ -264,7 +319,7 @@ func (r *Reader) latestFlowWindow(ctx context.Context, clusterID string) (flow.W
 		  LIMIT 1`,
 		clusterID, string(snapshotstore.IngestFailed)).Scan(&w.From, &w.To)
 	if errors.Is(err, sql.ErrNoRows) {
-		return flow.Window{}, fmt.Errorf("%w: cluster %s has no flow ingest", ErrNoCollection, clusterID)
+		return flow.Window{}, fmt.Errorf("%w: cluster %s", ErrNoFlowIngest, clusterID)
 	}
 	if err != nil {
 		return flow.Window{}, fmt.Errorf("collectstore: read latest flow window: %w", err)

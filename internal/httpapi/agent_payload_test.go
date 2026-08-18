@@ -1,11 +1,14 @@
 package httpapi_test
 
 import (
+	"context"
 	"strings"
 	"testing"
 
+	"github.com/imkerbos/Distill/internal/collectstore"
 	"github.com/imkerbos/Distill/internal/response"
 	"github.com/imkerbos/Distill/internal/snapshot"
+	"github.com/imkerbos/Distill/internal/store"
 )
 
 // fullRunBody 是一份每类资源都有一条记录的上报。
@@ -116,4 +119,42 @@ func TestIngestKeepsTheFieldsTheEvaluationLayerReads(t *testing.T) {
 			t.Errorf("a record carried ClusterID %q, want prod-asia-1", got)
 		}
 	}
+}
+
+// 一个采过资产、没摄入过流量的集群，安全发现这一屏必须答得出裸奔 Pod。
+//
+// **API 层此前把它挡在了 Reader 之前**：没有 from/to 就去问默认窗口，而默认
+// 窗口来自流量摄入。Reader 改成按资产作答之后，这一层不放行的话，页面上什么
+// 都不会变（design doc 2026-08-18 §4.2）。
+func TestSecurityEndpointAnswersWithoutAWindowWhenThereIsNoIngest(t *testing.T) {
+	reg := fixtureSource()
+	h, _, cookie := newTestRouterWithRegistry(t, noIngestReader{}, reg)
+
+	rec := authedGet(t, h, cookie, "/api/v1/clusters/prod-asia-1/security")
+	if got := bodyOf(t, rec)["code"]; got != float64(response.CodeOK) {
+		t.Fatalf("code = %v, want 0: %s", got, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"trafficObserved":false`) {
+		t.Errorf("the report did not say traffic was never observed: %s", rec.Body.String())
+	}
+}
+
+// noIngestReader 是一个「资产有、流量没有」的 Reader。
+//
+// DefaultWindow 答 ErrNoFlowIngest（真实 Reader 在这种集群上就是这么答的），
+// Security 则照常给出裸奔 Pod 并标注没有观测。
+type noIngestReader struct{ store.Reader }
+
+func (noIngestReader) DefaultWindow(context.Context, string) (store.TimeWindow, error) {
+	return store.TimeWindow{}, collectstore.ErrNoFlowIngest
+}
+
+func (noIngestReader) Security(_ context.Context, clusterID string, _ store.TimeWindow) (store.SecurityReport, error) {
+	return store.SecurityReport{
+		Cluster:         clusterID,
+		TrafficObserved: false,
+		NakedPods:       []store.NakedPod{{Cluster: clusterID, Namespace: "shop", Name: "web-1"}},
+		RiskyFlows:      []store.RiskyFlow{},
+		EgressTargets:   []store.EgressTarget{},
+	}, nil
 }

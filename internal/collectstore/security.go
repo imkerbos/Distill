@@ -2,6 +2,7 @@ package collectstore
 
 import (
 	"context"
+	"errors"
 	"sort"
 
 	"github.com/imkerbos/Distill/internal/flow"
@@ -36,17 +37,56 @@ import (
 func (r *Reader) Security(
 	ctx context.Context, clusterID string, window store.TimeWindow,
 ) (store.SecurityReport, error) {
-	if !window.Valid() {
-		return store.SecurityReport{}, store.ErrWindowRequired
-	}
-	t, err := r.readTraffic(ctx, clusterID, flow.Window{From: window.From, To: window.To})
+	// 没有摄入过时窗口也就无从谈起：调用方给不出一个有意义的窗口，而裸奔
+	// Pod 本来就与窗口无关。因此这里先看有没有流量，再决定窗口是不是必需
+	// （design doc 2026-08-18 §4.2）。
+	// 先问「这个集群摄入过流量吗」，而不是拿调用方给的窗口去试。
+	//
+	// 两者必须分开：**「这个集群从没摄入过」才走资产作答**；「你点名的这段
+	// 时间没有数据」不是 —— 那时该照旧拒绝，因为按资产回答等于悄悄换掉了
+	// 调用方问的那个问题，而报告上那个 Window 字段会变成一句假话。
+	// **来源门禁先过。** 一个登记为 FIXTURE 的集群在这里必须拿到
+	// ErrClusterNotFound，而不是一份用采集数据拼出来、却写着演示集群名字的
+	// 报告（design doc 2026-08-17 §2）。把它排在问流量之后，这条守卫就会
+	// 被事实层的错误抢先答掉 —— 而那个错误看起来像一次普通的读失败。
+	c, err := r.collectedCluster(ctx, clusterID)
 	if err != nil {
 		return store.SecurityReport{}, err
+	}
+
+	trafficObserved := true
+	var t traffic
+	_, werr := r.latestFlowWindow(ctx, clusterID)
+	switch {
+	case errors.Is(werr, ErrNoFlowIngest):
+		trafficObserved = false
+		d, derr := r.describeAssets(ctx, clusterID)
+		if derr != nil {
+			return store.SecurityReport{}, derr
+		}
+		// 走**同一条**装配（trafficOf），不是自己拼一个空的 traffic：裸奔
+		// Pod 要的是锚点那一刻的 Pod 与策略，而那两样正是它读出来的。绕过
+		// 它，这一栏会静默变成空清单 —— 读起来是「这个集群没有裸奔 Pod」。
+		t, err = r.trafficOf(ctx, c, d)
+		if err != nil {
+			return store.SecurityReport{}, err
+		}
+	case werr != nil:
+		return store.SecurityReport{}, werr
+	default:
+		if !window.Valid() {
+			return store.SecurityReport{}, store.ErrWindowRequired
+		}
+		t, err = r.readTraffic(ctx, clusterID, flow.Window{From: window.From, To: window.To})
+		if err != nil {
+			return store.SecurityReport{}, err
+		}
 	}
 
 	rep := store.SecurityReport{
 		Cluster:         clusterID,
 		Window:          window,
+		TrafficObserved: trafficObserved,
 		RiskyFlows:      []store.RiskyFlow{},
 		EgressTargets:   []store.EgressTarget{},
 		NakedPods:       []store.NakedPod{},

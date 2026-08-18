@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { edgeCountLabel, showsGraph, trafficNotice } from './topologyView.ts'
 import { api } from '../api/client'
 import type { Topology, TopologyLevel } from '../api/types'
 import { useResource } from '../api/useResource'
@@ -61,9 +62,25 @@ export default function TopologyPage({ cluster }: { cluster: string }) {
         只会显得刻意。多出来的宽度拿来放图例与概览 —— 横排的图例在宽屏上
         会拉成一长条，反而不好读。
       */}
+      {/*
+        没有流量观测时不画那张图（topologyView.showsGraph）：一张没有边的图
+        是一堆互不相连的点，看起来像一个"结构清晰、没有耦合"的集群 ——
+        而事实是我们还没看过它的通信。节点仍然列出来，它们是真的。
+      */}
+      {trafficNotice(topo) !== null && (
+        <Card style={{
+          padding: 'var(--space-3)', marginBottom: 'var(--space-4)',
+          borderLeft: '3px solid var(--verdict-unknown)',
+        }}>
+          <p style={{ margin: 0, fontSize: 'var(--text-sm)' }}>{trafficNotice(topo)}</p>
+        </Card>
+      )}
+
       <Card style={{ padding: 'var(--space-3)', display: 'flex', gap: 'var(--space-4)' }}>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <TopologyGraph topology={topo} />
+          {showsGraph(topo)
+            ? <TopologyGraph topology={topo} />
+            : <NodeList topo={topo} />}
         </div>
 
         <aside style={{
@@ -170,7 +187,7 @@ function GraphSummary({ topo }: { topo: Topology }) {
     }}>
       <Item k="节点" v={`${topo.nodes.length - foreign}`} />
       <Item k="其他集群节点" v={`${foreign}`} />
-      <Item k="边" v={`${topo.edges.length}`} />
+      <Item k="边" v={edgeCountLabel(topo)} />
       <Item k="跨集群边" v={`${crossCluster}`} />
       <Item k="无策略节点" v={`${noPolicy}`} />
     </dl>
@@ -191,4 +208,42 @@ function Swatch({ color, width = 2 }: { color: string; width?: number }) {
     display: 'inline-block', width: 18, height: width,
     background: color, verticalAlign: 'middle', marginRight: 4,
   }} />
+}
+
+/**
+ * 没有图可画时，把节点原样列出来。
+ *
+ * 列表而不是图：图的形状本身会传达"它们之间是这样连接的"，而这一刻我们
+ * 对连接一无所知。列表只说它知道的那件事 —— 这些工作负载存在，其中哪些
+ * 没有任何 NetworkPolicy 覆盖。
+ */
+function NodeList({ topo }: { topo: Topology }) {
+  const own = topo.nodes.filter((n) => !n.foreign)
+  if (own.length === 0) return null
+  return (
+    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--text-sm)' }}>
+      <thead>
+        <tr style={{ textAlign: 'left', color: 'var(--text-muted)' }}>
+          <th style={{ padding: '4px 8px' }}>{topo.level === 'workload' ? '工作负载' : '命名空间'}</th>
+          <th style={{ padding: '4px 8px' }}>Pod 数</th>
+          <th style={{ padding: '4px 8px' }}>NetworkPolicy</th>
+        </tr>
+      </thead>
+      <tbody>
+        {own.map((n) => (
+          <tr key={n.id} style={{ borderTop: '1px solid var(--border)' }}>
+            <td style={{ padding: '4px 8px' }}>
+              {n.workload ? `${n.namespace}/${n.workload}` : n.namespace}
+            </td>
+            <td style={{ padding: '4px 8px', fontVariantNumeric: 'tabular-nums' }}>{n.podCount}</td>
+            <td style={{ padding: '4px 8px' }}>
+              {n.hasPolicy
+                ? '有'
+                : <span style={{ color: 'var(--verdict-deny)' }}>无</span>}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
 }

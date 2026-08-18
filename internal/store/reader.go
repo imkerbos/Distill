@@ -71,6 +71,16 @@ type Topology struct {
 	UnplaceableFlowCount int `json:"unplaceableFlowCount"`
 	// Level 是本次聚合粒度，回显给调用方。
 	Level string `json:"level"`
+	// TrafficObserved 表示这份拓扑的边是不是基于真实观测。
+	//
+	// **为 false 时，空的 Edges 不是「这些工作负载之间没有通信」，而是
+	// 「我们一条流量都还没观测过」。** 这两句话的区别是这个平台的核心
+	// （CLAUDE.md §3）：没看见 ≠ 不存在，而把前者读成后者的后果是那条规则
+	// 被判「无流量、可收紧」，推荐一份切断它的策略。
+	//
+	// 它是答案的一部分，不是可选的展示提示：调用方拿不到「边为空」而不同时
+	// 拿到「因为没有观测」（design doc 2026-08-18 §2）。
+	TrafficObserved bool `json:"trafficObserved"`
 }
 
 // TimeWindow 是一个左闭右开的时间区间 [From, To)。

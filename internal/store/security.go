@@ -123,8 +123,14 @@ type SecurityReport struct {
 	// NakedPods 来自资产快照而非流量，不受本窗口约束 —— 两类数据
 	// 时间语义不同，放在同一响应里必须说明，否则使用者会以为
 	// "这段时间内有 6 个裸奔 Pod"。
-	Window     TimeWindow  `json:"window"`
-	RiskyFlows []RiskyFlow `json:"riskyFlows"`
+	Window TimeWindow `json:"window"`
+	// TrafficObserved 表示流量类发现是不是基于真实观测。
+	//
+	// **为 false 时，空的 RiskyFlows 不是「这个集群没有风险连接」，而是
+	// 「我们一条流量都还没观测过」。** NakedPods 不受它影响 —— 那一栏来自
+	// 资产快照，没有流量也答得出（design doc 2026-08-18 §4.2）。
+	TrafficObserved bool        `json:"trafficObserved"`
+	RiskyFlows      []RiskyFlow `json:"riskyFlows"`
 	// RiskyFlowsTruncation 回显 RiskyFlows 截断前的条数与生效上限。
 	//
 	// 三个清单各回显各的，不合并成一个：被截的是哪一份决定了该怎么办 ——
