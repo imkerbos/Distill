@@ -127,9 +127,13 @@ func NewRouter(d Deps) http.Handler {
 	// 安全头在 Recoverer 之内：头在进入 handler 前就写进 w，因此
 	// 500、404、405 这些不经过 handler 的响应同样带着它们。
 	r.Use(SecurityHeaders)
-	// 请求体上限装在路由根部，而不是五个 Decode 调用点各一份 ——
-	// 漏掉的那一个就是会被挑中的那一个。
-	r.Use(LimitRequestBody(MaxRequestBytes))
+	// 请求体上限**按子树装**，不装在根部：agent 子树的报文与人的子树差三个
+	// 数量级（一次流量摄入 1–2 MB，一次登录几百字节），装在根部只能取小的
+	// 那个，而那会让摄入过不去。见 MaxAgentRequestBytes 的说明。
+	//
+	// 仍然是子树级中间件、不是每个 Decode 调用点各一份 —— 那条理由没变：
+	// 漏掉的那一个就是会被挑中的那一个。新增一条**子树**时要记得声明，
+	// 而 TestEveryBodyTakingSubtreeIsAccountedFor 守着这件事。
 
 	r.NotFound(func(w http.ResponseWriter, _ *http.Request) {
 		response.WriteSystem(w, http.StatusNotFound, response.CodeNotFound)
@@ -145,7 +149,8 @@ func NewRouter(d Deps) http.Handler {
 	r.Route(apiPrefix, func(api chi.Router) {
 		// 登录是唯一无需会话的端点，也因此是唯一挂了限流的那个。
 		// 它也是唯一不经过授权层的端点：还没有会话，也就还没有角色。
-		api.With(loginLimiter.Middleware).Post("/sessions", handleCreateSession(d))
+		api.With(loginLimiter.Middleware, LimitRequestBody(MaxRequestBytes)).
+			Post("/sessions", handleCreateSession(d))
 
 		// agent 子树与人的子树**并列，不嵌套**（design doc 2026-08-18 §3.3）。
 		//
@@ -156,12 +161,14 @@ func NewRouter(d Deps) http.Handler {
 		//
 		// 默认拒绝同样成立，只是形状不同：这条链上没有有效 token 一律 401。
 		api.Route("/agent", func(agent chi.Router) {
+			agent.Use(LimitRequestBody(MaxAgentRequestBytes))
 			agent.Use(RequireAgent(d))
 			agent.Get("/config", handleAgentConfig())
 			agent.Post("/collection-runs", handleAgentCollectionRun(d))
 		})
 
 		api.Group(func(protected chi.Router) {
+			protected.Use(LimitRequestBody(MaxRequestBytes))
 			protected.Use(RequireSession(d.Sessions))
 			// 授权紧跟在认证之后：先知道是谁，才谈得上他能做什么。
 			protected.Use(az.enforce)
