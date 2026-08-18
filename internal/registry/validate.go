@@ -295,3 +295,43 @@ func checkCIDR(field, value string) error {
 	}
 	return nil
 }
+
+// ValidateClusterAgent 校验一条 agent 记录在入库前是否自洽。
+//
+// **错误文案里不带哈希内容**：这条错误会走到 API 边界，而哈希是离线
+// 爆破的输入（规范 §19、§20、§22）。说得出「长度不对」就够定位了。
+func ValidateClusterAgent(a ClusterAgent) error {
+	if a.ClusterID == "" {
+		return invalid("agent 必须绑定一个集群")
+	}
+	if !isAgentID(a.AgentID) {
+		return invalidf("agent ID %q 不是一个合法的 agent 标识", a.AgentID)
+	}
+	if len(a.TokenHash) != TokenHashLen {
+		// 长度不符说明存进来的不是 SHA-256。比对按整段比，长度不符恒不
+		// 相等 —— 症状是「这把 token 怎么都认不过」，而成因在写入侧，
+		// 从症状反推不到。必须在入库前拒绝。
+		return invalidf("agent token 摘要长度为 %d，应为 %d", len(a.TokenHash), TokenHashLen)
+	}
+	if !a.State.Valid() {
+		return invalidf("agent 状态 %q 不在已登记的取值范围内", a.State)
+	}
+	return nil
+}
+
+// isAgentID 判断一个字符串是否是平台生成的 agent 公开段：定长小写 hex。
+//
+// 不复用 secrets.ValidateRef：那一条管的是「能不能拼进凭据后端的资源
+// 路径」，字符集比这里宽。两个约束的成因不同，合用一份会让其中一边
+// 将来被放宽时另一边跟着松掉，而松掉不会有任何症状。
+func isAgentID(s string) bool {
+	if len(s) != AgentIDLen {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
