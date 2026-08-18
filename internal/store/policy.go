@@ -67,6 +67,18 @@ type PolicyPreview struct {
 	// 我们压根没看过依据，由 NotAssessedBaselines 单独标注 —— 那是一个
 	// **叠加的**说明，不是一次从本清单里的摘除。理由见那个字段。
 	MissingBaselines []policygen.MissingBaseline `json:"missingBaselines"`
+	// NotApplicableBaselines 是那些在该 namespace 里**没有推导对象**、
+	// 因而无需放行的 Baseline 类型（design doc 2026-08-18-baseline-applicability）。
+	//
+	// **与 MissingBaselines 互斥**，与 NotAssessedBaselines 也互斥：
+	// 「看过了、这个 namespace 没有暴露面」不是「需要但没有」，也不是
+	// 「没看过」。三栏各答一个问题。
+	//
+	// 报出来而不是让那一行凭空消失，理由与 Kinds 同源：一份空缺失与一次
+	// 根本没做的校验必须区分得开。
+	//
+	// **恒为非 nil**，理由同 NotAssessedBaselines。
+	NotApplicableBaselines []policygen.MissingBaseline `json:"notApplicableBaselines"`
 	// NotAssessedBaselines 是依据资源这次采集没有拿回来、因而无从判断
 	// 缺不缺的 Baseline 类型（design doc 2026-08-17 §11）。
 	//
@@ -276,6 +288,9 @@ func (r *FixtureReader) PolicyPreview(
 		WindowCompleteness: flow.CompletenessComplete,
 		Candidates:         FilterCandidates(gen.Policies, namespace),
 		MissingBaselines:   FilterMissing(gen.MissingBaselines, namespace),
+		// 与缺失清单同样按 namespace 裁剪展示：两栏并排读，一栏跟着筛选走、
+		// 另一栏不跟，会让人以为别的 namespace 也不适用。
+		NotApplicableBaselines: nonNilMissing(FilterMissing(gen.NotApplicableBaselines, namespace)),
 		// 合成数据集把五类依据都带齐了（Services / Endpoints / Gateways /
 		// ScrapeTargets / NodeAgents 都在 fixture.Cluster.Assets 里），因此
 		// 这里恒为空。**非 nil**：空清单要读作"五类都检查过、都在"，而不是
@@ -359,6 +374,17 @@ func FilterCandidates(in []policygen.CandidatePolicy, namespace string) []policy
 		}
 	}
 	return out
+}
+
+// nonNilMissing 保证一份清单序列化成 [] 而不是 null。
+//
+// 空清单是一句话（"没有哪一类是不适用的"），null 是"这个 Reader 没回答过"。
+// 两者对读的人完全不同，理由与 NotAssessedBaselines 同源。
+func nonNilMissing(in []policygen.MissingBaseline) []policygen.MissingBaseline {
+	if in == nil {
+		return []policygen.MissingBaseline{}
+	}
+	return in
 }
 
 // FilterMissing 按 namespace 裁剪缺失清单的展示范围；空表示全集群。

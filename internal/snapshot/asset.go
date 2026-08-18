@@ -97,6 +97,23 @@ type ScrapeTarget struct {
 	TargetPort int32
 }
 
+// ScrapeDeclaration 是一个 Pod 声明「我要被抓」这件观测事实。
+//
+// 只记它在哪、叫什么，不记端口：端口属于「怎么抓」，那一半由登记的抓取端
+// 给出。本类型回答的是适用性 —— 这个 namespace 里有没有东西会因为
+// default-deny 而丢掉抓取流量。
+type ScrapeDeclaration struct {
+	// ClusterID 是所属集群。
+	ClusterID string
+	// Namespace 是声明所在命名空间。
+	Namespace string
+	// PodName 是发出声明的 Pod。
+	//
+	// 留着它是为了事后答得出「凭什么说这个 namespace 需要抓取放行」——
+	// 而那时这个 Pod 可能已经不在了（同 ScrapeAnnotations 的理由）。
+	PodName string
+}
+
 // APIServerEndpoint 是集群 API server 的访问端点。
 type APIServerEndpoint struct {
 	// ClusterID 是所属集群。
@@ -154,6 +171,19 @@ type Assets struct {
 	Gateways []Gateway
 	// ScrapeTargets 是 metrics 抓取关系快照。
 	ScrapeTargets []ScrapeTarget
+	// ScrapeDeclarations 是观测到的「谁愿意被抓」，每个声明的 Pod 一条。
+	//
+	// **与 ScrapeTargets 分开，因为它们的来源不同。** ScrapeTargets 是
+	// 「登记的抓取端 × 观测到的被抓端」拼出来的，一个还没登记任何抓取端的
+	// 集群它是空的；而本字段只取观测得到的那一半。
+	//
+	// 分开的用处在于判定 METRICS_SCRAPE 这一类适不适用：拿 ScrapeTargets
+	// 当判据，未登记抓取端的集群每个 namespace 都会显得「不需要放行抓取
+	// 流量」，而下发之后真正的 Prometheus 会被挡住
+	// （design doc 2026-08-18-baseline-applicability §4.2）。
+	//
+	// **声明决定适不适用，登记决定推不推得出规则。**
+	ScrapeDeclarations []ScrapeDeclaration
 	// APIServers 是 API server 端点快照。
 	APIServers []APIServerEndpoint
 	// NodeAgents 是节点级 agent 快照。

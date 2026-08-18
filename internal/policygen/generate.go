@@ -33,6 +33,13 @@ type Input struct {
 	Pods []replay.PodRef
 	// Observations 是带判定结果的观测流量。
 	Observations []Observation
+	// UnassessedBaselines 是依据资源这次采集没有拿回来的那几类。
+	//
+	// 传给 baseline.Derive，让它不把"我们没看过"判成"不适用"：资产里
+	// 两者长得一模一样，而误判的方向是让一次采集失败变成一次放行
+	// （design doc 2026-08-18-baseline-applicability §3）。
+	// 依据齐备的数据源（fixture）传 nil。
+	UnassessedBaselines []baseline.Kind
 }
 
 // Result 是一次生成的全部产物。
@@ -47,6 +54,13 @@ type Result struct {
 	Policies []CandidatePolicy `json:"policies"`
 	// MissingBaselines 是本次涉及的 namespace 中尚未齐备的 Baseline 类型。
 	MissingBaselines []MissingBaseline `json:"missingBaselines"`
+	// NotApplicableBaselines 是那些在该 namespace 里**没有推导对象**的类型。
+	//
+	// 与 MissingBaselines 互斥、并列返回。报出来而不是静默丢弃：一份空缺失
+	// 与一次根本没做的校验必须区分得开 —— 屏幕上要读得出「batch 的 LB：
+	// 看过了，这个 namespace 没有暴露面」，而不是那一行凭空不见
+	// （design doc 2026-08-18-baseline-applicability §5）。
+	NotApplicableBaselines []MissingBaseline `json:"notApplicableBaselines"`
 	// Ungeneratable 是无法表达为规则的流量。
 	Ungeneratable []UngeneratableItem `json:"ungeneratable"`
 	// ExcludedWorkloads 是从未进入候选策略花名册的 Pod，按 (namespace, pod) 确定排序。
@@ -163,7 +177,7 @@ func Generate(in Input) Result {
 	baselineByNS := map[string][]Rule{}
 	baselineSetByNS := map[string]baseline.Set{}
 	for ns := range nsWithWorkload {
-		set := baseline.Derive(in.Assets, ns)
+		set := baseline.Derive(in.Assets, ns, in.UnassessedBaselines)
 		baselineSetByNS[ns] = set
 		for _, br := range set.Rules {
 			baselineByNS[ns] = append(baselineByNS[ns], baselineRule(br))
@@ -198,13 +212,21 @@ func Generate(in Input) Result {
 	})
 
 	for ns := range nsWithWorkload {
-		if missing := baselineSetByNS[ns].Missing(); len(missing) > 0 {
+		set := baselineSetByNS[ns]
+		if missing := set.Missing(); len(missing) > 0 {
 			res.MissingBaselines = append(res.MissingBaselines,
 				MissingBaseline{Namespace: ns, Kinds: missing})
+		}
+		if na := set.NotApplicable; len(na) > 0 {
+			res.NotApplicableBaselines = append(res.NotApplicableBaselines,
+				MissingBaseline{Namespace: ns, Kinds: na})
 		}
 	}
 	sort.Slice(res.MissingBaselines, func(i, j int) bool {
 		return res.MissingBaselines[i].Namespace < res.MissingBaselines[j].Namespace
+	})
+	sort.Slice(res.NotApplicableBaselines, func(i, j int) bool {
+		return res.NotApplicableBaselines[i].Namespace < res.NotApplicableBaselines[j].Namespace
 	})
 
 	return res

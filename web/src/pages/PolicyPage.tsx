@@ -14,7 +14,7 @@ import DataSourceNotice from '../components/DataSourceNotice'
 import { DryRunDetail } from './DryRunDetail'
 import { dryRunView, type DryRunView } from './dryRunView'
 import { policyExportView, type PolicyExportView } from './policyExportView'
-import { baselineGapViews, notAssessedNote, wouldBreakQualifierFor } from './preconditionsView'
+import { baselineGapViews, notApplicableNote, notAssessedNote, wouldBreakQualifierFor } from './preconditionsView'
 import {
   writebackCountDrift, writebackPushBody, writebackView,
   type WritebackPushBody, type WritebackView,
@@ -124,6 +124,7 @@ export default function PolicyPage({ cluster }: { cluster: string }) {
         // 未评估是叠加在缺失清单上的标注，不是第二份清单：它改的是处置
         // （去修采集，而不是去写策略），不改门禁（design doc §4）。
         notAssessed={pv.notAssessedBaselines}
+        notApplicable={pv.notApplicableBaselines}
       />
       <ExcludedWorkloadSection items={pv.excludedWorkloads ?? []} />
       <UngeneratableSection items={pv.ungeneratable} />
@@ -1233,12 +1234,14 @@ function StaleOverridesSection({ staleOverrides }: { staleOverrides: StaleOverri
  * 问题"；不标注则等于塌回普通缺失，运维会去写一条 DNS 策略，而真正该做的
  * 是改 RBAC。两种缺口都照旧挡住 Enforcing——标注不放宽任何门禁。
  */
-function MissingBaselineSection({ missing, baselineKinds, notAssessed }: {
+function MissingBaselineSection({ missing, baselineKinds, notAssessed, notApplicable }: {
   missing: MissingBaseline[]
   baselineKinds: Kind[]
   notAssessed: Kind[] | null
+  notApplicable: MissingBaseline[] | null
 }) {
   const note = notAssessedNote(notAssessed)
+  const naNote = notApplicableNote(notApplicable)
   return (
     <Section
       title="缺失 Baseline"
@@ -1250,6 +1253,11 @@ function MissingBaselineSection({ missing, baselineKinds, notAssessed }: {
           没有任何限定的「没有 namespace 缺失 baseline」，正是这条标注要
           挡住的读法。 */}
       {note !== '' && <Notice>{note}</Notice>}
+      {/* 「不适用」与缺失并列，且在空清单上同样出现：一份空缺失可能是
+          "五类都推出来了"，也可能是"其中几类这个命名空间根本不需要"，
+          而这两句话对下一步做什么的含义不同。少了它，那几行会凭空消失
+          （design doc 2026-08-18-baseline-applicability §5）。 */}
+      {naNote !== '' && <Notice>{naNote}</Notice>}
       {missing.length === 0 ? (
         <EmptyState
           message="没有 namespace 缺失 baseline。"

@@ -116,6 +116,21 @@ type Pod struct {
 	ScrapeAnnotations map[string]string
 }
 
+// ScrapeAnnotationScrape 是被抓端表达意愿的注解键。
+const ScrapeAnnotationScrape = "prometheus.io/scrape"
+
+// DeclaresScrape 报告这个 Pod 是否声明了自己要被抓。
+//
+// **判据是取值等于 "true"，不是注解存在。** `prometheus.io/scrape: "false"`
+// 是一句明确的"别抓我"，把它读成一次声明会让那个 namespace 的
+// METRICS_SCRAPE 永远显得适用而又推不出规则 —— 一道永远在挡的门。
+//
+// 收成一个方法而不是让每个消费方各写一次比较：适用性判定与规则推导必须
+// 用同一条判据，各写一份就会出现"这一类适用、却永远推不出规则"的死角。
+func (p Pod) DeclaresScrape() bool {
+	return p.ScrapeAnnotations[ScrapeAnnotationScrape] == "true"
+}
+
 // Node 是一个节点的观测快照。
 //
 // 采它是为了拿到集群真实网段：PodCIDRs 与 InternalIPs 是集群自己报的事实，

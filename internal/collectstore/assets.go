@@ -245,7 +245,12 @@ func (r *Reader) readNamespacesAt(ctx context.Context, d described) ([]replay.Na
 // 那个值（NetworkPolicy 的 peer 只能是 selector 或 ipBlock）。
 func (r *Reader) readServicesAt(ctx context.Context, d described) ([]snapshot.Service, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT namespace, name, selector, ports
+		// service_type 一并取回：它是 LB_HEALTH_CHECK 这一类适不适用的判据
+		// 之一。入口暴露对象在快照里本轮只含 Kind=Ingress，只看它会漏掉
+		// type=LoadBalancer 的 Service —— 那种 namespace 一样有健康检查流量，
+		// 一样会被 default-deny 打断，而把它判成"不适用"会让门禁放行一次
+		// 入口中断（design doc 2026-08-18-baseline-applicability §4.1）。
+		`SELECT namespace, name, service_type, selector, ports
 		   FROM observed_service
 		  WHERE cluster_id = ? AND observed_at = ?
 		  LIMIT ?`,
@@ -259,7 +264,7 @@ func (r *Reader) readServicesAt(ctx context.Context, d described) ([]snapshot.Se
 	for rows.Next() {
 		s := snapshot.Service{ClusterID: d.clusterID}
 		var selector, ports []byte
-		if err := rows.Scan(&s.Namespace, &s.Name, &selector, &ports); err != nil {
+		if err := rows.Scan(&s.Namespace, &s.Name, &s.Type, &selector, &ports); err != nil {
 			return nil, fmt.Errorf("collectstore: scan observed service: %w", err)
 		}
 		// 坏掉的列整体报错，不当成"这个 Service 没有 selector"：后者会让

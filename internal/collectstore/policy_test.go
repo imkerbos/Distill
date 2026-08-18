@@ -111,11 +111,36 @@ func dnsAssets() ([]snapshot.Service, []snapshot.Endpoints) {
 }
 
 // seedPreviewCluster 造出预览用的时间线：一次采集在窗口之前，资产因此
-// 用得上；DNS 依据齐备，入口暴露对象一个都没有。
+// 用得上；DNS 依据齐备。
+//
+// payment 刻意造成「**适用却推不出规则**」：
+//
+//   - 有一个 type=LoadBalancer 的 Service —— 健康检查确实会打进来，因此
+//     LB_HEALTH_CHECK 这一类适用；而集群登记里没有健康检查网段，推不出规则。
+//   - 有一个 Pod 声明 prometheus.io/scrape=true —— 因此 METRICS_SCRAPE 适用；
+//     而没有登记任何抓取端，推不出规则。
+//
+// 这两条正是本组对照要的那种数据。**没有暴露对象、也没有被抓声明的
+// namespace 走的是「不适用」而不是「缺失」**（design doc
+// 2026-08-18-baseline-applicability）—— 拿那种 namespace 做对照，一个
+// 把缺失清单恒返回空的实现照样能过。
 func seedPreviewCluster(t *testing.T, s *snapshotstore.Store) {
 	t.Helper()
 	services, endpoints := dnsAssets()
-	savePreviewRun(t, s, firstRunAt, stablePods(), services, endpoints, nil)
+	services = append(services, snapshot.Service{
+		ClusterID: collectedID, Namespace: "payment", Name: "pay-lb",
+		Type:     "LoadBalancer",
+		Selector: map[string]string{"app": "api"},
+		Ports: []snapshot.ServicePort{
+			{Name: "https", Port: 443, TargetPort: 8443, Protocol: "TCP"},
+		},
+	})
+	pods := stablePods()
+	pods[0].ScrapeAnnotations = map[string]string{
+		snapshot.ScrapeAnnotationScrape: "true",
+		"prometheus.io/port":            "9090",
+	}
+	savePreviewRun(t, s, firstRunAt, pods, services, endpoints, nil)
 }
 
 // openTestDB 另开一条到同一个库的连接，供用例直接写入证据行。

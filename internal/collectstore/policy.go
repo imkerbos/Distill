@@ -100,12 +100,16 @@ func (r *Reader) PolicyPreview(
 		// 有人看过了，并且写下了为什么不需要，那条记录在审计里。
 		MissingBaselines:     dropInapplicable(store.FilterMissing(gen.MissingBaselines, namespace), cs.inapplicable),
 		NotAssessedBaselines: dropKinds(cs.notAssessed, cs.inapplicable),
-		Ungeneratable:        gen.Ungeneratable,
-		ExcludedWorkloads:    gen.ExcludedWorkloads,
-		Prediction:           report,
-		Kinds:                baseline.AllKinds(),
-		Overrides:            stored,
-		StaleOverrides:       stale,
+		// 只装**推导出来**的不适用（namespace 里没有推导对象），不含人工
+		// 声明的那一类：后者带着一条写下来的理由与一行审计，把它混进来会让
+		// 一个平台自己推出来的结论看上去也有人签过字。
+		NotApplicableBaselines: store.FilterMissing(gen.NotApplicableBaselines, namespace),
+		Ungeneratable:          gen.Ungeneratable,
+		ExcludedWorkloads:      gen.ExcludedWorkloads,
+		Prediction:             report,
+		Kinds:                  baseline.AllKinds(),
+		Overrides:              stored,
+		StaleOverrides:         stale,
 		Overridden: store.OverriddenView{
 			Candidates: overriddenCandidates,
 			Prediction: overriddenReport,
@@ -177,6 +181,10 @@ func (r *Reader) generate(
 		})
 	}
 
+	// 先算未评估，再喂给生成：Derive 要靠它区分"集群里就是没有"与
+	// "我们没看过"，而两者在资产里长得一模一样。
+	notAssessed := notAssessedBaselines(evidence)
+
 	return candidateSet{
 		traffic:         t,
 		trafficObserved: trafficObserved,
@@ -187,10 +195,11 @@ func (r *Reader) generate(
 			// Pods 必须传入：候选策略按 workload 花名册生成而非按流量生成，
 			// 缺了它，流量全 DEGRADED（mesh 内）或全 UNKNOWN（策略写坏）的
 			// workload 会从候选集里悄悄消失，连带绕过它们的强制 Baseline 注入。
-			Pods:         t.roster(),
-			Observations: obs,
+			Pods:                t.roster(),
+			Observations:        obs,
+			UnassessedBaselines: notAssessed,
 		}),
-		notAssessed:  notAssessedBaselines(evidence),
+		notAssessed:  notAssessed,
 		inapplicable: inapplicableBaselines(c),
 	}, nil
 }
@@ -290,9 +299,34 @@ func (r *Reader) assetsAt(ctx context.Context, t traffic) (snapshot.Assets, erro
 		Gateways:      gateways,
 		APIServers:    t.registered.APIServerSnapshots(),
 		ScrapeTargets: t.registered.ScrapeTargetSnapshots(declared),
-		NodeAgents:    t.registered.NodeAgentSnapshots(),
-		Registry:      t.registered.ToSnapshot(),
+		// 被抓端的声明单独带出去，不只喂给 ScrapeTargetSnapshots：
+		// 它决定 METRICS_SCRAPE 这一类**适不适用**，而 ScrapeTargets 决定
+		// 推不推得出规则。拿后者当适用性判据的话，一个还没登记抓取端的集群
+		// 每个 namespace 都会显得"不需要放行抓取流量"，下发之后真正的
+		// Prometheus 会被挡（design doc 2026-08-18-baseline-applicability §4.2）。
+		ScrapeDeclarations: scrapeDeclarationsOf(t.clusterID, declared),
+		NodeAgents:         t.registered.NodeAgentSnapshots(),
+		Registry:           t.registered.ToSnapshot(),
 	}, nil
+}
+
+// scrapeDeclarationsOf 把声明了抓取意愿的 Pod 转成适用性判据。
+//
+// 端口不带过来：那属于"怎么抓"，由登记的抓取端给出。这里只回答
+// "这个 namespace 里有没有东西会因为 default-deny 丢掉抓取流量"。
+func scrapeDeclarationsOf(clusterID string, declared []snapshot.Pod) []snapshot.ScrapeDeclaration {
+	out := make([]snapshot.ScrapeDeclaration, 0, len(declared))
+	for _, p := range declared {
+		// scrape=false 是一句"别抓我"，不是一次声明 —— 与 scrapePortOf
+		// 同一条判据，两处不得分家。
+		if !p.DeclaresScrape() {
+			continue
+		}
+		out = append(out, snapshot.ScrapeDeclaration{
+			ClusterID: clusterID, Namespace: p.Namespace, PodName: p.Name,
+		})
+	}
+	return out
 }
 
 // degradeByCompleteness 把窗口完整度传导到**整份**预测（design doc §4）。

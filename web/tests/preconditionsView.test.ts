@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import {
-  baselineGapViews, dataSourceView, listTruncationView, notAssessedNote, NO_TRAFFIC_QUALIFIER, wouldBreakQualifier, wouldBreakQualifierFor,
+  baselineGapViews, dataSourceView, listTruncationView, notApplicableNote, notAssessedNote, NO_TRAFFIC_QUALIFIER, wouldBreakQualifier, wouldBreakQualifierFor,
 } from '../src/pages/preconditionsView.ts'
 import type { Completeness, DataSource, Kind } from '../src/api/types.ts'
 
@@ -357,4 +357,39 @@ test('页面用的是带观测判断的那个，不是只看完整度的老函�
     join(import.meta.dirname, '..', 'src', 'pages', 'PolicyPage.tsx'), 'utf8')
   assert.ok(page.includes('wouldBreakQualifierFor'),
     'PolicyPage 仍在用只看完整度的 wouldBreakQualifier：没有流量时 WOULD_BREAK 会以一个干净的 0 出现')
+})
+
+/* ---------------------------------------------------------------------- */
+/* 不适用：看过了，这个 namespace 没有推导对象                                */
+/* ---------------------------------------------------------------------- */
+
+test('不适用要说出它是「看过了、没有」，而不是让那一行凭空消失', () => {
+  const note = notApplicableNote([
+    { namespace: 'batch', kinds: ['LB_HEALTH_CHECK', 'METRICS_SCRAPE'] },
+  ])
+  assert.match(note, /batch/, '不适用的说明没有点名是哪个命名空间')
+  assert.match(note, /LB_HEALTH_CHECK/, '不适用的说明没有点名是哪一类')
+  assert.match(note, /不需要|没有/,
+    '这一句必须读得出"这个命名空间没有要放行的东西"，否则与缺失分不开')
+  assert.doesNotMatch(note, /挡住 Enforcing/,
+    '不适用不挡门禁——写成挡住会让人去补一个根本不需要的 Baseline')
+})
+
+test('一条不适用都没有时不出话', () => {
+  assert.equal(notApplicableNote([]), '')
+})
+
+test('服务端没回答不适用时，不得说成「一条都没有」', () => {
+  const note = notApplicableNote(null)
+  assert.notEqual(note, '',
+    'notApplicableBaselines 缺席被读成"没有任何一类不适用"，'
+    + '而那是一句服务端从没说过的话——与 dataSourceView / notAssessedNote 同一条纪律')
+  assert.match(note, /没有(说明|回答)|缺席/)
+})
+
+test('不适用与缺失是两栏，前端不得把不适用并进缺失', () => {
+  const view = src('pages', 'preconditionsView.ts')
+  assert.doesNotMatch(view, /notApplicableBaselines[^\n]*missingBaselines/,
+    '两栏在同一处被拼到一起：不适用一旦混进缺失清单，'
+    + '运维会去补一个这个命名空间根本不需要的 Baseline')
 })

@@ -58,6 +58,14 @@ func asiaAssets() snapshot.Assets {
 				TargetNamespace: "gateway", TargetPort: 9090,
 			},
 		},
+		// 被抓端的声明，与上面那份抓取关系是同一件事的另一半：
+		// 声明决定 METRICS_SCRAPE 这一类适不适用，登记决定推不推得出规则
+		// （design doc 2026-08-18-baseline-applicability §4.2）。
+		// 两者必须对得上 —— 有声明没登记的 namespace 会被判成缺失。
+		ScrapeDeclarations: []snapshot.ScrapeDeclaration{
+			{ClusterID: clusterID, Namespace: "payment", PodName: "payment-api-7d4"},
+			{ClusterID: clusterID, Namespace: "gateway", PodName: "gateway-lb-6c8"},
+		},
 		// Registry 与 APIServers 现在由 internal/registry 提供，
 		// 这里的值仅供不接数据库的单元测试兜底。两处必须保持一致 ——
 		// 不一致时以注册信息为准，而 fixture 的值会静默失效。
@@ -83,9 +91,17 @@ func asiaAssets() snapshot.Assets {
 
 // euAssets 构造 prod-eu-1 的资产快照。
 //
-// 刻意没有 Gateway：eu 不对外暴露。缺少暴露面时不生成 LB Baseline，
-// 这条路径必须有数据能走到，否则「五类齐备」在任何集群上都恒真，
-// Missing() 就成了永远返回空的摆设。
+// **这个集群承担「真的缺 Baseline」那一侧**，asia 承担齐备那一侧。两侧都
+// 必须有数据：全齐备时「五类齐备」恒真、Missing() 成了摆设；全缺失时
+// 「不适用」那条路径没人走。
+//
+// partner 的缺失是真缺，不是没有暴露面：它有一个 type=LoadBalancer 的
+// Service（因此健康检查确实会打进来），但平台今天只从 Ingress 类入口对象
+// 推 LB Baseline，推不出规则；它也有 Pod 声明要被抓，却没有任何抓取端
+// 登记到它。两者都是「有对象、推不出规则」——
+// 正是 Enforcing 门禁该挡住的那一种（design doc 2026-08-18-enforcing-gate）。
+//
+// 刻意没有 Gateway：eu 不从 Ingress 对外暴露。
 func euAssets() snapshot.Assets {
 	const clusterID = "prod-eu-1"
 	return snapshot.Assets{
@@ -98,6 +114,14 @@ func euAssets() snapshot.Assets {
 				Ports: []snapshot.ServicePort{
 					{Name: "dns", Port: 53, TargetPort: 53, Protocol: "UDP"},
 					{Name: "dns-tcp", Port: 53, TargetPort: 53, Protocol: "TCP"},
+				},
+			},
+			{
+				ClusterID: clusterID, Namespace: "partner", Name: "partner-lb",
+				Type: "LoadBalancer", ClusterIP: "10.12.0.44",
+				Selector: map[string]string{"app": "partner-api"},
+				Ports: []snapshot.ServicePort{
+					{Name: "https", Port: 443, TargetPort: 8443, Protocol: "TCP"},
 				},
 			},
 		},
@@ -113,6 +137,12 @@ func euAssets() snapshot.Assets {
 				ScraperLabels:   map[string]string{"app": "metrics-agent"},
 				TargetNamespace: "payment", TargetPort: 9090,
 			},
+		},
+		ScrapeDeclarations: []snapshot.ScrapeDeclaration{
+			{ClusterID: clusterID, Namespace: "payment", PodName: "payment-api-9f2"},
+			// partner 声明了要被抓，却没有任何抓取端登记到它：
+			// 适用且推不出规则，因此如实报缺失。
+			{ClusterID: clusterID, Namespace: "partner", PodName: "partner-api-4d7"},
 		},
 		// Registry 与 APIServers 现在由 internal/registry 提供，
 		// 这里的值仅供不接数据库的单元测试兜底。两处必须保持一致 ——

@@ -89,10 +89,13 @@ const (
 // 「平台推荐了什么」这个问题失去答案。
 func Apply(base Result, overrides []Override) (Result, []StaleOverride) {
 	out := Result{
-		Policies:          make([]CandidatePolicy, len(base.Policies)),
-		MissingBaselines:  base.MissingBaselines,
-		Ungeneratable:     base.Ungeneratable,
-		ExcludedWorkloads: base.ExcludedWorkloads,
+		Policies:         make([]CandidatePolicy, len(base.Policies)),
+		MissingBaselines: base.MissingBaselines,
+		// 不适用清单与缺失清单同源，人工覆盖改不了「这个 namespace 有没有
+		// 推导对象」这件事实，因此原样带过来。
+		NotApplicableBaselines: base.NotApplicableBaselines,
+		Ungeneratable:          base.Ungeneratable,
+		ExcludedWorkloads:      base.ExcludedWorkloads,
 	}
 	// 深拷贝规则切片：Result 里的 Policies 与 Rules 都是切片，
 	// 直接复用底层数组会让对 out 的写入穿透回 base。

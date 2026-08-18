@@ -753,6 +753,19 @@ export interface PolicyPreview {
   candidates: CandidatePolicy[]
   missingBaselines: MissingBaseline[]
   /**
+   * 这些命名空间里**没有推导对象**、因而不需要放行的类型。
+   *
+   * **与 missingBaselines 互斥，是另一栏，不是叠加**（与 notAssessedBaselines
+   * 那条正相反）：没有入口暴露面的命名空间没有健康检查流量要放行，把它报成
+   * 缺失是一条误报，而误报会把整份清单的可信度一起拖垮。
+   *
+   * 只装平台**推导出来**的不适用；人工声明的那一类（集群登记里的
+   * NoNodeAgentsReason）带着一条写下来的理由与一行审计，不混进这一栏。
+   *
+   * 契约恒为非 nil。真拿到 `null` 时按 notApplicableNote 落到"服务端没回答"。
+   */
+  notApplicableBaselines: MissingBaseline[] | null
+  /**
    * 这段观测窗口的完整度。**不得由 degradedCount === totalEvaluated 反推**——
    * 那是一个推断，而这个字段的全部意义就是把推断换成事实（design doc §5）。
    */

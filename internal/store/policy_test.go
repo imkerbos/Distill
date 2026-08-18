@@ -85,20 +85,20 @@ func TestPolicyPreviewPredictionIgnoresNamespaceFilter(t *testing.T) {
 // 该 namespace 从缺失清单里去掉，而测试照样通过 —— 这份清单是
 // 进入 Enforcing 的前置校验，报错报漏都是放行一次不该放行的上线。
 func TestPolicyPreviewMissingBaselinesContent(t *testing.T) {
-	// asia: 只有 gateway 有暴露面，只有 payment 与 gateway 是抓取目标。
-	// eu: 没有任何 Gateway，因此每个 namespace 都缺 LB；只有 payment 被抓取。
+	// **缺失只算"有推导对象、却推不出规则"的那些**，没有推导对象的走
+	// 不适用（design doc 2026-08-18-baseline-applicability）。
+	//
+	// asia 因此一条不缺：gateway 有暴露面也是抓取目标，payment 是抓取目标，
+	// 其余 namespace 既没有暴露面也没有 Pod 声明要被抓 —— 它们没有健康检查
+	// 与抓取流量要放行，报缺就是误报。
+	//
+	// eu 的 partner 是真缺：它有一个 type=LoadBalancer 的 Service（健康检查
+	// 确实会打进来），但平台今天只从 Ingress 类入口对象推 LB Baseline；
+	// 它也有 Pod 声明要被抓，却没有抓取端登记到它。
 	want := map[string]map[string][]baseline.Kind{
-		"prod-asia-1": {
-			"batch":       {baseline.KindLBHealth, baseline.KindMetrics},
-			"checkout":    {baseline.KindLBHealth, baseline.KindMetrics},
-			"kube-system": {baseline.KindLBHealth, baseline.KindMetrics},
-			"legacy":      {baseline.KindLBHealth, baseline.KindMetrics},
-			"payment":     {baseline.KindLBHealth},
-		},
+		"prod-asia-1": {},
 		"prod-eu-1": {
-			"kube-system": {baseline.KindLBHealth, baseline.KindMetrics},
-			"partner":     {baseline.KindLBHealth, baseline.KindMetrics},
-			"payment":     {baseline.KindLBHealth},
+			"partner": {baseline.KindLBHealth, baseline.KindMetrics},
 		},
 	}
 	r := reader()
@@ -114,26 +114,49 @@ func TestPolicyPreviewMissingBaselinesContent(t *testing.T) {
 		if !reflect.DeepEqual(got, expect) {
 			t.Errorf("%s: MissingBaselines = %v, want %v", cluster, got, expect)
 		}
+		// 对照组：缺失为空必须是"检查过、没有缺口"，不是"两栏都返回空"。
+		// asia 那五个 namespace 的两类必须出现在不适用栏里 —— 少了这条，
+		// 一个把两份清单都返回空的实现照样过。
+		if cluster != "prod-asia-1" {
+			continue
+		}
+		na := map[string][]baseline.Kind{}
+		for _, m := range pv.NotApplicableBaselines {
+			na[m.Namespace] = m.Kinds
+		}
+		wantNA := map[string][]baseline.Kind{
+			"batch":       {baseline.KindLBHealth, baseline.KindMetrics},
+			"checkout":    {baseline.KindLBHealth, baseline.KindMetrics},
+			"kube-system": {baseline.KindLBHealth, baseline.KindMetrics},
+			"legacy":      {baseline.KindLBHealth, baseline.KindMetrics},
+			"payment":     {baseline.KindLBHealth},
+		}
+		if !reflect.DeepEqual(na, wantNA) {
+			t.Errorf("%s: NotApplicableBaselines = %v, want %v", cluster, na, wantNA)
+		}
 	}
 }
 
 // 缺失清单同样只按 namespace 裁剪展示，内容不随筛选改变。
 func TestPolicyPreviewMissingBaselinesFilteredForDisplayOnly(t *testing.T) {
 	r := reader()
-	all, _ := r.PolicyPreview(context.Background(), "prod-asia-1", "", fullWindow(r))
-	one, err := r.PolicyPreview(context.Background(), "prod-asia-1", "batch", fullWindow(r))
+	// 用 eu/partner：它是唯一真缺 Baseline 的 namespace（有暴露对象、有被抓
+	// 声明，两者都推不出规则）。asia 现在一条不缺，拿它做筛选对照，一个
+	// 恒返回空清单的实现照样能过。
+	all, _ := r.PolicyPreview(context.Background(), "prod-eu-1", "", fullWindow(r))
+	one, err := r.PolicyPreview(context.Background(), "prod-eu-1", "partner", fullWindow(r))
 	if err != nil {
-		t.Fatalf("PolicyPreview(batch) error = %v", err)
+		t.Fatalf("PolicyPreview(partner) error = %v", err)
 	}
-	if len(one.MissingBaselines) != 1 || one.MissingBaselines[0].Namespace != "batch" {
-		t.Fatalf("MissingBaselines = %+v, want only batch", one.MissingBaselines)
+	if len(one.MissingBaselines) != 1 || one.MissingBaselines[0].Namespace != "partner" {
+		t.Fatalf("MissingBaselines = %+v, want only partner", one.MissingBaselines)
 	}
 	for _, m := range all.MissingBaselines {
-		if m.Namespace != "batch" {
+		if m.Namespace != "partner" {
 			continue
 		}
 		if !reflect.DeepEqual(m.Kinds, one.MissingBaselines[0].Kinds) {
-			t.Errorf("batch kinds = %v under the filter, %v without it; "+
+			t.Errorf("partner kinds = %v under the filter, %v without it; "+
 				"the filter must not change what a namespace is missing",
 				one.MissingBaselines[0].Kinds, m.Kinds)
 		}
@@ -289,7 +312,11 @@ func TestOverriddenViewReflectsAnEnabledRule(t *testing.T) {
 // 那件事：METRICS_SCRAPE 在这里是"依据齐备、推导不出"，不是"没看过"。
 func TestPolicyPreviewFixtureAssessesEveryBaselineKind(t *testing.T) {
 	r := reader()
-	pv, err := r.PolicyPreview(context.Background(), "prod-asia-1", "", fullWindow(r))
+	// eu 而不是 asia：对照组要求 MissingBaselines 非空，而 asia 现在一条不缺
+	// （它那些 namespace 没有推导对象，走的是不适用）。eu 的 partner 是真缺
+	// —— 有暴露对象、有被抓声明，两者都推不出规则，正是"依据齐备、推导不出"
+	// 这一种，与"没看过"必须分得开。
+	pv, err := r.PolicyPreview(context.Background(), "prod-eu-1", "", fullWindow(r))
 	if err != nil {
 		t.Fatalf("PolicyPreview() error = %v", err)
 	}

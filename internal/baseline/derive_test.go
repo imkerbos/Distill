@@ -14,29 +14,46 @@ func TestDeriveOnGatewayNamespaceIsComplete(t *testing.T) {
 	if !ok {
 		t.Fatal("cluster prod-asia-1 missing")
 	}
-	set := baseline.Derive(c.Assets, "gateway")
+	set := baseline.Derive(c.Assets, "gateway", nil)
 	if missing := set.Missing(); len(missing) != 0 {
 		t.Errorf("Missing() = %v, want none for an exposed namespace", missing)
 	}
 }
 
-// batch 没有暴露面、也不是抓取目标，必然缺两类。
-// Missing() 恒返回空就是个摆设 —— 必须有数据能让它非空。
-func TestDeriveOnUnexposedNamespaceReportsMissing(t *testing.T) {
+// Missing() 必须能非空 —— 恒返回空就是个摆设。
+//
+// 用 DNS 来守这条，而不再用 batch 的 LB/METRICS：那两类在 batch 上
+// 根本没有推导对象，如实报出来是「不适用」而不是「缺失」
+// （design doc 2026-08-18-baseline-applicability §1，用例在
+// applicability_test.go）。
+//
+// DNS 恒适用，因此它推不出来时只可能是缺失 —— 这是这条守卫要的那种数据。
+func TestMissingIsNotEmptyWhenAnAlwaysApplicableSourceIsGone(t *testing.T) {
 	c, _ := fixture.Load().Cluster("prod-asia-1")
-	missing := baseline.Derive(c.Assets, "batch").Missing()
-	want := map[baseline.Kind]bool{
-		baseline.KindLBHealth: false, baseline.KindMetrics: false,
-	}
-	for _, k := range missing {
-		if _, expected := want[k]; !expected {
-			t.Errorf("unexpected missing kind %q", k)
+	a := c.Assets
+	// 抽掉 kube-dns 的后端地址，DNS 就推不出规则了。
+	var kept []snapshot.Endpoints
+	for _, e := range a.Endpoints {
+		if e.Namespace == "kube-system" && e.Name == "kube-dns" {
+			continue
 		}
-		want[k] = true
+		kept = append(kept, e)
 	}
-	for k, seen := range want {
-		if !seen {
-			t.Errorf("kind %q not reported missing, but batch has no such derivation source", k)
+	a.Endpoints = kept
+
+	set := baseline.Derive(a, "batch", nil)
+	var sawDNS bool
+	for _, k := range set.Missing() {
+		if k == baseline.KindDNS {
+			sawDNS = true
+		}
+	}
+	if !sawDNS {
+		t.Error("DNS not reported missing after its derivation source was removed; Missing() would be a no-op")
+	}
+	for _, k := range set.NotApplicable {
+		if k == baseline.KindDNS {
+			t.Error("DNS reported inapplicable; every pod resolves names, so it can only ever be missing")
 		}
 	}
 }
@@ -46,7 +63,7 @@ func TestDeriveAlwaysIncludesDNSAndControlPlane(t *testing.T) {
 	c, _ := fixture.Load().Cluster("prod-asia-1")
 	for _, ns := range []string{"gateway", "payment", "batch", "legacy"} {
 		kinds := map[baseline.Kind]bool{}
-		for _, k := range baseline.Derive(c.Assets, ns).Kinds() {
+		for _, k := range baseline.Derive(c.Assets, ns, nil).Kinds() {
 			kinds[k] = true
 		}
 		if !kinds[baseline.KindDNS] {
@@ -63,7 +80,7 @@ func TestNodeAgentIsClusterWide(t *testing.T) {
 	for _, c := range fixture.Load().Clusters {
 		for _, ns := range c.Namespaces {
 			kinds := map[baseline.Kind]bool{}
-			for _, k := range baseline.Derive(c.Assets, ns.Name).Kinds() {
+			for _, k := range baseline.Derive(c.Assets, ns.Name, nil).Kinds() {
 				kinds[k] = true
 			}
 			if !kinds[baseline.KindNodeAgent] {
@@ -83,7 +100,7 @@ func TestNodeAgentMissingWhenNoneRegistered(t *testing.T) {
 		ClusterID: "c-no-agent",
 		Registry:  snapshot.ClusterRegistry{ClusterID: "c-no-agent", NodeCIDR: "10.128.0.0/20"},
 	}
-	if !containsKind(baseline.Derive(a, "payment").Missing(), baseline.KindNodeAgent) {
+	if !containsKind(baseline.Derive(a, "payment", nil).Missing(), baseline.KindNodeAgent) {
 		t.Error("Missing() omits NODE_AGENT although no NodeAgent is registered")
 	}
 }
@@ -101,7 +118,7 @@ func TestNodeAgentMissingWhenNodeCIDREmpty(t *testing.T) {
 		}},
 		Registry: snapshot.ClusterRegistry{ClusterID: "c-no-cidr"},
 	}
-	if !containsKind(baseline.Derive(a, "payment").Missing(), baseline.KindNodeAgent) {
+	if !containsKind(baseline.Derive(a, "payment", nil).Missing(), baseline.KindNodeAgent) {
 		t.Error("Missing() omits NODE_AGENT although Registry.NodeCIDR is empty")
 	}
 }
@@ -119,7 +136,7 @@ func containsKind(kinds []baseline.Kind, want baseline.Kind) bool {
 func TestEveryDerivedRuleCarriesDerivations(t *testing.T) {
 	for _, c := range fixture.Load().Clusters {
 		for _, ns := range c.Namespaces {
-			for _, r := range baseline.Derive(c.Assets, ns.Name).Rules {
+			for _, r := range baseline.Derive(c.Assets, ns.Name, nil).Rules {
 				if len(r.Derivations) == 0 {
 					t.Errorf("%s/%s: %s rule has no derivation", c.ID, ns.Name, r.Kind)
 				}

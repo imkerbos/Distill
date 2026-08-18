@@ -1,4 +1,4 @@
-import type { Completeness, DataSource, Kind, ListTruncation } from '../api/types'
+import type { Completeness, DataSource, Kind, ListTruncation, MissingBaseline } from '../api/types'
 
 /*
  * 接入前置的四道栓在界面上的取数层（design doc 2026-08-17 §2—§5）。
@@ -236,6 +236,37 @@ export function notAssessedNote(notAssessed: Kind[] | null | undefined): string 
   return `其中 ${notAssessed.join('、')} 属于「未评估」：平台从没拿到过这几类的依据资产`
     + '（从未采集，或那次采集被拒绝、超时），因此无从判断它们是不是真的缺。'
     + '处置是去修采集，不是去写策略。两种缺口都照旧挡住 Enforcing —— 这条标注不放宽任何门禁。'
+}
+
+/**
+ * 「不适用」那一栏上方的说明；一条都没有时为空串。
+ *
+ * **不适用不挡门禁，缺失与未评估挡。** 这一句必须读得出"这个命名空间没有
+ * 要放行的东西"，否则运维会去补一个根本不需要的 Baseline —— 而那正是这一栏
+ * 存在的理由：`Missing()` 从前把"需要但没有"和"根本不需要"压成同一句话，
+ * 演示集群九条缺失全是误报，与 NODE_AGENT 那一轮 42 条误报同一个病
+ * （design doc 2026-08-18-baseline-applicability §1）。
+ *
+ * **`null` / 缺席不得读成"一条都不适用"**，与 dataSourceView、notAssessedNote
+ * 同一条纪律：那是一句服务端从没说过的话。这一栏不影响门禁，因此缺席不危险，
+ * 但"平台没回答"与"平台答了没有"仍然是两件事。
+ */
+export function notApplicableNote(
+  list: readonly MissingBaseline[] | null | undefined,
+): string {
+  if (list == null) {
+    return '服务端没有说明哪几类在这些命名空间里不适用（notApplicableBaselines 缺席，'
+      + '按契约它恒为非 nil，因此这是一份老响应或字段改了名）。'
+      + '这一栏不参与门禁，但在服务端答上来之前，不得把"缺失清单为空"读作"全部齐备"。'
+  }
+  if (list.length === 0) return ''
+  const detail = list
+    .map((m) => `${m.namespace}（${m.kinds.join('、')}）`)
+    .join('；')
+  return `以下类型在这些命名空间里没有推导对象，因此不需要放行：${detail}。`
+    + 'LB 健康检查取决于该命名空间有没有入口暴露面，metrics 抓取取决于有没有 Pod '
+    + '声明要被抓 —— 两者都没有时，这一类没有流量会被 default-deny 打断。'
+    + '这是一个关于集群的结论（平台看过了），不是一个缺口，因此不必去补。'
 }
 
 /* ---------------------------------------------------------------------- */

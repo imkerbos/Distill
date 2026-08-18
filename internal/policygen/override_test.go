@@ -331,20 +331,25 @@ func ruleEnabled(res policygen.Result, ns, wl, fp string) bool {
 // 不走 JSON 往返：Rule.Ingress / Rule.Egress 标了 json:"-"，序列化会把
 // 这两个字段丢光，拷出来的副本就天生跟原对象不相等 —— 那样这条断言
 // 测的就不是「Apply 有没有改」，而是「json:"-" 的字段是否存在」。
+func cloneMissing(in []policygen.MissingBaseline) []policygen.MissingBaseline {
+	if in == nil {
+		return nil
+	}
+	out := make([]policygen.MissingBaseline, len(in))
+	for i, mb := range in {
+		out[i] = policygen.MissingBaseline{Namespace: mb.Namespace, Kinds: cloneKinds(mb.Kinds)}
+	}
+	return out
+}
+
 func deepCopyResult(r policygen.Result) policygen.Result {
 	out := policygen.Result{
 		Policies:          make([]policygen.CandidatePolicy, len(r.Policies)),
 		Ungeneratable:     cloneUngeneratable(r.Ungeneratable),
 		ExcludedWorkloads: cloneExcludedWorkloads(r.ExcludedWorkloads),
 	}
-	if r.MissingBaselines != nil {
-		out.MissingBaselines = make([]policygen.MissingBaseline, len(r.MissingBaselines))
-		for i, mb := range r.MissingBaselines {
-			out.MissingBaselines[i] = policygen.MissingBaseline{
-				Namespace: mb.Namespace, Kinds: cloneKinds(mb.Kinds),
-			}
-		}
-	}
+	out.MissingBaselines = cloneMissing(r.MissingBaselines)
+	out.NotApplicableBaselines = cloneMissing(r.NotApplicableBaselines)
 	for i, p := range r.Policies {
 		rules := make([]policygen.Rule, len(p.Rules))
 		for j, rule := range p.Rules {

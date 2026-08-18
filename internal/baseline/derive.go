@@ -10,6 +10,15 @@ type Set struct {
 	Namespace string `json:"namespace"`
 	// Rules 是推导出的规则。
 	Rules []Rule `json:"rules"`
+	// NotApplicable 是这个 namespace 里**没有推导对象**的那几类。
+	//
+	// 与 Missing() 互斥：一类要么需要而没有（缺失），要么根本不需要
+	// （不适用），不会同时是两者。判据见 applicability.go。
+	//
+	// 报出来而不是静默丢弃：一份空缺失与一次根本没做的校验必须区分得开
+	// （同 PolicyPreview.Kinds 的理由）。屏幕上要读得出「batch 的 LB：
+	// 看过了，这个 namespace 没有暴露面」。
+	NotApplicable []Kind `json:"notApplicable"`
 }
 
 // Derive 推导指定 (cluster, namespace) 的全部 Baseline。
@@ -24,8 +33,16 @@ type Set struct {
 //
 // 因此 Missing() 对 NODE_AGENT 的判据也是集群级的：没有登记任何 NodeAgent、
 // 或 Registry.NodeCIDR 为空时才算缺失，与 namespace 无关。
-func Derive(a snapshot.Assets, namespace string) Set {
+//
+// unassessed 是**依据资源这次没采回来**的那几类。它是必填参数而不是一个
+// 事后可选的修正：资产里"这个 namespace 没有暴露对象"与"我们没看过有没有
+// 暴露对象"长得一模一样，而把后者判成"不适用"会让一次采集失败变成一次
+// 放行 —— 那一类随后从缺失清单里消失，连带绕过 Enforcing 门禁。
+// 写成参数，调用方就忘不掉（design doc 2026-08-18-baseline-applicability §3）。
+// 全部依据都采回来时传 nil。
+func Derive(a snapshot.Assets, namespace string, unassessed []Kind) Set {
 	set := Set{Cluster: a.ClusterID, Namespace: namespace}
+	set.NotApplicable = notApplicable(a, namespace, unassessed)
 	set.Rules = append(set.Rules, deriveDNS(a)...)
 	set.Rules = append(set.Rules, deriveControlPlane(a)...)
 	set.Rules = append(set.Rules, deriveNodeAgent(a)...)
@@ -62,10 +79,18 @@ func (s Set) Kinds() []Kind {
 //
 // 返回缺失清单而非补占位规则：一条编出来的 0.0.0.0/0:53 会让齐备性
 // 校验通过，而真正的 DNS 仍然不通。缺 DNS 就是缺 DNS。
+//
+// **不适用的那几类不在此列。** 一个没有暴露面的 namespace 没有健康检查
+// 流量要放行，报它缺 LB_HEALTH_CHECK 是一条误报，而误报会把整份清单的
+// 可信度一起拖垮（design doc 2026-08-18-baseline-applicability §1）。
+// 有推导对象却推不出规则的，一条都没少报。
 func (s Set) Missing() []Kind {
 	present := map[Kind]bool{}
 	for _, r := range s.Rules {
 		present[r.Kind] = true
+	}
+	for _, k := range s.NotApplicable {
+		present[k] = true
 	}
 	out := make([]Kind, 0, len(allKinds))
 	for _, k := range allKinds {

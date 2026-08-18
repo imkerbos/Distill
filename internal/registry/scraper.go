@@ -80,16 +80,19 @@ func ValidateMetricsScraper(s MetricsScraper) error {
 	return nil
 }
 
-// scrapeAnnotationScrape / scrapeAnnotationPort 是被抓端声明用的注解键。
+// scrapeAnnotationPort 是被抓端声明抓取端口用的注解键。
 //
 // 与 collect.ScrapeAnnotationKeys 是同一组键的两处使用：那里决定采什么，
 // 这里决定怎么读。**不共享常量**是刻意的 —— collect 属于采集层，registry
 // 属于注册层，让后者 import 前者会把一条 K8s 客户端的依赖拖进注册表。
 // 两处漂移的代价是这一半读不出来，而那会让 METRICS_SCRAPE 恒定缺失；
 // 由 ScrapeTargetSnapshots 的测试与 collect 的白名单测试各自钉住。
+//
+// 「愿不愿意被抓」那一句判断不在这里，在 snapshot.Pod.DeclaresScrape 上：
+// 适用性判定与规则推导必须用同一条判据，各写一份就会出现"这一类适用、
+// 却永远推不出规则"的死角。snapshot 是纯类型包，收在那里不拖依赖。
 const (
-	scrapeAnnotationScrape = "prometheus.io/scrape"
-	scrapeAnnotationPort   = "prometheus.io/port"
+	scrapeAnnotationPort = "prometheus.io/port"
 )
 
 // ScrapeTargetSnapshots 把「登记的抓取端」与「观测到的被抓端」拼成推导依据。
@@ -154,7 +157,7 @@ func (c Cluster) ScrapeTargetSnapshots(pods []snapshot.Pod) []snapshot.ScrapeTar
 
 // scrapePortOf 读出一个 Pod 声明的 metrics 端口；没有可用声明时 ok 为 false。
 func scrapePortOf(p snapshot.Pod) (int32, bool) {
-	if p.ScrapeAnnotations[scrapeAnnotationScrape] != "true" {
+	if !p.DeclaresScrape() {
 		return 0, false
 	}
 	raw, ok := p.ScrapeAnnotations[scrapeAnnotationPort]
