@@ -32,8 +32,12 @@ func observe(t *testing.T, clusterID string) policygen.Input {
 		replay.WithCCNPPresent(c.CCNPPresent))
 	var obs []policygen.Observation
 	for _, fl := range f.Flows {
+		d := ev.Evaluate(fl.Flow)
 		obs = append(obs, policygen.Observation{
-			FlowID: fl.ID, Flow: fl.Flow, Decision: ev.Evaluate(fl.Flow),
+			FlowID: fl.ID, Flow: fl.Flow, Decision: d,
+			// 这条路径上没有窗口完整度可传导，因此求值引擎自己的可信度
+			// 就是身份可信度：mesh / CCNP 降级的那些仍然一条都学不到。
+			IdentityTrusted: d.Confidence == replay.ConfidenceTrusted,
 		})
 	}
 	return policygen.Input{
@@ -473,7 +477,8 @@ func TestK8sAppLabelledPodProducesMatchingPodSelector(t *testing.T) {
 		Pods:      []replay.PodRef{coredns, client},
 		Observations: []policygen.Observation{{
 			FlowID: "f1", Flow: flow,
-			Decision: replay.Decision{Verdict: replay.VerdictAllow, Confidence: replay.ConfidenceTrusted},
+			Decision:        replay.Decision{Verdict: replay.VerdictAllow, Confidence: replay.ConfidenceTrusted},
+			IdentityTrusted: true,
 		}},
 	})
 
@@ -565,7 +570,8 @@ func TestPodWithMultipleResolvableLabelsUsesHighestPriorityKey(t *testing.T) {
 		Pods:      []replay.PodRef{web, client},
 		Observations: []policygen.Observation{{
 			FlowID: "f1", Flow: flow,
-			Decision: replay.Decision{Verdict: replay.VerdictAllow, Confidence: replay.ConfidenceTrusted},
+			Decision:        replay.Decision{Verdict: replay.VerdictAllow, Confidence: replay.ConfidenceTrusted},
+			IdentityTrusted: true,
 		}},
 	})
 
@@ -636,8 +642,8 @@ func TestSameWorkloadUnderTwoLabelKeysYieldsOneCandidatePolicy(t *testing.T) {
 		ClusterID: "c1",
 		Pods:      []replay.PodRef{canonical, legacy, client},
 		Observations: []policygen.Observation{
-			{FlowID: "f-new", Flow: flowTo(canonical), Decision: allow},
-			{FlowID: "f-legacy", Flow: flowTo(legacy), Decision: allow},
+			{FlowID: "f-new", Flow: flowTo(canonical), Decision: allow, IdentityTrusted: true},
+			{FlowID: "f-legacy", Flow: flowTo(legacy), Decision: allow, IdentityTrusted: true},
 		},
 	})
 

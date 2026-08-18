@@ -7,8 +7,10 @@ import (
 )
 
 func TestEvidenceClassEnumIsClosed(t *testing.T) {
-	if len(policygen.AllEvidenceClasses()) != 4 {
-		t.Fatalf("AllEvidenceClasses() = %d entries, want 4", len(policygen.AllEvidenceClasses()))
+	// 5 类：2026-08-18 加入 INCOMPLETE_WINDOW —— 身份可信、但窗口证明不了
+	// 自己没漏的那一类（design doc 2026-08-18-learn-from-incomplete-evidence）。
+	if len(policygen.AllEvidenceClasses()) != 5 {
+		t.Fatalf("AllEvidenceClasses() = %d entries, want 5", len(policygen.AllEvidenceClasses()))
 	}
 	if policygen.EvidenceClass("SOMETHING").Valid() {
 		t.Error("unregistered evidence class reported valid")

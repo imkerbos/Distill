@@ -176,7 +176,13 @@ func classify(
 	o Observation, clusterID string, winners map[nsWorkload]string,
 ) ([]keyed, []UngeneratableItem) {
 	// 整条流量级别的排除先做：这两类与方向无关，逐侧判会重复报两次。
-	if o.Decision.Confidence == replay.ConfidenceDegraded {
+	//
+	// **只有身份不可信才整条排除。** mesh / CCNP 之后源地址不代表真实主体，
+	// 学出的规则会挂到错的主体上 —— 那不是"证据不够"，是"证据指向错的对象"。
+	// 窗口证明不了完整是另一回事：身份是准的，只是可能没看全，那类走
+	// EvidenceIncompleteWindow 生成、默认不启用
+	// （design doc 2026-08-18-learn-from-incomplete-evidence §2）。
+	if !o.IdentityTrusted {
 		return nil, []UngeneratableItem{{
 			FlowID: o.FlowID, Reason: ReasonDegradedEvidence,
 			Detail: "mesh 或 CCNP 干扰，结论不得作为策略推荐依据",
@@ -339,6 +345,12 @@ func peerOf(o Observation, ep replay.Endpoint, clusterID string) (
 // 顺序即优先级：跨集群与出公网先于 ALLOW/DENY 判定，因为它们描述的是
 // "对端只能用 ipBlock 表达"这一结构性事实，而不是当前策略的结论。
 func evidenceFor(o Observation) EvidenceClass {
+	// 窗口证明不了完整时，这一条盖过其余分类：操作者要先知道"这条规则的证据
+	// 可能不全"，再谈它是出公网还是跨集群。分类只有一个字段，而这一条是
+	// 决定它启不启用的那个（design doc §4）。
+	if o.Decision.Confidence == replay.ConfidenceDegraded {
+		return EvidenceIncompleteWindow
+	}
 	if o.Decision.CrossCluster {
 		return EvidenceCrossCluster
 	}

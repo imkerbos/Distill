@@ -172,6 +172,8 @@ func (r *Reader) generate(
 		a := t.attribute(c)
 		obs = append(obs, policygen.Observation{
 			FlowID: flowIDOf(t.clusterID, t.window, i, c), Flow: a.flow, Decision: a.decision,
+			// 传导完整度之前的那个可信度，见 attributed.identityTrusted。
+			IdentityTrusted: a.identityTrusted,
 		})
 	}
 

@@ -40,12 +40,23 @@ const (
 	EvidenceInternetEgress EvidenceClass = "INTERNET_EGRESS"
 	// EvidenceCrossCluster 是跨集群流量，对端只能用 ipBlock 表达且 IP 会漂。
 	EvidenceCrossCluster EvidenceClass = "CROSS_CLUSTER"
+	// EvidenceIncompleteWindow 是身份可信、但观测窗口证明不了自己没漏的流量。
+	//
+	// 三种来源没有一条能自证完整：Hubble 报不出采样率与丢弃数，VPC flow logs
+	// 不报丢弃，conntrack 轮询天然漏短连接。因此这一类不是例外，是常态
+	// （design doc 2026-08-18-learn-from-incomplete-evidence §1）。
+	//
+	// **它不等于 EvidenceTrustedAllow，因此 Enabled 恒为 false** ——
+	// 规则生成出来，但必须有人逐条确认才进生效集。代价写在 §3：漏看的连接
+	// 不会进候选，覆盖它的规则于是缺席，而缺席的规则会被判「无流量、可收紧」。
+	EvidenceIncompleteWindow EvidenceClass = "INCOMPLETE_WINDOW"
 )
 
 // allEvidenceClasses 是枚举的唯一登记处。
 var allEvidenceClasses = []EvidenceClass{
 	EvidenceTrustedAllow, EvidenceTrustedDeny,
 	EvidenceInternetEgress, EvidenceCrossCluster,
+	EvidenceIncompleteWindow,
 }
 
 // AllEvidenceClasses 返回全部已登记的证据类型。
@@ -197,6 +208,15 @@ type Observation struct {
 	Flow replay.Flow
 	// Decision 是该流量在当前策略下的判定。
 	Decision replay.Decision
+	// IdentityTrusted 是求值引擎对**主体身份**的可信度，与窗口完整度无关。
+	//
+	// Decision.Confidence 把两件事压成一个值：mesh / CCNP 让 L4 身份本身不可信，
+	// 而窗口不完整只是"可能没看全"。前者学出的规则会挂到**错的主体**上，
+	// 后者的规则本身没错、只是可能不够（design doc 2026-08-18-learn-from-incomplete-evidence §2）。
+	//
+	// 由调用方在传导完整度**之前**取，**不从 UnknownReason 反推** —— 那是一次
+	// 猜测，而猜错的方向是把 mesh 流量当成可学的证据。
+	IdentityTrusted bool
 }
 
 // Rule 是候选策略中的一条规则及其来源与风险标注。

@@ -156,6 +156,14 @@ type attributed struct {
 	srcOutcome identity.Outcome
 	dstOutcome identity.Outcome
 	decision   replay.Decision
+	// identityTrusted 是求值引擎对**主体身份**的可信度，取自传导窗口完整度
+	// **之前**的那个结论。
+	//
+	// decision.Confidence 传导之后压着两件事：mesh / CCNP 让身份本身不可信，
+	// 与窗口证明不了完整。前者学出的规则会挂到错的主体上，后者的规则本身
+	// 没错、只是可能不够（design doc 2026-08-18-learn-from-incomplete-evidence §2）。
+	// policygen 要分辨这两者，就必须拿到传导之前的那个值。
+	identityTrusted bool
 	// flow 是这条连接送进求值引擎的那个形状，**每条都有**，包括判不出来的。
 	//
 	// 存下来而不是让策略预览再拼一次：预览要把同一批连接喂给 policygen 与
@@ -209,7 +217,11 @@ func (t traffic) attribute(c flow.Connection) attributed {
 	}
 	a.flow.Source.Pod, a.flow.Dest.Pod = srcPod, dstPod
 
-	a.decision = t.transmitCompleteness(t.eval.Evaluate(a.flow))
+	engine := t.eval.Evaluate(a.flow)
+	// **先取身份可信度，再传导完整度。** 顺序反了这个字段就永远是完整度的
+	// 影子，而 policygen 会把 mesh 流量当成"只是证据不全"学进候选集。
+	a.identityTrusted = engine.Confidence == replay.ConfidenceTrusted
+	a.decision = t.transmitCompleteness(engine)
 	return a
 }
 

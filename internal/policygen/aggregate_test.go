@@ -29,7 +29,9 @@ func obs(src, dst *replay.PodRef, dstIP string, port int32, d replay.Decision) O
 	if dst != nil {
 		f.Dest.ClusterID = dst.ClusterID
 	}
-	return Observation{FlowID: "f1", Flow: f, Decision: d}
+	// IdentityTrusted 默认 true：这些用例验的是表达能力与拆分，不是身份可信度。
+	// 零值 false 的含义是"mesh / CCNP 让身份不可信"，那条由专门的用例覆盖。
+	return Observation{FlowID: "f1", Flow: f, Decision: d, IdentityTrusted: true}
 }
 
 // classifyOne 按这一条观测自身推出的归属键赢家做分类，等价于 Generate
@@ -152,14 +154,24 @@ func TestClassifyExternalPeerKeepsIPBlockFallback(t *testing.T) {
 	}
 }
 
-// DEGRADED 不得作为推荐依据（spec §6.4），整条流量排除并报原因。
-func TestClassifyRejectsDegradedEvidence(t *testing.T) {
+// 身份不可信不得作为推荐依据（spec §6.4），整条流量排除并报原因。
+//
+// **2026-08-18 收窄**：原先的判据是「Confidence 为 DEGRADED 就排除」，而那个
+// 字段压着两件事 —— mesh / CCNP 让身份不可信，与窗口证明不了完整。后者的规则
+// 本身没错，只是可能不够，现在走 EvidenceIncompleteWindow 生成、默认不启用
+// （design doc 2026-08-18-learn-from-incomplete-evidence §2）。
+//
+// 这一条守的仍然是前者，而且必须继续守：身份不可信时学出的规则会挂到**错的
+// 主体**上 —— 那不是"证据不够"，是"证据指向错的对象"。
+func TestClassifyRejectsUntrustworthyIdentity(t *testing.T) {
 	d := replay.Decision{Verdict: replay.VerdictAllow, Confidence: replay.ConfidenceDegraded}
-	items, bad := classifyOne(obs(
+	o := obs(
 		pod("c1", "checkout", "checkout-1", "checkout"),
-		pod("c1", "payment", "payment-1", "api"), "10.4.0.4", 8080, d), "c1")
+		pod("c1", "payment", "payment-1", "api"), "10.4.0.4", 8080, d)
+	o.IdentityTrusted = false
+	items, bad := classifyOne(o, "c1")
 	if len(items) != 0 {
-		t.Errorf("items = %d, want 0; DEGRADED must not feed recommendations", len(items))
+		t.Errorf("items = %d, want 0; an untrustworthy identity must not feed recommendations", len(items))
 	}
 	if len(bad) != 1 || bad[0].Reason != ReasonDegradedEvidence {
 		t.Errorf("ungeneratable = %+v, want one DEGRADED_EVIDENCE", bad)
@@ -244,5 +256,74 @@ func TestClassifyCrossClusterUsesIPBlock(t *testing.T) {
 	}
 	if it.key.PeerCIDR == "" {
 		t.Error("peer CIDR empty; a foreign-cluster peer is only expressible as ipBlock")
+	}
+}
+
+/* ---------------------------------------------------------------------- */
+/* 证据不完整的窗口（design doc 2026-08-18-learn-from-incomplete-evidence） */
+/* ---------------------------------------------------------------------- */
+
+// 窗口证明不了完整时，规则照学，但带自己的证据类别。
+//
+// **这是一次有代价的放宽**：漏看的连接不会进候选集，覆盖它的规则于是缺席，
+// 而那条规则会被判「无流量、可收紧」。放宽之前的行为是一条都不学（三种来源
+// 没有一条能自证完整，因此永远学不到）；放宽之后的行为是学了但默认不启用。
+func TestClassifyLearnsFromAnIncompleteWindowWithItsOwnEvidenceClass(t *testing.T) {
+	d := allowDecision()
+	d.Confidence = replay.ConfidenceDegraded // 完整度传导下来的降级
+	o := obs(pod("c1", "shop", "web-1", "web"), pod("c1", "payment", "api-1", "api"),
+		"10.4.0.2", 8080, d)
+	o.IdentityTrusted = true // 身份是准的，只是窗口证明不了完整
+
+	items, bad := classifyOne(o, "c1")
+
+	if len(bad) != 0 {
+		t.Fatalf("ungeneratable = %+v, want none — 身份可信的观测不该因为窗口"+
+			"证明不了完整而被整条丢掉", bad)
+	}
+	if len(items) == 0 {
+		t.Fatal("no items were produced from an incomplete window")
+	}
+	for _, it := range items {
+		if it.key.Evidence != EvidenceIncompleteWindow {
+			t.Errorf("evidence = %q, want %q — 与可信证据混成一类，界面上就分不出"+
+				"哪些规则的证据可能不全", it.key.Evidence, EvidenceIncompleteWindow)
+		}
+	}
+}
+
+// **身份不可信的一条都不许学。** mesh / CCNP 之后源地址不代表真实主体，
+// 学出的规则会挂到错的主体上 —— 那不是"证据不够"，是"证据指向错的对象"。
+func TestClassifyStillRefusesFlowsWhoseIdentityIsUntrustworthy(t *testing.T) {
+	d := allowDecision()
+	d.Confidence = replay.ConfidenceDegraded
+	o := obs(pod("c1", "shop", "web-1", "web"), pod("c1", "payment", "api-1", "api"),
+		"10.4.0.2", 8080, d)
+	o.IdentityTrusted = false // 求值引擎自己因为 mesh / CCNP 降的级
+
+	items, bad := classifyOne(o, "c1")
+
+	if len(items) != 0 {
+		t.Errorf("items = %+v, want none — 身份不可信的流量被学成了规则", items)
+	}
+	if len(bad) != 1 || bad[0].Reason != ReasonDegradedEvidence {
+		t.Errorf("ungeneratable = %+v, want one DEGRADED_EVIDENCE", bad)
+	}
+}
+
+// 完整窗口的行为一个字节不变。
+func TestClassifyKeepsTrustedAllowOnACompleteWindow(t *testing.T) {
+	o := obs(pod("c1", "shop", "web-1", "web"), pod("c1", "payment", "api-1", "api"),
+		"10.4.0.2", 8080, allowDecision())
+	o.IdentityTrusted = true
+
+	items, bad := classifyOne(o, "c1")
+	if len(bad) != 0 {
+		t.Fatalf("ungeneratable = %+v, want none", bad)
+	}
+	for _, it := range items {
+		if it.key.Evidence != EvidenceTrustedAllow {
+			t.Errorf("evidence = %q, want %q on a complete window", it.key.Evidence, EvidenceTrustedAllow)
+		}
 	}
 }

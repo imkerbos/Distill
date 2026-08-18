@@ -187,8 +187,13 @@ func (r *FixtureReader) generate(
 		if !window.Contains(f.Flow.Timestamp) || !involvesCluster(f.Flow, clusterID) {
 			continue
 		}
+		d := r.decide(f)
 		obs = append(obs, policygen.Observation{
-			FlowID: f.ID, Flow: f.Flow, Decision: r.decide(f),
+			FlowID: f.ID, Flow: f.Flow, Decision: d,
+			// 合成数据集没有窗口完整度这回事，因此求值引擎自己的可信度
+			// 就是身份可信度：mesh / CCNP 降级的那些仍然一条都学不到
+			// （design doc 2026-08-18-learn-from-incomplete-evidence §5）。
+			IdentityTrusted: d.Confidence == replay.ConfidenceTrusted,
 		})
 	}
 

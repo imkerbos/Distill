@@ -139,8 +139,8 @@ func TestFingerprintDistinguishesPeersThatRenderIdentically(t *testing.T) {
 		ClusterID: "c1",
 		Pods:      []replay.PodRef{client, apiApp, apiK8s},
 		Observations: []policygen.Observation{
-			{FlowID: "f-app", Flow: flowTo(apiApp), Decision: allow},
-			{FlowID: "f-k8s", Flow: flowTo(apiK8s), Decision: allow},
+			{FlowID: "f-app", Flow: flowTo(apiApp), Decision: allow, IdentityTrusted: true},
+			{FlowID: "f-k8s", Flow: flowTo(apiK8s), Decision: allow, IdentityTrusted: true},
 		},
 	})
 
