@@ -31,6 +31,18 @@ type SourceKind string
 // SourceHubble 是集群内 Hubble relay 的实时流量。
 const SourceHubble SourceKind = "HUBBLE"
 
+// SourceNodeConntrack 是节点上 /proc/net/nf_conntrack 的轮询。
+//
+// **它永远到不了 COMPLETE**，与 Hubble 同理但成因不同：conntrack 是当前被
+// 跟踪连接的**快照**，不是日志 —— 轮询之间起止的连接从来不出现在任何一次
+// 快照里，而条目上没有可靠的起始时刻。因此这个来源报不出覆盖窗口，完整度
+// 恒为 UNKNOWN（design doc 2026-08-19-conntrack-source §4）。
+//
+// 登记成独立取值而不是借用 HUBBLE：来源要落进 observed_connection.source_kind
+// 并长期留存，而"这条连接是谁看见的"决定了它该按哪一份完整度元数据解释。
+// 借名会让一批轮询来的连接在事后被当成 Hubble 的实时流量读。
+const SourceNodeConntrack SourceKind = "NODE_CONNTRACK"
+
 // Valid 判断该来源是否已登记。
 //
 // 显式 switch 而非查表：新增一个取值却没在这里列出来，它就不是一个合法
@@ -38,7 +50,7 @@ const SourceHubble SourceKind = "HUBBLE"
 // 从哪来的连接，也就说不出它的完整度该按什么解释。
 func (k SourceKind) Valid() bool {
 	switch k {
-	case SourceHubble:
+	case SourceHubble, SourceNodeConntrack:
 		return true
 	default:
 		return false

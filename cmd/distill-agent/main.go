@@ -27,9 +27,21 @@ func main() {
 	platformURL := flag.String("platform-url", "", "base URL of the platform")
 	tokenFile := flag.String("token-file", "", "path to the mounted agent token")
 	timeout := flag.Duration("timeout", defaultRunTimeout, "upper bound on one collection run")
+	// **缺省是 assets** —— 本轮之前的行为，没有回归。conntrack 是按节点的，
+	// 跑 DaemonSet + hostNetwork；assets 是按集群的，跑 CronJob。
+	// 同一个二进制两个模式：一个镜像、一条认证路径、一个摄入客户端。
+	mode := flag.String("mode", string(modeAssets),
+		"what to collect: assets (per cluster, CronJob) or conntrack (per node, DaemonSet)")
+	tablePath := flag.String("conntrack-table", defaultTablePath,
+		"path to the conntrack table; only read in -mode=conntrack")
+	polls := flag.Int("conntrack-polls", defaultPolls, "how many times to poll the conntrack table")
+	interval := flag.Duration("conntrack-interval", defaultPollInterval, "wait between conntrack polls")
 	flag.Parse()
 
-	if err := dispatch(options{platformURL: *platformURL, tokenFile: *tokenFile}, *timeout); err != nil {
+	if err := dispatch(options{
+		platformURL: *platformURL, tokenFile: *tokenFile, mode: collectMode(*mode),
+		tablePath: *tablePath, polls: *polls, pollInterval: *interval,
+	}, *timeout); err != nil {
 		// 日志器可能尚未构造成功，直接写 stderr。
 		_, _ = os.Stderr.WriteString("agent run failed: " + err.Error() + "\n")
 		os.Exit(1)

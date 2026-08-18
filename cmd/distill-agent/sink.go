@@ -287,13 +287,23 @@ type envelope struct {
 // 看起来成功 —— 而那个 agent 会一直"正常工作"下去，它那个集群的数据停在
 // 被拒的那一刻，页面上没有任何症状。
 func (s *httpSink) post(ctx context.Context, payload agentRunPayload) error {
+	return s.postTo(ctx, "/api/v1/agent/collection-runs", payload, "collection run")
+}
+
+// postTo 把一份报文 POST 到 agent 子树的某条路由上。
+//
+// 两条摄入路径（资产、流量）共用它，不是各写一份：这里的每一条守卫都是
+// 「什么不该出现在集群日志里」—— 不回显地址、不包 net/http 的错误、
+// 只读有限的一段响应。两份实现意味着两套守卫，而漏掉守卫的那一份会成为
+// 一次凭据泄漏的入口。
+func (s *httpSink) postTo(ctx context.Context, path string, payload any, what string) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("encode the collection run: %w", err)
+		return fmt.Errorf("encode the %s: %w", what, err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		s.base+"/api/v1/agent/collection-runs", bytes.NewReader(body))
+		s.base+path, bytes.NewReader(body))
 	if err != nil {
 		// 地址不回显：它是部署拓扑信息，而这个进程的输出终点是集群日志。
 		return errors.New("cannot build the ingest request")
@@ -328,8 +338,8 @@ func (s *httpSink) post(ctx context.Context, payload agentRunPayload) error {
 		// 少数几个码在这里翻成人话：这个进程的日志是运维在被管集群里唯一
 		// 看得到的东西，而「code 20008」需要他去查平台才知道是什么意思。
 		// 翻译用的是**这一侧自己写的句子**，不是把平台的 msg 转发出来。
-		return fmt.Errorf("the platform refused this run (HTTP %d, code %d)%s",
-			resp.StatusCode, env.Code, hintFor(env.Code))
+		return fmt.Errorf("the platform refused this %s (HTTP %d, code %d)%s",
+			what, resp.StatusCode, env.Code, hintFor(env.Code))
 	}
 	return nil
 }
@@ -347,4 +357,14 @@ func hintFor(code int) string {
 	default:
 		return ""
 	}
+}
+
+// SaveFlowIngest 把一次流量摄入推给平台。
+//
+// 与 Save 走同一条出站链路（postTo）：那里的每一条守卫都是「什么不该出现在
+// 集群日志里」—— 不回显地址、不包 net/http 的错误、只读有限的一段响应。
+// 两条各自演化的出站路径意味着两套守卫，而漏掉守卫的那一条会成为一次凭据
+// 泄漏的入口。
+func (s *httpSink) SaveFlowIngest(ctx context.Context, p flowIngestPayload) error {
+	return s.postTo(ctx, "/api/v1/agent/flow-ingests", p, "flow ingest")
 }

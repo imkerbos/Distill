@@ -23,6 +23,12 @@ import (
 type options struct {
 	// platformURL 是平台的地址。
 	platformURL string
+	// mode 决定这一次采什么。
+	mode collectMode
+	// tablePath / polls / pollInterval 只在 conntrack 模式下有意义。
+	tablePath    string
+	polls        int
+	pollInterval time.Duration
 	// tokenFile 是挂进来的 agent token 文件路径。
 	//
 	// **从文件读，不从环境变量读**（规范 §33）：环境变量会出现在
@@ -35,7 +41,33 @@ type options struct {
 // errTimeoutNotPositive 是一个写错了的超时配置。
 var errTimeoutNotPositive = errors.New("-timeout must be positive: an unbounded collection is one nobody can cancel")
 
+// collectMode 是这个二进制的采集模式，封闭枚举。
+//
+// 显式 switch 校验而不是「认不出就当默认」：一个拼错了 -mode 的 DaemonSet
+// 会安安静静地去采资产，而运维以为它在采流量 —— 那个集群于是永远显示
+// 「还没有任何流量观测」，而没有任何东西说得出为什么。
+type collectMode string
+
+const (
+	// modeAssets 采本集群资产，按集群一份（CronJob）。
+	modeAssets collectMode = "assets"
+	// modeConntrack 轮询本节点的 conntrack 表，按节点一份（DaemonSet）。
+	modeConntrack collectMode = "conntrack"
+)
+
+func (m collectMode) valid() bool {
+	switch m {
+	case modeAssets, modeConntrack:
+		return true
+	default:
+		return false
+	}
+}
+
 func (o options) validate() error {
+	if !o.mode.valid() {
+		return fmt.Errorf("-mode must be %q or %q", modeAssets, modeConntrack)
+	}
 	if o.platformURL == "" {
 		return errors.New("-platform-url is required in push mode")
 	}
@@ -155,9 +187,20 @@ func run(ctx context.Context, opts options, timeout time.Duration, logger *slog.
 	if err != nil {
 		return err
 	}
-	logger.Info("starting a push collection", "cluster", cfg.ClusterID)
+	logger.Info("starting a push collection",
+		"cluster", cfg.ClusterID, "mode", string(opts.mode))
 
 	sink := newHTTPSink(opts.platformURL, token)
+
+	if opts.mode == modeConntrack {
+		// conntrack 模式不建 Kubernetes 客户端：它读的是本节点的
+		// /proc/net/nf_conntrack，一个 API 都不调。不建也就不需要那份
+		// ServiceAccount —— 权限面小一圈。
+		return conntrackOnce(ctx, conntrackOptions{
+			clusterID: cfg.ClusterID, tablePath: opts.tablePath,
+			polls: opts.polls, interval: opts.pollInterval,
+		}, sink, logger)
+	}
 
 	client, err := inClusterClient()
 	if err != nil {

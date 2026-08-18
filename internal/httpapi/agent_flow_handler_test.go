@@ -208,7 +208,10 @@ func TestFlowIngestRejectsAnUnregisteredSource(t *testing.T) {
 	h, _, cookie := newTestRouterWithFlowSink(t, sink)
 	_, token := issueAgent(t, h, cookie, "prod-asia-1")
 
-	body := strings.Replace(flowBody(``), `"source":"HUBBLE"`, `"source":"NODE_CONNTRACK"`, 1)
+	// 取一个**真的没登记过**的取值。原来这里写的是 NODE_CONNTRACK，而
+	// conntrack 采集器落地那一轮把它登记了 —— 反例变成了正例，用例于是
+	// 静默失去了判别力。挑一个来源枚举里不会有的词。
+	body := strings.Replace(flowBody(``), `"source":"HUBBLE"`, `"source":"CARRIER_PIGEON"`, 1)
 	rec := postFlow(t, h, token, body)
 	refusedFlow(t, rec, "an unregistered source kind was accepted")
 }
