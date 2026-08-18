@@ -302,6 +302,14 @@ export type RuleOrigin = 'BASELINE' | 'LEARNED'
 /** LEARNED 规则的证据等级，决定是否默认启用。 */
 export type EvidenceClass =
   | 'TRUSTED_ALLOW' | 'TRUSTED_DENY' | 'INTERNET_EGRESS' | 'CROSS_CLUSTER'
+  /**
+   * 身份可信、但观测窗口证明不了自己没漏。
+   *
+   * 三种流量来源没有一条能自证完整（Hubble 报不出采样率与丢弃数，
+   * VPC flow logs 不报丢弃，conntrack 轮询漏短连接），因此这一类是常态。
+   * 规则本身没错，只是**可能不够** —— 默认不启用，要人逐条确认。
+   */
+  | 'INCOMPLETE_WINDOW'
 
 /** BASELINE 规则的五类基础设施事实。 */
 export type Kind =

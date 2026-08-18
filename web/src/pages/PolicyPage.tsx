@@ -1,4 +1,5 @@
 import { useState, type CSSProperties, type ReactNode } from 'react'
+import { EVIDENCE_LABEL, evidenceNote } from './evidenceView.ts'
 import { api, ApiError } from '../api/client'
 import {
   RISK_CATEGORY_LABEL,
@@ -984,9 +985,17 @@ function RuleBasis({ rule }: { rule: CandidateRule }) {
     )
   }
   if (rule.evidence) {
+    const note = evidenceNote(rule.evidence)
     return (
       <div>
-        <div>{rule.evidence}</div>
+        <div>{EVIDENCE_LABEL[rule.evidence] ?? rule.evidence}</div>
+        {note !== '' && (
+          <div style={{
+            fontSize: 'var(--text-xs)', color: 'var(--verdict-unknown)', marginTop: 2,
+          }}>
+            {note}
+          </div>
+        )}
         {rule.risk && (
           <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginTop: 2 }}>
             {RISK_CATEGORY_LABEL[rule.risk.category] ?? rule.risk.category}：{rule.risk.name} :{rule.risk.port}
