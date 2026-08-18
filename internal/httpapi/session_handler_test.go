@@ -13,8 +13,10 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/imkerbos/Distill/internal/auth"
+	"github.com/imkerbos/Distill/internal/cluster"
 	"github.com/imkerbos/Distill/internal/config"
 	"github.com/imkerbos/Distill/internal/fixture"
+	"github.com/imkerbos/Distill/internal/fleet"
 	"github.com/imkerbos/Distill/internal/httpapi"
 	applog "github.com/imkerbos/Distill/internal/log"
 	"github.com/imkerbos/Distill/internal/registry"
@@ -123,6 +125,66 @@ func newTestRouterWithLog(
 	var buf bytes.Buffer
 	h, sessions, cookie := buildTestRouterWithLog(t, nil, reg, nil, nil, nil, "INFO", &buf)
 	return h, sessions, cookie, &buf
+}
+
+// newTestRouterWithAgentSink 是 newTestRouterWithRegistry 的变体，额外注入
+// 一个 agent 摄入落库端与一份 fleet 登记。
+//
+// 单独开一个入口，理由同 newTestRouterWithCollection：绝大多数用例装配的是
+// 「没有 agent 推送这条路径」的形态（落库端为 nil），而那是当前真实部署的
+// 形态，必须持续被覆盖。让它保持零参数，就不会有人为了改签名顺手塞一个
+// 非 nil 的替身进去。
+func newTestRouterWithAgentSink(
+	t *testing.T, sink httpapi.AgentSink,
+) (http.Handler, *auth.SessionStore, *http.Cookie) {
+	t.Helper()
+	reg := fixtureSource()
+	return buildTestRouterWithAgent(t, reg, sink)
+}
+
+// buildTestRouterWithAgent 装配一个带 agent 摄入端的路由器。
+func buildTestRouterWithAgent(
+	t *testing.T, reg registry.Store, sink httpapi.AgentSink,
+) (http.Handler, *auth.SessionStore, *http.Cookie) {
+	t.Helper()
+	hash, err := bcrypt.GenerateFromPassword([]byte(testPassword), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	sessions := auth.NewSessionStore(time.Hour, nil)
+	logger, err := applog.New("ERROR", io.Discard)
+	if err != nil {
+		t.Fatalf("logger: %v", err)
+	}
+
+	h := httpapi.NewRouter(httpapi.Deps{
+		Sessions:  sessions,
+		Verifier:  auth.NewVerifier(config.User{Username: "demo", PasswordHash: string(hash)}, reg),
+		Logger:    logger,
+		Registry:  reg,
+		AgentSink: sink,
+		// fleet 登记从注册表现读：网段判定是平台的事，而登记随时会变
+		// （新集群接入、网段改了）。抄一份进装配等于把判定钉在启动那一刻。
+		Fleet: func(ctx context.Context) (*cluster.Registry, error) {
+			clusters, err := reg.Clusters(ctx)
+			if err != nil {
+				return nil, err
+			}
+			// 用与生产完全相同的那个转换：抄一份进测试，就再也测不出
+			// 转换本身写错了。
+			out, _ := fleet.FromRegistry(clusters)
+			return out, nil
+		},
+	})
+
+	login := postJSON(t, h, "/api/v1/sessions", map[string]string{
+		"username": "demo", "password": testPassword,
+	})
+	cookies := login.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("login returned no cookie")
+	}
+	return h, sessions, cookies[0]
 }
 
 // buildTestRouter 是全部装配入口的底层实现。

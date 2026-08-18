@@ -41,6 +41,17 @@ type Deps struct {
 	// 允许为 nil：未配置 secrets 的部署没有写回这回事。nil 表示"没有这条
 	// 路径"，**不是**"随便谁都能推"——见 handlePolicyWritebackPush。
 	PolicyWriter PolicyWriter
+	// AgentSink 落库一次由集群 agent 推上来的采集运行。
+	//
+	// 允许为 nil：没有部署 agent 的形态下没有推送这回事。nil 表示「本部署
+	// 收不下推送」，摄入端点据此答依赖不可用 —— **不是**静默成功，那会让
+	// agent 把这一轮当成已经交付，而那批观测就此丢了。
+	AgentSink AgentSink
+	// Fleet 现读全 fleet 的网段登记，供摄入路径判定地址归属。
+	//
+	// 与 AgentSink 一起为 nil 或一起非 nil：判不出归属的落库比不落库更糟，
+	// 那批 Pod 会以「归属未知」的形态进库，而症状要到求值阶段才冒出来。
+	Fleet FleetSource
 	// Collection 读最近一次资产采集运行的摘要。
 	//
 	// 允许为 nil：采集是一个独立进程，未部署它的形态下没有采集这回事。
@@ -136,6 +147,7 @@ func NewRouter(d Deps) http.Handler {
 		api.Route("/agent", func(agent chi.Router) {
 			agent.Use(RequireAgent(d))
 			agent.Get("/config", handleAgentConfig())
+			agent.Post("/collection-runs", handleAgentCollectionRun(d))
 		})
 
 		api.Group(func(protected chi.Router) {

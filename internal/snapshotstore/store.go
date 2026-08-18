@@ -12,8 +12,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
+
+	mysqldriver "github.com/go-sql-driver/mysql"
 
 	"github.com/imkerbos/Distill/internal/snapshot"
 )
@@ -26,12 +29,26 @@ type Store struct {
 // New 用已建立的连接池构造存储。
 func New(db *sql.DB) *Store { return &Store{db: db} }
 
+// ErrRunExists 表示这个 (cluster_id, run_id) 已经落过库。
+//
+// 推送式接入下 agent 跑在 CronJob 里，网络抖动重试是常态：第二次推同一个
+// run_id 不是错误，是同一次采集又说了一遍（design doc 2026-08-18 §4）。
+// 调用方据此答成功而不是失败 —— 塌成一个「写库失败」会让重试变成 500，
+// agent 于是接着重试，而每一次都会得到同样的结果。
+//
+// **重复的一次不覆盖已存的那份。** 覆盖等于让后到的推送改写历史，而历史
+// 正是这个平台用来解释「那时候是什么样」的东西（CLAUDE.md §4：禁止用当前
+// 状态解释历史数据）。
+var ErrRunExists = errors.New("snapshotstore: this collection run is already stored")
+
 // Save 在单个事务里写入一次采集运行的全部产物。
 //
 // 单事务而非逐表提交：一次运行的 collection_run 与它的各 observed_* 行
 // 必须同时可见。先提交计数、后提交明细会让可见面在两次提交之间报出一个
 // "采到了 800 个 Pod，但一个也查不到"的状态，而这个状态与"采集器挂了"
 // 无法区分。
+//
+// 这个 (cluster_id, run_id) 已经落过库时返回 ErrRunExists，**不覆盖**。
 func (s *Store) Save(ctx context.Context, run snapshot.Run) (err error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -104,6 +121,12 @@ func insertRun(ctx context.Context, tx *sql.Tx, run snapshot.Run) error {
 		obs.ClusterID, obs.RunID, obs.ObservedAt, run.StartedAt, run.FinishedAt,
 		string(run.Status), string(run.ErrorReason))
 	if err != nil {
+		// 唯一键冲突就是「这一次已经落过了」。用数据库的约束判重，而不是
+		// 先 SELECT 再 INSERT：后者在两次并发重试之间有窗口，而 CronJob
+		// 的重试恰恰可能同时到达。
+		if isDuplicateKey(err) {
+			return fmt.Errorf("%w: cluster %s run %s", ErrRunExists, obs.ClusterID, obs.RunID)
+		}
 		return fmt.Errorf("snapshotstore: insert run: %w", err)
 	}
 
@@ -355,4 +378,21 @@ func jsonArray[T any](s []T) ([]byte, error) {
 		s = []T{}
 	}
 	return json.Marshal(s)
+}
+
+// errDuplicateEntry 是 MySQL 的唯一键冲突错误号（ER_DUP_ENTRY）。
+//
+// 数字写成常量而非裸写在判断里：一个裸的 1062 在 review 时与任何别的
+// 数字没有区别。
+const errDuplicateEntry uint16 = 1062
+
+// isDuplicateKey 判断一次写入是不是撞上了唯一键。
+//
+// 与 internal/mysqlregistry 的 writeFailure 各写一份、刻意不共用：那一个
+// 把错误翻译成**面向操作者**的校验失败文案，这一个翻译成一个供调用方分支
+// 的哨兵。合成一个会让「这条写路径该不该回传文案」多出一个参数，而那个
+// 参数填错了不会有任何症状。
+func isDuplicateKey(err error) bool {
+	var me *mysqldriver.MySQLError
+	return errors.As(err, &me) && me.Number == errDuplicateEntry
 }
