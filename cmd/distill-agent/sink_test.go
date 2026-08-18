@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/imkerbos/Distill/internal/collectrun"
 	"github.com/imkerbos/Distill/internal/snapshot"
 )
 
@@ -203,63 +204,32 @@ func TestSinkReportsAnAbortedRunSoItIsNotMistakenForNeverCollected(t *testing.T)
 
 // httpSink 必须满足采集的落库口，否则 push 模式装配不出来。
 //
-// 只到 runStore 为止，**不是 collectorStore**：流量摄入与身份推导在推送式
-// 接入下都不归 agent —— 前者本轮没有来源，后者要读整张区间表，那是平台
-// 侧的事。装成 collectorStore 会逼出两个假实现，而假实现会让"这条路还没
-// 接通"看起来像"已经接通了"。
-var _ runStore = (*httpSink)(nil)
+// 只到 collectrun.Store 为止：流量摄入与身份推导在推送式接入下都不归
+// agent —— 前者本轮没有来源，后者要读整张区间表，那是平台侧的事。多装两个
+// 接口会逼出两个假实现，而假实现会让「这条路还没接通」看起来像「已经接通了」。
+var _ collectrun.Store = (*httpSink)(nil)
 
-// --- 形态分派（design doc 2026-08-18 §1.1）---
+// --- 参数校验 ---
 
-func TestDispatchRejectsAnUnknownMode(t *testing.T) {
-	err := dispatch("sideways", "configs/demo.yaml", "prod", time.Minute, ingestOptions{}, pushOptions{})
+func TestDispatchRejectsANonPositiveTimeout(t *testing.T) {
+	// 非正超时不是「不限时」，是一个写错了的配置：一次没人能取消的采集
+	// 会一直占着这个 Pod，而下一次 CronJob 又会拉起一个新的。
+	err := dispatch(options{platformURL: "https://p.example", tokenFile: "/run/token"}, 0)
 	if err == nil {
-		t.Error("dispatch(unknown mode) = nil — 一个没人定义过的形态必须让这次" +
-			"运行起不来，而不是悄悄退回某一条路径")
+		t.Error("dispatch(timeout 0) = nil, want an error")
 	}
 }
 
-func TestPushModeRefusesParametersThatDoNotApply(t *testing.T) {
-	base := pushOptions{platformURL: "https://platform.example", tokenFile: "/run/token"}
-	cases := []struct {
-		name      string
-		clusterID string
-		ingest    ingestOptions
-	}{
-		// 静默忽略会让一个以为自己配了集群 ID / 流量摄入的部署，一直等
-		// 一份不会出现的数据。
-		{"a cluster id", "prod", ingestOptions{}},
-		{"a flow relay", "", ingestOptions{relayAddress: "hubble:4245"}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if err := dispatch(modePush, "", tc.clusterID, time.Minute, tc.ingest, base); err == nil {
-				t.Errorf("dispatch(push with %s) = nil, want an error", tc.name)
-			}
-		})
-	}
-}
-
-func TestPullModeRefusesPushParameters(t *testing.T) {
-	// 反向也要拒：一个填了 -platform-url 却忘了 -mode push 的部署，会直连
-	// 状态库跑起来 —— 而那正是「平台数据库口令跑到别人集群里」的形状。
-	err := dispatch(modePull, "configs/demo.yaml", "prod", time.Minute,
-		ingestOptions{}, pushOptions{platformURL: "https://platform.example"})
-	if err == nil {
-		t.Error("dispatch(pull with -platform-url) = nil, want an error")
-	}
-}
-
-func TestPushModeValidatesItsOwnParameters(t *testing.T) {
+func TestOptionsValidation(t *testing.T) {
 	cases := []struct {
 		name string
-		opts pushOptions
+		opts options
 	}{
-		{"no platform url", pushOptions{tokenFile: "/run/token"}},
-		{"no token file", pushOptions{platformURL: "https://platform.example"}},
+		{"no platform url", options{tokenFile: "/run/token"}},
+		{"no token file", options{platformURL: "https://platform.example"}},
 		// 地址必须是 http(s)：一个写成 "platform.example" 的地址会在拼出
 		// 请求时才失败，那时这一轮已经跑起来了。
-		{"a scheme-less url", pushOptions{platformURL: "platform.example", tokenFile: "/run/token"}},
+		{"a scheme-less url", options{platformURL: "platform.example", tokenFile: "/run/token"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -12,8 +12,12 @@ build:
 # check 是合并前的门禁，必须只依赖本地能跑的东西。conformance 需要一个
 # 真实的 kind+Cilium 集群，不属于这里——它有自己的三个 target，未设置
 # DISTILL_CONFORMANCE_CONTEXT 时 `test` 里的那个子测试也会自行跳过。
-check: lint test
+# purity 与 lint / test 并列进 check：它守的是一条编译产物的性质
+# （装进客户集群的那个二进制不得链接状态库），而那种性质靠 review 守不住。
+check: lint test purity
 
+purity:
+	./scripts/check-push-purity.sh
 dev:
 	docker compose up --build
 

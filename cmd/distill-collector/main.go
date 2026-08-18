@@ -57,9 +57,6 @@ func main() {
 	relay := flag.String("flow-relay", "", "host:port of the Hubble relay; empty means no flow ingestion")
 	relayCred := flag.String("flow-relay-ca", "", "short-name reference to the relay TLS CA; empty means a plaintext connection")
 	flowWindow := flag.Duration("flow-window", defaultFlowWindow, "how far back one flow ingestion looks")
-	mode := flag.String("mode", string(modePull), "pull (platform holds a kubeconfig) or push (this runs inside the cluster)")
-	platformURL := flag.String("platform-url", "", "push mode: base URL of the platform")
-	tokenFile := flag.String("token-file", "", "push mode: path to the mounted agent token")
 	flag.Parse()
 
 	ingest := ingestOptions{
@@ -67,8 +64,7 @@ func main() {
 		credentialRef: *relayCred,
 		window:        *flowWindow,
 	}
-	push := pushOptions{platformURL: *platformURL, tokenFile: *tokenFile}
-	if err := dispatch(collectorMode(*mode), *configPath, *clusterID, *timeout, ingest, push); err != nil {
+	if err := run(*configPath, *clusterID, *timeout, ingest); err != nil {
 		// 日志器可能尚未构造成功，此处直接写 stderr。
 		//
 		// 措辞不说"采集失败"：这一行同样会承载一次摄入失败，而一次采成功、
@@ -78,51 +74,12 @@ func main() {
 	}
 }
 
-// dispatch 按形态选一条路径跑。
+// 推送式接入是另一个二进制（cmd/distill-agent）。
 //
-// **形态是显式选择的**（design doc 2026-08-18 §1.1）：不由「给没给
-// -platform-url」推断。推断意味着一个漏填的参数会让采集器悄悄换一条完全
-// 不同的凭据与落库路径，而两条的失败方式完全不同。
-//
-// 两条路径共用同一个二进制、同一段采集逻辑，差别只有两处：凭据从哪来
-// （平台持有的 kubeconfig vs Pod 自己的 ServiceAccount），结果去哪
-// （直连状态库 vs POST 回平台）。分成两个二进制会立刻分叉出两套语义，
-// 而它们描述的是同一件事。
-func dispatch(
-	mode collectorMode, configPath, clusterID string, timeout time.Duration,
-	ingest ingestOptions, push pushOptions,
-) error {
-	if !mode.valid() {
-		return fmt.Errorf("-mode %q is not a known collector mode", string(mode))
-	}
-	if timeout <= 0 {
-		return errors.New("-timeout must be positive: an unbounded collection is one nobody can cancel")
-	}
-
-	if mode == modePush {
-		// 推送模式下这些参数没有意义，给了要拒绝而不是忽略：一个以为自己
-		// 配了流量摄入、配了集群 ID 的部署，静默忽略之后会一直等一份不会
-		// 出现的数据。
-		if clusterID != "" {
-			return errors.New("-cluster does not apply in push mode: the platform resolves it from the token")
-		}
-		if ingest.relayAddress != "" {
-			return errors.New("-flow-relay does not apply in push mode yet")
-		}
-		logger, err := applog.New("INFO", os.Stdout)
-		if err != nil {
-			return err
-		}
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		defer stop()
-		return runPush(ctx, push, timeout, logger)
-	}
-
-	if push.platformURL != "" || push.tokenFile != "" {
-		return errors.New("-platform-url and -token-file only apply in push mode")
-	}
-	return run(configPath, clusterID, timeout, ingest)
-}
+// 拆开而不是靠一个 -mode 开关（原先是那样的）：这个二进制直连平台状态库，
+// 而推送式那个会被装进别人的集群 —— 只要它们还是同一个可执行文件，
+// 「装进去的那个不带状态库访问路径」就只能靠 review 保证
+// （design doc 2026-08-18 §1.2）。
 
 // run 采集一个集群并落库，返回过程中的致命错误。
 //

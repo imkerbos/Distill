@@ -15,33 +15,12 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
+	"github.com/imkerbos/Distill/internal/collectrun"
 	"github.com/imkerbos/Distill/internal/snapshot"
 )
 
-// collectorMode 是采集器的运行形态，封闭枚举。
-//
-// **显式选择，不由参数推断**（design doc 2026-08-18 §1.1）：推断意味着一个
-// 漏填的参数会让采集器悄悄换一条完全不同的凭据与落库路径 —— 而两条路径的
-// 失败方式完全不同，一条是"读不到集群"，另一条是"平台数据库口令跑到了
-// 别人的集群里"。
-type collectorMode string
-
-const (
-	// modePull：平台持有 kubeconfig，采集器从外面读，直连状态库落盘。
-	//
-	// 留给只给得到只读 token、给不了部署权限的集群 —— uat-k8s-cluster-01
-	// 今天就是这一类。删掉它等于让唯一一个接进来的真集群立刻采不了。
-	modePull collectorMode = "pull"
-	// modePush：采集器跑在被管集群里，用 in-cluster ServiceAccount 读，
-	// 结果 POST 回平台。**平台不持有这个集群的任何凭据。**
-	modePush collectorMode = "push"
-)
-
-// valid 判断取值是否在封闭枚举内。
-func (m collectorMode) valid() bool { return m == modePull || m == modePush }
-
-// pushOptions 是推送模式的参数。
-type pushOptions struct {
+// options 是这个二进制的全部参数。
+type options struct {
 	// platformURL 是平台的地址。
 	platformURL string
 	// tokenFile 是挂进来的 agent token 文件路径。
@@ -53,7 +32,10 @@ type pushOptions struct {
 }
 
 // validate 在做任何事之前检查推送参数。
-func (o pushOptions) validate() error {
+// errTimeoutNotPositive 是一个写错了的超时配置。
+var errTimeoutNotPositive = errors.New("-timeout must be positive: an unbounded collection is one nobody can cancel")
+
+func (o options) validate() error {
 	if o.platformURL == "" {
 		return errors.New("-platform-url is required in push mode")
 	}
@@ -152,12 +134,12 @@ func fetchAgentConfig(ctx context.Context, base, token string) (agentConfig, err
 	return envelope.Data, nil
 }
 
-// runPush 跑一次推送式采集。
+// run 跑一次推送式采集。
 //
 // **这条路径不触达平台状态库**：没有 mysqlregistry、没有 snapshotstore、
 // 没有 DSN（design doc §1.2）。它拿得到的只有自己集群的只读凭据与一把
 // 只能往一个集群写数据的 token。
-func runPush(ctx context.Context, opts pushOptions, timeout time.Duration, logger *slog.Logger) error {
+func run(ctx context.Context, opts options, timeout time.Duration, logger *slog.Logger) error {
 	if err := opts.validate(); err != nil {
 		return err
 	}
@@ -182,25 +164,25 @@ func runPush(ctx context.Context, opts pushOptions, timeout time.Duration, logge
 		// 客户端建不起来同样要留下痕迹：不上报的话，界面显示「这个集群还
 		// 没有过任何一次资产采集」，与一个 agent 压根没被拉起来的集群
 		// 一模一样。
-		reportAbortedPush(ctx, sink, cfg.ClusterID, snapshot.RunErrorClientUnavailable, logger)
+		reportAborted(ctx, sink, cfg.ClusterID, snapshot.RunErrorClientUnavailable, logger)
 		return err
 	}
 
 	// fleet 传 nil：**归属由平台判定**（design doc §3.4）。把 fleet 网段
 	// 下发给每一个被管集群，等于把整个 fleet 的拓扑发出去。
-	_, err = collectOnce(ctx, cfg.ClusterID, client, nil, sink, logger)
+	_, err = collectrun.Once(ctx, cfg.ClusterID, client, nil, sink, logger)
 	return err
 }
 
-// reportAbortedPush 尽力上报一次没能开始的运行；失败只记日志。
+// reportAborted 尽力上报一次没能开始的运行；失败只记日志。
 //
 // 上报失败不改变调用方要返回的那个错误：中止的成因才是操作者要看的东西，
 // 把它换成一句「上报失败」等于用记账的失败盖住被记的那件事。
-func reportAbortedPush(
+func reportAborted(
 	ctx context.Context, sink *httpSink, clusterID string,
 	reason snapshot.RunErrorReason, logger *slog.Logger,
 ) {
-	runID, err := newRunID()
+	runID, err := collectrun.NewRunID()
 	if err != nil {
 		logger.Warn("cannot mint a run id for an aborted push", "err", err)
 		return
