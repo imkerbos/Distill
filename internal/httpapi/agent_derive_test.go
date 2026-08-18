@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/imkerbos/Distill/internal/response"
 	"github.com/imkerbos/Distill/internal/snapshotstore"
 )
 
@@ -129,8 +130,10 @@ func TestIngestReportsAContendedDerivationInsteadOfSkippingIt(t *testing.T) {
 	_, token := issueAgent(t, h, cookie, "prod-asia-1")
 
 	rec := postRun(t, h, token, runBody(``))
-	if rec.Code != http.StatusInternalServerError {
-		t.Errorf("status = %d, want 500", rec.Code)
+	// 争用不是服务故障，答业务码（见 TestIngestNamesAContendedDerivationTheSameWay）。
+	// 这条用例盯的是另一半：**它必须被记下来**，不是被跳过。
+	if got := bodyOf(t, rec)["code"]; got != float64(response.CodeConcurrentCollection) {
+		t.Errorf("code = %v, want %d", got, response.CodeConcurrentCollection)
 	}
 	if len(deriver.saved) != 1 {
 		t.Fatalf("saved = %+v, want one recorded derive run", deriver.saved)
@@ -157,5 +160,39 @@ func TestAbortedRunsAreNotDerived(t *testing.T) {
 	}
 	if len(deriver.derived) != 0 {
 		t.Errorf("derivations = %d, want none", len(deriver.derived))
+	}
+}
+
+func TestIngestNamesAConcurrentCollectionInsteadOfBlamingItself(t *testing.T) {
+	// **这条用例来自一次真实的并发演练**：两个 agent 同时打同一个集群，
+	// 其中一个整份被拒，收到的是裸的「服务内部错误」——操作者会去查平台，
+	// 而平台什么问题都没有：成因是这个集群同时跑着两个采集器。
+	sink := &recordingSink{err: snapshotstore.ErrObservationExists}
+	deriver := &recordingDeriver{}
+	h, _, cookie := newTestRouterWithAgentPipeline(t, sink, deriver)
+	_, token := issueAgent(t, h, cookie, "prod-asia-1")
+
+	rec := postRun(t, h, token, runBody(``))
+	if got := bodyOf(t, rec)["code"]; got != float64(response.CodeConcurrentCollection) {
+		t.Errorf("code = %v, want %d: %s", got, response.CodeConcurrentCollection, rec.Body.String())
+	}
+	// 落不进去就不该推导：那一刻的观测属于另一次运行。
+	if len(deriver.derived) != 0 {
+		t.Errorf("derivations = %d, want none — 推导了一份没有落库的观测",
+			len(deriver.derived))
+	}
+}
+
+func TestIngestNamesAContendedDerivationTheSameWay(t *testing.T) {
+	// 推导拿不到互斥，与观测撞车是同一件事的两个阶段：这个集群同时跑着
+	// 两个采集器。对操作者是同一句话、同一个处置，因此同一个码。
+	sink := &recordingSink{}
+	deriver := &recordingDeriver{lockErr: snapshotstore.ErrDeriveInProgress}
+	h, _, cookie := newTestRouterWithAgentPipeline(t, sink, deriver)
+	_, token := issueAgent(t, h, cookie, "prod-asia-1")
+
+	rec := postRun(t, h, token, runBody(``))
+	if got := bodyOf(t, rec)["code"]; got != float64(response.CodeConcurrentCollection) {
+		t.Errorf("code = %v, want %d: %s", got, response.CodeConcurrentCollection, rec.Body.String())
 	}
 }

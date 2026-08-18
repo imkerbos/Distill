@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/imkerbos/Distill/internal/collectrun"
+	"github.com/imkerbos/Distill/internal/response"
 	"github.com/imkerbos/Distill/internal/snapshot"
 )
 
@@ -323,4 +324,51 @@ func TestSinkPushesEveryResourceKind(t *testing.T) {
 	if strings.Contains(got.rawGot, "clusterId") || strings.Contains(got.rawGot, "ClusterID") {
 		t.Errorf("the payload claimed a cluster: %s", got.rawGot)
 	}
+}
+
+func TestSinkTranslatesTheCodesAnOperatorCanActOn(t *testing.T) {
+	// 这个进程的日志是运维在被管集群里唯一看得到的东西。「code 20008」
+	// 需要他去查平台才知道是什么意思，而那时他手上只有一个失败的 Pod。
+	cases := []struct {
+		name string
+		code int
+		want string
+	}{
+		{"a concurrent collection", int(response.CodeConcurrentCollection), "only one collector"},
+		{"a revoked token", int(response.CodeAgentUnauthenticated), "revoked"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got captured
+			srv := stubPlatform(t, http.StatusOK,
+				`{"code":`+itoa(tc.code)+`,"msg":"平台写的文案"}`, &got)
+			defer srv.Close()
+
+			err := newHTTPSink(srv.URL, "dstl_x_y").Save(context.Background(), sampleRunForPush())
+			if err == nil {
+				t.Fatal("Save() = nil, want an error")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q, want it to mention %q", err, tc.want)
+			}
+			// 平台写的 msg 不转发：这一侧只说自己写的句子。
+			if strings.Contains(err.Error(), "平台写的文案") {
+				t.Errorf("the error forwarded the platform's message: %v", err)
+			}
+		})
+	}
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [12]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
 }

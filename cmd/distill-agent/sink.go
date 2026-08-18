@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/imkerbos/Distill/internal/response"
 	"github.com/imkerbos/Distill/internal/snapshot"
 )
 
@@ -322,8 +323,28 @@ func (s *httpSink) post(ctx context.Context, payload agentRunPayload) error {
 	}
 	if resp.StatusCode != http.StatusOK || env.Code != 0 {
 		// 带上业务码，不带 msg：msg 是平台写的文案，而这条错误会进集群
-		// 日志。码足够定位，且它是封闭枚举。
-		return fmt.Errorf("the platform refused this run (HTTP %d, code %d)", resp.StatusCode, env.Code)
+		// 日志。码是封闭枚举，足够定位。
+		//
+		// 少数几个码在这里翻成人话：这个进程的日志是运维在被管集群里唯一
+		// 看得到的东西，而「code 20008」需要他去查平台才知道是什么意思。
+		// 翻译用的是**这一侧自己写的句子**，不是把平台的 msg 转发出来。
+		return fmt.Errorf("the platform refused this run (HTTP %d, code %d)%s",
+			resp.StatusCode, env.Code, hintFor(env.Code))
 	}
 	return nil
+}
+
+// hintFor 给少数几个码补一句这一侧写的说明。
+//
+// 只覆盖「运维照着这句话能做点什么」的那些。其余的留给码本身 —— 编一句
+// 泛泛的解释，比只给一个码更糟：它看起来像结论。
+func hintFor(code int) string {
+	switch code {
+	case int(response.CodeConcurrentCollection):
+		return ": another collection is already in flight for this cluster; check that only one collector runs against it"
+	case int(response.CodeAgentUnauthenticated):
+		return ": this agent's token is unknown or has been revoked; it needs a new one"
+	default:
+		return ""
+	}
 }

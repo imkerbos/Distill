@@ -41,6 +41,18 @@ func New(db *sql.DB) *Store { return &Store{db: db} }
 // 状态解释历史数据）。
 var ErrRunExists = errors.New("snapshotstore: this collection run is already stored")
 
+// ErrObservationExists 表示这个集群在这一刻已经有一份观测了。
+//
+// observed_* 系列是时序表，主键为 (cluster_id, name, observed_at)，不含
+// run_id：同一时刻同一个对象只能有一份观测。两次**不同**的运行撞上同一个
+// observed_at，说明这个集群同时跑着两个采集器。
+//
+// 与 ErrRunExists 分开是必需的，不是细分：那一条说的是「这一次运行已经交付
+// 过了」，处置是什么都不用做；这一条说的是「另一次运行占了这个时刻」，处置
+// 是去查为什么有两个采集器在跑。塌成一个通用失败，调用方只能回一句「服务
+// 内部错误」，而操作者会去查平台 —— 平台什么问题都没有。
+var ErrObservationExists = errors.New("snapshotstore: another collection already covers this instant")
+
 // Save 在单个事务里写入一次采集运行的全部产物。
 //
 // 单事务而非逐表提交：一次运行的 collection_run 与它的各 observed_* 行
@@ -64,6 +76,13 @@ func (s *Store) Save(ctx context.Context, run snapshot.Run) (err error) {
 		return err
 	}
 	if err = insertObservation(ctx, tx, run.Observation); err != nil {
+		// 观测撞主键 = 另一次运行已经占了这个时刻。翻译成一个说得出成因的
+		// 哨兵，而不是让驱动的错误文本一路走到 API 边界。
+		if isDuplicateKey(err) {
+			return fmt.Errorf("%w: cluster %s at %s",
+				ErrObservationExists, run.Observation.ClusterID,
+				run.Observation.ObservedAt.Format(time.RFC3339Nano))
+		}
 		return err
 	}
 

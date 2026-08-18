@@ -81,6 +81,21 @@ const (
 	// 也不能落回 50001：平台没接完某条路不是服务故障，而"服务内部错误"会把
 	// 人支去查服务，还会让一次正当的拒绝被计进服务错误率、按故障告警。
 	CodeReadNotWired Code = 20007
+	// CodeConcurrentCollection 表示这个集群同时有另一次采集在跑，本次没被接受。
+	//
+	// 与 50001 分开是必需的，不是细分：这不是服务故障。观测表是时序表，
+	// 同一时刻同一个对象只能有一份观测，撞上说明这个集群同时跑着两个
+	// 采集器 —— 处置是去查为什么有两个，而「服务内部错误」会把人支去查
+	// 平台，那里什么问题都没有。
+	//
+	// 两条路径落在同一个码上，因为对操作者是同一件事、处置也相同：
+	// 观测撞上同一个 observed_at（时序表的主键不含 run_id），以及推导拿不到
+	// 这个集群的互斥。分成两个码只会让「去确认只有一个采集器在跑」这句话
+	// 说两遍。
+	//
+	// 与 20004 / 20005 分开：那两条说的是「没有数据」，这一条说的是
+	// 「这一刻已经有人在写了」。
+	CodeConcurrentCollection Code = 20008
 
 	// CodeInternal 表示服务端内部错误。
 	CodeInternal Code = 50001
@@ -108,6 +123,7 @@ var messages = map[Code]string{
 	CodeNoUsableCollection:    "该集群还没有可用的采集数据，请先跑一次采集与流量摄入",
 	CodeClusterRequired:       "请先选择一个集群：流量列表按集群作答，不跨集群合并",
 	CodeReadNotWired:          "该集群的这条读路径尚未接通，暂时无法作答；这不是采集缺失，跑采集不会改变它",
+	CodeConcurrentCollection:  "这个集群同时有另一次采集在跑，本次未被接受：请先确认只有一个采集器在跑",
 	CodeInternal:              "服务内部错误",
 	CodeDependencyUnavailable: "依赖服务暂时不可用",
 }
@@ -142,6 +158,7 @@ var registered = []Code{
 	CodeNoUsableCollection,
 	CodeClusterRequired,
 	CodeReadNotWired,
+	CodeConcurrentCollection,
 	CodeInternal,
 	CodeDependencyUnavailable,
 }

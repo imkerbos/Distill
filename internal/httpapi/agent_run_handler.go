@@ -247,6 +247,16 @@ func handleAgentCollectionRun(d Deps) http.HandlerFunc {
 			// 是落库成功、推导失败之后 agent 重推的 —— 直接答成功会让那次
 			// 失败的推导永远补不上，而那个集群会一直停在「资产有了、身份
 			// 没有」的状态。已存的那份不动，推导照跑。
+			if errors.Is(err, snapshotstore.ErrObservationExists) {
+				// 另一次运行占了这个时刻。这不是服务故障，也不是「这一次
+				// 已经交付过了」—— 答一个说得出成因的业务码，操作者才会去
+				// 查为什么这个集群同时跑着两个采集器。
+				d.Logger.Warn("two collectors are pushing the same cluster at the same instant",
+					"cluster", clusterID, "runId", payload.RunID,
+					"request_id", RequestIDFrom(r.Context()))
+				response.WriteBusiness(w, response.CodeConcurrentCollection)
+				return
+			}
 			if !errors.Is(err, snapshotstore.ErrRunExists) {
 				d.Logger.Error("cannot store a pushed collection run",
 					"err", err, "cluster", clusterID, "runId", payload.RunID,
@@ -271,8 +281,18 @@ func handleAgentCollectionRun(d Deps) http.HandlerFunc {
 		// 自愈。答成功则那次失败永远补不上。
 		if err := identityderive.Once(r.Context(), clusterID, payload.RunID,
 			d.AgentDeriver, d.Logger); err != nil {
-			// 原因已经由 identityderive 落进 identity_derive_run 并记了日志。
-			// 这里不再重复它的文本 —— 那段文本里带着底层错误。
+			// 拿不到互斥说明这个集群同时跑着另一次采集 —— 与观测撞车是同一
+			// 件事的另一个阶段，处置也相同。不是服务故障，答业务码；答
+			// 「服务内部错误」会把人支去查平台，而平台什么问题都没有。
+			if errors.Is(err, snapshotstore.ErrDeriveInProgress) {
+				d.Logger.Warn("two collections are in flight for this cluster",
+					"cluster", clusterID, "runId", payload.RunID,
+					"request_id", RequestIDFrom(r.Context()))
+				response.WriteBusiness(w, response.CodeConcurrentCollection)
+				return
+			}
+			// 其余原因已经由 identityderive 落进 identity_derive_run 并记了
+			// 日志。这里不再重复它的文本 —— 那段文本里带着底层错误。
 			response.WriteSystem(w, http.StatusInternalServerError, response.CodeInternal)
 			return
 		}
