@@ -125,6 +125,19 @@ func NewRouter(d Deps) http.Handler {
 		// 它也是唯一不经过授权层的端点：还没有会话，也就还没有角色。
 		api.With(loginLimiter.Middleware).Post("/sessions", handleCreateSession(d))
 
+		// agent 子树与人的子树**并列，不嵌套**（design doc 2026-08-18 §3.3）。
+		//
+		// 这里没有 RequireSession，也没有 az.enforce：agent 没有 Cookie、
+		// 没有角色，它能做什么完全由 token 绑定的那个集群决定。两条链互不
+		// 相通 —— 人的会话不得成为一次摄入的身份，一把泄漏的 agent token
+		// 也不得成为一把能读全平台的钥匙。
+		//
+		// 默认拒绝同样成立，只是形状不同：这条链上没有有效 token 一律 401。
+		api.Route("/agent", func(agent chi.Router) {
+			agent.Use(RequireAgent(d))
+			agent.Get("/config", handleAgentConfig())
+		})
+
 		api.Group(func(protected chi.Router) {
 			protected.Use(RequireSession(d.Sessions))
 			// 授权紧跟在认证之后：先知道是谁，才谈得上他能做什么。

@@ -23,6 +23,15 @@ const (
 	// 「你不能做这件事」的处置完全相反，共用一个码会让一次权限不足
 	// 变成一次退出登录，而重新登录之后结果一模一样。
 	CodeForbidden Code = 10004
+	// CodeAgentUnauthenticated 表示请求没有携带可用的集群 agent token。
+	//
+	// 与 CodeUnauthenticated 分开：那一条的处置是「去登录页」，而 agent
+	// 不会登录 —— 它的处置是「检查装在集群里的那把 token 是不是被吊销了、
+	// 或者根本没挂进去」。合成一个码，运维与前端会读到同一句毫无指向的话。
+	//
+	// 未知、已吊销、格式不对、干脆没带，**一律是这一个码**：分开回答等于
+	// 帮试探者确认哪个 agent_id 是存在的（规范 §22）。差别只进日志。
+	CodeAgentUnauthenticated Code = 10005
 
 	// CodeInvalidParam 表示请求参数校验失败。
 	CodeInvalidParam Code = 20001
@@ -91,6 +100,7 @@ var messages = map[Code]string{
 	CodeSessionExpired:        "会话已过期，请重新登录",
 	CodeUnauthenticated:       "请先登录",
 	CodeForbidden:             "当前账号没有执行该操作的权限",
+	CodeAgentUnauthenticated:  "集群 agent 凭据无效或已被吊销",
 	CodeInvalidParam:          "请求参数不合法",
 	CodeNotFound:              "请求的资源不存在",
 	CodeRateLimited:           "请求过于频繁，请稍后再试",
@@ -124,6 +134,7 @@ var registered = []Code{
 	CodeSessionExpired,
 	CodeUnauthenticated,
 	CodeForbidden,
+	CodeAgentUnauthenticated,
 	CodeInvalidParam,
 	CodeNotFound,
 	CodeRateLimited,

@@ -30,6 +30,12 @@ const (
 	// 中间件，键定义在这里只是为了让全部 context 键留在同一处 ——
 	// 分散之后，"这个包一共往 context 里放了几样东西"就没有一处答得上来。
 	ctxKeyRole
+	// ctxKeyAgentCluster 携带 agent 认证判定出的集群归属。写入方只有
+	// RequireAgent，读取方只有 AgentClusterFrom（design doc 2026-08-18 §2）。
+	//
+	// 与 ctxKeySession 分成两个键：两条认证链的产物不得互相冒充 —— 共用
+	// 一个键，一次装配错误就会让人的会话在摄入路径上被读成一个 agent 身份。
+	ctxKeyAgentCluster
 )
 
 // RequestID 为每个请求生成标识，并回写到响应头。
