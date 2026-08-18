@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/imkerbos/Distill/internal/collectstore"
+	"github.com/imkerbos/Distill/internal/flow"
 	"github.com/imkerbos/Distill/internal/snapshot"
 	"github.com/imkerbos/Distill/internal/store"
 )
@@ -116,5 +117,55 @@ func assetOnlyPods() []snapshot.Pod {
 	return []snapshot.Pod{
 		podAt("payment", "api-1", "3c9d2b1a-0000-4000-8000-00000000000a", recycledIP, "api"),
 		podAt("shop", "web-1", "3c9d2b1a-0000-4000-8000-00000000000b", peerIP, "web"),
+	}
+}
+
+// 候选策略在没有流量时也要给得出来。
+//
+// **policygen 的生成单位是 Pod 名册，不是流量**（generate.go 的注释写得很
+// 明确）：Baseline 是按 workload 无条件注入的，依据是资产。挡住它的只是
+// generate() 里那句 readTraffic —— 而那一句要的是一个流量窗口。
+//
+// 这一屏正是操作者问「那你推荐我加什么策略」时要看的东西。
+func TestPolicyPreviewGivesBaselineCandidatesWithoutTraffic(t *testing.T) {
+	r, s := newTestReader(t)
+	ctx := context.Background()
+	saveRun(t, s, "run-assets-only", firstRunAt, assetOnlyPods())
+
+	pv, err := r.PolicyPreview(ctx, collectedID, "", store.TimeWindow{})
+	if err != nil {
+		t.Fatalf("PolicyPreview() error = %v, want baseline candidates built from assets", err)
+	}
+	if len(pv.Candidates) == 0 {
+		t.Error("PolicyPreview() returned no candidates — Baseline 是按 workload " +
+			"无条件注入的，名册在库里就该有")
+	}
+	if pv.TrafficObserved {
+		t.Error("PolicyPreview().TrafficObserved = true with no ingest")
+	}
+}
+
+// **没有流量时，dry-run 的数字不得被当成上线影响数。**
+//
+// 零条连接下每一项预测都是 0，而「会拦断 0 条连接」读起来是「可以放心下发」
+// —— 那是这个平台最不能给出的错觉。零不是一次评估的结果，是没有评估过
+// （real-reader design §4.1 记的就是这笔账）。
+func TestPolicyPreviewWithoutTrafficDoesNotLookLikeAVerifiedZero(t *testing.T) {
+	r, s := newTestReader(t)
+	ctx := context.Background()
+	saveRun(t, s, "run-assets-only", firstRunAt, assetOnlyPods())
+
+	pv, err := r.PolicyPreview(ctx, collectedID, "", store.TimeWindow{})
+	if err != nil {
+		t.Fatalf("PolicyPreview() error = %v", err)
+	}
+	if pv.Prediction.TotalEvaluated != 0 {
+		t.Errorf("Prediction.TotalEvaluated = %d with no traffic, want 0",
+			pv.Prediction.TotalEvaluated)
+	}
+	// 完整度不得是 COMPLETE：一次都没观测过，说不出这段时间漏没漏。
+	if pv.WindowCompleteness == flow.CompletenessComplete {
+		t.Errorf("WindowCompleteness = %q with no ingest — 宣称了一个没建立过的完整度",
+			pv.WindowCompleteness)
 	}
 }

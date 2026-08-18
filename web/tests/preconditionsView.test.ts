@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import {
-  baselineGapViews, dataSourceView, listTruncationView, notAssessedNote, wouldBreakQualifier,
+  baselineGapViews, dataSourceView, listTruncationView, notAssessedNote, NO_TRAFFIC_QUALIFIER, wouldBreakQualifier, wouldBreakQualifierFor,
 } from '../src/pages/preconditionsView.ts'
 import type { Completeness, DataSource, Kind } from '../src/api/types.ts'
 
@@ -291,7 +291,10 @@ test('安全发现三个清单各自回显自己的截断，且各用各的处�
 })
 
 test('WOULD_BREAK 的限定语来自 windowCompleteness，不来自反推', () => {
-  assert.match(POLICY_SOURCE, /wouldBreakQualifier\(pv\.windowCompleteness\)/,
+  // 2026-08-18：多带一个 trafficObserved —— 「一次都没观测过」比「观测不
+  // 完整」更强，前者的数字根本不存在。仍然要读 windowCompleteness，这一条
+  // 不变：有观测时限定语依旧由它决定，而不是靠反推。
+  assert.match(POLICY_SOURCE, /wouldBreakQualifierFor\(pv\.trafficObserved, pv\.windowCompleteness\)/,
     '页面不再读 windowCompleteness：限定语于是又要靠猜')
   // 断的是那个**推断**本身，不是 degradedCount 这个词：降级条数作为一个
   // 独立指标展示是正当的（DryRunDetail 的可信度降级磁贴），拿它去反推窗口
@@ -327,4 +330,31 @@ test('未评估叠加在缺失清单上，不另开一栏', () => {
     '页面自己写死了「未评估」文案：三种状态各显示什么于是又回到了测不到的那一层')
   assert.equal(/title="未评估/.test(POLICY_SOURCE), false,
     '未评估被单列成了另一节：那几类必须留在缺失清单里，只读缺失一栏的人才是 fail-closed 的')
+})
+
+test('一次流量都没观测过时，WOULD_BREAK 旁边必须说"没有评估过"', () => {
+  // 零条连接下每一项预测都是 0，而「会拦断 0 条连接」读起来正好是
+  // 「可以放心下发」——这个平台最不能给出的就是那种错觉。
+  const q = wouldBreakQualifierFor(false, 'COMPLETE')
+  assert.equal(q, NO_TRAFFIC_QUALIFIER)
+  assert.match(q, /没有评估过/)
+  assert.match(q, /不要据此下发/)
+})
+
+test('没说有没有观测过时按没有处理', () => {
+  // 与 dataSourceView 同一条纪律：一个我们读不懂的响应，不能当成最让人
+  // 安心的那个方向。
+  assert.equal(wouldBreakQualifierFor(undefined, 'COMPLETE'), NO_TRAFFIC_QUALIFIER)
+})
+
+test('有观测时退回完整度那一档', () => {
+  assert.equal(wouldBreakQualifierFor(true, 'COMPLETE'), '')
+  assert.equal(wouldBreakQualifierFor(true, 'DEGRADED'), wouldBreakQualifier('DEGRADED'))
+})
+
+test('页面用的是带观测判断的那个，不是只看完整度的老函数', () => {
+  const page = readFileSync(
+    join(import.meta.dirname, '..', 'src', 'pages', 'PolicyPage.tsx'), 'utf8')
+  assert.ok(page.includes('wouldBreakQualifierFor'),
+    'PolicyPage 仍在用只看完整度的 wouldBreakQualifier：没有流量时 WOULD_BREAK 会以一个干净的 0 出现')
 })

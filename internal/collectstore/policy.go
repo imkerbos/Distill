@@ -2,6 +2,7 @@ package collectstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 
@@ -23,8 +24,13 @@ import (
 // 指向不同的候选集。
 type candidateSet struct {
 	traffic
-	observations []policygen.Observation
-	result       policygen.Result
+	// trafficObserved 表示这次生成背后有没有真实观测。
+	//
+	// 没有时候选集仍然是真的（Baseline 依据资产），但预测的每一项都是 0，
+	// 而那个 0 是「没有评估过」不是「评估出来是 0」。
+	trafficObserved bool
+	observations    []policygen.Observation
+	result          policygen.Result
 	// notAssessed 是依据资源这次采集根本没有枚举的那几类 Baseline。
 	notAssessed []baseline.Kind
 }
@@ -70,6 +76,7 @@ func (r *Reader) PolicyPreview(
 
 	return store.PolicyPreview{
 		Cluster: clusterID, Namespace: namespace, Window: window,
+		TrafficObserved: cs.trafficObserved,
 		// 完整度照实回显，不由调用方从 DegradedCount 推断（design doc §4）。
 		WindowCompleteness: cs.completeness,
 		Candidates:         store.FilterCandidates(gen.Policies, namespace),
@@ -102,13 +109,39 @@ func (r *Reader) PolicyPreview(
 func (r *Reader) generate(
 	ctx context.Context, clusterID string, window store.TimeWindow,
 ) (candidateSet, error) {
-	// 先于集群校验：缺时间窗是调用方用错了接口，与查哪个集群无关。
-	if !window.Valid() {
-		return candidateSet{}, store.ErrWindowRequired
-	}
-	t, err := r.readTraffic(ctx, clusterID, flow.Window{From: window.From, To: window.To})
+	c, err := r.collectedCluster(ctx, clusterID)
 	if err != nil {
 		return candidateSet{}, err
+	}
+
+	// 这个集群一次流量都没摄入过时，仍然给得出候选：**Baseline 按 workload
+	// 无条件注入，依据是资产而不是流量**（policygen.Input.Pods 的说明）。
+	// 挡住它的只是这里要一个流量窗口 —— 而那正是操作者问「那你推荐我加
+	// 什么策略」时最需要的一屏（design doc 2026-08-18）。
+	//
+	// 只放行「从没摄入过」这一种：调用方点名了一段没有数据的时间时照旧
+	// 拒绝，按资产回答等于悄悄换掉了他问的那个问题。
+	var t traffic
+	trafficObserved := true
+	if _, werr := r.latestFlowWindow(ctx, clusterID); errors.Is(werr, ErrNoFlowIngest) {
+		trafficObserved = false
+		d, derr := r.describeAssets(ctx, clusterID)
+		if derr != nil {
+			return candidateSet{}, derr
+		}
+		if t, err = r.trafficOf(ctx, c, d); err != nil {
+			return candidateSet{}, err
+		}
+	} else if werr != nil {
+		return candidateSet{}, werr
+	} else {
+		// 先于集群校验：缺时间窗是调用方用错了接口，与查哪个集群无关。
+		if !window.Valid() {
+			return candidateSet{}, store.ErrWindowRequired
+		}
+		if t, err = r.readTraffic(ctx, clusterID, flow.Window{From: window.From, To: window.To}); err != nil {
+			return candidateSet{}, err
+		}
 	}
 
 	assets, err := r.assetsAt(ctx, t)
@@ -132,8 +165,9 @@ func (r *Reader) generate(
 	}
 
 	return candidateSet{
-		traffic:      t,
-		observations: obs,
+		traffic:         t,
+		trafficObserved: trafficObserved,
+		observations:    obs,
 		result: policygen.Generate(policygen.Input{
 			ClusterID: clusterID,
 			Assets:    assets, Namespaces: t.namespaces,

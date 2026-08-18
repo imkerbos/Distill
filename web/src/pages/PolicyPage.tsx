@@ -13,7 +13,7 @@ import DataSourceNotice from '../components/DataSourceNotice'
 import { DryRunDetail } from './DryRunDetail'
 import { dryRunView, type DryRunView } from './dryRunView'
 import { policyExportView, type PolicyExportView } from './policyExportView'
-import { baselineGapViews, notAssessedNote, wouldBreakQualifier } from './preconditionsView'
+import { baselineGapViews, notAssessedNote, wouldBreakQualifierFor } from './preconditionsView'
 import {
   writebackCountDrift, writebackPushBody, writebackView,
   type WritebackPushBody, type WritebackView,
@@ -103,7 +103,7 @@ export default function PolicyPage({ cluster }: { cluster: string }) {
         // 窗口完整度是后端说出来的事实，页面不再拿 degradedCount ===
         // totalEvaluated 反推——把推断换成事实正是这个字段存在的理由
         // （design doc 2026-08-17 §5）。
-        breakQualifier={wouldBreakQualifier(pv.windowCompleteness)}
+        breakQualifier={wouldBreakQualifierFor(pv.trafficObserved, pv.windowCompleteness)}
         // 导出入口与 dry-run 同屏，取数同样只来自这一个 pv 对象：文件对应的
         // 时间窗与上面那四个数字来自同一次预览响应（design doc §2、§6）。
         exportView={policyExportView(pv)}

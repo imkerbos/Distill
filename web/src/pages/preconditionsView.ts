@@ -252,6 +252,26 @@ export function notAssessedNote(notAssessed: Kind[] | null | undefined): string 
  * **未登记的取值与缺席一律加限定语**，与 dataSourceView 同一条纪律：
  * 一个我们读不懂的完整度，不能当成"完整"。
  */
+export const NO_TRAFFIC_QUALIFIER =
+  '这个集群还没有任何流量观测：下面这四个数**全部是 0，而那个 0 不是评估出来的结果，'
+  + '是根本没有评估过**。候选策略本身是真的 —— Baseline 按工作负载推导，依据是资产 —— '
+  + '但「加了会拦断什么」这个问题，在有流量之前没有答案。**不要据此下发。**'
+
+/**
+ * 一次流量都没观测过时的限定语，优先于完整度那一档。
+ *
+ * 两者不是一回事：完整度说的是「这段观测漏了多少」，而这里说的是「一次都
+ * 没观测过」。前者的数字不可信，后者的数字根本不存在 —— 而零条连接下每一项
+ * 预测都是 0，「会拦断 0 条连接」读起来正好是「可以放心下发」。
+ */
+export function wouldBreakQualifierFor(
+  trafficObserved: boolean | undefined, completeness: Completeness | undefined,
+): string {
+  // 缺席按 false 处理：一个没说自己有没有观测过的响应，不能当成有观测。
+  if (trafficObserved !== true) return NO_TRAFFIC_QUALIFIER
+  return wouldBreakQualifier(completeness)
+}
+
 export function wouldBreakQualifier(completeness: Completeness | undefined): string {
   switch (completeness) {
     case 'COMPLETE':

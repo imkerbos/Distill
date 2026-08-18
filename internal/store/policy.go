@@ -27,6 +27,16 @@ type PolicyPreview struct {
 	Namespace string `json:"namespace"`
 	// Window 是实际生效的查询时间窗，必须回显。
 	Window TimeWindow `json:"window"`
+	// TrafficObserved 表示这份预演背后有没有真实观测。
+	//
+	// **为 false 时 Prediction 的每一项都是 0，而那个 0 不是一次评估的结果，
+	// 是没有评估过。** 「会拦断 0 条连接」读起来是「可以放心下发」——
+	// 这个平台最不能给出的正是那种错觉。
+	//
+	// 候选集本身仍然是真的：Baseline 按 workload 无条件注入，依据是资产而
+	// 不是流量（policygen.Input.Pods 的说明）。因此这一屏没有流量时照样
+	// 给得出「建议加哪些策略」，只是给不出「加了会拦断什么」。
+	TrafficObserved bool `json:"trafficObserved"`
 	// WindowCompleteness 是这段观测窗口的完整度，必须回显。
 	//
 	// **它决定 Prediction 的计数该怎么读，因此不能靠推断。** 窗口不是
