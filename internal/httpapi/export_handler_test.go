@@ -130,7 +130,8 @@ func TestPolicyExportRendersTheSameRuleSetThePreviewReported(t *testing.T) {
 			bodies[c.name] = rec.Body.String()
 
 			// 方向 1：与 Reader 在同一组入参下的产物逐字段相等。
-			want, err := reader.PolicyPreview(context.Background(), "prod-asia-1", c.namespace, pv.Window)
+			want, err := reader.PolicyPreviewAtGranularity(context.Background(), "prod-asia-1",
+				c.namespace, pv.Window, policygen.GranularityWorkload)
 			if err != nil {
 				t.Fatalf("PolicyPreview() error = %v", err)
 			}
@@ -426,10 +427,11 @@ func TestPolicyExportHeaderIsSelfDescribingAndNothingMore(t *testing.T) {
 // 判定、窗口回显）仍然是真的，被测的只有"没有可导出内容时怎么办"。
 type noEnabledRulesReader struct{ store.Reader }
 
-func (r noEnabledRulesReader) PolicyPreview(
+func (r noEnabledRulesReader) PolicyPreviewAtGranularity(
 	ctx context.Context, clusterID, namespace string, window store.TimeWindow,
+	g policygen.Granularity,
 ) (store.PolicyPreview, error) {
-	pv, err := r.Reader.PolicyPreview(ctx, clusterID, namespace, window)
+	pv, err := r.Reader.PolicyPreviewAtGranularity(ctx, clusterID, namespace, window, g)
 	if err != nil {
 		return pv, err
 	}

@@ -51,6 +51,22 @@ type candidateSet struct {
 func (r *Reader) PolicyPreview(
 	ctx context.Context, clusterID, namespace string, window store.TimeWindow,
 ) (store.PolicyPreview, error) {
+	// 默认 workload 粒度 —— 最细的那一层，也是人工确认挂靠的那一层。
+	return r.PolicyPreviewAtGranularity(
+		ctx, clusterID, namespace, window, policygen.GranularityWorkload)
+}
+
+// PolicyPreviewAtGranularity 同 PolicyPreview，但指定主体粒度。
+//
+// **策略与预测必须同粒度。** 两个粒度是两批不同的策略，一份 namespace 粒度的
+// 策略集配上 workload 粒度算出来的 WOULD_BREAK 描述的是另一套策略，且偏在
+// 让人放心的方向（粗化只会放宽，因此拦断更少）—— 与写回拒绝 namespace 筛选
+// 是同一条理由（design doc 2026-08-19 §3）。因此折叠与两次预测都在这里发生，
+// 不交给调用方拼。
+func (r *Reader) PolicyPreviewAtGranularity(
+	ctx context.Context, clusterID, namespace string, window store.TimeWindow,
+	granularity policygen.Granularity,
+) (store.PolicyPreview, error) {
 	cs, err := r.generate(ctx, clusterID, window)
 	if err != nil {
 		return store.PolicyPreview{}, err
@@ -62,7 +78,6 @@ func (r *Reader) PolicyPreview(
 	}
 
 	gen := cs.result
-	report := cs.predictWith(gen.EnabledPolicies())
 
 	stored, err := r.src.RuleOverrides(ctx, clusterID)
 	if err != nil {
@@ -73,7 +88,21 @@ func (r *Reader) PolicyPreview(
 		pgOverrides = append(pgOverrides, o.ToPolicygen())
 	}
 	// Apply 建在同一次 Generate 的输出上，两套预测因此必然可比。
+	//
+	// **覆盖先于折叠。** 人工确认记在 workload 粒度（rule_override 的键），
+	// 折叠取的是确认之后仍然启用的那个集合。反过来做就没有 workload 可以
+	// 挂键了，而且一条只为某个 workload 禁用的决定会变成对整个 namespace
+	// 生效 —— 爆炸半径完全不同（design doc §4）。
 	overridden, stale := policygen.Apply(gen, pgOverrides)
+
+	// 折叠放在两次预测**之前**：预测跑的必须是屏幕上那一套策略。
+	widening := []policygen.Widening{}
+	if granularity == policygen.GranularityNamespace {
+		gen, _ = gen.AtNamespaceGranularity()
+		overridden, widening = overridden.AtNamespaceGranularity()
+	}
+
+	report := cs.predictWith(gen.EnabledPolicies())
 	overriddenReport := cs.predictWith(overridden.EnabledPolicies())
 
 	// 一份裁剪结果，两处使用：屏幕上的候选集与导出的文件必须是同一个切片
@@ -82,6 +111,10 @@ func (r *Reader) PolicyPreview(
 
 	return store.PolicyPreview{
 		Cluster: clusterID, Namespace: namespace, Window: window,
+		// 粒度回显：一份不说明自己粒度的策略集，操作者无从判断屏幕上那 42 份
+		// 是"折叠过的"还是"这个集群只有 42 个 workload"。
+		Granularity:     effectiveGranularity(granularity),
+		Widening:        widening,
 		TrafficObserved: cs.trafficObserved,
 		// 完整度照实回显，不由调用方从 DegradedCount 推断（design doc §4）。
 		WindowCompleteness: cs.completeness,
@@ -406,4 +439,16 @@ func dropInapplicable(in []policygen.MissingBaseline, drop []baseline.Kind) []po
 		out = append(out, policygen.MissingBaseline{Namespace: m.Namespace, Kinds: kinds})
 	}
 	return out
+}
+
+// effectiveGranularity 把未登记的取值收敛到 WORKLOAD。
+//
+// 失败方向朝窄（安全规范 §49）：WORKLOAD 是现状、也是更精确的那一侧。
+// 落到 NAMESPACE 会把一份本该只选中一个 workload 的策略变成选中整个
+// 命名空间，而那个方向不该靠一个零值走到。
+func effectiveGranularity(g policygen.Granularity) policygen.Granularity {
+	if g == policygen.GranularityNamespace {
+		return policygen.GranularityNamespace
+	}
+	return policygen.GranularityWorkload
 }

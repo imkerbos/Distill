@@ -10,6 +10,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/imkerbos/Distill/internal/collectstore"
+	"github.com/imkerbos/Distill/internal/policygen"
 	"github.com/imkerbos/Distill/internal/store"
 )
 
@@ -52,8 +53,9 @@ func (noTrafficPreviewReader) DefaultWindow(context.Context, string) (store.Time
 	return store.TimeWindow{}, collectstore.ErrNoFlowIngest
 }
 
-func (noTrafficPreviewReader) PolicyPreview(
+func (noTrafficPreviewReader) PolicyPreviewAtGranularity(
 	_ context.Context, clusterID, namespace string, _ store.TimeWindow,
+	_ policygen.Granularity,
 ) (store.PolicyPreview, error) {
 	enabled := []networkingv1.NetworkPolicy{{
 		ObjectMeta: metav1.ObjectMeta{Name: "distill-web", Namespace: "shop"},

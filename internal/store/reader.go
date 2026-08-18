@@ -248,8 +248,20 @@ type Reader interface {
 	Quality(ctx context.Context, clusterID string) (Quality, error)
 	// Security 返回指定集群的安全发现。集群不存在时返回错误。
 	Security(ctx context.Context, clusterID string, window TimeWindow) (SecurityReport, error)
-	// PolicyPreview 生成候选策略并回放预测。集群不存在时返回错误。
-	PolicyPreview(ctx context.Context, clusterID, namespace string, window TimeWindow) (PolicyPreview, error)
+	// PolicyPreviewAtGranularity 按指定主体粒度生成候选策略并回放预测。
+	// 集群不存在时返回错误。
+	//
+	// **粒度是必填参数，接口上没有省略它的那个重载。** 两个粒度是两批不同的
+	// 策略，而一份 namespace 粒度的策略集配上 workload 粒度算出来的
+	// WOULD_BREAK 描述的是另一套策略、且偏在让人放心的方向（粗化只会放宽，
+	// 因此拦断更少）。写成可省略，就给了"忘了传"一个位置，而那一次的症状是
+	// 屏幕上的策略与数字对不上，且不报错（design doc 2026-08-19 §3）。
+	//
+	// 未登记的取值由实现收敛到 WORKLOAD —— 那是更精确的那一侧，失败方向朝窄。
+	PolicyPreviewAtGranularity(
+		ctx context.Context, clusterID, namespace string, window TimeWindow,
+		granularity policygen.Granularity,
+	) (PolicyPreview, error)
 	// EnsureRuleExists 重新生成一次候选集，校验该指纹确实出现在
 	// (namespace, workload) 下，且这条决定不会必然失效。
 	//

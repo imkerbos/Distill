@@ -356,7 +356,7 @@ func deepCopyResult(r policygen.Result) policygen.Result {
 			rules[j] = deepCopyRule(rule)
 		}
 		out.Policies[i] = policygen.CandidatePolicy{
-			Cluster: p.Cluster, Namespace: p.Namespace,
+			Cluster: p.Cluster, Namespace: p.Namespace, Granularity: p.Granularity,
 			Workload: p.Workload, WorkloadLabelKey: p.WorkloadLabelKey, Rules: rules,
 		}
 	}

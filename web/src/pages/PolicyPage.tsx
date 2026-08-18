@@ -4,7 +4,7 @@ import { api, ApiError } from '../api/client'
 import {
   RISK_CATEGORY_LABEL,
   type CandidatePolicy, type CandidateRule, type ChangeKind, type ExcludedWorkload,
-  type Kind, type MissingBaseline, type OverrideDecision,
+  type Granularity, type Kind, type MissingBaseline, type OverrideDecision, type Widening,
   type RuleOrigin, type RuleOverride, type StaleOverride,
   type UngeneratableItem, type UngeneratableReason, type WorkloadExclusionReason,
   type WritebackPlanResult, type WritebackPushResult,
@@ -15,6 +15,7 @@ import { DryRunDetail } from './DryRunDetail'
 import { dryRunView, type DryRunView } from './dryRunView'
 import { policyExportView, type PolicyExportView } from './policyExportView'
 import { baselineGapViews, notApplicableNote, notAssessedNote, wouldBreakQualifierFor } from './preconditionsView'
+import { ALL_GRANULARITIES, granularityView, wideningNote } from './granularityView'
 import {
   writebackCountDrift, writebackPushBody, writebackView,
   type WritebackPushBody, type WritebackView,
@@ -62,12 +63,18 @@ export default function PolicyPage({ cluster }: { cluster: string }) {
   const [refreshKey, setRefreshKey] = useState(0)
   const onChanged = () => setRefreshKey((k) => k + 1)
 
+  // 粒度是一次**重新取数**，不是本地过滤：两个粒度是两批不同的策略，
+  // 各自带着自己那一套 dry-run。在前端折叠会让屏幕上的策略配上另一套
+  // 数字，而那个方向偏在让人放心的一侧（粗化只会放宽，拦断更少）。
+  const [granularity, setGranularity] = useState<Granularity>('NAMESPACE')
+
   // cluster 为空串时 key 必须也是空串——useResource 把空 key 当作"还没有
   // 可查询的目标"，直接跳过请求（见 useResource 的 `if (!key)` 分支）。
   // 拼上 refreshKey 之前先判空，否则 `":0"` 这类非空字符串会绕过那道
   // 门禁，在集群尚未选定时就拿着空 clusterID 发一次注定失败的请求。
   const { data: pv, error, loading } = useResource(
-    cluster ? `${cluster}:${refreshKey}` : '', () => api.policyPreview(cluster),
+    cluster ? `${cluster}:${refreshKey}:${granularity}` : '',
+    () => api.policyPreview(cluster, undefined, granularity),
   )
 
   // 标题与数据来源一起提到早退分支之前，理由见 DataSourceNotice：来源标识
@@ -94,6 +101,13 @@ export default function PolicyPage({ cluster }: { cluster: string }) {
   return (
     <div>
       {head}
+
+      {/* 粒度切换放在最前：它决定下面每一块内容 —— 策略、dry-run、导出。
+          放在策略那一节里面会让人先读完 dry-run 才发现那是另一个粒度的数字。 */}
+      <GranularitySection
+        current={granularity} onPick={setGranularity}
+        echoed={pv.granularity} widening={pv.widening} count={pv.candidates.length}
+      />
 
       {/* 两套预测在整个前端只在这一处同时出现：dryRunView 收下它们，
           往下传的是一个已经选定的视图。哪一套该被强调、哪一套该出现在
@@ -1470,3 +1484,56 @@ const secondarySmallButtonStyle: CSSProperties = {
   border: '1px solid var(--border-strong)', borderRadius: 'var(--radius-sm)', cursor: 'pointer',
 }
 
+/**
+ * 粒度切换与折叠的放宽报告。
+ *
+ * **回显的粒度优先于本地选择。** 两者不一致说明请求里那个值没被服务端认下来
+ * （拼错、老版本后端），此时屏幕上这份策略是服务端给的那个粒度，不是你点的
+ * 那个 —— 显示成你点的那个就是让界面替服务端撒谎。
+ */
+function GranularitySection({ current, onPick, echoed, widening, count }: {
+  current: Granularity
+  onPick: (g: Granularity) => void
+  echoed: Granularity | null
+  widening: Widening[] | null
+  count: number
+}) {
+  const view = granularityView(echoed)
+  const note = wideningNote(widening)
+  const mismatch = view.code !== current
+  return (
+    <Section
+      title="策略粒度"
+      description="决定 podSelector 选中谁。对端不受粒度影响——放行的目标始终精确到 workload 与端口。"
+      meta={`${count} 份`}
+    >
+      <div style={{ display: 'flex', gap: 8, marginBottom: 'var(--space-2)' }}>
+        {ALL_GRANULARITIES.map((g) => (
+          <button
+            key={g} type="button" onClick={() => onPick(g)}
+            aria-pressed={g === current}
+            style={{
+              padding: '4px 12px', fontSize: 'var(--text-sm)',
+              border: '1px solid var(--border)', borderRadius: 4,
+              background: g === current ? 'var(--surface-active)' : 'transparent',
+              cursor: 'pointer',
+            }}
+          >
+            {granularityView(g).label}
+          </button>
+        ))}
+      </div>
+      <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+        主体：{view.subject}。{view.detail}
+      </p>
+      {mismatch && (
+        <Notice>
+          服务端回显的粒度是 <strong>{view.code}</strong>，与这里选中的
+          <strong> {current} </strong>不一致。下方内容是服务端那个粒度的产物 ——
+          请求里的取值没有被认下来（拼错，或后端版本不认识它）。
+        </Notice>
+      )}
+      {note !== '' && <Notice>{note}</Notice>}
+    </Section>
+  )
+}

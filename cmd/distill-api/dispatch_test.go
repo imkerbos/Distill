@@ -71,10 +71,12 @@ func dispatchCasesFor(ctx context.Context, clusterID string, window store.TimeWi
 			_, err := d.Security(ctx, clusterID, window)
 			return err
 		}},
-		{method: "PolicyPreview", name: "PolicyPreview", call: func(d *dispatchReader) error {
-			_, err := d.PolicyPreview(ctx, clusterID, "payment", window)
-			return err
-		}},
+		{method: "PolicyPreviewAtGranularity", name: "PolicyPreviewAtGranularity",
+			call: func(d *dispatchReader) error {
+				_, err := d.PolicyPreviewAtGranularity(ctx, clusterID, "payment", window,
+					policygen.GranularityNamespace)
+				return err
+			}},
 		{method: "EnsureRuleExists", name: "EnsureRuleExists", call: func(d *dispatchReader) error {
 			return d.EnsureRuleExists(ctx, clusterID, "payment", "payment",
 				"deadbeef", policygen.DecisionDisable, window)

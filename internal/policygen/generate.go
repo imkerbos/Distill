@@ -190,7 +190,11 @@ func Generate(in Input) Result {
 		rules = append(rules, baselineByNS[s.namespace]...)
 		sortRules(rules)
 		res.Policies = append(res.Policies, CandidatePolicy{
-			Cluster: in.ClusterID, Namespace: s.namespace, Workload: s.workload,
+			// 生成恒为 workload 粒度 —— 那是最细的一层，也是人工确认挂靠的
+			// 那一层。namespace 粒度由 AtNamespaceGranularity 折叠出来，
+			// 不是第二次生成。
+			Granularity: GranularityWorkload,
+			Cluster:     in.ClusterID, Namespace: s.namespace, Workload: s.workload,
 			WorkloadLabelKey: s.labelKey, Rules: rules,
 		})
 	}
@@ -458,15 +462,23 @@ func dedupeGaps(in []UngeneratableItem) []UngeneratableItem {
 func (r Result) EnabledPolicies() []networkingv1.NetworkPolicy {
 	out := make([]networkingv1.NetworkPolicy, 0, len(r.Policies))
 	for _, p := range r.Policies {
+		// 名字与 podSelector 按粒度分支。未登记的取值按 WORKLOAD 处理：
+		// 那是现状、也是更精确的那一侧，失败方向朝窄（安全规范 §49）。
+		// 落到 namespace 粒度会把一份本该只选中一个 workload 的策略
+		// 变成选中整个命名空间 —— 那个方向不能靠零值走到。
+		name := "candidate-" + p.Workload
+		selector := metav1.LabelSelector{
+			MatchLabels: map[string]string{p.WorkloadLabelKey: p.Workload},
+		}
+		if p.Granularity == GranularityNamespace {
+			// 每个 namespace 内的常量名，因此天然唯一。空 selector 选中该
+			// namespace 的全部 Pod —— 那正是这个粒度的定义。
+			name, selector = "candidate-namespace", metav1.LabelSelector{}
+		}
 		np := networkingv1.NetworkPolicy{
-			ObjectMeta: metav1.ObjectMeta{
-				Namespace: p.Namespace,
-				Name:      "candidate-" + p.Workload,
-			},
+			ObjectMeta: metav1.ObjectMeta{Namespace: p.Namespace, Name: name},
 			Spec: networkingv1.NetworkPolicySpec{
-				PodSelector: metav1.LabelSelector{
-					MatchLabels: map[string]string{p.WorkloadLabelKey: p.Workload},
-				},
+				PodSelector: selector,
 				PolicyTypes: []networkingv1.PolicyType{
 					networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress,
 				},

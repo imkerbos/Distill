@@ -102,10 +102,12 @@ func sourceGuardCases(ctx context.Context, window store.TimeWindow) []sourceGuar
 			_, err := r.Security(ctx, id, window)
 			return wantClusterNotFound(err)
 		}},
-		{method: "PolicyPreview", name: "PolicyPreview", refusal: func(r *collectstore.Reader, id string) string {
-			_, err := r.PolicyPreview(ctx, id, "payment", window)
-			return wantClusterNotFound(err)
-		}},
+		{method: "PolicyPreviewAtGranularity", name: "PolicyPreviewAtGranularity",
+			refusal: func(r *collectstore.Reader, id string) string {
+				_, err := r.PolicyPreviewAtGranularity(ctx, id, "payment", window,
+					policygen.GranularityNamespace)
+				return wantClusterNotFound(err)
+			}},
 		{method: "Flows", name: "Flows(cluster named)", refusal: func(r *collectstore.Reader, id string) string {
 			_, err := r.Flows(ctx, store.FlowFilter{Cluster: id, Window: window})
 			return wantClusterNotFound(err)

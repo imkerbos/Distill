@@ -103,10 +103,11 @@ func (p *windowProbeReader) Security(
 	return store.SecurityReport{}, nil
 }
 
-func (p *windowProbeReader) PolicyPreview(
-	_ context.Context, clusterID, _ string, w store.TimeWindow,
+func (p *windowProbeReader) PolicyPreviewAtGranularity(
+	_ context.Context, clusterID, _ string, w store.TimeWindow, _ policygen.Granularity,
 ) (store.PolicyPreview, error) {
-	p.calls = append(p.calls, windowCall{method: "PolicyPreview", cluster: clusterID, window: w})
+	p.calls = append(p.calls,
+		windowCall{method: "PolicyPreviewAtGranularity", cluster: clusterID, window: w})
 	return store.PolicyPreview{Window: w}, nil
 }
 

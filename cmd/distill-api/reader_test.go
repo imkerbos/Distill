@@ -315,10 +315,12 @@ func TestACollectedClusterNeverGetsTheFixtureReader(t *testing.T) {
 			_, err := fr.Security(ctx, fixtureBackedID, window)
 			return wantClusterNotFound(err)
 		}},
-		{method: "PolicyPreview", name: "PolicyPreview(collected cluster)", leak: func() string {
-			_, err := fr.PolicyPreview(ctx, fixtureBackedID, "payment", window)
-			return wantClusterNotFound(err)
-		}},
+		{method: "PolicyPreviewAtGranularity",
+			name: "PolicyPreviewAtGranularity(collected cluster)", leak: func() string {
+				_, err := fr.PolicyPreviewAtGranularity(ctx, fixtureBackedID, "payment", window,
+					policygen.GranularityNamespace)
+				return wantClusterNotFound(err)
+			}},
 		{method: "EnsureRuleExists", name: "EnsureRuleExists(collected cluster)", leak: func() string {
 			err := fr.EnsureRuleExists(ctx, fixtureBackedID, "payment", "payment",
 				"deadbeef", policygen.DecisionDisable, window)

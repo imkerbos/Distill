@@ -59,10 +59,11 @@ type notAssessedReader struct {
 	store.Reader
 }
 
-func (r notAssessedReader) PolicyPreview(
+func (r notAssessedReader) PolicyPreviewAtGranularity(
 	ctx context.Context, clusterID, namespace string, w store.TimeWindow,
+	g policygen.Granularity,
 ) (store.PolicyPreview, error) {
-	pv, err := r.Reader.PolicyPreview(ctx, clusterID, namespace, w)
+	pv, err := r.Reader.PolicyPreviewAtGranularity(ctx, clusterID, namespace, w, g)
 	if err != nil {
 		return pv, err
 	}
@@ -180,10 +181,11 @@ type injectMissingReader struct {
 	namespace string
 }
 
-func (r injectMissingReader) PolicyPreview(
+func (r injectMissingReader) PolicyPreviewAtGranularity(
 	ctx context.Context, clusterID, namespace string, w store.TimeWindow,
+	g policygen.Granularity,
 ) (store.PolicyPreview, error) {
-	pv, err := r.Reader.PolicyPreview(ctx, clusterID, namespace, w)
+	pv, err := r.Reader.PolicyPreviewAtGranularity(ctx, clusterID, namespace, w, g)
 	if err != nil {
 		return pv, err
 	}
@@ -237,10 +239,11 @@ type emptyEnabledReader struct {
 	store.Reader
 }
 
-func (r emptyEnabledReader) PolicyPreview(
+func (r emptyEnabledReader) PolicyPreviewAtGranularity(
 	ctx context.Context, clusterID, namespace string, w store.TimeWindow,
+	g policygen.Granularity,
 ) (store.PolicyPreview, error) {
-	pv, err := r.Reader.PolicyPreview(ctx, clusterID, namespace, w)
+	pv, err := r.Reader.PolicyPreviewAtGranularity(ctx, clusterID, namespace, w, g)
 	if err != nil {
 		return pv, err
 	}

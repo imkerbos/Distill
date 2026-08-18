@@ -2,7 +2,7 @@ import { isNoRunError, isUnknownClusterError } from '../pages/collectionView'
 import type {
   Account, ClusterWrite, CollectionState, CollectionSummary,
   CurrentSession, Decision, Envelope, FlowFilter, FlowPage, GitBindingWrite,
-  GitRepo, GitRepoWrite, Identity, ImportRole, ImportSource, OverrideDecision,
+  GitRepo, GitRepoWrite, Granularity, Identity, ImportRole, ImportSource, OverrideDecision,
   PathVerifyStatus, PlatformSettingView, PlatformSettingWrite, PolicyImportItem, PolicyPreview,
   Quality, RegisteredCluster, RepoVerifyStatus, Role, SecurityReport, Topology, TopologyLevel,
   WritebackPlanResult, WritebackPushResult,
@@ -380,9 +380,12 @@ export const api = {
   decision: (flowID: string) =>
     request<Decision>(`/api/v1/flows/${encodeURIComponent(flowID)}/decision`),
 
-  policyPreview: (cluster: string, namespace?: string) => {
+  policyPreview: (cluster: string, namespace?: string, granularity?: Granularity) => {
     const p = new URLSearchParams()
     if (namespace) p.set('namespace', namespace)
+    // 小写：后端 parseGranularity 大小写不敏感，但查询参数沿用拓扑那套
+    // 小写词汇（?level=namespace），两处保持一致。
+    if (granularity === 'NAMESPACE') p.set('granularity', 'namespace')
     const q = p.toString()
     return request<PolicyPreview>(
       `/api/v1/clusters/${encodeURIComponent(cluster)}/policy-preview${q ? `?${q}` : ''}`,

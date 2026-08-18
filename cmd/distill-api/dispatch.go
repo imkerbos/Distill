@@ -131,15 +131,16 @@ func (d *dispatchReader) Security(
 	return r.Security(ctx, clusterID, window)
 }
 
-// PolicyPreview 转发给这个集群登记的来源对应的 Reader。
-func (d *dispatchReader) PolicyPreview(
+// PolicyPreviewAtGranularity 转发给这个集群登记的来源对应的 Reader。
+func (d *dispatchReader) PolicyPreviewAtGranularity(
 	ctx context.Context, clusterID, namespace string, window store.TimeWindow,
+	granularity policygen.Granularity,
 ) (store.PolicyPreview, error) {
 	r, err := d.readerOf(ctx, clusterID)
 	if err != nil {
 		return store.PolicyPreview{}, err
 	}
-	return r.PolicyPreview(ctx, clusterID, namespace, window)
+	return r.PolicyPreviewAtGranularity(ctx, clusterID, namespace, window, granularity)
 }
 
 // EnsureRuleExists 转发给这个集群登记的来源对应的 Reader。

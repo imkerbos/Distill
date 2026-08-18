@@ -102,8 +102,11 @@ func Apply(base Result, overrides []Override) (Result, []StaleOverride) {
 	for i, p := range base.Policies {
 		rules := make([]Rule, len(p.Rules))
 		copy(rules, p.Rules)
+		// Granularity 必须带过来。丢掉它会让覆盖之后的那一份策略集落到零值，
+		// 而零值不是任何一个登记取值 —— 渲染时走 workload 分支、却拿着一个
+		// 空 Workload，产出的是 `candidate-` 加一个 {"": ""} 的 selector。
 		out.Policies[i] = CandidatePolicy{
-			Cluster: p.Cluster, Namespace: p.Namespace,
+			Cluster: p.Cluster, Namespace: p.Namespace, Granularity: p.Granularity,
 			Workload: p.Workload, WorkloadLabelKey: p.WorkloadLabelKey, Rules: rules,
 		}
 	}

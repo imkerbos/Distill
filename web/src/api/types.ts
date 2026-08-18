@@ -389,11 +389,35 @@ export interface OverriddenView {
   prediction: PredictionReport
 }
 
+/**
+ * 候选策略的主体粒度。
+ *
+ * 后端的封闭枚举是大写；查询参数用小写（沿用拓扑 ?level=namespace 那套词汇）。
+ * 两边不一致过一次 —— 直接拿参数比对枚举永远不相等，而那种失败不报错，
+ * 只是静默落回默认粒度。
+ */
+export type Granularity = 'WORKLOAD' | 'NAMESPACE'
+
 export interface CandidatePolicy {
   cluster: string
   namespace: string
+  /** 主体粒度。NAMESPACE 时 workload 为空，那是结果、不是判据。 */
+  granularity: Granularity
   workload: string
   rules: CandidateRule[]
+}
+
+/**
+ * 折叠到 namespace 粒度多放出去的量。
+ *
+ * **粗化只会放宽。** extraGrants 为 0 表示这个 namespace 里每条规则本来就
+ * 人人都有，折叠无损；大于 0 表示有 Pod 拿到了它原本没有的放行。
+ */
+export interface Widening {
+  namespace: string
+  workloads: number
+  rules: number
+  extraGrants: number
 }
 
 export interface MissingBaseline {
@@ -751,6 +775,14 @@ export interface PolicyPreview {
   namespace: string
   window: TimeWindow
   candidates: CandidatePolicy[]
+  /** 本次预览的粒度，后端回显。缺席按 WORKLOAD 读（见 granularityView）。 */
+  granularity: Granularity | null
+  /**
+   * 折叠的放宽报告，按 namespace 一条。workload 粒度下为空数组。
+   *
+   * 契约恒为非 nil：空数组是"这个粒度不涉及折叠"，null 是"没人算过"。
+   */
+  widening: Widening[] | null
   missingBaselines: MissingBaseline[]
   /**
    * 这些命名空间里**没有推导对象**、因而不需要放行的类型。

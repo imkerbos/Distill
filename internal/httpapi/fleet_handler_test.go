@@ -44,6 +44,12 @@ func (brokenReader) Security(context.Context, string, store.TimeWindow) (store.S
 	return store.SecurityReport{}, errors.New("bigquery: connection refused at 10.0.0.5:9050")
 }
 
+func (brokenReader) PolicyPreviewAtGranularity(
+	context.Context, string, string, store.TimeWindow, policygen.Granularity,
+) (store.PolicyPreview, error) {
+	return store.PolicyPreview{}, errors.New("bigquery: connection refused at 10.0.0.5:9050")
+}
+
 func (brokenReader) PolicyPreview(context.Context, string, string, store.TimeWindow) (store.PolicyPreview, error) {
 	return store.PolicyPreview{}, errors.New("bigquery: connection refused at 10.0.0.5:9050")
 }
@@ -116,6 +122,12 @@ func (noCollectionReader) Security(
 	context.Context, string, store.TimeWindow,
 ) (store.SecurityReport, error) {
 	return store.SecurityReport{}, noCollection()
+}
+
+func (noCollectionReader) PolicyPreviewAtGranularity(
+	context.Context, string, string, store.TimeWindow, policygen.Granularity,
+) (store.PolicyPreview, error) {
+	return store.PolicyPreview{}, noCollection()
 }
 
 func (noCollectionReader) PolicyPreview(

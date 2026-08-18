@@ -86,7 +86,10 @@ func handlePolicyExport(d Deps) http.HandlerFunc {
 			response.WriteInvalid(w, namespacedExportMsg)
 			return
 		}
-		pv, err := d.Reader.PolicyPreview(r.Context(), clusterID, namespace, window)
+		// 导出跟着当前粒度走（design doc 2026-08-19 §9）：文件里那份策略必须
+		// 与屏幕上看过的那一份逐条对应。
+		pv, err := d.Reader.PolicyPreviewAtGranularity(r.Context(), clusterID, namespace, window,
+			parseGranularity(r.URL.Query().Get("granularity")))
 		if err != nil {
 			writeReaderError(w, r, d, err)
 			return

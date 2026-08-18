@@ -58,6 +58,21 @@ type PolicyPreview struct {
 	WindowCompleteness flow.Completeness `json:"windowCompleteness"`
 	// Candidates 是候选策略。
 	Candidates []policygen.CandidatePolicy `json:"candidates"`
+	// Granularity 是本次预览的主体粒度，回显请求里那个值。
+	//
+	// 必须回显：一份不说明自己粒度的策略集，操作者无从判断屏幕上那 42 份是
+	// "折叠过的"还是"这个集群只有 42 个 workload"，而两者对下一步做什么的
+	// 含义完全不同（design doc 2026-08-19 §8）。
+	Granularity policygen.Granularity `json:"granularity"`
+	// Widening 是折叠到 namespace 粒度多放出去的量，按 namespace 一条。
+	//
+	// **粗化只会放宽**：一条原本只属于某个 workload 的放行，折叠之后该
+	// namespace 里每个 Pod 都拿到了。这是一次刻意的取舍，但不得无声发生 ——
+	// 因此它与策略同屏返回（design doc §2）。
+	//
+	// workload 粒度下恒为空切片（不是 nil）：空清单是"这个粒度不涉及折叠"，
+	// null 是"没人算过"，两者对读的人不同。
+	Widening []policygen.Widening `json:"widening"`
 	// MissingBaselines 是尚未齐备的 Baseline 类型。
 	//
 	// 五类齐备是进入 Enforcing 的前提（spec §7.3 G3）。缺失必须与
@@ -232,6 +247,19 @@ func (r *FixtureReader) generate(
 func (r *FixtureReader) PolicyPreview(
 	ctx context.Context, clusterID, namespace string, window TimeWindow,
 ) (PolicyPreview, error) {
+	return r.PolicyPreviewAtGranularity(
+		ctx, clusterID, namespace, window, policygen.GranularityWorkload)
+}
+
+// PolicyPreviewAtGranularity 同 PolicyPreview，但指定主体粒度。
+//
+// 折叠与两次预测都在这里发生：策略与预测必须同粒度，一份 namespace 粒度的
+// 策略集配上 workload 粒度的 WOULD_BREAK 描述的是另一套策略
+// （design doc 2026-08-19 §3）。
+func (r *FixtureReader) PolicyPreviewAtGranularity(
+	ctx context.Context, clusterID, namespace string, window TimeWindow,
+	granularity policygen.Granularity,
+) (PolicyPreview, error) {
 	cs, err := r.generate(ctx, clusterID, window)
 	if err != nil {
 		return PolicyPreview{}, err
@@ -240,16 +268,6 @@ func (r *FixtureReader) PolicyPreview(
 	if namespace != "" && !hasNamespace(c.Namespaces, namespace) {
 		return PolicyPreview{}, fmt.Errorf("%w: %s/%s", ErrNamespaceNotFound, clusterID, namespace)
 	}
-
-	report := predict.Run(predict.Input{
-		ClusterID:    clusterID,
-		Policies:     gen.EnabledPolicies(),
-		Namespaces:   c.Namespaces,
-		CCNPPresent:  c.CCNPPresent,
-		Observations: cs.observations,
-		// 展示名复用流量列表那一套，两个界面必须用同一个名字指同一个 Pod。
-		Label: endpointLabel,
-	})
 
 	stored, err := r.source.RuleOverrides(ctx, clusterID)
 	if err != nil {
@@ -262,6 +280,24 @@ func (r *FixtureReader) PolicyPreview(
 	// Apply 建在同一次 Generate 的输出上，两套预测因此必然可比 ——
 	// 这是结构性保证，不是约定。
 	overridden, stale := policygen.Apply(gen, pgOverrides)
+
+	// **覆盖先于折叠**：确认记在 workload 粒度，折叠取的是确认之后仍然启用
+	// 的那个集合（design doc §4）。折叠先于预测：预测跑的必须是屏幕上那一套。
+	widening := []policygen.Widening{}
+	if granularity == policygen.GranularityNamespace {
+		gen, _ = gen.AtNamespaceGranularity()
+		overridden, widening = overridden.AtNamespaceGranularity()
+	}
+
+	report := predict.Run(predict.Input{
+		ClusterID:    clusterID,
+		Policies:     gen.EnabledPolicies(),
+		Namespaces:   c.Namespaces,
+		CCNPPresent:  c.CCNPPresent,
+		Observations: cs.observations,
+		// 展示名复用流量列表那一套，两个界面必须用同一个名字指同一个 Pod。
+		Label: endpointLabel,
+	})
 	overriddenReport := predict.Run(predict.Input{
 		ClusterID:    clusterID,
 		Policies:     overridden.EnabledPolicies(),
@@ -282,6 +318,8 @@ func (r *FixtureReader) PolicyPreview(
 		// 有的警告，而它的 dry-run 数字是真算过的。
 		TrafficObserved: true,
 		Cluster:         clusterID, Namespace: namespace, Window: window,
+		Granularity: effectiveGranularity(granularity),
+		Widening:    widening,
 		// 合成数据集不是一次观测，没有采样、没有丢弃、没有覆盖不满的窗口 ——
 		// 它就是完整的。填 COMPLETE 而不是留空：空值不在 flow.Completeness
 		// 的封闭枚举里，前端拿到它只能猜，而这个字段存在的理由正是不让人猜。
@@ -402,4 +440,20 @@ func FilterMissing(in []policygen.MissingBaseline, namespace string) []policygen
 		}
 	}
 	return out
+}
+
+// effectiveGranularity 把未登记的取值收敛到 WORKLOAD。
+//
+// 失败方向朝窄（安全规范 §49）：WORKLOAD 是现状、也是更精确的那一侧。
+// 落到 NAMESPACE 会把一份本该只选中一个 workload 的策略变成选中整个命名
+// 空间，而那个方向不该靠一个零值走到。
+//
+// 两个 Reader 各有一份同名函数，是刻意的：它们分属两个包，而这条收敛规则
+// 是各自边界上的判断。合成一份要么让 store 依赖 collectstore（反了），
+// 要么再开一个包放三行代码。
+func effectiveGranularity(g policygen.Granularity) policygen.Granularity {
+	if g == policygen.GranularityNamespace {
+		return policygen.GranularityNamespace
+	}
+	return policygen.GranularityWorkload
 }

@@ -330,7 +330,11 @@ func planWriteback(
 		return plannedWriteback{}, false
 	}
 
-	pv, err := d.Reader.PolicyPreview(r.Context(), clusterID, "", window)
+	// 写回跟着当前粒度走，与导出同源：推进 Git 的必须是操作者确认过的那一份。
+	// 粒度进指纹（计划由 registry.NewWritebackPlan 现算），因此换粒度会让
+	// 旧指纹对不上 —— 那正是期望行为。
+	pv, err := d.Reader.PolicyPreviewAtGranularity(r.Context(), clusterID, "", window,
+		parseGranularity(r.URL.Query().Get("granularity")))
 	if err != nil {
 		writeReaderError(w, r, d, err)
 		return plannedWriteback{}, false

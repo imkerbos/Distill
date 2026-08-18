@@ -278,6 +278,12 @@ type CandidatePolicy struct {
 	Cluster string `json:"cluster"`
 	// Namespace 是所属命名空间。
 	Namespace string `json:"namespace"`
+	// Granularity 是主体粒度。
+	//
+	// NAMESPACE 粒度下 Workload 与 WorkloadLabelKey 为空，**但那是结果、
+	// 不是判据** —— 拿空串当粒度标记会让「这个字段没填」与「这是 namespace
+	// 粒度」变成同一个状态（design doc 2026-08-19 §6）。
+	Granularity Granularity `json:"granularity"`
 	// Workload 是主体 workload，即 podSelector 的标签值。
 	Workload string `json:"workload"`
 	// WorkloadLabelKey 是 Workload 命中的标签键，见 workloadLabelKeys。
