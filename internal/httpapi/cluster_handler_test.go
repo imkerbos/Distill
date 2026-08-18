@@ -56,6 +56,11 @@ type memRegistry struct {
 	setting registry.PlatformSetting
 	// accounts 是这个替身持有的账号表，见本文件末尾的账号方法。
 	accounts map[string]*memAccount
+	// agents 是这个替身持有的 agent 表，键是公开段（全局唯一）。
+	//
+	// 按 agentID 而不是 (clusterID, agentID) 建索引，与真实实现的唯一索引
+	// 对齐：认证路径上只有 token 在手，能拿到的只有公开段。
+	agents map[string]registry.ClusterAgent
 	// failAccountsWith 让账号读写失败。
 	//
 	// **账号路径有自己的开关，不吃 failWith / failWritesWith**，这不是
@@ -123,6 +128,7 @@ func newMemRegistry() *memRegistry {
 		imports:   map[string][]registry.PolicyImport{},
 		overrides: map[string][]registry.RuleOverride{},
 		accounts:  map[string]*memAccount{},
+		agents:    map[string]registry.ClusterAgent{},
 		// 一份能过 ValidatePlatformSetting 的设置：零值那份读出来是
 		// 「会话立即过期、超时保护关掉」，不是一个可用的初始状态。
 		setting: registry.PlatformSetting{
@@ -1239,4 +1245,78 @@ func TestCreateClusterCarriesEveryFieldIntoTheDomainObject(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("stored cluster =\n%+v\nwant\n%+v", got, want)
 	}
+}
+
+// --- cluster agent（design doc 2026-08-18 §3）---
+//
+// 这个替身刻意实现出真实的定位语义，而不是"存下就算数"：跨集群吊销必须
+// 落空、已吊销的记录必须仍然查得到。handler 与中间件的测试正是靠这两条
+// 区分「被吊销」与「不存在」，替身把它们抹平，那些断言就全成了摆设。
+
+func (m *memRegistry) IssueClusterAgent(
+	_ context.Context, _ registry.Actor, a registry.ClusterAgent,
+) error {
+	if err := m.writeErr(); err != nil {
+		return err
+	}
+	if err := registry.ValidateClusterAgent(a); err != nil {
+		return err
+	}
+	if _, exists := m.agents[a.AgentID]; exists {
+		return registry.NewInvalidError("agent 已存在")
+	}
+	a.State = registry.AgentActive
+	a.CreatedAt = time.Date(2026, 8, 18, 0, 0, 0, 0, time.UTC)
+	m.agents[a.AgentID] = a
+	return nil
+}
+
+func (m *memRegistry) RevokeClusterAgent(
+	_ context.Context, _ registry.Actor, clusterID, agentID string,
+) error {
+	if err := m.writeErr(); err != nil {
+		return err
+	}
+	a, ok := m.agents[agentID]
+	// 三个条件缺一不可，与真实实现的 WHERE 一一对应：集群不符、已经吊销
+	// 过、根本不存在，都答 ErrNotFound。
+	if !ok || a.ClusterID != clusterID || a.State != registry.AgentActive {
+		return registry.ErrNotFound
+	}
+	a.State = registry.AgentRevoked
+	a.RevokedAt = time.Date(2026, 8, 18, 1, 0, 0, 0, time.UTC)
+	m.agents[agentID] = a
+	return nil
+}
+
+func (m *memRegistry) ClusterAgents(_ context.Context, clusterID string) ([]registry.ClusterAgent, error) {
+	if m.failWith != nil {
+		return nil, m.failWith
+	}
+	var out []registry.ClusterAgent
+	for _, a := range m.agents {
+		if a.ClusterID == clusterID {
+			out = append(out, a)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].AgentID < out[j].AgentID })
+	return out, nil
+}
+
+func (m *memRegistry) ClusterAgentByID(_ context.Context, agentID string) (registry.ClusterAgent, bool, error) {
+	if m.failWith != nil {
+		return registry.ClusterAgent{}, false, m.failWith
+	}
+	a, ok := m.agents[agentID]
+	return a, ok, nil
+}
+
+func (m *memRegistry) TouchClusterAgent(_ context.Context, agentID string, at time.Time) error {
+	a, ok := m.agents[agentID]
+	if !ok {
+		return nil
+	}
+	a.LastSeenAt = at
+	m.agents[agentID] = a
+	return nil
 }

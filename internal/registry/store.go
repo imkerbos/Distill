@@ -69,6 +69,31 @@ type Store interface {
 	// 而那些行记录着谁在什么时候以什么理由启用了一条风险规则。
 	SoftDeleteCluster(ctx context.Context, actor Actor, id string) error
 
+	// IssueClusterAgent 登记一把新签发的 agent token，同事务写审计。
+	//
+	// 明文 token 不经过这个接口：签发方（internal/agentauth）把它交给
+	// 操作者，落库的只有摘要（design doc 2026-08-18 §3.2）。
+	IssueClusterAgent(ctx context.Context, actor Actor, a ClusterAgent) error
+	// RevokeClusterAgent 吊销一把 token，同事务写审计。
+	//
+	// 按 (clusterID, agentID) 定位而不是只按 agentID：少了前者，一个
+	// 管理员就能吊销别的集群的 agent，而界面上看起来他只在操作自己那个。
+	// 没有可吊销的行时返回 ErrNotFound —— 静默成功会让一次吊销错对象的
+	// 操作看起来生效了。
+	RevokeClusterAgent(ctx context.Context, actor Actor, clusterID, agentID string) error
+	// ClusterAgents 返回一个集群下的全部 agent，含已吊销的。
+	ClusterAgents(ctx context.Context, clusterID string) ([]ClusterAgent, error)
+	// ClusterAgentByID 按公开段查一条记录，**不按状态过滤**。
+	//
+	// 认证层要能分辨「被吊销」与「从来不存在」：前者意味着有人正在用一把
+	// 该扔的凭据，那是要被看见的信号。在这里过滤掉就把两者合并了。
+	ClusterAgentByID(ctx context.Context, agentID string) (ClusterAgent, bool, error)
+	// TouchClusterAgent 记下一次成功认证的时刻。
+	//
+	// 不写审计：每一次成功的摄入都会调它一次。它是可观测性，不是安全判定
+	// —— 写失败不该拒掉一次合法推送。
+	TouchClusterAgent(ctx context.Context, agentID string, at time.Time) error
+
 	// PolicyImports 返回一个集群下未删除的导入策略。
 	PolicyImports(ctx context.Context, clusterID string) ([]PolicyImport, error)
 	// CreatePolicyImport 记录一条导入，同事务写审计。
