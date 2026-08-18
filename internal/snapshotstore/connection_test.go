@@ -610,3 +610,67 @@ func TestAConnectionThatCannotBeExplainedIsRefused(t *testing.T) {
 		t.Errorf("observed_connection holds %d rows after a valid ingest, want 1", n)
 	}
 }
+
+// 重复推同一个 run_id 不是错误，是同一次摄入又说了一遍。
+//
+// agent 跑在 CronJob 里，网络抖动重试是常态。撞主键报一个通用失败会让 agent
+// 拿到 500 然后原样重试，而每一次都会得到同样的结果 —— 与 ErrRunExists 那条
+// 是同一个道理，只是对象换成了摄入。
+//
+// **已存的那一份不动**：覆盖等于让后到的推送改写历史，而历史正是这个平台
+// 用来解释「那时候是什么样」的东西（CLAUDE.md §4）。
+func TestReingestingTheSameRunIsRecognisedNotClobbered(t *testing.T) {
+	s, db := newTestStore(t)
+
+	first := ingestRun(clusterA, "ingest-dup", snapshotstore.IngestOK,
+		completeIngest(t, connection("10.4.0.9", "10.4.0.21", 8080)))
+	mustSaveIngest(t, s, first)
+
+	// 第二次带着**不同的**连接：认出重复的实现什么都不会写，而一个
+	// 「先删后插」的实现会让窗口里变成两条 9090。
+	second := ingestRun(clusterA, "ingest-dup", snapshotstore.IngestOK,
+		completeIngest(t, connection("10.4.0.9", "10.4.0.99", 9090)))
+	err := s.SaveIngest(t.Context(), second)
+	if !errors.Is(err, snapshotstore.ErrIngestRunExists) {
+		t.Fatalf("SaveIngest() error = %v, want ErrIngestRunExists; a retrying agent would "+
+			"see a server failure and retry forever", err)
+	}
+
+	if n := scanInt(t, db,
+		`SELECT COUNT(*) FROM flow_ingest_run WHERE cluster_id = ? AND run_id = ?`,
+		clusterA, "ingest-dup"); n != 1 {
+		t.Errorf("flow_ingest_run holds %d rows for this run, want 1", n)
+	}
+	conns, _ := mustReadWindow(t, s, clusterA, window).Connections()
+	if len(conns) != 1 {
+		t.Fatalf("window holds %d connections, want 1 — the retry rewrote history", len(conns))
+	}
+	if conns[0].Dest.IP != "10.4.0.21" {
+		t.Errorf("stored destination = %q, want 10.4.0.21: the second push overwrote the first",
+			conns[0].Dest.IP)
+	}
+}
+
+// 超过条数上限要报成一个**认得出来的**拒绝，不是一次通用失败。
+//
+// 边界层要靠它区分「调用方一次要得太多」与「平台坏了」：前者的处置是缩短
+// 窗口，后者是去查平台。塌成一个通用失败，agent 拿到 500 之后会原样重试。
+func TestTooManyConnectionsIsARecognisableRefusal(t *testing.T) {
+	s, db := newTestStore(t)
+
+	conns := make([]flow.Connection, 0, 50_001)
+	for i := 0; i < 50_001; i++ {
+		conns = append(conns, connection("10.4.0.9", "10.4.0.21", int32(1024+i%40000)))
+	}
+	err := s.SaveIngest(t.Context(), ingestRun(clusterA, "ingest-huge",
+		snapshotstore.IngestOK, completeIngest(t, conns...)))
+	if !errors.Is(err, snapshotstore.ErrTooManyConnections) {
+		t.Fatalf("SaveIngest() error = %v, want ErrTooManyConnections", err)
+	}
+	// 拒绝是整份的，不是截断：留下半个窗口比留下空窗口更糟 —— 那半份
+	// 看起来是一段完整的观测。
+	if n := scanInt(t, db,
+		`SELECT COUNT(*) FROM observed_connection WHERE cluster_id = ?`, clusterA); n != 0 {
+		t.Errorf("observed_connection holds %d rows after the refusal, want 0", n)
+	}
+}

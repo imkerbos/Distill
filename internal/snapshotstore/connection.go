@@ -132,9 +132,9 @@ func (s *Store) SaveIngest(ctx context.Context, run IngestRun) (err error) {
 	// 对不上的位置。
 	if len(conns) > maxIngestConnections {
 		return fmt.Errorf(
-			"snapshotstore: ingest run %s of cluster %s carries %d connections, over the %d limit; "+
+			"%w: ingest run %s of cluster %s carries %d connections, over the %d limit; "+
 				"refusing rather than storing part of a window",
-			run.RunID, run.ClusterID, len(conns), maxIngestConnections)
+			ErrTooManyConnections, run.RunID, run.ClusterID, len(conns), maxIngestConnections)
 	}
 	for i, c := range conns {
 		if err = validateConnection(c); err != nil {
@@ -263,6 +263,13 @@ func insertIngestRun(ctx context.Context, tx *sql.Tx, run IngestRun) error {
 		requested.From, requested.To, coveredStart, coveredEnd,
 		run.StartedAt, run.FinishedAt,
 		string(run.Status), string(run.ErrorReason), sampleRate, dropped); err != nil {
+		// 唯一键冲突就是「这一次摄入已经落过了」。用数据库的约束判重，不是
+		// 先 SELECT 再 INSERT：后者在两次并发重试之间有窗口，而 CronJob 的
+		// 重试恰恰可能同时到达（同 insertRun 的理由）。
+		if isDuplicateKey(err) {
+			return fmt.Errorf("%w: cluster %s ingest run %s",
+				ErrIngestRunExists, run.ClusterID, run.RunID)
+		}
 		return fmt.Errorf("snapshotstore: insert ingest run %s: %w", run.RunID, err)
 	}
 	return nil

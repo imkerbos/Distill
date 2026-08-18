@@ -53,6 +53,24 @@ var ErrRunExists = errors.New("snapshotstore: this collection run is already sto
 // 内部错误」，而操作者会去查平台 —— 平台什么问题都没有。
 var ErrObservationExists = errors.New("snapshotstore: another collection already covers this instant")
 
+// ErrIngestRunExists 表示这个 (cluster_id, run_id) 的流量摄入已经落过库。
+//
+// 与 ErrRunExists 同一条理由、不同的对象：摄入也走 CronJob，也会重试。
+// 分成两个哨兵而不是共用一个：调用方要能在日志里说清"重复的是哪一件事"，
+// 而共用一个会让一次资产重推与一次流量重推在排查时长得一样。
+var ErrIngestRunExists = errors.New("snapshotstore: this flow ingest is already stored")
+
+// ErrTooManyConnections 表示一次摄入带的连接数超过了 maxIngestConnections。
+//
+// 单独一个哨兵，是为了让边界层分辨得出它与一次数据库故障：前者是调用方
+// 一次要得太多，处置是缩短窗口；后者是平台坏了。塌成一个通用失败，agent
+// 会拿到 500 然后原样重试，而每一次都会得到同样的结果。
+//
+// **它是一次拒绝，不是一次截断。** 截断会让一部分连接凭空消失，而那批连接
+// 的缺席看起来与"这段时间它们没发生"一模一样 —— 一个写入上限伪装成关于
+// 集群的观测结论。
+var ErrTooManyConnections = errors.New("snapshotstore: this flow ingest carries too many connections")
+
 // Save 在单个事务里写入一次采集运行的全部产物。
 //
 // 单事务而非逐表提交：一次运行的 collection_run 与它的各 observed_* 行
