@@ -142,6 +142,11 @@ func run(configPath string) error {
 		// 凭据，也依然不会去连那个集群。方向反了 —— 这正是推送式接入的
 		// 全部意义。
 		AgentSink: snapshotstore.New(db),
+		// 推送落库之后的身份推导。没有它，推送式接入的集群
+		// pod_identity_interval 是空的，而六个读方法每一个都从那张表出发
+		// —— 页面上显示「这个集群还没有可用的采集数据」，而资产其实已经
+		// 在库里了（design doc 2026-08-18）。
+		AgentDeriver: snapshotstore.New(db),
 		// 归属判定所需的 fleet 登记，**每次请求现读**。
 		//
 		// 装配时抄一份等于把判定钉在进程启动那一刻：那之后接入的集群，

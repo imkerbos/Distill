@@ -47,6 +47,17 @@ type Deps struct {
 	// 收不下推送」，摄入端点据此答依赖不可用 —— **不是**静默成功，那会让
 	// agent 把这一轮当成已经交付，而那批观测就此丢了。
 	AgentSink AgentSink
+	// AgentDeriver 在一次推送落库之后推导 Pod 身份区间。
+	//
+	// **没有它，推送式接入的集群是不可用的**：pod_identity_interval 会是空的，
+	// 而六个读方法每一个都从那张表出发 —— 页面上显示「这个集群还没有可用的
+	// 采集数据」，而资产其实已经在库里了。
+	//
+	// 拉取式接入下这件事由采集器自己做（它有库）；推送式下 agent 读不到整张
+	// 区间表，只能发生在这一侧（design doc 2026-08-18）。
+	//
+	// 允许为 nil：与 AgentSink 一样，没有部署 agent 的形态下没有推送这回事。
+	AgentDeriver AgentDeriver
 	// Fleet 现读全 fleet 的网段登记，供摄入路径判定地址归属。
 	//
 	// 与 AgentSink 一起为 nil 或一起非 nil：判不出归属的落库比不落库更糟，

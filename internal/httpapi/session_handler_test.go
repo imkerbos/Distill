@@ -20,6 +20,7 @@ import (
 	"github.com/imkerbos/Distill/internal/httpapi"
 	applog "github.com/imkerbos/Distill/internal/log"
 	"github.com/imkerbos/Distill/internal/registry"
+	"github.com/imkerbos/Distill/internal/snapshotstore"
 	"github.com/imkerbos/Distill/internal/store"
 )
 
@@ -138,13 +139,36 @@ func newTestRouterWithAgentSink(
 	t *testing.T, sink httpapi.AgentSink,
 ) (http.Handler, *auth.SessionStore, *http.Cookie) {
 	t.Helper()
-	reg := fixtureSource()
-	return buildTestRouterWithAgent(t, reg, sink)
+	// 配一个什么都不做的推导端：这些用例盯的是摄入本身，而没有推导端的
+	// 部署会在依赖检查那一步就被挡下（那是另一条用例的事）。「推导到底
+	// 有没有被调」由 newTestRouterWithAgentPipeline 那几条盯着。
+	return buildTestRouterWithAgent(t, fixtureSource(), sink, nopDeriver{})
+}
+
+// nopDeriver 是一个成功但什么都不做的推导端。
+type nopDeriver struct{}
+
+func (nopDeriver) LockCluster(context.Context, string) (func(context.Context) error, error) {
+	return func(context.Context) error { return nil }, nil
+}
+func (nopDeriver) DeriveIdentityIntervals(context.Context, string, string) error { return nil }
+func (nopDeriver) SaveDeriveRun(context.Context, snapshotstore.DeriveRun) error  { return nil }
+
+// newTestRouterWithAgentPipeline 额外注入推导端。
+//
+// 与 newTestRouterWithAgentSink 分开：绝大多数摄入用例不关心推导，而让它们
+// 都带一个推导替身，会让「推导到底有没有被调」这件事分散在每一个用例里，
+// 而不是集中在盯着它的那几条上。
+func newTestRouterWithAgentPipeline(
+	t *testing.T, sink httpapi.AgentSink, deriver httpapi.AgentDeriver,
+) (http.Handler, *auth.SessionStore, *http.Cookie) {
+	t.Helper()
+	return buildTestRouterWithAgent(t, fixtureSource(), sink, deriver)
 }
 
 // buildTestRouterWithAgent 装配一个带 agent 摄入端的路由器。
 func buildTestRouterWithAgent(
-	t *testing.T, reg registry.Store, sink httpapi.AgentSink,
+	t *testing.T, reg registry.Store, sink httpapi.AgentSink, deriver httpapi.AgentDeriver,
 ) (http.Handler, *auth.SessionStore, *http.Cookie) {
 	t.Helper()
 	hash, err := bcrypt.GenerateFromPassword([]byte(testPassword), bcrypt.MinCost)
@@ -158,11 +182,12 @@ func buildTestRouterWithAgent(
 	}
 
 	h := httpapi.NewRouter(httpapi.Deps{
-		Sessions:  sessions,
-		Verifier:  auth.NewVerifier(config.User{Username: "demo", PasswordHash: string(hash)}, reg),
-		Logger:    logger,
-		Registry:  reg,
-		AgentSink: sink,
+		Sessions:     sessions,
+		Verifier:     auth.NewVerifier(config.User{Username: "demo", PasswordHash: string(hash)}, reg),
+		Logger:       logger,
+		Registry:     reg,
+		AgentSink:    sink,
+		AgentDeriver: deriver,
 		// fleet 登记从注册表现读：网段判定是平台的事，而登记随时会变
 		// （新集群接入、网段改了）。抄一份进装配等于把判定钉在启动那一刻。
 		Fleet: func(ctx context.Context) (*cluster.Registry, error) {

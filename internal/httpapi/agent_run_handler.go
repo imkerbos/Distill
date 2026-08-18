@@ -9,6 +9,7 @@ import (
 
 	"github.com/imkerbos/Distill/internal/cluster"
 	"github.com/imkerbos/Distill/internal/collect"
+	"github.com/imkerbos/Distill/internal/identityderive"
 	"github.com/imkerbos/Distill/internal/response"
 	"github.com/imkerbos/Distill/internal/snapshot"
 	"github.com/imkerbos/Distill/internal/snapshotstore"
@@ -37,6 +38,15 @@ type AgentSink interface {
 		startedAt, finishedAt time.Time, reason snapshot.RunErrorReason,
 	) error
 }
+
+// AgentDeriver 为一次已落库的采集运行推导 Pod 身份区间。
+//
+// 与 AgentSink 分成两个接口而不是并成一个（同 collector 侧 runStore /
+// deriveStore 的拆法）：推导的成败落在自己的记录上，分开的接口让「顺手把
+// 推导结果塞进采集那张表」在类型层面就没有落脚点。
+//
+// *snapshotstore.Store 满足它，identityderive.Once 消费它。
+type AgentDeriver = identityderive.Store
 
 // FleetSource 现读全 fleet 的网段登记，供归属判定使用。
 //
@@ -109,7 +119,7 @@ func handleAgentCollectionRun(d Deps) http.HandlerFunc {
 			response.WriteSystem(w, http.StatusUnauthorized, response.CodeAgentUnauthenticated)
 			return
 		}
-		if d.AgentSink == nil || d.Fleet == nil {
+		if d.AgentSink == nil || d.Fleet == nil || d.AgentDeriver == nil {
 			// 没有落库端的部署形态收不下推送。答"依赖不可用"而不是成功：
 			// 答成功会让 agent 把这一轮当成已经交付，那批观测就此丢了。
 			d.Logger.Error("an agent pushed a run but this deployment has no sink",
@@ -155,18 +165,36 @@ func handleAgentCollectionRun(d Deps) http.HandlerFunc {
 		run := collect.Classify(payload.toRun(clusterID), fleet)
 
 		if err := d.AgentSink.Save(r.Context(), run); err != nil {
-			if errors.Is(err, snapshotstore.ErrRunExists) {
-				// 重复的一次是同一次采集又说了一遍，不是失败。答成功让
-				// agent 停止重试；已存的那份不动。
-				d.Logger.Info("an agent re-sent a run that was already stored",
-					"cluster", clusterID, "runId", payload.RunID,
+			// **重复的一次不是失败，但也不是「什么都不用做」。** 上一次可能
+			// 是落库成功、推导失败之后 agent 重推的 —— 直接答成功会让那次
+			// 失败的推导永远补不上，而那个集群会一直停在「资产有了、身份
+			// 没有」的状态。已存的那份不动，推导照跑。
+			if !errors.Is(err, snapshotstore.ErrRunExists) {
+				d.Logger.Error("cannot store a pushed collection run",
+					"err", err, "cluster", clusterID, "runId", payload.RunID,
 					"request_id", RequestIDFrom(r.Context()))
-				response.WriteOK(w, map[string]string{"runId": payload.RunID})
+				response.WriteSystem(w, http.StatusInternalServerError, response.CodeInternal)
 				return
 			}
-			d.Logger.Error("cannot store a pushed collection run",
-				"err", err, "cluster", clusterID, "runId", payload.RunID,
+			d.Logger.Info("an agent re-sent a run that was already stored",
+				"cluster", clusterID, "runId", payload.RunID,
 				"request_id", RequestIDFrom(r.Context()))
+		}
+
+		// 推导紧跟落库，在同一次请求里（design doc 2026-08-18）。
+		//
+		// **同步而不是丢进后台**：丢进后台就要回答「进程重启时那些没跑完的
+		// 推导去哪了」，而答案会是「没有人知道」—— 一个资产有了、身份没有的
+		// 集群，在界面上与一个完整采集的集群一模一样。同步的代价是这次请求
+		// 慢一点，而调用方是 CronJob，它不在乎。
+		//
+		// 推导失败要**答失败**：agent 会重推，而重推会再推导一次，顺序重推
+		// 是幂等的（snapshotstore 那条集成用例钉着这一点），于是这条路径
+		// 自愈。答成功则那次失败永远补不上。
+		if err := identityderive.Once(r.Context(), clusterID, payload.RunID,
+			d.AgentDeriver, d.Logger); err != nil {
+			// 原因已经由 identityderive 落进 identity_derive_run 并记了日志。
+			// 这里不再重复它的文本 —— 那段文本里带着底层错误。
 			response.WriteSystem(w, http.StatusInternalServerError, response.CodeInternal)
 			return
 		}
