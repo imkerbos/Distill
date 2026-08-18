@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/imkerbos/Distill/internal/collectstore"
 	"github.com/imkerbos/Distill/internal/flow"
+	"github.com/imkerbos/Distill/internal/policygen"
 	"github.com/imkerbos/Distill/internal/snapshot"
+	"github.com/imkerbos/Distill/internal/snapshotstore"
 	"github.com/imkerbos/Distill/internal/store"
 )
 
@@ -167,5 +170,106 @@ func TestPolicyPreviewWithoutTrafficDoesNotLookLikeAVerifiedZero(t *testing.T) {
 	if pv.WindowCompleteness == flow.CompletenessComplete {
 		t.Errorf("WindowCompleteness = %q with no ingest — 宣称了一个没建立过的完整度",
 			pv.WindowCompleteness)
+	}
+}
+
+// 人工逐条确认必须能落在采集集群上。
+//
+// **此前 EnsureRuleExists 在这个 Reader 上一律拒绝**（notyet.go：「尚未接到
+// 采集数据上」）。于是操作者在 UAT 上看得见 304 条推荐，却一条都确认不了 ——
+// 而「人工逐条确认」正是需求第三段的核心动作。
+//
+// 校验逻辑与 fixture 侧逐字同源：指纹要在当前候选集里对得上，BASELINE 来源
+// 的规则不许 DISABLE。共用同一个 generate，两个端点因此不可能对着不同的
+// 候选集给出互相矛盾的答案。
+func TestEnsureRuleExistsWorksOnACollectedCluster(t *testing.T) {
+	r, s := newTestReader(t)
+	ctx := context.Background()
+	// 带上 kube-dns 的 Service 与后端：DNS Baseline 的依据就是它
+	// （baseline/derive_dns.go）。没有依据资产时候选策略只是一份
+	// default-deny，一条规则都不带 —— 那样这条用例证明不了任何事。
+	saveRunWithDNS(t, s, "run-assets-only", firstRunAt, assetOnlyPods())
+
+	pv, err := r.PolicyPreview(ctx, collectedID, "", store.TimeWindow{})
+	if err != nil {
+		t.Fatalf("PolicyPreview() error = %v", err)
+	}
+	var ns, wl, fp string
+	var origin policygen.RuleOrigin
+	for _, p := range pv.Candidates {
+		for _, rule := range p.Rules {
+			ns, wl, fp, origin = p.Namespace, p.Workload, rule.Fingerprint, rule.Origin
+			break
+		}
+		if fp != "" {
+			break
+		}
+	}
+	if fp == "" {
+		t.Fatal("候选集里一条规则都没有，这条用例证明不了任何事")
+	}
+
+	// 一条真实存在的规则：确认（ENABLE）必须通过。
+	if err := r.EnsureRuleExists(ctx, collectedID, ns, wl, fp,
+		policygen.DecisionEnable, store.TimeWindow{}); err != nil {
+		t.Errorf("EnsureRuleExists(existing rule) = %v, want nil", err)
+	}
+
+	// 一个对不上的指纹必须被拒：拿着过期页面提交的覆盖写进去不会报错，
+	// 只会永远待在「已失效」那一节，而它从来就没生效过。
+	err = r.EnsureRuleExists(ctx, collectedID, ns, wl, "not-a-real-fingerprint",
+		policygen.DecisionEnable, store.TimeWindow{})
+	if err == nil {
+		t.Error("EnsureRuleExists(stale fingerprint) = nil, want a rejection")
+	}
+
+	// BASELINE 来源的规则不许 DISABLE：policygen.Apply 面对同一种输入本就会
+	// 把它判成失效，这里只是把同一个必然结论挪到写库之前。
+	if origin == policygen.OriginBaseline {
+		err = r.EnsureRuleExists(ctx, collectedID, ns, wl, fp,
+			policygen.DecisionDisable, store.TimeWindow{})
+		if !errors.Is(err, policygen.ErrBaselineNotDisablable) {
+			t.Errorf("EnsureRuleExists(disable a baseline) = %v, want ErrBaselineNotDisablable", err)
+		}
+	}
+}
+
+// saveRunWithDNS 落一次带 kube-dns 依据的采集。
+func saveRunWithDNS(
+	t *testing.T, s *snapshotstore.Store, runID string, at time.Time, pods []snapshot.Pod,
+) {
+	t.Helper()
+	run := snapshot.Run{
+		Status:     snapshot.RunOK,
+		StartedAt:  at.Add(-30 * time.Second),
+		FinishedAt: at.Add(5 * time.Second),
+		Observation: snapshot.Observation{
+			ClusterID: collectedID, RunID: runID, ObservedAt: at,
+			Namespaces: []snapshot.Namespace{
+				{ClusterID: collectedID, Name: "payment"},
+				{ClusterID: collectedID, Name: "shop"},
+				{ClusterID: collectedID, Name: "kube-system"},
+			},
+			Pods: pods,
+			Services: []snapshot.Service{{
+				ClusterID: collectedID, Namespace: "kube-system", Name: "kube-dns",
+				Type: "ClusterIP", Selector: map[string]string{"k8s-app": "kube-dns"},
+				ClusterIP: "10.8.0.10",
+				Ports: []snapshot.ServicePort{
+					{Name: "dns", Port: 53, TargetPort: 53, Protocol: "UDP"},
+				},
+			}},
+			Endpoints: []snapshot.Endpoints{{
+				ClusterID: collectedID, Namespace: "kube-system", Name: "kube-dns",
+				Addresses: []string{"10.4.9.9"}, Ports: []int32{53},
+			}},
+		},
+	}
+	ctx := context.Background()
+	if err := s.Save(ctx, run); err != nil {
+		t.Fatalf("Save(%s) error = %v", runID, err)
+	}
+	if err := s.DeriveIdentityIntervals(ctx, collectedID, runID); err != nil {
+		t.Fatalf("DeriveIdentityIntervals(%s) error = %v", runID, err)
 	}
 }

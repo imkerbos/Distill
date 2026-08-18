@@ -259,7 +259,12 @@ func (r *FixtureReader) PolicyPreview(
 	overriddenCandidates := FilterCandidates(overridden.Policies, namespace)
 
 	return PolicyPreview{
-		Cluster: clusterID, Namespace: namespace, Window: window,
+		// fixture 数据集自带合成流量，因此这一份预演确实评估过
+		// （design doc 2026-08-18）。**显式写 true，不靠零值**：零值是 false，
+		// 而 false 的含义是"没有观测过" —— 演示集群会因此被挂上一条本不该
+		// 有的警告，而它的 dry-run 数字是真算过的。
+		TrafficObserved: true,
+		Cluster:         clusterID, Namespace: namespace, Window: window,
 		// 合成数据集不是一次观测，没有采样、没有丢弃、没有覆盖不满的窗口 ——
 		// 它就是完整的。填 COMPLETE 而不是留空：空值不在 flow.Completeness
 		// 的封闭枚举里，前端拿到它只能猜，而这个字段存在的理由正是不让人猜。

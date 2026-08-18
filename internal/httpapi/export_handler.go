@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
 
+	"github.com/imkerbos/Distill/internal/collectstore"
 	"github.com/imkerbos/Distill/internal/predict"
 	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/response"
@@ -58,6 +60,12 @@ func handlePolicyExport(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		clusterID := chi.URLParam(r, "clusterID")
 		window, ok, err := parseWindow(r.Context(), r.URL.Query(), d.Reader, clusterID)
+		// 一次流量都没摄入过时默认窗口答不出来，但候选策略照样给得出
+		// （design doc 2026-08-18）。**拿不走的推荐等于没有推荐** —— 放行，
+		// 由 renderPolicyExport 在头里说清这份文件没有经过任何评估。
+		if errors.Is(err, collectstore.ErrNoFlowIngest) {
+			window, ok, err = store.TimeWindow{}, true, nil
+		}
 		if err != nil {
 			writeReaderError(w, r, d, err)
 			return
@@ -157,18 +165,34 @@ func renderPolicyExport(pv store.PolicyPreview, exporter string, at time.Time) (
 	line("Distill 已确认策略导出")
 	line("集群: %s", pv.Cluster)
 	line("命名空间筛选: %s", namespaceLabel(pv.Namespace))
-	line("时间窗: %s ~ %s",
-		pv.Window.From.UTC().Format(time.RFC3339), pv.Window.To.UTC().Format(time.RFC3339))
-	// 四类计数取应用人工决定之后的那一套，与文档同源：文件渲染的正是
-	// Overridden 那一份候选集，配上默认推荐的数字就又是轮 3 那条缺陷。
-	for _, k := range predict.AllChangeKinds() {
-		line("dry-run %s: %d", k, counts[k])
+	if pv.TrafficObserved {
+		line("时间窗: %s ~ %s",
+			pv.Window.From.UTC().Format(time.RFC3339), pv.Window.To.UTC().Format(time.RFC3339))
+		// 四类计数取应用人工决定之后的那一套，与文档同源：文件渲染的正是
+		// Overridden 那一份候选集，配上默认推荐的数字就又是轮 3 那条缺陷。
+		for _, k := range predict.AllChangeKinds() {
+			line("dry-run %s: %d", k, counts[k])
+		}
+	} else {
+		// **不印那四个 0。** 零条连接下它们全是 0，而这份文件会脱离平台
+		// 独自存在 —— 隔两天有人读到「dry-run WOULD_BREAK: 0」，读到的是
+		// 「应用它不会打断任何东西」，而事实是没有人评估过。
+		//
+		// 空缺本身也不行：一份少了那几行的文件与一份老格式的文件长得一样。
+		// 必须显式说出来。
+		line("时间窗: 无 —— 这个集群还没有任何流量观测")
+		line("dry-run: 没有做过。平台一条流量都没有观测到这个集群，因此")
+		line("  「应用这些策略会拦断什么」这个问题在这份文件里没有答案。")
+		line("下面的策略来自资产推导（Baseline），它们本身是真的；")
+		line("**但在有流量数据之前，不要把这份文件当作评估过的变更应用出去。**")
 	}
 	line("策略文档: %d 份，启用规则: %d 条", len(pv.Overridden.Enabled), countEnabledRules(pv.Overridden.Enabled))
 	line("导出者: %s", exporter)
 	line("导出时刻: %s", at.UTC().Format(time.RFC3339))
-	line("以上 dry-run 结论算的是导出这一刻的集群状态，不是应用这一刻的。")
-	line("集群在此之后发生的变化不在其中；应用前请重新导出并核对这几个数字。")
+	if pv.TrafficObserved {
+		line("以上 dry-run 结论算的是导出这一刻的集群状态，不是应用这一刻的。")
+		line("集群在此之后发生的变化不在其中；应用前请重新导出并核对这几个数字。")
+	}
 
 	for _, p := range pv.Overridden.Enabled {
 		doc := p

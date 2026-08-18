@@ -2,32 +2,50 @@ package collectstore
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/imkerbos/Distill/internal/policygen"
+	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/store"
 )
 
-// 本文件是分阶段接入的中间态（design doc §7）：EnsureRuleExists 还没有接到
-// 采集数据上。
+// EnsureRuleExists 校验一条即将落库的人工决定在当前候选集里仍然成立。
 //
-// 它**明确拒绝**，而不是返回空结果，也不借道 fixture：
+// **这里此前一律拒绝**（「尚未接到采集数据上」）。那个拒绝在写路径上是对的
+// 失败方向，但它的代价是：一个真集群上看得见几百条推荐，却一条都确认不了 ——
+// 而「人工逐条确认」正是这个平台的核心动作。接上之后拒绝仍然存在，只是它现在
+// 拒绝的是真正该拒的那些（指纹对不上、想关掉一条 Baseline）。
 //
-//   - 空结果在界面上与"这个集群没有会被拦断的连接"完全一样，而那是一份
-//     关于生产集群的结论；
-//   - 回退到合成数据是本轮第一顺位要挡住的那件事（design doc §2）。
+// 校验逻辑与 store.FixtureReader 逐字同源，且**共用同一个 generate**：两个端点
+// 都要回答「当前候选集长什么样」，各自拼装只要有一处漂移，就会对着不同的候选集
+// 给出互相矛盾的答案（store/policy.go §candidateSet 的注释）。
 //
-// 拒绝时带上集群 ID：一次拒绝要能说出自己拒绝的是谁，否则运维只能从
-// 页面上猜是哪个集群还没接。错误文本里不含 SQL、路径与内部地址
-// （安全规范 §22）。
-
-// EnsureRuleExists 尚未接到采集数据上，一律拒绝。
+// 指纹对不上时返回 registry.NewInvalidError：调用方拿着一个过期页面提交，写进去
+// 的覆盖不会报错，只会永远待在「已失效」那一节，而它从来就没生效过。
 //
-// 它是写路径的前置校验，而校验依赖 PolicyPreview 那套候选集。前置校验
-// 答不出来时必须拒绝写入，不能放行 —— **失败方向朝关**（安全规范 §49）。
+// 指纹对上了、但目标是 BASELINE 来源且决定是 DISABLE 时返回
+// policygen.ErrBaselineNotDisablable：policygen.Apply 面对同一种输入本就会把它
+// 判成失效，这里只是把同一个必然结论挪到写库之前。
 func (r *Reader) EnsureRuleExists(
-	_ context.Context, clusterID, namespace, workload, _ string,
-	_ policygen.OverrideDecision, _ store.TimeWindow,
+	ctx context.Context, clusterID, namespace, workload, fingerprint string,
+	decision policygen.OverrideDecision, window store.TimeWindow,
 ) error {
-	return fmt.Errorf("%w: rule of %s/%s/%s", ErrReadNotCollectedYet, clusterID, namespace, workload)
+	cs, err := r.generate(ctx, clusterID, window)
+	if err != nil {
+		return err
+	}
+	for _, p := range cs.result.Policies {
+		if p.Namespace != namespace || p.Workload != workload {
+			continue
+		}
+		for _, rule := range p.Rules {
+			if rule.Fingerprint != fingerprint {
+				continue
+			}
+			if rule.Origin == policygen.OriginBaseline && decision == policygen.DecisionDisable {
+				return policygen.ErrBaselineNotDisablable
+			}
+			return nil
+		}
+	}
+	return registry.NewInvalidError("指纹与当前候选规则不匹配，页面可能已过期")
 }

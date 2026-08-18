@@ -613,7 +613,9 @@ func (r *FixtureReader) Topology(
 ) (Topology, error) {
 	c, ok := r.fleet.Cluster(clusterID)
 	if !ok {
-		return Topology{}, fmt.Errorf("%w: %s", ErrClusterNotFound, clusterID)
+		return Topology{
+			// 同 PolicyPreview：fixture 自带合成流量，边是有依据的。
+			TrafficObserved: true}, fmt.Errorf("%w: %s", ErrClusterNotFound, clusterID)
 	}
 	_, ok, err := r.registeredCluster(ctx, clusterID)
 	if err != nil {

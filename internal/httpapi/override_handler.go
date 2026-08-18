@@ -81,6 +81,13 @@ func handleCreateOverride(d Deps) http.HandlerFunc {
 		// 当成调用方的输入错误，不当默认值处理。
 		window, ok, err := parseWindow(
 			r.Context(), map[string][]string{"from": {p.From}, "to": {p.To}}, d.Reader, clusterID)
+		// 一次流量都没摄入过时默认窗口答不出来，但候选集照样存在
+		// （Baseline 依据资产，design doc 2026-08-18）。**记一个人工决定
+		// 不需要看过流量** —— 挡住它，操作者能看见 304 条推荐却一条都
+		// 确认不了。
+		if errors.Is(err, collectstore.ErrNoFlowIngest) {
+			window, ok, err = store.TimeWindow{}, true, nil
+		}
 		if err != nil {
 			writeReaderError(w, r, d, err)
 			return

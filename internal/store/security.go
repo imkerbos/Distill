@@ -166,6 +166,8 @@ func (r *FixtureReader) Security(ctx context.Context, clusterID string, window T
 	}
 
 	rep := SecurityReport{
+		// 同 PolicyPreview：fixture 自带合成流量。
+		TrafficObserved: true,
 		Cluster:         clusterID,
 		Window:          window,
 		RiskyFlows:      []RiskyFlow{},
