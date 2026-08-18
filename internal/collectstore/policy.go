@@ -231,10 +231,15 @@ func (t traffic) roster() []replay.PodRef {
 // 集群登记（网段、apiserver 端点）来自注册表，其余来自锚点那一次采集 ——
 // 不是最新一次（CLAUDE.md §4）。
 //
-// **ScrapeTargets 与 NodeAgents 留空**：采集层没有这两张表、也没有采集代码
-// （design doc §11）。留空不是遗漏，而是如实 —— 由 NotAssessedBaselines 说出
-// "我们没看过这两类依据"，而不是让它们变成两条恒定的"缺失"，把真正缺的那条
-// 淹掉。这里不得填任何占位数据。
+// **ScrapeTargets 由「登记的抓取端 × 观测到的被抓端」拼出**
+// （design doc 2026-08-18-metrics-scrape-evidence §4）：抓取端观测不出来，
+// 被抓端登记不出来，两半各有各的来源。没有登记抓取端时它是空的，
+// METRICS_SCRAPE 照旧进缺失清单 —— 不补占位数据。
+//
+// **NodeAgents 仍然留空**：那一类的依据（agent 实际访问的端口）不在任何资产
+// 里，而且它今天报的"缺失"有一部分可能根本不适用（filebeat / promtail 读文件，
+// 不往工作负载建连接）。「不适用」与「缺失」是两件事，平台今天说不出前者 ——
+// 单独一轮（同 spec §6）。留空是如实，由 NotAssessedBaselines 说出"我们没看过"。
 func (r *Reader) assetsAt(ctx context.Context, t traffic) (snapshot.Assets, error) {
 	services, err := r.readServicesAt(ctx, t.described)
 	if err != nil {
@@ -248,13 +253,30 @@ func (r *Reader) assetsAt(ctx context.Context, t traffic) (snapshot.Assets, erro
 	if err != nil {
 		return snapshot.Assets{}, err
 	}
+	pods, err := r.readPodsAt(ctx, t.described)
+	if err != nil {
+		return snapshot.Assets{}, err
+	}
+	// 只把这一半用得上的两个字段搬过去：ScrapeTargetSnapshots 要的是
+	// 「这个 Pod 在哪、它声明了什么」，不需要整行观测。
+	declared := make([]snapshot.Pod, 0, len(pods))
+	for _, p := range pods {
+		if len(p.scrapeAnnotations) == 0 {
+			continue
+		}
+		declared = append(declared, snapshot.Pod{
+			Namespace: p.namespace, Name: p.name, ScrapeAnnotations: p.scrapeAnnotations,
+		})
+	}
+
 	return snapshot.Assets{
-		ClusterID:  t.clusterID,
-		Services:   services,
-		Endpoints:  endpoints,
-		Gateways:   gateways,
-		APIServers: t.registered.APIServerSnapshots(),
-		Registry:   t.registered.ToSnapshot(),
+		ClusterID:     t.clusterID,
+		Services:      services,
+		Endpoints:     endpoints,
+		Gateways:      gateways,
+		APIServers:    t.registered.APIServerSnapshots(),
+		ScrapeTargets: t.registered.ScrapeTargetSnapshots(declared),
+		Registry:      t.registered.ToSnapshot(),
 	}, nil
 }
 

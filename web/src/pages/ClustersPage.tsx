@@ -470,6 +470,26 @@ function ClusterFields({ values, patch, mode }: {
         />
       </div>
 
+      <div style={{ marginTop: 'var(--space-4)' }}>
+        <SubHeading>metrics 抓取端（可选，每行一个）</SubHeading>
+        <p style={{
+          margin: '0 0 6px', fontSize: 'var(--text-xs)', color: 'var(--text-muted)',
+        }}>
+          格式 <code>命名空间&nbsp;&nbsp;标签键=值,标签键=值</code>，例如{' '}
+          <code>monitoring&nbsp;&nbsp;app.kubernetes.io/name=prometheus</code>。
+          填了它，被抓的工作负载才会拿到放行抓取端的 Baseline；不填就照旧报缺失
+          —— 平台不会去猜谁是抓取端，猜错会生成一条选不中任何 Pod 的规则。
+        </p>
+        <textarea
+          className="ctl"
+          aria-label="metrics 抓取端"
+          value={values.metricsScrapers}
+          onChange={(e) => patch({ metricsScrapers: e.target.value })}
+          rows={3}
+          style={textareaStyle}
+        />
+      </div>
+
     </>
   )
 }

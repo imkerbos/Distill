@@ -39,6 +39,13 @@ type clusterPayload struct {
 	State              string               `json:"state"`
 	APIServers         []registry.APIServer `json:"apiServers"`
 	HealthCheckSources []string             `json:"healthCheckSources"`
+	// MetricsScrapers 是 metrics 抓取端登记。
+	//
+	// 与 healthCheckSources 同类：它是 METRICS_SCRAPE Baseline 依据的一半，
+	// 而这一半观测不出来（design doc 2026-08-18-metrics-scrape-evidence §3.2）。
+	// 漏掉它的后果与漏掉 kubeconfigRef 同形 —— 请求成功、登记没落下，
+	// 而那一类 Baseline 继续报缺失，没有任何东西指向登记。
+	MetricsScrapers []registry.MetricsScraper `json:"metricsScrapers"`
 }
 
 // toCluster 把请求体转成领域对象。
@@ -62,6 +69,7 @@ func (p clusterPayload) toCluster() registry.Cluster {
 		KubeconfigRef:      p.KubeconfigRef,
 		APIServers:         p.APIServers,
 		HealthCheckSources: p.HealthCheckSources,
+		MetricsScrapers:    p.MetricsScrapers,
 	}
 }
 

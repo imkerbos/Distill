@@ -23,9 +23,12 @@ import (
 type observedPod struct {
 	namespace string
 	// name 是 Pod 名。安全发现要点名裸奔的那几个 Pod，只报计数说不清该去看谁。
-	name        string
-	labels      map[string]string
-	hostNetwork bool
+	name   string
+	labels map[string]string
+	// scrapeAnnotations 是这个 Pod 自己声明的 metrics 抓取意愿，
+	// METRICS_SCRAPE Baseline 依据的一半（design doc 2026-08-18 §3）。
+	scrapeAnnotations map[string]string
+	hostNetwork       bool
 }
 
 // podKey 按 (namespace, name) 索引一次快照里的 Pod。
@@ -115,7 +118,7 @@ func (r *Reader) readIntervals(
 // 且取的是**覆盖那一刻的那次运行**，不是最新一次。
 func (r *Reader) readPodsAt(ctx context.Context, d described) ([]observedPod, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT namespace, name, labels, host_network
+		`SELECT namespace, name, labels, scrape_annotations, host_network
 		   FROM observed_pod
 		  WHERE cluster_id = ? AND observed_at = ?
 		  LIMIT ?`,
@@ -128,16 +131,23 @@ func (r *Reader) readPodsAt(ctx context.Context, d described) ([]observedPod, er
 	var out []observedPod
 	for rows.Next() {
 		var (
-			p   observedPod
-			raw []byte
+			p         observedPod
+			raw       []byte
+			rawScrape []byte
 		)
-		if err := rows.Scan(&p.namespace, &p.name, &raw, &p.hostNetwork); err != nil {
+		if err := rows.Scan(&p.namespace, &p.name, &raw, &rawScrape, &p.hostNetwork); err != nil {
 			return nil, fmt.Errorf("collectstore: scan observed pod: %w", err)
 		}
 		if err := json.Unmarshal(raw, &p.labels); err != nil {
 			// 标签列坏了就是坏了，不当成"这个 Pod 没有标签"：后者会让它被
 			// 判成没有被任何 selector 覆盖，于是一次列损坏显示成一个裸 Pod。
 			return nil, fmt.Errorf("collectstore: decode pod labels of cluster %s: %w", d.clusterID, err)
+		}
+		// 同理不吞：坏掉的抓取声明当成"这个 Pod 没声明过"，会让一条本该
+		// 生成的 metrics 放行规则静默消失，而症状是监控在下发之后中断。
+		if err := json.Unmarshal(rawScrape, &p.scrapeAnnotations); err != nil {
+			return nil, fmt.Errorf(
+				"collectstore: decode pod scrape annotations of cluster %s: %w", d.clusterID, err)
 		}
 		out = append(out, p)
 	}

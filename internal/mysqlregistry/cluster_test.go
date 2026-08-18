@@ -557,3 +557,66 @@ func TestUpdateClusterDoesNotRewriteTheDeclaredDataSource(t *testing.T) {
 		t.Errorf("DisplayName = %q, want the update to have taken effect", got.DisplayName)
 	}
 }
+
+// metrics 抓取端登记必须原样往返。
+//
+// 它是 METRICS_SCRAPE Baseline 依据的一半，而这一半观测不出来
+// （design doc 2026-08-18-metrics-scrape-evidence §3.2）。静默丢掉它的症状是：
+// 运维在页面上登记了抓取端，那一类 Baseline 却仍然报缺失，而没有任何东西
+// 指向登记没落库。
+func TestMetricsScrapersSurviveTheRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newTestStore(t)
+	actor := registry.Actor{Username: "admin"}
+
+	c := sampleCluster()
+	c.MetricsScrapers = []registry.MetricsScraper{
+		{Namespace: "monitoring", Labels: map[string]string{
+			"app.kubernetes.io/name": "prometheus", "release": "kube-prometheus-stack",
+		}},
+		{Namespace: "observability", Labels: map[string]string{"app": "vmagent"}},
+	}
+	if err := s.CreateCluster(ctx, actor, c); err != nil {
+		t.Fatalf("CreateCluster() error = %v", err)
+	}
+
+	got, ok, err := s.Cluster(ctx, c.ID)
+	if err != nil || !ok {
+		t.Fatalf("Cluster() = (_, %v, %v)", ok, err)
+	}
+	if len(got.MetricsScrapers) != 2 {
+		t.Fatalf("MetricsScrapers = %+v, want 2", got.MetricsScrapers)
+	}
+	// 一个集群可以有多个抓取端：Prometheus 与一个 agent 型采集器并存是
+	// 常见形态。少了这一条，第二个会静默覆盖第一个。
+	if got.MetricsScrapers[0].Namespace != "monitoring" {
+		t.Errorf("first scraper namespace = %q, want monitoring", got.MetricsScrapers[0].Namespace)
+	}
+	if got.MetricsScrapers[0].Labels["release"] != "kube-prometheus-stack" {
+		t.Errorf("labels round-tripped as %v", got.MetricsScrapers[0].Labels)
+	}
+}
+
+func TestUpdateClusterReplacesMetricsScrapers(t *testing.T) {
+	// 整体替换语义与 apiServers / healthCheckSources 一致：一次 PUT 描述的
+	// 是"这个集群现在有哪些抓取端"，而不是"再加一个"。
+	ctx := context.Background()
+	s, _ := newTestStore(t)
+	actor := registry.Actor{Username: "admin"}
+
+	c := sampleCluster()
+	c.MetricsScrapers = []registry.MetricsScraper{
+		{Namespace: "monitoring", Labels: map[string]string{"app": "prometheus"}},
+	}
+	if err := s.CreateCluster(ctx, actor, c); err != nil {
+		t.Fatalf("CreateCluster() error = %v", err)
+	}
+	c.MetricsScrapers = nil
+	if err := s.UpdateCluster(ctx, actor, c); err != nil {
+		t.Fatalf("UpdateCluster() error = %v", err)
+	}
+	got, _, _ := s.Cluster(ctx, c.ID)
+	if len(got.MetricsScrapers) != 0 {
+		t.Errorf("MetricsScrapers = %+v after removing them, want none", got.MetricsScrapers)
+	}
+}

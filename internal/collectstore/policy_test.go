@@ -368,13 +368,19 @@ func TestUncollectedEvidenceIsNotAMissingBaseline(t *testing.T) {
 		return out
 	}
 
-	t.Run("依据没被枚举的两类进未评估，同时留在缺失清单里", func(t *testing.T) {
+	t.Run("依据没被枚举的那一类进未评估，同时留在缺失清单里", func(t *testing.T) {
 		pv := preview(t, seed(t))
 
-		want := []baseline.Kind{baseline.KindMetrics, baseline.KindNodeAgent}
+		// **2026-08-18：METRICS_SCRAPE 离开了这一栏。** 它的依据现在落在
+		// Pod 的 prometheus.io/* 注解上，而 Pod 是每次采集都枚举的资源 ——
+		// 于是它再出现在缺失清单里，含义变成"我们看过了，这个集群没有登记
+		// 抓取端"，那是一个照着能做点什么的缺口，不是盲区。
+		//
+		// NODE_AGENT 仍在：它的依据（agent 实际访问的端口）不在任何资产里。
+		want := []baseline.Kind{baseline.KindNodeAgent}
 		if len(pv.NotAssessedBaselines) != len(want) {
-			t.Fatalf("NotAssessedBaselines = %v, want %v: the collection layer enumerates neither "+
-				"ScrapeTarget nor NodeAgent, so neither can be called missing",
+			t.Fatalf("NotAssessedBaselines = %v, want %v: the collection layer still does not "+
+				"enumerate NodeAgent, so that one cannot be called missing",
 				pv.NotAssessedBaselines, want)
 		}
 		for i, k := range want {

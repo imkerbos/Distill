@@ -2,7 +2,10 @@ package collect
 
 import (
 	"context"
+	"fmt"
 	"net/netip"
+	"reflect"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -483,5 +486,61 @@ func TestCollectPodsAttachesWarningsToTheObservation(t *testing.T) {
 		if !found {
 			t.Errorf("warning %q missing from the observation; got %v", want, got)
 		}
+	}
+}
+
+// Pod 上的 metrics 抓取声明要采下来，但**只采白名单里那三个键**。
+//
+// 整批采集 annotations 是不行的：kubectl.kubernetes.io/last-applied-configuration
+// 里是整份 manifest —— 体积上是 labels 的几十倍，内容上可能带着 env 里的口令与
+// 内网地址。而这个库会被导出到事实层长期留存（design doc 2026-08-18 §5）。
+func TestToPodCollectsOnlyTheWhitelistedScrapeAnnotations(t *testing.T) {
+	c := collectorWith(fleetRegistry(t))
+
+	p := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "api-1", Namespace: "shop",
+			Annotations: map[string]string{
+				"prometheus.io/scrape": "true",
+				"prometheus.io/port":   "9102",
+				"prometheus.io/path":   "/metrics",
+				// 下面这些一个字节都不该进来。
+				"kubectl.kubernetes.io/last-applied-configuration": `{"spec":{"containers":[{"env":[{"name":"DB_PASSWORD","value":"hunter2"}]}]}}`,
+				"internal.company/oncall-phone":                    "13800000000",
+			},
+		},
+		Spec:   corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.1.5"},
+	}
+
+	got, _ := c.toPod(p, nil)
+
+	want := map[string]string{
+		"prometheus.io/scrape": "true",
+		"prometheus.io/port":   "9102",
+		"prometheus.io/path":   "/metrics",
+	}
+	if !reflect.DeepEqual(got.ScrapeAnnotations, want) {
+		t.Errorf("ScrapeAnnotations = %v, want %v", got.ScrapeAnnotations, want)
+	}
+	for _, leak := range []string{"hunter2", "DB_PASSWORD", "13800000000", "oncall"} {
+		if strings.Contains(fmt.Sprint(got.ScrapeAnnotations), leak) {
+			t.Errorf("ScrapeAnnotations leaked %q: %v", leak, got.ScrapeAnnotations)
+		}
+	}
+}
+
+func TestToPodLeavesScrapeAnnotationsEmptyWhenThePodDeclaresNothing(t *testing.T) {
+	// 空 map 与 nil 都可以，但**不得凭空补一个默认端口**：一条放行到猜出来
+	// 的端口的规则，看起来齐备、实际什么都没放行。
+	c := collectorWith(fleetRegistry(t))
+	p := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "quiet", Namespace: "shop"},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.1.6"},
+	}
+	got, _ := c.toPod(p, nil)
+	if len(got.ScrapeAnnotations) != 0 {
+		t.Errorf("ScrapeAnnotations = %v, want empty", got.ScrapeAnnotations)
 	}
 }

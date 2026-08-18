@@ -272,6 +272,11 @@ type Cluster struct {
 	APIServers []APIServer `json:"apiServers"`
 	// HealthCheckSources 是负载均衡健康检查的来源网段。
 	HealthCheckSources []string `json:"healthCheckSources"`
+	// MetricsScrapers 是这个集群里的 metrics 抓取端。
+	//
+	// 与 HealthCheckSources 并列、理由同源：它是 METRICS_SCRAPE Baseline
+	// 依据的一半，而这一半观测不出来（design doc 2026-08-18 §3）。
+	MetricsScrapers []MetricsScraper `json:"metricsScrapers"`
 	// Git 是 GitOps 仓库绑定；未绑定时为 nil。
 	Git *GitBinding `json:"git,omitempty"`
 }

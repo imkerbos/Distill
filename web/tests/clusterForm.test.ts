@@ -1,11 +1,12 @@
 import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
   ALL_PATH_VERIFY_RESULTS, blankFormValues, blankGitValues, buildClusterWrite,
   describePathVerifyOutcome, describePathVerifyStatus, formValuesOf, gitFormValuesOf,
-  resolveGitBinding,
+  resolveGitBinding, parseScraperLines, scraperToLine,
 } from '../src/pages/clusterForm.ts'
 import { formatUtcTime } from '../src/pages/verifyView.ts'
 import type { GitBinding, PathVerifyResult, RegisteredCluster } from '../src/api/types.ts'
@@ -44,8 +45,10 @@ function unbound(): RegisteredCluster {
 }
 
 const CLUSTER_WRITE_KEYS = [
+  // metricsScrapers 2026-08-18 加入：它与 healthCheckSources 同类 —— 一份
+  // 观测不出来、只能由人登记的 Baseline 依据。
   'apiServers', 'ccnpPresent', 'displayName', 'healthCheckSources', 'id', 'kubeconfigRef',
-  'nodeCidr', 'podCidr',
+  'metricsScrapers', 'nodeCidr', 'podCidr',
 ]
 
 /* ---------------------------------------------------------------------- */
@@ -639,4 +642,42 @@ test('集群列表与校验回执确实经由这些纯函数渲染', () => {
     assert.equal(PAGE_SRC.includes(banned), false,
       `ClustersPage 里出现了「${banned}」：只读校验得不出与写有关的结论`)
   }
+})
+
+test('抓取端一行解析成 namespace 与标签', () => {
+  const got = parseScraperLines('monitoring  app.kubernetes.io/name=prometheus,release=kps')
+  assert.deepEqual(got, [{
+    namespace: 'monitoring',
+    labels: { 'app.kubernetes.io/name': 'prometheus', release: 'kps' },
+  }])
+})
+
+test('解析不出标签的行整行丢弃，不做局部挽救', () => {
+  // 一个只解析出 namespace、标签为空的抓取端会被服务端拒（空 podSelector
+  // 放行整个命名空间），而在这里半途挽救只会让那次拒绝的成因离输入更远。
+  for (const line of ['monitoring', 'monitoring  ', 'monitoring  =prometheus', 'monitoring  app=']) {
+    assert.deepEqual(parseScraperLines(line), [], `line ${JSON.stringify(line)} should be dropped`)
+  }
+})
+
+test('抓取端往返：渲染回去的一行要能再解析回来', () => {
+  // 编辑表单是拿现值预填的。渲染与解析对不上，改一次别的字段就会顺手把
+  // 抓取端登记改坏，而页面上看不出来。
+  const original = { namespace: 'monitoring', labels: { b: '2', a: '1' } }
+  assert.deepEqual(parseScraperLines(scraperToLine(original)), [original])
+})
+
+test('提交体带上抓取端', () => {
+  const values = { ...blankFormValues(), id: 'c1', displayName: 'C', podCidr: '10.4.0.0/14',
+    nodeCidr: '10.128.0.0/20', metricsScrapers: 'monitoring  app=prometheus' }
+  const req = buildClusterWrite(values)
+  assert.deepEqual((req.body as Record<string, unknown>).metricsScrapers,
+    [{ namespace: 'monitoring', labels: { app: 'prometheus' } }])
+})
+
+test('页面真的把这个字段渲染出来了', () => {
+  const page = readFileSync(
+    join(import.meta.dirname, '..', 'src', 'pages', 'ClustersPage.tsx'), 'utf8')
+  assert.ok(page.includes('metricsScrapers'),
+    'ClustersPage 没有渲染 metrics 抓取端：运维填不了，那一类 Baseline 永远缺失')
 })

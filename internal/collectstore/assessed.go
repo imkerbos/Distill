@@ -28,9 +28,13 @@ const maxResourceRows = 256
 //     （derive_infra.go），健康检查网段来自集群登记；
 //   - CONTROL_PLANE 只取集群登记的 apiserver 端点，不依赖任何被采资源，
 //     因此恒可评估 —— 空切片是这句话的显式写法，不是漏填；
-//   - METRICS_SCRAPE 取 snapshot.ScrapeTargets，NODE_AGENT 取
-//     snapshot.NodeAgents。这两类**目前采集层没有采**，因此它们的资源名
-//     今天不会出现在任何一次采集的枚举清单里，两类于是落进"未评估"。
+//   - METRICS_SCRAPE 取 Pod：被抓端的声明就写在 Pod 的
+//     prometheus.io/scrape|port 注解上（design doc 2026-08-18-metrics-scrape-evidence §2），
+//     而 Pod 是每次采集都枚举的资源。因此这一类**已经可评估** —— 它再出现在
+//     缺失清单里，含义是"我们看过了，这个集群没有登记抓取端"，那是一个
+//     照着能做点什么的缺口，不是一个盲区；
+//   - NODE_AGENT 取 snapshot.NodeAgents，**采集层仍然没有采**，因此它的
+//     资源名不会出现在任何一次采集的枚举清单里，仍落进"未评估"。
 //
 // 后两条的资源名直接取自 baseline 那份既有的来源枚举（SourceScrapeTarget /
 // SourceNodeAgent），不另起一个字面量：两个封闭枚举指的是同一样东西，让它
@@ -46,7 +50,7 @@ var baselineEvidence = map[baseline.Kind][]snapshot.ResourceKind{
 	baseline.KindDNS:          {snapshot.ResourceService, snapshot.ResourceEndpointSlice},
 	baseline.KindLBHealth:     {snapshot.ResourceIngress, snapshot.ResourceService},
 	baseline.KindControlPlane: {},
-	baseline.KindMetrics:      {snapshot.ResourceKind(baseline.SourceScrapeTarget)},
+	baseline.KindMetrics:      {snapshot.ResourcePod},
 	baseline.KindNodeAgent:    {snapshot.ResourceKind(baseline.SourceNodeAgent)},
 }
 

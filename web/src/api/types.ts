@@ -600,7 +600,14 @@ export interface RegisteredCluster {
    */
   dataSource?: DataSource
   apiServers?: APIServer[] | null
-  healthCheckSources?: string[] | null
+  healthCheckSources?: string[]
+  /**
+   * metrics 抓取端登记。
+   *
+   * METRICS_SCRAPE Baseline 依据的一半 —— Pod 上的 prometheus.io/scrape 注解
+   * 只说了"谁愿意被抓"，说不出"谁来抓"，而后者观测不出来。
+   */
+  metricsScrapers?: Array<{ namespace: string; labels: Record<string, string> }> | null
   git?: GitBinding
 }
 

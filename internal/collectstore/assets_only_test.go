@@ -6,9 +6,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/imkerbos/Distill/internal/baseline"
 	"github.com/imkerbos/Distill/internal/collectstore"
 	"github.com/imkerbos/Distill/internal/flow"
 	"github.com/imkerbos/Distill/internal/policygen"
+	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/snapshot"
 	"github.com/imkerbos/Distill/internal/snapshotstore"
 	"github.com/imkerbos/Distill/internal/store"
@@ -271,5 +273,92 @@ func saveRunWithDNS(
 	}
 	if err := s.DeriveIdentityIntervals(ctx, collectedID, runID); err != nil {
 		t.Fatalf("DeriveIdentityIntervals(%s) error = %v", runID, err)
+	}
+}
+
+// scraperSource 是登记了一个 metrics 抓取端的注册表。
+func scraperSource() stubSource {
+	src := testSource()
+	for i := range src.clusters {
+		if src.clusters[i].ID == collectedID {
+			src.clusters[i].MetricsScrapers = []registry.MetricsScraper{{
+				Namespace: "monitoring",
+				Labels:    map[string]string{"app.kubernetes.io/name": "prometheus"},
+			}}
+		}
+	}
+	return src
+}
+
+// 登记了抓取端、且集群里有 Pod 声明自己可被抓 —— METRICS_SCRAPE 就该有规则。
+//
+// **这条用例是整份改动的落点**：其余那些（白名单采集、往返、纯逻辑拼接、
+// 登记持久化）都只是它的一段。它红了说明这条链上某处断了，而断在哪里由
+// 那几条各自的用例指出来。
+func TestMetricsBaselineAppearsOnceAScraperIsRegistered(t *testing.T) {
+	r, s := newTestReaderWithSource(t, scraperSource())
+	ctx := context.Background()
+
+	pods := assetOnlyPods()
+	pods[0].ScrapeAnnotations = map[string]string{
+		"prometheus.io/scrape": "true",
+		"prometheus.io/port":   "9102",
+	}
+	saveRunWithDNS(t, s, "run-scrape", firstRunAt, pods)
+
+	pv, err := r.PolicyPreview(ctx, collectedID, "", store.TimeWindow{})
+	if err != nil {
+		t.Fatalf("PolicyPreview() error = %v", err)
+	}
+
+	var metrics int
+	for _, p := range pv.Candidates {
+		for _, rule := range p.Rules {
+			if rule.Baseline != nil && *rule.Baseline == baseline.KindMetrics {
+				metrics++
+			}
+		}
+	}
+	if metrics == 0 {
+		t.Error("no METRICS_SCRAPE rule was generated although a scraper is registered " +
+			"and a pod declares prometheus.io/scrape")
+	}
+	// 而它必须从缺失清单里消失 —— 否则运维照着提示去补，补完还是那句话。
+	for _, m := range pv.MissingBaselines {
+		if m.Namespace != "payment" {
+			continue
+		}
+		for _, k := range m.Kinds {
+			if k == baseline.KindMetrics {
+				t.Error("METRICS_SCRAPE is still listed as missing after it was derived")
+			}
+		}
+	}
+}
+
+// 没登记抓取端时不得凭空生成任何 metrics 规则。
+//
+// 编一条占位规则会让齐备性校验通过，而真正的抓取仍被挡
+// （baseline.Set.Missing 的注释）。
+func TestNoMetricsBaselineWithoutARegisteredScraper(t *testing.T) {
+	r, s := newTestReader(t) // testSource：没有登记抓取端
+	ctx := context.Background()
+
+	pods := assetOnlyPods()
+	pods[0].ScrapeAnnotations = map[string]string{
+		"prometheus.io/scrape": "true", "prometheus.io/port": "9102",
+	}
+	saveRunWithDNS(t, s, "run-scrape", firstRunAt, pods)
+
+	pv, err := r.PolicyPreview(ctx, collectedID, "", store.TimeWindow{})
+	if err != nil {
+		t.Fatalf("PolicyPreview() error = %v", err)
+	}
+	for _, p := range pv.Candidates {
+		for _, rule := range p.Rules {
+			if rule.Baseline != nil && *rule.Baseline == baseline.KindMetrics {
+				t.Fatalf("a METRICS_SCRAPE rule was generated with no scraper registered: %+v", rule)
+			}
+		}
 	}
 }

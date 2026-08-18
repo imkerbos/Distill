@@ -121,6 +121,11 @@ func ValidateCluster(c Cluster) error {
 	// secrets.ValidateRef，不另写一份字符集校验：两份安全相关的字符类
 	// 定义迟早会走样，而走样的那一份放行的是一个能指向凭据目录之外的
 	// 引用，丢了不会有任何症状，直到有人用它读到别的东西。
+	for i, sc := range c.MetricsScrapers {
+		if err := ValidateMetricsScraper(sc); err != nil {
+			return wrapInvalid(fmt.Sprintf("metricsScrapers[%d] 不合法", i), err)
+		}
+	}
 	if c.KubeconfigRef != "" {
 		if err := secrets.ValidateRef(c.KubeconfigRef); err != nil {
 			return wrapInvalid(fmt.Sprintf("kubeconfigRef %q 不是合法的凭据引用", c.KubeconfigRef), err)

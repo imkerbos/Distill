@@ -1,0 +1,22 @@
+-- Pod 自己声明的 metrics 抓取意愿（design doc 2026-08-18-metrics-scrape-evidence）。
+--
+-- 本文件是新增的第 18 号迁移，不改动 000001–000017 中任何一条已应用的迁移。
+--
+-- **为什么要有这一列**：五类 Baseline 里 METRICS_SCRAPE 的依据从来没被采过，
+-- 于是它在每个命名空间上都恒定报「缺失」，而填什么登记都不会改变。监控被策略
+-- 切断的后果特殊 —— 它在事故发生时才显现，那时恰好看不到数据。
+--
+-- **只装白名单里那三个键**（prometheus.io/scrape|port|path，见
+-- collect.ScrapeAnnotationKeys），不是整批 annotations。整批采集会把
+-- kubectl.kubernetes.io/last-applied-configuration 一起抄进来：那是整份 manifest，
+-- 体积上是 labels 的几十倍，内容上可能带着 env 里的口令与内网地址，而这张表会被
+-- 导出到事实层长期留存（V4 spec §9.9）。
+--
+-- 白名单由 Go 侧执行，不写进这里的 DDL：写进 SQL 意味着改一次要同时改采集与
+-- 读取两处，而漏改的那一处不会报错。
+--
+-- NOT NULL DEFAULT ('{}')：与同表的 labels 一列同形。已有行拿到空对象，
+-- 含义是「这一次采集没有记录过这个 Pod 的抓取声明」—— 而不是「它声明了不抓」。
+-- 两者在读取侧不需要区分：没有声明就不生成规则，两种情况下都不生成。
+ALTER TABLE observed_pod
+  ADD COLUMN scrape_annotations JSON NOT NULL DEFAULT (JSON_OBJECT()) AFTER labels;

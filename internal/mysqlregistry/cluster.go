@@ -3,6 +3,7 @@ package mysqlregistry
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -96,6 +97,34 @@ func (s *Store) loadChildren(ctx context.Context, c *registry.Cluster) error {
 	}
 	if err := hcRows.Err(); err != nil {
 		return fmt.Errorf("iterate health check sources: %w", err)
+	}
+
+	// metrics 抓取端：METRICS_SCRAPE Baseline 依据的一半，观测不出来
+	// （design doc 2026-08-18-metrics-scrape-evidence §3.2）。
+	msRows, err := s.db.QueryContext(ctx,
+		`SELECT namespace, labels FROM cluster_metrics_scraper
+		  WHERE cluster_id = ? ORDER BY namespace, labels_key`, c.ID)
+	if err != nil {
+		return fmt.Errorf("query metrics scrapers: %w", err)
+	}
+	defer func() { _ = msRows.Close() }()
+	for msRows.Next() {
+		var (
+			sc  registry.MetricsScraper
+			raw []byte
+		)
+		if err := msRows.Scan(&sc.Namespace, &raw); err != nil {
+			return fmt.Errorf("scan metrics scraper: %w", err)
+		}
+		if err := json.Unmarshal(raw, &sc.Labels); err != nil {
+			// 标签列坏了就是坏了，不当成"这个抓取端没有标签"：后者会生成
+			// 一个空 podSelector，放行那个命名空间里的每一个 Pod。
+			return fmt.Errorf("decode metrics scraper labels: %w", err)
+		}
+		c.MetricsScrapers = append(c.MetricsScrapers, sc)
+	}
+	if err := msRows.Err(); err != nil {
+		return fmt.Errorf("iterate metrics scrapers: %w", err)
 	}
 
 	var g registry.GitBinding
@@ -201,6 +230,7 @@ func (s *Store) UpdateCluster(ctx context.Context, actor registry.Actor, c regis
 			for _, stmt := range []string{
 				`DELETE FROM cluster_apiserver WHERE cluster_id = ?`,
 				`DELETE FROM cluster_health_check_source WHERE cluster_id = ?`,
+				`DELETE FROM cluster_metrics_scraper WHERE cluster_id = ?`,
 			} {
 				if _, err := tx.ExecContext(ctx, stmt, c.ID); err != nil {
 					return fmt.Errorf("clear children: %w", err)
@@ -264,6 +294,20 @@ func insertChildren(ctx context.Context, tx *sql.Tx, c registry.Cluster) error {
 		); err != nil {
 			return writeFailure("insert health check source",
 				fmt.Sprintf("健康检查网段 %q 在本集群下重复", cidr), "", err)
+		}
+	}
+	for _, sc := range c.MetricsScrapers {
+		labels, err := json.Marshal(sc.Labels)
+		if err != nil {
+			return fmt.Errorf("marshal metrics scraper labels: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO cluster_metrics_scraper (cluster_id, namespace, labels_key, labels)
+			 VALUES (?, ?, ?, ?)`,
+			c.ID, sc.Namespace, sc.LabelsKey(), labels,
+		); err != nil {
+			return writeFailure("insert metrics scraper",
+				fmt.Sprintf("metrics 抓取端 %q 在本集群下重复", sc.Namespace), "", err)
 		}
 	}
 	return nil

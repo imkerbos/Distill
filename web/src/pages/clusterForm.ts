@@ -86,6 +86,15 @@ export interface ClusterFormValues {
   apiServerRows: ApiServerRow[]
   /** 健康检查网段，每行一个 CIDR。 */
   healthChecks: string
+  /**
+   * metrics 抓取端，每行一个 `namespace  key=value,key=value`。
+   *
+   * 它是 METRICS_SCRAPE Baseline 依据的一半，而这一半观测不出来：Pod 上的
+   * prometheus.io/scrape 注解只说了"谁愿意被抓"，说不出"谁来抓"。
+   * 靠命名空间名去猜是一张硬编码常量表，猜错的后果是一条 podSelector
+   * 选不中任何 Pod 的规则 —— 看起来齐备、实际什么都没放行。
+   */
+  metricsScrapers: string
 }
 
 /** 绑定表单的初始值：全空，对应"这个集群还没有绑定"。 */
@@ -96,7 +105,7 @@ export function blankFormValues(): ClusterFormValues {
   return {
     id: '', displayName: '', podCidr: '', nodeCidr: '', ccnpPresent: false,
     kubeconfigRef: '',
-    apiServerRows: [emptyApiServerRow()], healthChecks: '',
+    apiServerRows: [emptyApiServerRow()], healthChecks: '', metricsScrapers: '',
   }
 }
 
@@ -126,6 +135,7 @@ export function formValuesOf(c: RegisteredCluster): ClusterFormValues {
     // 至少留一行空行，否则界面上没有任何可填的输入框，"添加"按钮成了唯一入口。
     apiServerRows: rows.length > 0 ? rows : [emptyApiServerRow()],
     healthChecks: (c.healthCheckSources ?? []).join('\n'),
+    metricsScrapers: (c.metricsScrapers ?? []).map(scraperToLine).join('\n'),
   }
 }
 
@@ -325,6 +335,7 @@ export function buildClusterWrite(values: ClusterFormValues): BuildResult {
       kubeconfigRef: values.kubeconfigRef.trim(),
       apiServers: servers.apiServers,
       healthCheckSources: values.healthChecks.split('\n').map((s) => s.trim()).filter(Boolean),
+      metricsScrapers: parseScraperLines(values.metricsScrapers),
     },
   }
 }
@@ -341,4 +352,48 @@ export function buildClusterWrite(values: ClusterFormValues): BuildResult {
  */
 export function describePathVerifyOutcome(status: PathVerifyStatus): VerifyOutcomeView {
   return describeOutcome(PATH_VERIFY_COPY, status)
+}
+
+/* ---------------------------------------------------------------------- */
+/* metrics 抓取端的文本形式                                                  */
+/* ---------------------------------------------------------------------- */
+
+/**
+ * 一行一个抓取端：`namespace  key=value,key=value`。
+ *
+ * 用文本而不是一组行控件，与健康检查网段同一取舍：这两样都是"偶尔填一次、
+ * 填完很少动"的登记，而一组可增删的行控件要多出增行、删行、空行三种状态，
+ * 每一种都能被填成一条无效登记。
+ *
+ * **解析失败的那一行整行丢弃，不做局部挽救。** 一个只解析出 namespace、
+ * 标签为空的抓取端会被服务端拒（空 podSelector 放行整个命名空间），而在这里
+ * 半途挽救只会让那次拒绝的成因离输入更远。
+ */
+export function parseScraperLines(text: string): Array<{ namespace: string; labels: Record<string, string> }> {
+  const out: Array<{ namespace: string; labels: Record<string, string> }> = []
+  for (const raw of text.split('\n')) {
+    const line = raw.trim()
+    if (line === '') continue
+    const gap = line.search(/\s/)
+    if (gap < 0) continue
+    const namespace = line.slice(0, gap).trim()
+    const labels: Record<string, string> = {}
+    for (const pair of line.slice(gap).trim().split(',')) {
+      const eq = pair.indexOf('=')
+      if (eq <= 0) continue
+      const k = pair.slice(0, eq).trim()
+      const v = pair.slice(eq + 1).trim()
+      if (k === '' || v === '') continue
+      labels[k] = v
+    }
+    if (namespace === '' || Object.keys(labels).length === 0) continue
+    out.push({ namespace, labels })
+  }
+  return out
+}
+
+/** 把一个抓取端渲染回一行，供编辑表单预填。 */
+export function scraperToLine(s: { namespace: string; labels: Record<string, string> }): string {
+  const pairs = Object.keys(s.labels).sort().map((k) => `${k}=${s.labels[k]}`)
+  return `${s.namespace}  ${pairs.join(',')}`
 }

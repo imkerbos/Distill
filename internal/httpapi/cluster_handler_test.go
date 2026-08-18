@@ -1320,3 +1320,50 @@ func (m *memRegistry) TouchClusterAgent(_ context.Context, agentID string, at ti
 	m.agents[agentID] = a
 	return nil
 }
+
+// metrics 抓取端必须能从请求体走到领域对象。
+//
+// 这条与 kubeconfigRef 那条同形（clusterPayload 的注释）：集群没有别的路由
+// 能说出自己的抓取端，漏掉它的后果是请求返回成功、登记从未写下，而
+// METRICS_SCRAPE 继续报缺失 —— 没有任何东西指向登记。
+func TestClusterPayloadCarriesMetricsScrapers(t *testing.T) {
+	reg := newMemRegistry()
+	h, _, cookie := newTestRouterWithRegistry(t, fixtureReader(), reg)
+
+	rec := authedPostJSON(t, h, cookie, "/api/v1/clusters", map[string]any{
+		"id": "new-cluster", "displayName": "New", "podCidr": "10.4.0.0/14",
+		"nodeCidr": "10.128.0.0/20",
+		"metricsScrapers": []map[string]any{{
+			"namespace": "monitoring",
+			"labels":    map[string]string{"app.kubernetes.io/name": "prometheus"},
+		}},
+	})
+	if got := bodyOf(t, rec)["code"]; got != float64(response.CodeOK) {
+		t.Fatalf("code = %v, want 0: %s", got, rec.Body.String())
+	}
+	got := reg.lastCluster
+	if len(got.MetricsScrapers) != 1 {
+		t.Fatalf("MetricsScrapers = %+v, want one", got.MetricsScrapers)
+	}
+	if got.MetricsScrapers[0].Namespace != "monitoring" {
+		t.Errorf("namespace = %q, want monitoring", got.MetricsScrapers[0].Namespace)
+	}
+	if got.MetricsScrapers[0].Labels["app.kubernetes.io/name"] != "prometheus" {
+		t.Errorf("labels = %v", got.MetricsScrapers[0].Labels)
+	}
+}
+
+func TestClusterPayloadRejectsAScraperWithoutLabels(t *testing.T) {
+	// 空 podSelector 会放行那个命名空间里的每一个 Pod，而请求照样"成功"。
+	reg := newMemRegistry()
+	h, _, cookie := newTestRouterWithRegistry(t, fixtureReader(), reg)
+
+	rec := authedPostJSON(t, h, cookie, "/api/v1/clusters", map[string]any{
+		"id": "new-cluster", "displayName": "New", "podCidr": "10.4.0.0/14",
+		"nodeCidr":        "10.128.0.0/20",
+		"metricsScrapers": []map[string]any{{"namespace": "monitoring"}},
+	})
+	if got := bodyOf(t, rec)["code"]; got != float64(response.CodeInvalidParam) {
+		t.Errorf("code = %v, want %d: %s", got, response.CodeInvalidParam, rec.Body.String())
+	}
+}

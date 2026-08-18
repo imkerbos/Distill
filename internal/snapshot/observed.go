@@ -103,6 +103,17 @@ type Pod struct {
 	MeshSource cluster.MeshSource
 	// MeshDetail 是依据的具体取值。
 	MeshDetail string
+	// ScrapeAnnotations 是这个 Pod 自己声明的 metrics 抓取意愿。
+	//
+	// **只装白名单里的那几个键**（见 collect.ScrapeAnnotationKeys），不是
+	// 整批 annotations：kubectl.kubernetes.io/last-applied-configuration 里
+	// 是整份 manifest —— 体积上是 labels 的几十倍，内容上可能带着 env 里的
+	// 口令与内网地址，而这个库会被导出到事实层长期留存（V4 spec §9.9）。
+	//
+	// 它是 METRICS_SCRAPE Baseline 的依据的一半：这一半说的是"谁愿意被抓"，
+	// 另一半"谁来抓"由集群登记给出，两者都不许猜
+	// （design doc 2026-08-18 §3）。
+	ScrapeAnnotations map[string]string
 }
 
 // Node 是一个节点的观测快照。

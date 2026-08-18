@@ -232,10 +232,11 @@ func insertPods(ctx context.Context, tx *sql.Tx, obs snapshot.Observation) error
 	stmt, err := tx.PrepareContext(ctx,
 		`INSERT INTO observed_pod
 		   (cluster_id, namespace, name, observed_at, run_id, uid, phase, ip,
-		    ip_scope, ip_scope_reason, labels, host_network, node_name, service_account,
+		    ip_scope, ip_scope_reason, labels, scrape_annotations,
+		    host_network, node_name, service_account,
 		    owner_kind, owner_name, workload_kind, workload_name,
 		    in_mesh, mesh_source, mesh_detail)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return fmt.Errorf("snapshotstore: prepare pod: %w", err)
 	}
@@ -246,10 +247,18 @@ func insertPods(ctx context.Context, tx *sql.Tx, obs snapshot.Observation) error
 		if err != nil {
 			return fmt.Errorf("snapshotstore: marshal pod labels %s/%s: %w", p.Namespace, p.Name, err)
 		}
+		// 抓取声明与 labels 走同一个序列化：白名单已经在采集侧执行过
+		// （collect.ScrapeAnnotationKeys），这里不再过滤一遍 —— 两处各过滤
+		// 一次意味着两份白名单，而漏改的那一份不会报错。
+		scrape, err := jsonObject(p.ScrapeAnnotations)
+		if err != nil {
+			return fmt.Errorf("snapshotstore: marshal pod scrape annotations %s/%s: %w",
+				p.Namespace, p.Name, err)
+		}
 		if _, err := stmt.ExecContext(ctx,
 			obs.ClusterID, p.Namespace, p.Name, obs.ObservedAt, obs.RunID,
 			p.UID, p.Phase, p.IP, string(p.IPScope), string(p.IPScopeReason),
-			labels, p.HostNetwork, p.NodeName, p.ServiceAccount,
+			labels, scrape, p.HostNetwork, p.NodeName, p.ServiceAccount,
 			p.OwnerKind, p.OwnerName, p.WorkloadKind, p.WorkloadName,
 			p.InMesh, string(p.MeshSource), p.MeshDetail); err != nil {
 			return fmt.Errorf("snapshotstore: insert pod %s/%s: %w", p.Namespace, p.Name, err)

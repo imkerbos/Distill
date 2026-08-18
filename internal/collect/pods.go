@@ -55,27 +55,69 @@ func (c *Collector) toPod(p *corev1.Pod, rsOwners map[string]ownerRef) (snapshot
 	}
 
 	snap := snapshot.Pod{
-		ClusterID:      c.clusterID,
-		Namespace:      p.Namespace,
-		Name:           p.Name,
-		UID:            string(p.UID),
-		Phase:          string(p.Status.Phase),
-		IP:             p.Status.PodIP,
-		Labels:         p.Labels,
-		HostNetwork:    p.Spec.HostNetwork,
-		NodeName:       p.Spec.NodeName,
-		ServiceAccount: p.Spec.ServiceAccountName,
-		OwnerKind:      owner.Kind,
-		OwnerName:      owner.Name,
-		WorkloadKind:   workload.Kind,
-		WorkloadName:   workload.Name,
-		InMesh:         mesh.InMesh,
-		MeshSource:     mesh.Source,
-		MeshDetail:     mesh.Detail,
+		ClusterID:         c.clusterID,
+		Namespace:         p.Namespace,
+		Name:              p.Name,
+		UID:               string(p.UID),
+		Phase:             string(p.Status.Phase),
+		IP:                p.Status.PodIP,
+		Labels:            p.Labels,
+		HostNetwork:       p.Spec.HostNetwork,
+		NodeName:          p.Spec.NodeName,
+		ServiceAccount:    p.Spec.ServiceAccountName,
+		OwnerKind:         owner.Kind,
+		OwnerName:         owner.Name,
+		WorkloadKind:      workload.Kind,
+		WorkloadName:      workload.Name,
+		InMesh:            mesh.InMesh,
+		MeshSource:        mesh.Source,
+		MeshDetail:        mesh.Detail,
+		ScrapeAnnotations: scrapeAnnotationsOf(p.Annotations),
 	}
 
 	// 归属不在这里判：它要看全 fleet 的网段，而推送式接入下 agent 看不见
 	// 别的集群（design doc 2026-08-18 §3.4）。采完之后统一走 Classify，
 	// PULL 与 PUSH 共用同一份实现。
 	return snap, warnings
+}
+
+// ScrapeAnnotationKeys 是允许被采集的 metrics 抓取注解键。
+//
+// **白名单，不是过滤器。** 整批采集 annotations 会把
+// kubectl.kubernetes.io/last-applied-configuration 一起抄进来 —— 那是整份
+// manifest，体积上是 labels 的几十倍，内容上可能带着 env 里的口令与内网地址，
+// 而这个库会被导出到事实层长期留存（design doc 2026-08-18 §5，V4 spec §9.9）。
+//
+// path 一并采：NetworkPolicy 不管路径，但「这条 Baseline 当初凭什么生成」
+// 要在事后答得出来，而那时这个 Pod 可能已经不在了。
+//
+// 白名单放在 Go 侧而不是查询里：写进 SQL 意味着改一次要同时改采集与读取
+// 两处，而漏改的那一处不会报错。
+var ScrapeAnnotationKeys = []string{
+	"prometheus.io/scrape",
+	"prometheus.io/port",
+	"prometheus.io/path",
+}
+
+// scrapeAnnotationsOf 从 Pod 的注解里挑出白名单那几个。
+//
+// 一个都没有时返回 nil 而不是空 map：**不得凭空补一个默认端口**。一条放行到
+// 猜出来的端口的规则，看起来齐备、实际什么都没放行，而症状要到监控静默中断
+// 时才出现（derive_infra.go 的注释）。
+func scrapeAnnotationsOf(annotations map[string]string) map[string]string {
+	if len(annotations) == 0 {
+		return nil
+	}
+	var out map[string]string
+	for _, k := range ScrapeAnnotationKeys {
+		v, ok := annotations[k]
+		if !ok {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]string, len(ScrapeAnnotationKeys))
+		}
+		out[k] = v
+	}
+	return out
 }
