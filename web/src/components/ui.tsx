@@ -3,30 +3,27 @@ import type { CSSProperties, ReactNode } from 'react'
 /*
  * 通用组件层。
  *
- * 存在的理由：四个页面此前各自手写表头样式、卡片边框、区块标题，三种表格
- * 长得不一样，读者会以为它们在讲不同性质的事。规整的组件系统本身就是
- * 专业感的来源之一（spec §17.1 手法三）。
+ * 存在的理由：页面此前各自手写表头样式、卡片边框、区块标题，三种表格长得
+ * 不一样，读者会以为它们在讲不同性质的事。规整的组件系统本身就是专业感的
+ * 来源之一（spec §17.1 手法三）。
  *
- * 这里刻意不做主题化与变体爆炸 —— 组件越少、越固定，界面越像一个
- * 长期使用的系统，而不是一次演示。
+ * **样式走 Tailwind，色板与尺度仍然只来自 tokens.css。** theme.css 里每一个
+ * 值都是 var(--…)，一个字面量都没有 —— 语义色是硬约束（ALLOW / DENY /
+ * UNKNOWN 各自唯一，全站不得挪作他用），在这里重新定义一份色阶等于给同一
+ * 个概念开第二个定义，而两份会漂：漂的症状是某个页面的 ALLOW 绿与别处不是
+ * 同一个绿，于是颜色不再读得出判定。
+ *
+ * 这里刻意不做主题化与变体爆炸 —— 组件越少、越固定，界面越像一个长期使用
+ * 的系统，而不是一次演示。
  */
 
 /** 页面标题与一句说明。说明解释这一屏回答什么问题，不是装饰。 */
 export function PageHeader({ title, description }: { title: string; description?: ReactNode }) {
   return (
-    <header style={{ marginBottom: 'var(--space-4)' }}>
-      <h1 style={{
-        margin: 0, fontSize: 'var(--text-2xl)', fontWeight: 600, letterSpacing: '-0.01em',
-      }}>
-        {title}
-      </h1>
+    <header className="mb-4">
+      <h1 className="m-0 text-2xl font-semibold tracking-[-0.01em] text-ink">{title}</h1>
       {description && (
-        <p style={{
-          margin: 'var(--space-2) 0 0', fontSize: 'var(--text-sm)',
-          color: 'var(--text-muted)', maxWidth: '640px',
-        }}>
-          {description}
-        </p>
+        <p className="mt-2 mb-0 max-w-[640px] text-sm text-ink-muted">{description}</p>
       )}
     </header>
   )
@@ -35,13 +32,10 @@ export function PageHeader({ title, description }: { title: string; description?
 /** 卡片：靠边框分层，不靠投影。投影一重就显得"演示用"。 */
 export function Card({ children, style }: { children: ReactNode; style?: CSSProperties }) {
   return (
-    <div style={{
-      background: 'var(--surface)',
-      border: '1px solid var(--border)',
-      borderRadius: 'var(--radius)',
-      boxShadow: 'var(--shadow-card)',
-      ...style,
-    }}>
+    <div
+      className="rounded-card border border-line bg-surface shadow-card"
+      style={style}
+    >
       {children}
     </div>
   )
@@ -50,7 +44,7 @@ export function Card({ children, style }: { children: ReactNode; style?: CSSProp
 /**
  * 区块：标题 + 说明 + 卡片化的内容。
  *
- * meta 放在标题右侧，用于条数、时间范围这类"这块内容的边界"信息——
+ * meta 放在标题右侧，用于条数、时间范围这类"这块内容的边界"信息 ——
  * 它们必须与内容同屏且固定位置，不能散落在正文里被读者漏掉。
  */
 export function Section({
@@ -62,122 +56,79 @@ export function Section({
   children: ReactNode
 }) {
   return (
-    <section style={{ marginBottom: 'var(--space-5)' }}>
-      <div style={{
-        display: 'flex', alignItems: 'baseline', justifyContent: 'space-between',
-        gap: 'var(--space-3)', flexWrap: 'wrap', marginBottom: 'var(--space-2)',
-      }}>
-        <h2 style={{ margin: 0, fontSize: 'var(--text-lg)', fontWeight: 600 }}>{title}</h2>
-        {meta && (
-          <span style={{ fontSize: 'var(--text-sm)', color: 'var(--text-muted)' }}>{meta}</span>
-        )}
+    <section className="mb-5">
+      <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+        <h2 className="m-0 text-lg font-semibold text-ink">{title}</h2>
+        {meta && <span className="text-xs tabular-nums text-ink-muted">{meta}</span>}
       </div>
       {description && (
-        <p style={{
-          margin: '0 0 var(--space-3)', fontSize: 'var(--text-sm)',
-          color: 'var(--text-muted)', maxWidth: '720px',
-        }}>
-          {description}
-        </p>
+        <p className="mt-0 mb-3 max-w-[720px] text-sm text-ink-muted">{description}</p>
       )}
       {children}
     </section>
   )
 }
 
-/** 表格容器：窄屏下横向滚动由容器承担，页面本身不横向滚动。 */
+/** 表格外壳。表格是本产品的主要信息载体，样式集中在这里，不由各页面各写一份。 */
 export function TableCard({ children }: { children: ReactNode }) {
   return (
-    <Card style={{ overflowX: 'auto' }}>
+    <Card style={{ overflow: 'hidden' }}>
       <table className="dt">{children}</table>
     </Card>
   )
 }
 
-/**
- * 带纵向滚动的表格容器。
- *
- * 后端刻意不分页、不截断（每类变化都带完整连接清单），把全部行铺开会
- * 让页面高达数万像素；这里用固定高度 + 内部滚动承接，而不是截断数据——
- * 总数与每一行都必须可达，只是不必同时进入视口。
- */
+/** 会滚动的表格外壳，表头由 StickyHead 钉住。 */
 export function ScrollTableCard({ children, maxHeight = 420 }: {
   children: ReactNode
   maxHeight?: number
 }) {
   return (
-    <Card style={{ overflow: 'auto', maxHeight }}>
-      <table className="dt">{children}</table>
+    <Card style={{ overflow: 'hidden' }}>
+      <div className="overflow-auto" style={{ maxHeight }}>
+        <table className="dt">{children}</table>
+      </div>
     </Card>
   )
 }
 
-/**
- * ScrollTableCard 的表头。
- *
- * 做成组件而不是导出一份样式常量：滚到第 300 行还知道在看哪一列，是
- * ScrollTableCard 这个形状能成立的前提，不是调用方可选的装饰——把它写成
- * 常量，就总有一张表会忘了贴。
- */
+/** 钉住的表头。长表格滚下去之后，列的含义不能跟着消失。 */
 export function StickyHead({ children }: { children: ReactNode }) {
-  return (
-    <thead style={{ position: 'sticky', top: 0, background: 'var(--surface)' }}>
-      {children}
-    </thead>
-  )
+  return <thead className="sticky top-0 z-10 bg-sunken">{children}</thead>
 }
 
-/**
- * 中性标签。
- *
- * 刻意不接受语义色：位置、方向、粒度这类元信息一旦借用 ALLOW/DENY/UNKNOWN
- * 的颜色，读者就会把"跨 namespace"读成"无法判定"。语义色只归 VerdictBadge。
- */
+/** 标签。strong 用于需要被一眼认出的那一个，其余保持克制。 */
 export function Chip({ children, strong = false }: { children: ReactNode; strong?: boolean }) {
   return (
-    <span style={{
-      display: 'inline-block',
-      padding: '2px 8px',
-      borderRadius: 'var(--radius-sm)',
-      fontSize: 'var(--text-xs)',
-      whiteSpace: 'nowrap',
-      background: strong ? 'var(--accent)' : 'var(--surface-sunken)',
-      color: strong ? 'var(--text-on-dark)' : 'var(--text-secondary)',
-      border: strong ? '1px solid var(--accent)' : '1px solid var(--border)',
-    }}>
+    <span
+      className={[
+        'inline-block rounded-chip px-2 py-[2px] text-xs whitespace-nowrap',
+        strong
+          ? 'border border-line-strong bg-sunken font-medium text-ink'
+          : 'border border-line text-ink-muted',
+      ].join(' ')}
+    >
       {children}
     </span>
   )
 }
 
 /**
- * 空状态。
- *
- * detail 是必填的设计约定：一句"没有数据"无法区分"查过了、确实没有"
- * 与"根本没查"。这个平台的每块屏都必须能说清自己没告诉你什么。
+ * 空态。**message 说"是什么空了"，detail 说"为什么"** ——
+ * 一个只说"暂无数据"的空态，与一次查询失败长得一模一样。
  */
 export function EmptyState({ message, detail }: { message: string; detail: ReactNode }) {
   return (
     <Card style={{ padding: 'var(--space-4)' }}>
-      <p style={{ margin: 0, fontSize: 'var(--text-sm)' }}>{message}</p>
-      <p style={{
-        margin: 'var(--space-2) 0 0', fontSize: 'var(--text-xs)', color: 'var(--text-muted)',
-      }}>
-        {detail}
-      </p>
+      <p className="m-0 text-sm text-ink-2">{message}</p>
+      <p className="mt-2 mb-0 text-xs text-ink-muted">{detail}</p>
     </Card>
   )
 }
 
 /**
- * 指标卡。
- *
- * tone 只接受语义值：UNKNOWN 与 DEGRADED 必须与正常指标同等显著
- * （spec §17.1），因此用左侧色条而非灰字弱化 —— 弱化它们等同于
- * 隐瞒平台的能力边界。`deny` 用于 dry-run 页的 WOULD_BREAK ——
- * 它与判定语义色里的 DENY 是同一个颜色，含义也一致："会被拦"。
- * size='lg' 只用于页面上唯一需要盖过其它数字的那一个指标
- * （WOULD_BREAK）：把最重要的数字做大，比任何措辞都更快传达优先级。
+ * 指标块。tone 只接受三个语义值，且**只用于判定语义** ——
+ * 拿 unknown 的琥珀色表示"跨 namespace"之类，用户就再也无法从颜色读出结论。
  */
 export function StatTile({
   label, value, note, tone, size,
@@ -188,6 +139,9 @@ export function StatTile({
   tone?: 'unknown' | 'degraded' | 'deny'
   size?: 'lg'
 }) {
+  // **语义用左侧描边表达，数字本身保持满对比度。**
+  // 把数字染成语义色会让"这个数不太可信"读成"这个数不重要"，而 DEGRADED
+  // 的结论仍然成立，只是不可信 —— 它必须与正常结论同等显著（tokens.css）。
   const accent =
     tone === 'unknown' ? 'var(--verdict-unknown)'
       : tone === 'degraded' ? 'var(--degraded-stroke)'
@@ -198,55 +152,34 @@ export function StatTile({
       padding: 'var(--space-3)',
       borderLeft: accent ? `3px solid ${accent}` : undefined,
     }}>
-      <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>{label}</div>
-      <div style={{
-        fontSize: size === 'lg' ? 'var(--text-2xl)' : 'var(--text-xl)',
-        fontWeight: 600, marginTop: 'var(--space-1)',
-        color: accent ?? 'var(--text)', fontVariantNumeric: 'tabular-nums',
-      }}>
+      <div className="text-xs text-ink-muted">{label}</div>
+      <div
+        className={`mt-1 font-semibold tabular-nums ${size === 'lg' ? 'text-2xl' : 'text-xl'}`}
+        style={{ color: accent ?? 'var(--text)' }}
+      >
         {value}
       </div>
-      {note && (
-        <div style={{
-          fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginTop: 'var(--space-1)',
-        }}>
-          {note}
-        </div>
-      )}
+      {note && <div className="mt-1 text-xs text-ink-muted">{note}</div>}
     </Card>
   )
 }
 
-/** 筛选栏：控件横排，标签在控件左侧，保持各页一致。 */
+/** 工具条：筛选与操作入口横排。 */
 export function Toolbar({ children }: { children: ReactNode }) {
-  return (
-    <div style={{
-      display: 'flex', gap: 'var(--space-3)', alignItems: 'center',
-      flexWrap: 'wrap', marginBottom: 'var(--space-3)',
-    }}>
-      {children}
-    </div>
-  )
+  return <div className="mb-3 flex flex-wrap items-center gap-3">{children}</div>
 }
 
+/** 带标签的表单项。 */
 export function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <label style={{
-      display: 'inline-flex', alignItems: 'center', gap: 'var(--space-2)',
-      fontSize: 'var(--text-sm)', color: 'var(--text-muted)',
-    }}>
+    <label className="inline-flex items-center gap-2 text-sm text-ink-muted">
       {label}
       {children}
     </label>
   )
 }
 
-/**
- * 下拉选择。
- *
- * 统一外观后各页共用一个实现 —— 之前集群选择器、判定筛选、粒度切换
- * 三处各写一套内联样式，尺寸与圆角都不一致，界面看起来是拼出来的。
- */
+/** 下拉框。控件高度统一取 --control-h，避免各处自己拍尺寸。 */
 export function Select({ value, onChange, options, ariaLabel, style }: {
   value: string
   onChange: (v: string) => void
@@ -256,29 +189,27 @@ export function Select({ value, onChange, options, ariaLabel, style }: {
 }) {
   return (
     <select
-      className="ctl"
       aria-label={ariaLabel}
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      style={style}
+      className="rounded-chip border border-line-strong bg-surface px-2 text-sm text-ink"
+      style={{ height: 'var(--control-h)', ...style }}
     >
       {options.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
     </select>
   )
 }
 
-/** 提示条：用于"有一部分内容没能展示"这类必须被看到的说明。 */
+/**
+ * 提示条。
+ *
+ * **不分级别**（没有 info / warn / error 三色）：这一屏上唯一该用颜色说话的
+ * 是判定语义色。给提示条也上色会让画面出现第二套颜色语言，而读者分不清
+ * 哪一套在讲判定。要强调的内容靠文案自己说。
+ */
 export function Notice({ children }: { children: ReactNode }) {
   return (
-    <div style={{
-      padding: 'var(--space-3)',
-      marginBottom: 'var(--space-4)',
-      background: 'var(--verdict-unknown-bg)',
-      border: '1px solid var(--verdict-unknown)',
-      borderRadius: 'var(--radius)',
-      color: 'var(--verdict-unknown)',
-      fontSize: 'var(--text-sm)',
-    }}>
+    <div className="mb-3 rounded-card border border-line bg-sunken px-3 py-2 text-sm text-ink-2">
       {children}
     </div>
   )

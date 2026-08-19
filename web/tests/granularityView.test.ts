@@ -72,3 +72,35 @@ test('页面不自己拼粒度文案，也不把粒度当布尔', () => {
   assert.match(page, /granularityView|wideningNote/,
     '页面没有走判定模块，粒度文案散在 tsx 里会各自漂')
 })
+
+/* ---------------------------------------------------------------------- */
+/* 组件层：Radix + Tailwind 之后要守住的几条                                */
+/* ---------------------------------------------------------------------- */
+
+test('粒度切换用的是一组互斥选项，不是两个按钮', () => {
+  const page = src('pages', 'PolicyPage.tsx')
+  assert.match(page, /<Segmented/,
+    '粒度切换没走 Segmented —— 一对 aria-pressed 的按钮在读屏器里读不出'
+    + '"这是一组互斥选项"，键盘左右键也走不动')
+  assert.doesNotMatch(page, /aria-pressed/,
+    '页面里还留着手写的 aria-pressed 切换')
+})
+
+test('长解释折起来，但摘要必须自带结论', () => {
+  const radix = src('components', 'radix.tsx')
+  assert.match(radix, /summary/,
+    'Disclosure 没有 summary —— 一个写着"详情"的折叠块等于把内容藏了，'
+    + '而藏起来的依据与不存在的依据对读者是同一件事')
+  assert.match(radix, /defaultOpen/,
+    '折叠块不能只有一种状态：要紧的那几条得能默认展开')
+})
+
+test('语义色不进 Tailwind 的通用色阶', () => {
+  const theme = src('theme.css')
+  // 每一个 --color-* 都必须是 var(--…)，不得出现十六进制字面量 ——
+  // 在这里重开一份色板等于给同一个概念开第二个定义，而两份会漂：
+  // 漂的症状是某个页面的 ALLOW 绿与别处不是同一个绿。
+  const literals = theme.match(/--color-[a-z-]+:\s*#[0-9a-fA-F]/g)
+  assert.equal(literals, null,
+    `theme.css 里有写死的颜色：${literals?.join(', ')}；色板只能来自 tokens.css`)
+})

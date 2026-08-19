@@ -16,6 +16,7 @@ import { dryRunView, type DryRunView } from './dryRunView'
 import { policyExportView, type PolicyExportView } from './policyExportView'
 import { baselineGapViews, notApplicableNote, notAssessedNote, wouldBreakQualifierFor } from './preconditionsView'
 import { ALL_GRANULARITIES, granularityView, wideningNote } from './granularityView'
+import { Disclosure, Segmented } from '../components/radix'
 import {
   writebackCountDrift, writebackPushBody, writebackView,
   type WritebackPushBody, type WritebackView,
@@ -1507,25 +1508,18 @@ function GranularitySection({ current, onPick, echoed, widening, count }: {
       description="决定 podSelector 选中谁。对端不受粒度影响——放行的目标始终精确到 workload 与端口。"
       meta={`${count} 份`}
     >
-      <div style={{ display: 'flex', gap: 8, marginBottom: 'var(--space-2)' }}>
-        {ALL_GRANULARITIES.map((g) => (
-          <button
-            key={g} type="button" onClick={() => onPick(g)}
-            aria-pressed={g === current}
-            style={{
-              padding: '4px 12px', fontSize: 'var(--text-sm)',
-              border: '1px solid var(--border)', borderRadius: 4,
-              background: g === current ? 'var(--surface-active)' : 'transparent',
-              cursor: 'pointer',
-            }}
-          >
-            {granularityView(g).label}
-          </button>
-        ))}
+      <div className="mb-3 flex flex-wrap items-center gap-3">
+        <Segmented
+          ariaLabel="策略粒度"
+          value={current}
+          onChange={onPick}
+          options={ALL_GRANULARITIES.map((g) => ({ value: g, label: granularityView(g).label }))}
+        />
+        <span className="text-xs text-ink-muted">主体：{view.subject}</span>
       </div>
-      <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
-        主体：{view.subject}。{view.detail}
-      </p>
+
+      {/* 粒度不一致要常驻，不折叠：屏幕上这份策略不是你点的那个粒度，
+          而那句话读晚了，下面每一个数字都被读错了。 */}
       {mismatch && (
         <Notice>
           服务端回显的粒度是 <strong>{view.code}</strong>，与这里选中的
@@ -1533,7 +1527,22 @@ function GranularitySection({ current, onPick, echoed, widening, count }: {
           请求里的取值没有被认下来（拼错，或后端版本不认识它）。
         </Notice>
       )}
-      {note !== '' && <Notice>{note}</Notice>}
+
+      {/* 放宽报告默认展开：粗化只会放宽，那是操作者切过来之后第一件该知道
+          的事。摘要自带结论，展开的是分布明细。 */}
+      {note !== '' && (
+        <Disclosure defaultOpen summary={<strong>折叠代价</strong>}>
+          {note}
+        </Disclosure>
+      )}
+
+      {/* 这个粒度的取舍折起来：它是一段稳定的说明，读过一次就不必再占版面。
+          摘要仍然说出结论，不是一个"详情"。 */}
+      <div className="mt-2">
+        <Disclosure summary={<span className="text-ink-muted">这个粒度的代价</span>}>
+          {view.detail}
+        </Disclosure>
+      </div>
     </Section>
   )
 }
