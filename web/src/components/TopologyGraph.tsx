@@ -191,17 +191,42 @@ export default function TopologyGraph({
   return (
     <div ref={boxRef} style={{ width: '100%' }}>
       <svg width={width || '100%'} height={H} style={{ display: 'block' }}>
+        {/*
+          **箭头，不是可选的装饰。**
+          对一个 NetworkPolicy 工具，方向是最要紧的那个事实：「A 调 B」与
+          「B 调 A」产出完全不同的策略（A 的 egress 对 B 的 ingress）。
+          在这之前方向只写在 <title> 悬浮里 —— 而悬浮层在触屏上摸不到、
+          在截图与打印里不存在，而这张图会被贴进工单。
+
+          一个判定一个 marker：SVG 的 marker 不继承 line 的 stroke，
+          共用一个就会让全部箭头变成同一个颜色，于是箭头与线身各说各的。
+        */}
+        <defs>
+          {(Object.keys(EDGE_COLOR) as Array<keyof typeof EDGE_COLOR>).map((v) => (
+            <marker
+              key={v} id={`arrow-${v}`}
+              viewBox="0 0 10 10" refX="9" refY="5"
+              markerWidth="6" markerHeight="6" orient="auto-start-reverse"
+            >
+              <path d="M 0 0 L 10 5 L 0 10 z" fill={EDGE_COLOR[v]} />
+            </marker>
+          ))}
+        </defs>
       {linksRef.current.map((l, i) => {
         const s = l.source as SimNode
         const t = l.target as SimNode
         const e = l.edge
         return (
           <g key={i} onClick={() => onSelectEdge?.(e)} style={{ cursor: onSelectEdge ? 'pointer' : 'default' }}>
+            {/* 终点收到目标节点的边缘之外，否则箭头会被圆形盖住 ——
+                一个看不见的箭头与没有箭头是同一件事。 */}
             <line
-              x1={s.x} y1={s.y} x2={t.x} y2={t.y}
+              x1={s.x} y1={s.y}
+              {...shortenToEdge(s, t, nodeRadius(t) + 6)}
               stroke={EDGE_COLOR[e.verdict]}
               strokeWidth={e.confidence === 'DEGRADED' ? 3 : 1.5}
               strokeDasharray={e.crossCluster ? '6 4' : undefined}
+              markerEnd={`url(#arrow-${e.verdict})`}
               opacity={0.85}
             />
             <title>
@@ -264,4 +289,21 @@ export default function TopologyGraph({
       </svg>
     </div>
   )
+}
+
+/**
+ * 把线段的终点收到目标节点边缘之外 gap 像素处。
+ *
+ * 不收的话箭头落在圆心，被节点自己的填充盖掉 —— 而一个看不见的箭头与
+ * 没有箭头是同一件事。两点重合时原样返回：算不出方向就不假装有方向。
+ */
+function shortenToEdge(
+  s: { x?: number; y?: number }, t: { x?: number; y?: number }, gap: number,
+): { x2: number; y2: number } {
+  const sx = s.x ?? 0, sy = s.y ?? 0, tx = t.x ?? 0, ty = t.y ?? 0
+  const dx = tx - sx, dy = ty - sy
+  const len = Math.hypot(dx, dy)
+  if (len === 0) return { x2: tx, y2: ty }
+  const k = Math.max(0, len - gap) / len
+  return { x2: sx + dx * k, y2: sy + dy * k }
 }

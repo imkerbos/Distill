@@ -66,3 +66,26 @@ test('页面真的用了这三样，而不是自己另写一套判断', () => {
   assert.ok(!/topo\.edges\.length\}/.test(PAGE_SOURCE),
     'TopologyPage 直接渲染了 topo.edges.length，绕开了 edgeCountLabel')
 })
+
+/* ---------------------------------------------------------------------- */
+/* 图的可读性                                                              */
+/* ---------------------------------------------------------------------- */
+
+const GRAPH_SOURCE = readFileSync(
+  join(import.meta.dirname, '..', 'src', 'components', 'TopologyGraph.tsx'), 'utf8')
+
+test('边必须画出方向，而不是只写在悬浮提示里', () => {
+  // 对一个 NetworkPolicy 工具，方向是最要紧的那个事实：「A 调 B」与
+  // 「B 调 A」产出完全不同的策略（A 的 egress 对 B 的 ingress）。而悬浮层
+  // 在触屏上摸不到、在截图与打印里不存在 —— 这张图会被贴进工单。
+  assert.match(GRAPH_SOURCE, /markerEnd=/,
+    '边上没有箭头，方向只能从悬浮提示里读')
+  assert.match(GRAPH_SOURCE, /<marker\b/, '没有定义箭头 marker')
+})
+
+test('每个判定一个箭头 marker，不共用一个', () => {
+  // SVG 的 marker 不继承 line 的 stroke：共用一个会让全部箭头变成同一个
+  // 颜色，于是箭头与线身各说各的判定。
+  assert.match(GRAPH_SOURCE, /arrow-\$\{v\}|arrow-\$\{e\.verdict\}/,
+    '箭头 marker 的 id 不随判定变化，说明三种判定共用了一个箭头颜色')
+})
