@@ -16,6 +16,7 @@ import { dryRunView, type DryRunView } from './dryRunView'
 import { policyExportView, type PolicyExportView } from './policyExportView'
 import { baselineGapViews, notApplicableNote, notAssessedNote, wouldBreakQualifierFor } from './preconditionsView'
 import { ALL_GRANULARITIES, granularityView, wideningNote } from './granularityView'
+import { accessEdges, edgeStatus, tighteningNote } from './accessGraphView'
 import { Disclosure, Segmented } from '../components/radix'
 import {
   writebackCountDrift, writebackPushBody, writebackView,
@@ -129,6 +130,12 @@ export default function PolicyPage({ cluster }: { cluster: string }) {
         // 拿默认推荐那一套去比，会在"人工决定改变了预测"时报出一个与集群
         // 无关的假差异，而假差异重复几次之后，真的那次也不会有人看。
         pageCounts={pv.overridden.prediction.counts}
+      />
+      {/* 访问关系摆在候选策略之前：那 728 条规则本身就是一张「谁访问谁」，
+          而逐条读表格读不出这件事。 */}
+      <AccessSection
+        candidates={pv.candidates}
+        trafficObserved={pv.trafficObserved}
       />
       <CandidateSection candidates={pv.candidates} overrides={overrides} cluster={cluster} onChanged={onChanged} />
       <PendingSection candidates={pv.candidates} overrides={overrides} cluster={cluster} onChanged={onChanged} />
@@ -1558,5 +1565,79 @@ function RemedyLegend({ missing, notAssessed }: {
         </dl>
       </Disclosure>
     </div>
+  )
+}
+
+/**
+ * 访问关系：谁访问谁。
+ *
+ * **NetworkPolicy 本身就是一张这样的图** —— 一条规则就是一条边。在这之前
+ * 这些边只以「某条规则的对端」的形式散在下面的表格单元格里，没有任何一屏
+ * 把它们聚起来，于是这一页与"谁访问谁"看起来毫无关系。
+ *
+ * 这一节只画**推荐**那一层。现存 NetworkPolicy 与观测流量是另外两层，
+ * 三层的边含义完全不同（推荐允许 / 现在允许 / 真的在走），合并画会让
+ * 一条声明的边被读成观测到的流量 —— 而「这条规则没有流量、可以收紧」
+ * 正是从后者推出来的（design doc 2026-08-19-access-graph §1）。
+ */
+function AccessSection({ candidates, trafficObserved }: {
+  candidates: CandidatePolicy[]
+  trafficObserved: boolean
+}) {
+  const edges = accessEdges(candidates)
+    .slice()
+    .sort((a, b) => b.ruleCount - a.ruleCount || a.source.localeCompare(b.source))
+  const note = tighteningNote(trafficObserved)
+
+  return (
+    <Section
+      title="谁访问谁"
+      description="这份推荐里的每一条规则就是一条访问关系。方向按规则方向读：出向是「主体 → 对端」，入向是「对端 → 主体」。"
+      meta={`${edges.length} 条`}
+    >
+      {/* 限定语常驻、不折叠：它说的是这一屏的每一个结论都缺同一样东西，
+          读晚了下面每一行都被读错了。 */}
+      {note !== '' && <Notice>{note}</Notice>}
+
+      {edges.length === 0 ? (
+        <EmptyState
+          message="这份推荐里没有任何访问关系。"
+          detail="候选策略为空，或它们只含没有对端的规则。见下方「不可生成清单」。"
+        />
+      ) : (
+        <ScrollTableCard maxHeight={420}>
+          <StickyHead>
+            <tr>
+              <th>发起方</th>
+              <th>目的方</th>
+              <th className="num">规则数</th>
+              <th>这条边现在是什么状态</th>
+            </tr>
+          </StickyHead>
+          <tbody>
+            {edges.map((e) => {
+              // 本轮只有推荐这一层：declared / observed 两层要读集群现存策略
+              // 与流量，属于下一轮。**不假装知道** —— 传 false 让 edgeStatus
+              // 走「缺一条策略」，那正是此刻唯一成立的那句话。
+              const st = edgeStatus(
+                { proposed: true, declared: false, observed: false }, trafficObserved)
+              return (
+                <tr key={`${e.source} ${e.target}`}>
+                  <td className="mono">{e.source}</td>
+                  <td className="mono">
+                    {e.target}
+                    {/* 网段不是集群里的节点：不标出来，读者会去找一个叫
+                        10.170.48.2/32 的 namespace。 */}
+                    {e.targetIsCIDR && <span className="ml-2"><Chip>网段</Chip></span>}
+                  </td>
+                  <td className="num">{e.ruleCount}</td>
+                  <td className="text-xs text-ink-muted">{st.action}</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </ScrollTableCard>
+      )}
+    </Section>
   )
 }
