@@ -193,6 +193,9 @@ body {
   font-family: var(--mono);
   font-size: var(--text-xs);
   color: var(--text-muted);
+  /* 标识不许被折行拆开：`uat-k8s-cluster-01` 折成三行之后，读者要把三段
+     拼回去才知道那是一个 id。表格宁可横向滚动，也不该让一个标识变形。 */
+  white-space: nowrap;
 }
 
 /*

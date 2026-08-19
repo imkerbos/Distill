@@ -154,3 +154,41 @@ test('标题元素自己带样式，不靠父节点', () => {
   assert.match(ui, /<h1\s+className=/, 'PageHeader 的 h1 没有自己的类')
   assert.match(ui, /<h2\s+className=/, 'Section 的 h2 没有自己的类')
 })
+
+test('窄格里的徽标不许被逐字折行', () => {
+  // 「有 · 判定降级」在 CCNP 那一格里被折成了一列单字。这种坏法在截图里
+  // 一眼可见、在代码里看不出来 —— 也不会有任何测试因此变红，除非专门盯着。
+  // 盯住那个徽标自己那一段，不是它附近某处也出现过这个类 —— 第一版
+  // 用了一个 1200 字符的切片，把邻近组件的 nowrap 一起算了进来，变异
+  // 因此没红。
+  // 剥掉注释再断言：这一轮已经第四次出现守卫被注释里的词骗过 ——
+  // 这次是我解释"为什么要加 whitespace-nowrap"的那句注释自己命中了断言。
+  const src = read('ClustersPage.tsx')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '')
+  const at = src.indexOf('有 · 判定降级')
+  assert.ok(at > 0, '找不到 CCNP 徽标')
+  const badge = src.slice(Math.max(0, at - 420), at)
+  assert.match(badge, /whitespace-nowrap/,
+    'CCNP 徽标没有禁止折行；这一格很窄，不加会被逐字折成一列单字')
+})
+
+test('不可逆的动作不画成视觉上最重的那一个', () => {
+  // 「下线」是集群管理里唯一不可逆的动作。拦住误点的是二次确认，不是颜色，
+  // 但也不该反过来用颜色去吸引点击。
+  const src = read('ClustersPage.tsx')
+  const at = src.indexOf('offboard(c.id)')
+  assert.ok(at > 0, '找不到下线按钮')
+  const around = src.slice(at, at + 240)
+  assert.doesNotMatch(around, /variant="primary"/,
+    '下线按钮用了主操作样式')
+})
+
+test('表格单元格里不放整段散文', () => {
+  // 一段三行的说明塞进单元格，会把那一行撑到相邻行的六倍高，整张表就读不
+  // 成一张表了。说明必须在，但要折起来。
+  const src = read('ClustersPage.tsx')
+  const cell = src.slice(src.indexOf('function GitBindingCell'))
+  assert.match(cell.slice(0, 2000), /<Disclosure/,
+    'Git 绑定那一格仍然把整段说明摊在表格里')
+})

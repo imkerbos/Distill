@@ -6,7 +6,7 @@ import {
   type APIServer, type DriftResult, type GitBinding, type GitRepo, type ImportRole, type ImportSource,
   type PolicyImportItem, type RegisteredCluster,
 } from '../api/types'
-import { Checkbox } from '../components/radix'
+import { Checkbox, Disclosure } from '../components/radix'
 import { useResource } from '../api/useResource'
 import {
   blankFormValues, blankGitValues, buildClusterWrite, describePathVerifyOutcome,
@@ -90,7 +90,7 @@ function ClusterListSection({ clusters, repos, reposError, error, loading, onCha
   return (
     <Section
       title="已注册集群"
-      description="Git 绑定为空时显式写「未绑定」——空单元格会被读成「加载中」或「未知」，两者都不是这里想表达的事实；同一条理由，没校验过的路径写「路径未校验」而不是留白。这一格展示的是**路径级**结论：policyPath 在不在。仓库那一层能不能连上是仓库页的事，两层各有各的结论，不合成一个。校验只做只读查询，它从不向仓库提交任何内容，因此证明不了平台能往那个路径提交——那要等真正提交一次才知道。「编辑」在行内展开成两份各自提交的表单：登记信息一份、Git 绑定一份。绑定是一个有自己生命周期的资源，改集群不会碰它，改绑定也不会重写集群，更不会改动仓库。"
+      description="Git 绑定为空时显式写「未绑定」——空单元格会被读成「加载中」或「未知」，两者都不是这里想表达的事实。"
       meta={clusters ? `${clusters.length} 个` : undefined}
     >
       {/*
@@ -106,6 +106,14 @@ function ClusterListSection({ clusters, repos, reposError, error, loading, onCha
       ) : clusters.length === 0 ? (
         <EmptyState message="尚未注册任何集群。" detail="使用下方表单登记第一个集群。" />
       ) : (
+        <>
+        {/* 其余说明折起来：十行散文压在表格上方，读者要先读完一屏字
+            才看得到数据。摘要说结论，展开的是理由。 */}
+        <div className="mb-3">
+          <Disclosure summary={<span className="text-xs">这张表里的几格为什么这么写</span>}>
+            <span className="text-sm leading-relaxed">Git 绑定为空时显式写「未绑定」——空单元格会被读成「加载中」或「未知」，两者都不是这里想表达的事实；同一条理由，没校验过的路径写「路径未校验」而不是留白。这一格展示的是**路径级**结论：policyPath 在不在。仓库那一层能不能连上是仓库页的事，两层各有各的结论，不合成一个。校验只做只读查询，它从不向仓库提交任何内容，因此证明不了平台能往那个路径提交——那要等真正提交一次才知道。「编辑」在行内展开成两份各自提交的表单：登记信息一份、Git 绑定一份。绑定是一个有自己生命周期的资源，改集群不会碰它，改绑定也不会重写集群，更不会改动仓库。</span>
+          </Disclosure>
+        </div>
         <TableCard>
           <thead>
             <tr>
@@ -157,10 +165,14 @@ function ClusterListSection({ clusters, repos, reposError, error, loading, onCha
                       >
                         {editingId === c.id ? '收起' : '编辑'}
                       </Button>
+                      {/* 下线用次要样式：它是这一行里唯一不可逆的动作，
+                          而把它画成视觉上最重的那一个，等于邀请人去点。
+                          拦住误点的是二次确认，不是颜色 —— 但也不该反过来
+                          用颜色去吸引点击。 */}
                       <Button
                         onClick={() => offboard(c.id)}
                         disabled={busyId === c.id}
-                        variant="primary"
+                        variant="secondary"
                       >
                         {busyId === c.id ? '下线中…' : '下线'}
                       </Button>
@@ -198,6 +210,7 @@ function ClusterListSection({ clusters, repos, reposError, error, loading, onCha
             ))}
           </tbody>
         </TableCard>
+        </>
       )}
     </Section>
   )
@@ -278,9 +291,13 @@ function GitBindingCell({ clusterId, git, repo, onChanged }: {
       <span className="text-xs text-ink-muted">
         {view.checkedAt}
       </span>
-      <span className="text-xs text-ink-2">
-        {view.detail}
-      </span>
+      {/* 说明折起来。它必须在（「从未校验过」与「校验通过」是相反的两件
+          事实），但摊在单元格里会把这一行撑到相邻行的六倍高，整张表就读不
+          成一张表了。摘要仍然说结论 —— 折起来的说明与不存在的说明对读者
+          是两回事。 */}
+      <Disclosure summary={<span className="text-xs">这个结论是什么意思</span>}>
+        <span className="text-xs text-ink-2">{view.detail}</span>
+      </Disclosure>
       <Button
         type="button"
         onClick={reverify}
@@ -1146,12 +1163,15 @@ function CCNPMark({ present }: { present: boolean }) {
     return <span style={{ color: 'var(--text-muted)', fontSize: 'var(--text-xs)' }}>无</span>
   }
   return (
-    <span style={{
-      display: 'inline-flex', alignItems: 'center', padding: '2px 8px',
-      fontSize: 'var(--text-xs)', fontWeight: 500, borderRadius: 999,
-      color: 'var(--verdict-unknown)',
-      border: 'var(--degraded-stroke-width) solid var(--verdict-unknown)',
-    }}>
+    // whitespace-nowrap 不是排版偏好：这一格很窄，不加的话「有 · 判定降级」
+    // 会被逐字折成一列单字，那种坏法在截图里一眼可见、在代码里看不出来。
+    <span
+      className="inline-flex items-center rounded-full px-2 py-[2px] text-xs font-medium whitespace-nowrap"
+      style={{
+        color: 'var(--verdict-unknown)',
+        border: 'var(--degraded-stroke-width) solid var(--verdict-unknown)',
+      }}
+    >
       有 · 判定降级
     </span>
   )
