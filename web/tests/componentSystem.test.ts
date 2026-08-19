@@ -130,3 +130,27 @@ test('下拉与勾选走无头组件', () => {
   assert.deepEqual(offenders, [],
     `这些页面还在用原生 checkbox：${offenders.join(', ')}`)
 })
+
+test('组件层没有被压扁成一个装满类名的外壳', () => {
+  // 一次按行号合并 className 的机械改动把 PageHeader / Section / AppShell 的
+  // 内层元素（h1 / h2 / span / p）的类全部抽到了外层 div 上，内层变成裸标签。
+  // 编译过、测试过、构建过 —— 只有肉眼能看出那三屏塌成了漂浮的文字。
+  //
+  // 判据：一个 className 长到超过 90 个字符，几乎一定是被合并进来的一堆
+  // 互不相干的类（真实的组合到不了那个长度）。
+  for (const f of ['ui.tsx', 'AppShell.tsx', 'radix.tsx']) {
+    const long = (readComp(f).match(/className="[^"]{90,}"/g) ?? [])
+      .filter((c) => !c.includes('\n'))
+    assert.deepEqual(long, [],
+      `${f} 里有超长 className，多半是内层元素的类被合并到了外层：${long.join(' | ')}`)
+  }
+})
+
+test('标题元素自己带样式，不靠父节点', () => {
+  const ui = readComp('ui.tsx')
+  // 上面那次破坏的直接症状就是 <h1> 与 <h2> 变成了裸标签。
+  assert.doesNotMatch(ui, /<h1\s*\n\s*>/, 'PageHeader 的 h1 是裸标签')
+  assert.doesNotMatch(ui, /<h2\s*\n\s*>/, 'Section 的 h2 是裸标签')
+  assert.match(ui, /<h1\s+className=/, 'PageHeader 的 h1 没有自己的类')
+  assert.match(ui, /<h2\s+className=/, 'Section 的 h2 没有自己的类')
+})

@@ -21,13 +21,15 @@ import { Dropdown } from './radix'
 /** 页面标题与一句说明。说明解释这一屏回答什么问题，不是装饰。 */
 export function PageHeader({ title, description }: { title: string; description?: ReactNode }) {
   return (
-    <header className="mb-5 m-0 text-2xl tracking-[-0.02em] text-ink font-title mt-2 mb-0 max-w-[640px] text-sm leading-relaxed text-ink-muted">
+    <header className="mb-5">
       <h1
+        className="m-0 text-2xl tracking-[-0.02em] text-ink"
+        style={{ fontWeight: 'var(--weight-title)' }}
       >
         {title}
       </h1>
       {description && (
-        <p>
+        <p className="mt-2 mb-0 max-w-[720px] text-sm leading-relaxed text-ink-muted">
           {description}
         </p>
       )}
@@ -66,20 +68,24 @@ export function Section({
   children: ReactNode
 }) {
   return (
-    <section className="mb-6">
-      {/* 标题下一条细线：此前标题与正文只差 2px 字号，"区块"读不出是区块。
+    <section className="mb-5">
+      {/* 标题下一条细线：标题与正文只差 2px 字号时，"区块"读不出是区块。
           分隔线比放大字号便宜 —— 把标题放大到扎眼会让这一屏显得在推销结论，
           而这个平台的结论靠依据可查建立信任，不靠视觉音量。 */}
-      <div className="mb-3 border-b border-line pb-2 flex flex-wrap items-baseline justify-between gap-2 m-0 text-lg tracking-[-0.01em] text-ink font-section text-xs tabular-nums text-ink-muted mt-2 mb-0 max-w-[720px] text-sm leading-relaxed">
-        <div>
+      <div className="mb-3 border-b border-line pb-2">
+        <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
           <h2
+            className="m-0 text-lg tracking-[-0.01em] text-ink"
+            style={{ fontWeight: 'var(--weight-section)' }}
           >
             {title}
           </h2>
-          {meta && <span>{meta}</span>}
+          {/* 计数贴着标题右侧，不推到版面另一端：宽屏上 justify-between 会把
+              它甩到一千多像素外，读者要横扫整行才对得上它属于哪个标题。 */}
+          {meta && <span className="mr-auto text-xs tabular-nums text-ink-muted">{meta}</span>}
         </div>
         {description && (
-          <p>
+          <p className="mt-2 mb-0 max-w-[720px] text-sm leading-relaxed text-ink-muted">
             {description}
           </p>
         )}

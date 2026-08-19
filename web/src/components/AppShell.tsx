@@ -82,18 +82,26 @@ export default function AppShell({ cluster, onClusterChange, children }: Props) 
   ]
 
   return (
-    <div className="grid min-h-screen grid-cols-[236px_1fr] bg-bg flex flex-col gap-4 border-r border-line bg-surface px-3 py-4 text-lg tracking-[-0.01em] text-ink font-title text-xs text-ink-muted">
-      <nav>
-        <div>
+    <div className="grid min-h-screen grid-cols-[236px_1fr] bg-bg">
+      {/* 侧栏用下沉底色，不是纯白：白底侧栏配白底内容区之间只剩一条 1px
+          的线，两块看起来是同一张纸，导航于是像浮在正文上的一列字。 */}
+      <nav className="flex flex-col gap-5 border-r border-line bg-sunken px-3 py-5">
+        {/* 品牌块与其余部分之间给一条线：标题、副标题、"集群"三行贴在一起
+            会读成同一段文字。 */}
+        <div className="border-b border-line px-3 pb-4">
           <div
+            className="text-lg tracking-[-0.01em] text-ink"
+            style={{ fontWeight: 'var(--weight-title)' }}
           >
             Distill
           </div>
-          <div>NetworkPolicy 可见性</div>
+          <div className="mt-[2px] text-xs text-ink-muted">NetworkPolicy 可见性</div>
         </div>
 
-        <label className="block">
-          <span className="mb-1 block text-xs text-ink-muted">集群</span>
+        <label className="block px-3">
+          <span className="mb-[6px] block text-[11px] tracking-[0.06em] text-ink-muted uppercase">
+            集群
+          </span>
           <Select
             value={cluster}
             ariaLabel="集群"
@@ -151,7 +159,7 @@ export default function AppShell({ cluster, onClusterChange, children }: Props) 
         限制正文宽度：宽屏下表格列会被拉到一两千像素，同一行的源与目的
         相隔太远，读者无法把它们连成一条记录。
       */}
-      <div className="overflow-auto px-5 py-5">
+      <div className="overflow-auto px-5 py-4">
         {/*
           数据来源沿这里下发给每一屏的内容区。取的是这一次已经发生的集群
           列表请求里的字段，不为标识本身再发一次请求（design doc
