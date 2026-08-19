@@ -135,6 +135,8 @@ func run(configPath string) error {
 		// 资产采集的只读摘要。拉取式采集的写入侧属于 cmd/distill-collector
 		// —— 这里只拿读的那一面，主服务不持有任何 Kubernetes 凭据。
 		Collection: snapshotstore.New(db),
+		// 流量摄入的只读摘要，与资产采集并列。
+		FlowIngest: snapshotstore.New(db),
 		// 推送式接入的落库口（design doc 2026-08-18）。
 		//
 		// 这里出现一条写路径，与上面那句「只拿读的那一面」并不矛盾：写进来

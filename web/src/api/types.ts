@@ -1112,3 +1112,40 @@ export type CollectionState =
   | { readonly kind: 'RUN'; readonly summary: CollectionSummary }
   | { readonly kind: 'NO_RUN' }
   | { readonly kind: 'UNKNOWN_CLUSTER' }
+
+/**
+ * 最近一次流量摄入的摘要。
+ *
+ * **接口答 CodeNoIngestRun 时这个对象不存在** —— 那是"从来没有过任何一次
+ * 摄入"，与"摄入过、这段窗口没有连接"是两句不同的话，处置也相反。
+ */
+export interface IngestSummary {
+  clusterId: string
+  runId: string
+  /** 来源，封闭枚举回显；平台不认识时是 UNRECOGNIZED。 */
+  source: string
+  startedAt: string
+  finishedAt: string
+  /** OK / PARTIAL / FAILED。 */
+  status: string
+  /** 仅失败时非空，取值是封闭枚举。 */
+  errorReason: string
+  /** 这次要观测的那段时间。 */
+  window: TimeWindow
+  /** 来源说自己实际覆盖到的那段；coveredKnown 为 false 时无意义。 */
+  covered: TimeWindow
+  connections: number
+  /**
+   * 完整度的三项证据，各自带一个"来源报没报过"。
+   *
+   * **缺席与零值必须分开**：dropped 为 0 是"来源说一条没丢"，
+   * droppedReported 为 false 是"来源不报这件事"，两者对完整度的含义完全不同。
+   */
+  sampleRate: number
+  sampleRateKnown: boolean
+  dropped: number
+  droppedReported: boolean
+  coveredKnown: boolean
+  /** 由上面那几项算出，不落库。 */
+  completeness: Completeness
+}

@@ -3,6 +3,8 @@ import type { CollectionSummary } from '../api/types'
 import { useResource } from '../api/useResource'
 import { Card, EmptyState, Notice, PageHeader, Section, Skeleton, StatTile, TableCard } from '../components/ui'
 import { COLLECTION_FEEDS_NOTHING, collectionSummaryView } from './collectionView'
+import { flowIngestView, missingEvidence } from './flowIngestView'
+import { Disclosure } from '../components/radix'
 
 /**
  * 资产采集页。
@@ -19,8 +21,8 @@ export default function CollectionPage({ cluster }: { cluster: string }) {
   return (
     <div>
       <PageHeader
-        title="资产采集"
-        description="平台从真实集群只读采回来的资产清单，以及这次采集有什么没能看到。"
+        title="数据采集"
+        description="平台看见了这个集群的什么 —— 资产与流量两条链路。两者独立：只有资产时候选策略照样出得来，但「谁在访问谁」与「加了会拦断什么」要等流量。"
       />
 
       {/*
@@ -54,6 +56,8 @@ export default function CollectionPage({ cluster }: { cluster: string }) {
       ) : (
         <CollectionRun summary={state.summary} />
       )}
+
+      <FlowIngestSection cluster={cluster} />
     </div>
   )
 }
@@ -194,5 +198,76 @@ function CollectionRun({ summary }: { summary: CollectionSummary }) {
         </p>
       </Card>
     </div>
+  )
+}
+
+/**
+ * 流量摄入那一节。
+ *
+ * 与资产同屏，因为两者答的是同一个问题的两半：**平台看见了这个集群的什么**。
+ * 分成两个导航项会让人以为流量是另一件事，而一个集群"能不能被回答"取决于
+ * 两者都有（design doc 2026-08-19-flow-ingest-visibility §2）。
+ */
+function FlowIngestSection({ cluster }: { cluster: string }) {
+  const { data, error, loading } = useResource(
+    cluster ? `flow-ingest:${cluster}` : '',
+    () => api.flowIngest(cluster),
+  )
+
+  // 「从未摄入过」是服务端的一个业务码，不是一次读取失败 —— 它到这里是
+  // 一个 ApiError，而 view(null) 正是它该显示的那句话。
+  const neverIngested = error !== '' && /从来没有过|从未|20009/.test(error ?? '')
+  const summary = data ?? null
+  const view = flowIngestView(loading && !neverIngested ? undefined : summary)
+
+  return (
+    <Section
+      title="流量摄入"
+      description="连接观测从哪来、上次什么时候试的、看到了多少。没有它，候选策略只有基础设施那一半。"
+      meta={summary ? summary.source : undefined}
+    >
+      {loading && !neverIngested ? <Skeleton rows={2} /> : (
+        <>
+          <Card className="mb-3 px-4 py-3">
+            <p className="m-0 text-sm">{view.headline}</p>
+            {view.action !== '' && (
+              <p className="mt-2 mb-0 text-xs leading-relaxed text-ink-muted">{view.action}</p>
+            )}
+          </Card>
+
+          {summary && (
+            <>
+              <TableCard>
+                <thead>
+                  <tr><th>项</th><th>值</th></tr>
+                </thead>
+                <tbody>
+                  <tr><td>来源</td><td className="mono">{summary.source}</td></tr>
+                  <tr><td>状态</td><td className="mono">{summary.status}</td></tr>
+                  <tr><td>连接数</td><td className="num">{summary.connections}</td></tr>
+                  <tr><td>完整度</td><td className="mono">{summary.completeness}</td></tr>
+                </tbody>
+              </TableCard>
+
+              {/* **只报一个 UNKNOWN 不够。** 操作者会以为那是平台的毛病，
+                  而它其实是来源的性质 —— Hubble 报不出采样率与丢弃数，
+                  conntrack 是轮询快照、说不出自己覆盖了多久。 */}
+              {missingEvidence(summary).length > 0 && (
+                <div className="mt-3">
+                  <Disclosure
+                    defaultOpen
+                    summary={<span>完整度是 <strong>{summary.completeness}</strong>，因为这几项证据来源没给</span>}
+                  >
+                    <ul className="m-0 pl-[1.2em] text-sm leading-relaxed">
+                      {missingEvidence(summary).map((m) => <li key={m}>{m}</li>)}
+                    </ul>
+                  </Disclosure>
+                </div>
+              )}
+            </>
+          )}
+        </>
+      )}
+    </Section>
   )
 }

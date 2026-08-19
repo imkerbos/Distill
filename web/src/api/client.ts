@@ -2,7 +2,7 @@ import { isNoRunError, isUnknownClusterError } from '../pages/collectionView'
 import type {
   Account, ClusterWrite, CollectionState, CollectionSummary,
   CurrentSession, Decision, Envelope, FlowFilter, FlowPage, GitBindingWrite,
-  GitRepo, GitRepoWrite, Granularity, Identity, ImportRole, ImportSource, OverrideDecision,
+  GitRepo, GitRepoWrite, Granularity, Identity, ImportRole, ImportSource, IngestSummary, OverrideDecision,
   PathVerifyStatus, PlatformSettingView, PlatformSettingWrite, PolicyImportItem, PolicyPreview,
   Quality, RegisteredCluster, RepoVerifyStatus, Role, SecurityReport, Topology, TopologyLevel,
   WritebackPlanResult, WritebackPushResult,
@@ -379,6 +379,15 @@ export const api = {
 
   decision: (flowID: string) =>
     request<Decision>(`/api/v1/flows/${encodeURIComponent(flowID)}/decision`),
+
+  /**
+   * 最近一次流量摄入。
+   *
+   * 从未摄入过时服务端答 CodeNoIngestRun —— 调用方据此显示"从未"，
+   * 而不是"没有流量"。两者的处置相反。
+   */
+  flowIngest: (cluster: string) =>
+    request<IngestSummary>(`/api/v1/clusters/${encodeURIComponent(cluster)}/flow-ingest`),
 
   policyPreview: (cluster: string, namespace?: string, granularity?: Granularity) => {
     const p = new URLSearchParams()

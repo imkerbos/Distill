@@ -97,6 +97,17 @@ const (
 	// 「这一刻已经有人在写了」。
 	CodeConcurrentCollection Code = 20008
 
+	// CodeNoIngestRun 表示这个集群还没有过任何一次流量摄入。
+	//
+	// **与"摄入过、这段窗口确实没有连接"是两句不同的话**，因此是两个不同的
+	// 答复：前者要去部署采集器或开流量日志，后者什么都不用做 —— 那是一句
+	// 关于集群的话。合成一个码，操作者会照着错的那一半行动
+	// （design doc 2026-08-19-flow-ingest-visibility §3）。
+	//
+	// 也与 CodeNoUsableCollection 分开：那一条说的是"这次问到的窗口没有
+	// 可用数据"，这一条说的是"这条链路从来没有跑过"。
+	CodeNoIngestRun Code = 20009
+
 	// CodeInternal 表示服务端内部错误。
 	CodeInternal Code = 50001
 	// CodeDependencyUnavailable 表示依赖不可用。
@@ -124,6 +135,7 @@ var messages = map[Code]string{
 	CodeClusterRequired:       "请先选择一个集群：流量列表按集群作答，不跨集群合并",
 	CodeReadNotWired:          "该集群的这条读路径尚未接通，暂时无法作答；这不是采集缺失，跑采集不会改变它",
 	CodeConcurrentCollection:  "这个集群同时有另一次采集在跑，本次未被接受：请先确认只有一个采集器在跑",
+	CodeNoIngestRun:           "这个集群还没有过任何一次流量摄入：采集器尚未部署，或流量日志尚未开启",
 	CodeInternal:              "服务内部错误",
 	CodeDependencyUnavailable: "依赖服务暂时不可用",
 }
@@ -156,6 +168,7 @@ var registered = []Code{
 	CodeRateLimited,
 	CodeNoCollectionRun,
 	CodeNoUsableCollection,
+	CodeNoIngestRun,
 	CodeClusterRequired,
 	CodeReadNotWired,
 	CodeConcurrentCollection,

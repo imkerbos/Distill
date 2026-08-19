@@ -157,6 +157,17 @@ func newTestRouterWithFlowSink(
 	return buildTestRouterWithAgent(t, fixtureSource(), &recordingSink{}, nopDeriver{}, flowSink)
 }
 
+// newTestRouterWithFlowIngest 装一个带流量摄入读取端的部署。
+//
+// 单独开一个入口，理由同 newTestRouterWithCollection：绝大多数用例装配的是
+// "没有流量读取端"的形态（读取端为 nil），而那是当前真实部署的形态。
+func newTestRouterWithFlowIngest(
+	t *testing.T, fi httpapi.FlowIngestReader,
+) (http.Handler, *auth.SessionStore, *http.Cookie) {
+	t.Helper()
+	return buildTestRouterWithFlowIngest(t, newMemRegistry(), fi)
+}
+
 // nopDeriver 是一个成功但什么都不做的推导端。
 type nopDeriver struct{}
 
@@ -237,6 +248,37 @@ func buildTestRouter(
 }
 
 // buildTestRouterWithLog 是 buildTestRouter 多带一个日志去处的版本。
+// buildTestRouterWithFlowIngest 装一个只带流量摄入读取端的路由器。
+func buildTestRouterWithFlowIngest(
+	t *testing.T, reg registry.Store, fi httpapi.FlowIngestReader,
+) (http.Handler, *auth.SessionStore, *http.Cookie) {
+	t.Helper()
+	hash, err := bcrypt.GenerateFromPassword([]byte(testPassword), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	sessions := auth.NewSessionStore(time.Hour, nil)
+	logger, err := applog.New("ERROR", io.Discard)
+	if err != nil {
+		t.Fatalf("logger: %v", err)
+	}
+	h := httpapi.NewRouter(httpapi.Deps{
+		Sessions:   sessions,
+		Verifier:   auth.NewVerifier(config.User{Username: "demo", PasswordHash: string(hash)}, reg),
+		Logger:     logger,
+		Registry:   reg,
+		FlowIngest: fi,
+	})
+	login := postJSON(t, h, "/api/v1/sessions", map[string]string{
+		"username": "demo", "password": testPassword,
+	})
+	cookies := login.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("login returned no cookie")
+	}
+	return h, sessions, cookies[0]
+}
+
 func buildTestRouterWithLog(
 	t *testing.T, reader store.Reader, reg registry.Store,
 	gv httpapi.GitVerifier, pw httpapi.PolicyWriter,

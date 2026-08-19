@@ -78,6 +78,12 @@ type Deps struct {
 	// nil 表示"本部署没有采集读取端"，**不是**"这个集群没有采集记录"——
 	// 见 handleCollection。
 	Collection CollectionReader
+	// FlowIngest 读最近一次流量摄入的摘要。
+	//
+	// 与 Collection 分开：资产采集与流量摄入是两条独立链路，各自会失败、
+	// 各自重试，而一个部署可以只有其中一条。允许为 nil —— nil 表示"本部署
+	// 没有流量读取端"，**不是**"这个集群没有摄入记录"。
+	FlowIngest FlowIngestReader
 	// GitVerifier 对 Git 绑定做只读校验。
 	//
 	// 允许为 nil：未配置 secrets 的部署（比如 demo）不做校验，结论一律是
@@ -310,6 +316,14 @@ func NewRouter(d Deps) http.Handler {
 			// （spec §5.2）—— 没有哪条只读判定依赖它。
 			az.route(protected, http.MethodGet, "/clusters/{clusterID}/collection",
 				accessAdmin, handleCollection(d))
+			// 流量摄入与资产采集并列：两者答的是同一个问题的两半 ——
+			// 平台看见了这个集群的什么。
+			// 与 /collection 同为 accessAdmin：摘要里带着来源类型（装了
+			// Hubble 还是 conntrack agent）与失败原因（UNAUTHORIZED 说明
+			// 凭据出了问题），那是平台自身的部署形态。分类存疑时取更严的
+			// 那一侧，与本文件其余几处同一处置。
+			az.route(protected, http.MethodGet, "/clusters/{clusterID}/flow-ingest",
+				accessAdmin, handleFlowIngest(d))
 			az.route(protected, http.MethodGet, "/clusters/{clusterID}/topology",
 				accessViewer, handleTopology(d))
 			az.route(protected, http.MethodGet, "/clusters/{clusterID}/quality",
