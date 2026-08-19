@@ -1,3 +1,4 @@
+import { windowAbsent } from './policyExportView.ts'
 import type { ChangeKind, PolicyPreview, TimeWindow, WritebackPlan } from '../api/types'
 
 /**
@@ -86,6 +87,11 @@ const CHANGE_KIND_LABEL: Record<ChangeKind, string> = {
  * 的调用路径。
  */
 function writebackPath(cluster: string, window: TimeWindow, step: 'plan' | 'push'): string {
+  // 窗口缺席就省掉 from/to，理由同导出：回传一个零值时刻会被服务端判成
+  // 非法参数，而事实是这个集群还没有流量观测（policyExportView.windowAbsent）。
+  if (windowAbsent(window)) {
+    return `/api/v1/clusters/${encodeURIComponent(cluster)}/policy-writeback/${step}`
+  }
   const p = new URLSearchParams({ from: window.from, to: window.to })
   return `/api/v1/clusters/${encodeURIComponent(cluster)}/policy-writeback/${step}?${p}`
 }

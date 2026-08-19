@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/imkerbos/Distill/internal/baseline"
+	"github.com/imkerbos/Distill/internal/collectstore"
 
 	"github.com/imkerbos/Distill/internal/fixture"
 	"github.com/imkerbos/Distill/internal/gitwrite"
@@ -250,4 +251,37 @@ func (r emptyEnabledReader) PolicyPreviewAtGranularity(
 	pv.Overridden.Enabled = nil
 	pv.NotAssessedBaselines = []baseline.Kind{baseline.KindDNS}
 	return pv, nil
+}
+
+// 没有流量观测的集群照样要走到门禁，而不是停在「请求参数不合法」。
+//
+// 这个平台的资产兜底那一轮之后，零流量集群照样产得出候选策略（UAT 实测
+// 303 份）。写回请求不带时间窗时，默认窗口答不出来 —— 那**不是**一次参数
+// 错误，是「这个集群还没有流量观测」。答成参数错误会把一句关于集群的话
+// 变成一次调用方的过错，而操作者会去检查自己的请求。
+func TestAClusterWithoutTrafficReachesTheGateNotAParameterError(t *testing.T) {
+	f := newWritebackFixture(t)
+	f.reader = noWindowReader{Reader: f.reader}
+	h, _, cookie := buildTestRouterWithLog(t, f.reader, f.reg, f.verifier, f.writer, nil, "ERROR", f.logs)
+
+	rec := authedPostJSON(t, h, cookie, writebackPlanPath, map[string]any{})
+	code, msg := refusal(t, rec.Body.String())
+	if code == 0 {
+		t.Fatalf("plan succeeded for a cluster with no traffic: %s", rec.Body.String())
+	}
+	// 拒绝要说得出实质原因（这个 fixture 上是 Enforcing 门禁），而不是
+	// 一句「请求参数不合法」—— 后者会让操作者去检查自己的请求。
+	if !strings.Contains(msg, "Baseline") && !strings.Contains(msg, "流量") {
+		t.Errorf("refused with %q; a cluster with no flow ingest is a fact about the cluster, "+
+			"not a mistake by the caller", msg)
+	}
+}
+
+// noWindowReader 让默认窗口答不出来，模拟一次流量都没摄入过的集群。
+type noWindowReader struct {
+	store.Reader
+}
+
+func (noWindowReader) DefaultWindow(context.Context, string) (store.TimeWindow, error) {
+	return store.TimeWindow{}, collectstore.ErrNoFlowIngest
 }

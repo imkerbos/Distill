@@ -222,3 +222,36 @@ test('页面不重建 YAML 或注释头', () => {
       + '前端重建一份，"它与页面上的预测同源"这个保证当场就没了（design doc §2、§3）')
   }
 })
+
+/* ---------------------------------------------------------------------- */
+/* 没有流量观测时，时间窗是"没有"，不是零值                                   */
+/* ---------------------------------------------------------------------- */
+
+const ZERO_WINDOW = { from: '0001-01-01T00:00:00Z', to: '0001-01-01T00:00:00Z' }
+
+test('窗口缺席时不把零值时刻回传给服务端', () => {
+  // 零值窗口拼进 from/to 之后，服务端的 parseWindow 判它非法，答「请求参数
+  // 不合法」—— 而真正的事实是这个集群还没有流量观测。回传一个我们自己
+  // 造出来的非法值，把一句关于集群的话变成了一次参数错误。
+  const view = policyExportView(preview({ window: ZERO_WINDOW }))
+  assert.doesNotMatch(view.path, /0001-01-01/,
+    `导出路径里带上了零值时刻：${view.path}`)
+  assert.doesNotMatch(view.path, /from=/,
+    '窗口缺席时仍然拼了 from —— 应当整个省掉，让服务端走它自己的默认')
+})
+
+test('窗口缺席时说"没有"，不显示 0001 年', () => {
+  const view = policyExportView(preview({ window: ZERO_WINDOW }))
+  assert.doesNotMatch(view.windowNote, /0001/,
+    '把 Go 的零值时刻当成一个真实时间窗显示了出来')
+  assert.match(view.windowNote, /没有|尚未|未观测/,
+    '没有说清楚窗口为什么是空的')
+})
+
+test('有窗口时照旧原样带上 —— 上一条不是靠"永远不传"做到的', () => {
+  const view = policyExportView(preview({
+    window: { from: '2026-08-18T00:00:00Z', to: '2026-08-18T01:00:00Z' },
+  }))
+  assert.match(view.path, /from=2026-08-18T00%3A00%3A00Z/)
+  assert.match(view.windowNote, /2026-08-18/)
+})

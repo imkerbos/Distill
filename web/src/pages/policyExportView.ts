@@ -47,7 +47,27 @@ export interface PolicyExportView {
  * 唯一成立的取值就是"没有筛选"。做成可传的参数等于留一条注定失败的
  * 调用路径。
  */
+/**
+ * 窗口是不是"根本没有"。
+ *
+ * 后端在这个集群一次流量都没摄入时回一个零值窗口（TimeWindow 的零值），
+ * 那不是一段时间，是"我们答不出这一屏覆盖哪一段时间"。把它当成时间用会
+ * 有两个后果：界面显示 0001 年，以及**回传给服务端时被判成非法参数** ——
+ * 一句关于集群的话于是变成一次参数错误。
+ */
+export function windowAbsent(window: TimeWindow): boolean {
+  return !window || !window.from || !window.to
+    || window.from === window.to
+    || new Date(window.from).getUTCFullYear() <= 1
+}
+
 function policyExportPath(cluster: string, window: TimeWindow): string {
+  // 窗口缺席就整个省掉 from/to，让服务端走它自己的默认那一支 —— 它知道
+  // 这个集群没有流量摄入，也知道该怎么办（资产兜底）。我们不替它造一个
+  // 非法值再让它拒绝。
+  if (windowAbsent(window)) {
+    return `/api/v1/clusters/${encodeURIComponent(cluster)}/policy-export`
+  }
   const p = new URLSearchParams({ from: window.from, to: window.to })
   return `/api/v1/clusters/${encodeURIComponent(cluster)}/policy-export?${p}`
 }
@@ -115,6 +135,9 @@ export function policyExportView(pv: PolicyPreview): PolicyExportView {
 
 /** 时间窗的显示形状，与本页 formatTime 一致（UTC，不带毫秒）。 */
 function formatWindow(pv: PolicyPreview): string {
+  if (windowAbsent(pv.window)) {
+    return '没有 —— 这个集群还没有任何流量观测'
+  }
   return `${formatInstant(pv.window.from)} ~ ${formatInstant(pv.window.to)}`
 }
 
