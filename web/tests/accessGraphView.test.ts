@@ -128,3 +128,19 @@ test('候选策略页真的把访问关系画出来了', () => {
   assert.match(page, /tighteningNote\(/,
     '零观测时的限定语没有接上；缺了它，读者会把「缺一条策略」读成完整结论')
 })
+
+test('接入状态不得整页替换掉候选策略', () => {
+  // 只看真的渲染出来的东西，不看注释 —— 一条被注释里的词骗过的守卫
+  // 是假的（这一轮里第三次了）。
+  const page = readFileSync(
+    join(import.meta.dirname, '..', 'src', 'pages', 'PolicyPage.tsx'), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '')
+  // onboard_state 是接入生命周期，不是"有没有数据"。拿它整页替换，会把
+  // 一个真的产出了 303 份候选策略的集群显示成"什么都没有" —— UAT 上就是
+  // 这么发生的。要判"这一屏能不能答"，判据是 trafficObserved。
+  assert.doesNotMatch(page, /state === 'REGISTERED'\)\s*return/,
+    '接入状态仍然在整页替换这一屏')
+  assert.doesNotMatch(page, /无法产出候选策略/,
+    '页面仍然声称产不出候选策略，而 Baseline 依据来自资产、不依赖流量')
+})

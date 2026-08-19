@@ -51,14 +51,15 @@ const WORKLOAD_EXCLUSION_REASON_LABEL: Record<WorkloadExclusionReason, string> =
 }
 
 export default function PolicyPage({ cluster }: { cluster: string }) {
-  // 集群的接入状态决定这一整屏该展示什么，而不是"候选策略查询是否
-  // 返回了行"——REGISTERED 意味着平台还没采集到任何流量，此时候选
-  // 策略永远是空的，但那是"还没有数据"而不是"查过、确实没有"，两者
-  // 在界面上必须可区分（同 EmptyState 的纪律），因此整页替换而不是
-  // 让下面的表格自己空着。
-  const { data: clusters } = useResource('registered-clusters', () => api.clusters())
-  const current = clusters?.find((c) => c.id === cluster)
-
+  // **接入状态不决定这一屏展示什么。**
+  //
+  // 这里曾经按 onboard_state === 'REGISTERED' 整页替换，理由是"那时候选
+  // 策略永远是空的"。那条理由在资产兜底那一轮之后就不成立了：Baseline
+  // 按 workload 无条件注入、依据是资产而不是流量，UAT 上实测产出 303 份
+  // 候选策略 / 728 条规则 —— 而整页替换把它们全挡住了，还写着"无法产出
+  // 候选策略"。
+  //
+  // "这一屏能不能答"的判据是 pv.trafficObserved，不是接入生命周期。
   // refreshKey 驱动确认/撤销之后的重新拉取——服务端是人工决定的唯一
   // 真相源，本页不在本地叠加一份乐观状态（与 ClustersPage 的 refreshKey
   // 同一条纪律：写操作成功后自增，让 useResource 重新发请求）。
@@ -91,8 +92,6 @@ export default function PolicyPage({ cluster }: { cluster: string }) {
     </>
   )
 
-  if (current?.state === 'REGISTERED') return <NoTrafficNotice />
-
   if (error) return <div>{head}<p className="text-deny">{error}</p></div>
   if (loading || !pv) return <div>{head}<Skeleton /></div>
 
@@ -103,6 +102,8 @@ export default function PolicyPage({ cluster }: { cluster: string }) {
   return (
     <div>
       {head}
+
+      {!pv.trafficObserved && <NoTrafficBanner />}
 
       {/* 粒度切换放在最前：它决定下面每一块内容 —— 策略、dry-run、导出。
           放在策略那一节里面会让人先读完 dry-run 才发现那是另一个粒度的数字。 */}
@@ -155,53 +156,31 @@ export default function PolicyPage({ cluster }: { cluster: string }) {
 }
 
 /**
- * REGISTERED 集群的整页替换态：一个空表格与"我们还没有数据"是两个
- * 不同的断言，这个平台在别处（缺失 baseline 清单、不可生成清单）已经
- * 把这条纪律当作硬约束，这里同样适用——不展示任何空表格。
+ * 没有流量观测时的横幅。
+ *
+ * **横幅，不是整页替换。** 它此前替换整屏并写着"无法产出候选策略"，而那句
+ * 话是假的：Baseline 按 workload 无条件注入、依据是资产快照，UAT 上实测
+ * 产出 303 份候选策略。整页替换于是把真内容全挡住了，只留下一句错话。
+ *
+ * 它仍然必须出现：没有流量时这一屏答得出"该加哪些策略"，答不出"加了会
+ * 拦断什么" —— 后者的四个数字全是 0，而"会拦断 0 条"读起来是"可以放心
+ * 下发"。
  */
-function NoTrafficNotice() {
+function NoTrafficBanner() {
   return (
-    <div>
-      <PageHeader
-        title="候选策略"
-        description="dry-run 预测置顶：先看这条推荐会拦掉多少条当前正在工作的连接，再看策略本身长什么样。顺序即优先级。"
-      />
-      {/* 整页替换态同样要说清来源：一个「尚未采集到流量」的演示集群与一个
-          真集群，下一步动作完全不同（design doc 2026-08-17 §2）。 */}
-      <DataSourceNotice />
-
-      <Notice>尚未采集到流量，无法产出候选策略。</Notice>
-
-      <Card className="mb-4 p-4">
-        <p className="mt-0 mb-2 text-sm">
-          候选规则来自对观测流量的学习。当前该集群只登记了元数据，还差：
-        </p>
-        <ul className="m-0 pl-[1.2em] text-sm">
-          <li>流量日志尚未开启</li>
-          <li>采集器尚未部署</li>
-        </ul>
-      </Card>
-
-      <Card className="p-4">
-        <p className="m-0 text-sm">
-          已可用的部分：五类必备 Baseline 的推导依据来自资产快照，不依赖流量。
-        </p>
-      </Card>
-    </div>
+    <Card className="mb-4 border-l-[3px] px-4 py-3" style={{ borderLeftColor: 'var(--verdict-unknown)' }}>
+      <p className="mt-0 mb-2 text-sm">
+        这个集群还没有任何流量观测。下面的候选策略是真的 —— 五类必备 Baseline
+        的推导依据来自资产快照，不依赖流量；但<strong>「加了会拦断什么」这个问题，
+        在有流量之前没有答案</strong>。
+      </p>
+      <p className="m-0 text-xs text-ink-muted">
+        还差：流量日志尚未开启，或采集器尚未部署。
+      </p>
+    </Card>
   )
 }
 
-/* ---------------------------------------------------------------------- */
-/* 1. dry-run 影响                                                        */
-/* ---------------------------------------------------------------------- */
-
-/**
- * dry-run 影响：默认推荐 vs 应用人工决定之后的版本。
- *
- * 无覆盖时（overrideCount === 0）两套预测在结构上恒等——store 层的
- * Apply 对空覆盖列表是恒等变换——此时只显示一组数：否则每个集群第一次
- * 打开都要看一堆 `→ 0`，噪声掩盖了真正有覆盖时该看的差值。
- */
 function DryRunSection({ view, overrideCount, breakQualifier, exportView, writeback, pageCounts }: {
   view: DryRunView
   overrideCount: number
