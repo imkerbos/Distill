@@ -165,18 +165,18 @@ function NoTrafficNotice() {
 
       <Notice>尚未采集到流量，无法产出候选策略。</Notice>
 
-      <Card style={{ padding: 'var(--space-4)', marginBottom: 'var(--space-4)' }}>
-        <p style={{ margin: '0 0 var(--space-2)', fontSize: 'var(--text-sm)' }}>
+      <Card className="mb-4 p-4">
+        <p className="mt-0 mb-2 text-sm">
           候选规则来自对观测流量的学习。当前该集群只登记了元数据，还差：
         </p>
-        <ul style={{ margin: 0, paddingLeft: '1.2em', fontSize: 'var(--text-sm)' }}>
+        <ul className="m-0 pl-[1.2em] text-sm">
           <li>流量日志尚未开启</li>
           <li>采集器尚未部署</li>
         </ul>
       </Card>
 
       <Card className="p-4">
-        <p style={{ margin: 0, fontSize: 'var(--text-sm)' }}>
+        <p className="m-0 text-sm">
           已可用的部分：五类必备 Baseline 的推导依据来自资产快照，不依赖流量。
         </p>
       </Card>
@@ -240,10 +240,7 @@ function DryRunSection({ view, overrideCount, breakQualifier, exportView, writeb
         </Notice>
       )}
 
-      <div style={{
-        display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
-        gap: 'var(--space-3)', marginBottom: 'var(--space-4)',
-      }}>
+      <div className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(200px,1fr))] gap-3">
         <DryRunMetric
           label="WOULD_BREAK · 会被拦断" defaultValue={c.WOULD_BREAK} overriddenValue={o.WOULD_BREAK}
           tone="deny" size="lg" showDelta={showDelta} note="当前放行、新策略会拒绝的连接"
@@ -273,9 +270,7 @@ function DryRunSection({ view, overrideCount, breakQualifier, exportView, writeb
       <WritebackControl view={writeback} pageCounts={pageCounts} />
 
       {showDelta && (
-        <p style={{
-          margin: '0 0 var(--space-2)', fontSize: 'var(--text-xs)', color: 'var(--text-muted)',
-        }}>
+        <p className="mt-0 mb-2 text-xs text-ink-muted">
           {view.detail.basis}
         </p>
       )}
@@ -337,9 +332,7 @@ function DryRunMetric({
   return (
     <Card style={{ padding: 'var(--space-3)', borderLeft: accent ? `3px solid ${accent}` : undefined }}>
       <div className="text-xs text-ink-muted">{label}</div>
-      <div style={{
-        display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 'var(--space-1)', flexWrap: 'wrap',
-      }}>
+      <div className="mt-1 flex flex-wrap items-baseline gap-2">
         <span style={{
           fontSize: size === 'lg' ? 'var(--text-xl)' : 'var(--text-lg)', fontWeight: 500,
           color: 'var(--text-muted)', fontVariantNumeric: 'tabular-nums',
@@ -411,10 +404,8 @@ function ExportControl({ view }: { view: PolicyExportView }) {
   }
 
   return (
-    <Card style={{ padding: 'var(--space-3)', marginBottom: 'var(--space-4)' }}>
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: 'var(--space-3)', flexWrap: 'wrap',
-      }}>
+    <Card className="mb-4 p-3">
+      <div className="flex flex-wrap items-center gap-3">
         <button
           type="button"
           onClick={download}
@@ -430,20 +421,16 @@ function ExportControl({ view }: { view: PolicyExportView }) {
         {/* 不可用的原因与按钮同屏、不折进 tooltip：它是一条处置指引，
             不是补充说明。理由为空的禁用等于"按钮坏了"。 */}
         {!view.available && (
-          <span style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', flex: 1, minWidth: 280 }}>
+          <span className="min-w-[280px] flex-1 text-sm text-ink-2">
             {view.unavailableReason}
           </span>
         )}
       </div>
-      <p style={{
-        margin: 'var(--space-2) 0 0', fontSize: 'var(--text-xs)', color: 'var(--text-muted)',
-      }}>
+      <p className="mt-2 mb-0 text-xs text-ink-muted">
         {view.windowNote}
       </p>
       {error && (
-        <p role="alert" style={{
-          margin: 'var(--space-2) 0 0', fontSize: 'var(--text-xs)', color: 'var(--verdict-deny)',
-        }}>
+        <p role="alert" className="mt-2 mb-0 text-xs text-deny">
           {error}
         </p>
       )}
@@ -521,10 +508,8 @@ function WritebackControl({ view, pageCounts }: {
   }
 
   return (
-    <Card style={{ padding: 'var(--space-3)', marginBottom: 'var(--space-4)' }}>
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: 'var(--space-3)', flexWrap: 'wrap',
-      }}>
+    <Card className="mb-4 p-3">
+      <div className="flex flex-wrap items-center gap-3">
         <button
           type="button"
           onClick={loadPlan}
@@ -540,21 +525,17 @@ function WritebackControl({ view, pageCounts }: {
         {/* 不可用的原因与按钮同屏，理由同导出：它是一条处置指引，不是补充
             说明。理由为空的禁用等于"按钮坏了"。 */}
         {!view.available && (
-          <span style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', flex: 1, minWidth: 280 }}>
+          <span className="min-w-[280px] flex-1 text-sm text-ink-2">
             {view.unavailableReason}
           </span>
         )}
       </div>
-      <p style={{
-        margin: 'var(--space-2) 0 0', fontSize: 'var(--text-xs)', color: 'var(--text-muted)',
-      }}>
+      <p className="mt-2 mb-0 text-xs text-ink-muted">
         {view.note}
       </p>
 
       {error && (
-        <p role="alert" style={{
-          margin: 'var(--space-2) 0 0', fontSize: 'var(--text-xs)', color: 'var(--verdict-deny)',
-        }}>
+        <p role="alert" className="mt-2 mb-0 text-xs text-deny">
           {error}
         </p>
       )}
@@ -612,18 +593,19 @@ function WritebackControl({ view, pageCounts }: {
           </PlanRow>
 
           <PlanRow label="重算后的四类计数">
-            <table className="text-xs">
+            {/* 走统一的表格样式，不自己拼一份：三个页面三种表格，读者会
+                以为它们在讲不同性质的事（ui.tsx 抬头）。这里嵌在计划行内，
+                因此只取 .dt 的排版，不再套一层卡片。 */}
+            <table className="dt">
               <thead>
-                <tr><th>类别</th><th>本页正在显示</th><th>计划重算</th></tr>
+                <tr><th>类别</th><th className="num">本页正在显示</th><th className="num">计划重算</th></tr>
               </thead>
               <tbody>
                 {drift.rows.map((r) => (
                   <tr key={r.kind} style={{ color: r.changed ? 'var(--verdict-deny)' : undefined }}>
                     <td>{r.kind}</td>
-                    <td className="tabular-nums">{r.pageText}</td>
-                    <td style={{
-                      fontVariantNumeric: 'tabular-nums', fontWeight: r.changed ? 600 : undefined,
-                    }}>
+                    <td className="num">{r.pageText}</td>
+                    <td className="num" style={{ fontWeight: r.changed ? 600 : undefined }}>
                       {r.planText}
                     </td>
                   </tr>
@@ -681,7 +663,7 @@ function PlanRow({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="mb-2">
       <div className="text-xs text-ink-muted">{label}</div>
-      <div style={{ fontSize: 'var(--text-sm)', wordBreak: 'break-all' }}>{children}</div>
+      <div className="text-sm break-all">{children}</div>
     </div>
   )
 }
@@ -845,7 +827,7 @@ function OverrideAppliedRow({ cluster, override, onChanged }: {
       <div style={{ marginTop: 4, color: 'var(--text-secondary)' }}>
         {override.decidedBy} · {formatTime(override.decidedAt)}
       </div>
-      <div style={{ marginTop: 2 }}>「{override.reason}」</div>
+      <div className="mt-[2px]">「{override.reason}」</div>
       {error && <div role="alert" style={{ color: 'var(--verdict-deny)', marginTop: 4 }}>{error}</div>}
       <button type="button" onClick={revoke} disabled={busy} style={{ ...secondarySmallButtonStyle, marginTop: 4 }}>
         {busy ? '撤销中…' : '撤销'}
@@ -885,7 +867,7 @@ function CandidateSection({ candidates, overrides, cluster, onChanged }: {
                 <strong className="mono text-sm">
                   {c.namespace}/{c.workload}
                 </strong>
-                <span style={{ marginLeft: 8, fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+                <span className="ml-2 text-xs text-ink-muted">
                   {enabled.length} 条启用规则
                 </span>
               </div>
@@ -991,7 +973,7 @@ function RuleBasis({ rule }: { rule: CandidateRule }) {
       <div>
         <div>{rule.baseline}</div>
         {rule.derivations && rule.derivations.length > 0 && (
-          <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginTop: 2 }}>
+          <div className="mt-[2px] text-xs text-ink-muted">
             {rule.derivations
               .map((d) => `${d.sourceKind}:${d.namespace ? `${d.namespace}/` : ''}${d.name}`)
               .join('、')}
@@ -1013,7 +995,7 @@ function RuleBasis({ rule }: { rule: CandidateRule }) {
           </div>
         )}
         {rule.risk && (
-          <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginTop: 2 }}>
+          <div className="mt-[2px] text-xs text-ink-muted">
             {RISK_CATEGORY_LABEL[rule.risk.category] ?? rule.risk.category}：{rule.risk.name} :{rule.risk.port}
           </div>
         )}
@@ -1133,7 +1115,7 @@ function PendingSection({ candidates, overrides, cluster, onChanged }: {
                   <td className="mono text-sm">
                     {namespace}/{workload}
                     {originallyEnabled && (
-                      <div style={{ marginTop: 2 }}>
+                      <div className="mt-[2px]">
                         <span className="text-xs text-ink-muted">默认启用</span>
                       </div>
                     )}

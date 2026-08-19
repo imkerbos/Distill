@@ -189,8 +189,8 @@ export default function TopologyGraph({
   }, [key, topology, width])
 
   return (
-    <div ref={boxRef} style={{ width: '100%' }}>
-      <svg width={width || '100%'} height={H} style={{ display: 'block' }}>
+    <div ref={boxRef} className="w-full">
+      <svg width={width || '100%'} height={H} className="block">
         {/*
           **箭头，不是可选的装饰。**
           对一个 NetworkPolicy 工具，方向是最要紧的那个事实：「A 调 B」与

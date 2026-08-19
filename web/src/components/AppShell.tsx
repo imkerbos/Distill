@@ -82,16 +82,14 @@ export default function AppShell({ cluster, onClusterChange, children }: Props) 
   ]
 
   return (
-    <div className="grid min-h-screen grid-cols-[236px_1fr] bg-bg">
-      <nav className="flex flex-col gap-4 border-r border-line bg-surface px-3 py-4">
+    <div className="grid min-h-screen grid-cols-[236px_1fr] bg-bg flex flex-col gap-4 border-r border-line bg-surface px-3 py-4 text-lg tracking-[-0.01em] text-ink font-title text-xs text-ink-muted">
+      <nav>
         <div>
           <div
-            className="text-lg tracking-[-0.01em] text-ink"
-            style={{ fontWeight: 'var(--weight-title)' }}
           >
             Distill
           </div>
-          <div className="text-xs text-ink-muted">NetworkPolicy 可见性</div>
+          <div>NetworkPolicy 可见性</div>
         </div>
 
         <label className="block">

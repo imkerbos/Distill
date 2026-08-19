@@ -3,7 +3,7 @@ import { api, ApiError } from '../api/client'
 import type { GitRepo } from '../api/types'
 import { useResource } from '../api/useResource'
 import { VerifyBadge, VerifyOutcomeNote } from '../components/Verdict'
-import { Button, Card, EmptyState, PageHeader, Section, Skeleton, TableCard } from '../components/ui'
+import { Button, Card, EmptyState, ErrorNotice, PageHeader, Section, Skeleton, TableCard } from '../components/ui'
 import {
   blankRepoValues, describeRepoVerifyOutcome, describeRepoVerifyStatus,
   repoFormValuesOf, resolveGitRepo, type RepoFormValues,
@@ -87,7 +87,7 @@ function RepoListSection({ repos, error, loading, onChanged }: {
       description="没校验过的仓库写「仓库未校验」而不是留白 —— 空单元格会被读成「加载中」或「没什么要报告的」，而「从未校验过」与「校验通过」是相反的两件事实。「编辑」在行内展开：修改是整体替换，且服务端会把上一次的结论清成未校验（换了地址之后，旧的结论描述的是另一个仓库），要新结论请再点一次重新校验。"
       meta={repos ? `${repos.length} 个` : undefined}
     >
-      {actionError && <FormError>{actionError}</FormError>}
+      {actionError && <ErrorNotice>{actionError}</ErrorNotice>}
       {error ? (
         <p className="text-deny">{error}</p>
       ) : loading || !repos ? (
@@ -213,15 +213,12 @@ function RepoVerifyCell({ repo, onChanged }: { repo: GitRepo; onChanged: () => v
   }
 
   return (
-    <div style={{
-      display: 'flex', flexDirection: 'column', alignItems: 'flex-start',
-      gap: 'var(--space-1)', maxWidth: 340,
-    }}>
+    <div className="flex max-w-[340px] flex-col items-start gap-1">
       <VerifyBadge view={view} />
       <span className="text-xs text-ink-muted">
         {view.checkedAt}
       </span>
-      <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)' }}>
+      <span className="text-xs text-ink-2">
         {view.detail}
       </span>
       <Button
@@ -233,7 +230,7 @@ function RepoVerifyCell({ repo, onChanged }: { repo: GitRepo; onChanged: () => v
         {busy ? '校验中…' : '重新校验（只读）'}
       </Button>
       {outcome && <VerifyOutcomeNote outcome={outcome} />}
-      {error && <FormError>{error}</FormError>}
+      {error && <ErrorNotice>{error}</ErrorNotice>}
     </div>
   )
 }
@@ -349,7 +346,7 @@ function CreateRepoSection({ onCreated }: { onCreated: () => void }) {
           <RepoFields values={values} patch={patch} mode="create" />
           <RepoOutcome values={values} />
 
-          {error && <FormError>{error}</FormError>}
+          {error && <ErrorNotice>{error}</ErrorNotice>}
           {outcome && <VerifyOutcomeNote outcome={outcome} />}
 
           <Button type="submit" disabled={busy} variant="primary" className="mt-3">
@@ -421,7 +418,7 @@ function EditRepoForm({ repo, onSaved, onCancel }: {
         <RepoFields values={values} patch={patch} mode="edit" />
         <RepoOutcome values={values} />
 
-        {error && <FormError>{error}</FormError>}
+        {error && <ErrorNotice>{error}</ErrorNotice>}
 
         <div className="mt-3 flex gap-2">
           <Button type="submit" disabled={busy} variant="primary">
@@ -491,16 +488,5 @@ function TextField({ label, value, onChange, mono, placeholder, readOnly }: {
   )
 }
 
-function FormError({ children }: { children: ReactNode }) {
-  return (
-    <p role="alert" style={{
-      margin: 'var(--space-3) 0 0', padding: 'var(--space-2)',
-      background: 'var(--verdict-deny-bg)', color: 'var(--verdict-deny)',
-      borderRadius: 'var(--radius)', fontSize: 'var(--text-sm)',
-    }}>
-      {children}
-    </p>
-  )
-}
 
 

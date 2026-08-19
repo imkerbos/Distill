@@ -29,7 +29,7 @@ export default function QualityPage({ cluster }: { cluster: string }) {
     <div>
       {head}
 
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 'var(--space-3)' }}>
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3">
         <StatTile label="策略覆盖率" value={pct(q.policyCoverage)}
           note={`${q.nakedPodCount} 个 Pod 无任何策略`} />
         <StatTile label="可信判定占比" value={pct(q.trustedRate)} />

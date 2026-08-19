@@ -44,9 +44,9 @@ export default function DecisionDrawer({ flowID, onClose }: { flowID: string; on
           }}>关闭</button>
         </header>
 
-        <div style={{ padding: 'var(--space-4)' }}>
-          {error && <p style={{ color: 'var(--verdict-deny)' }}>{error}</p>}
-          {!d && !error && <p style={{ color: 'var(--text-muted)' }}>加载中…</p>}
+        <div className="p-4">
+          {error && <p className="text-deny">{error}</p>}
+          {!d && !error && <p className="text-ink-muted">加载中…</p>}
 
           {d && (
             <>
@@ -61,7 +61,7 @@ export default function DecisionDrawer({ flowID, onClose }: { flowID: string; on
               <Block label="流量">
                 <div style={{ fontFamily: 'var(--mono)', fontSize: 'var(--text-xs)', lineHeight: 1.9 }}>
                   <div>{d.sourceLabel}</div>
-                  <div style={{ color: 'var(--text-muted)' }}>↓ {d.protocol} :{d.port}</div>
+                  <div className="text-ink-muted">↓ {d.protocol} :{d.port}</div>
                   <div>{d.destLabel}</div>
                 </div>
               </Block>
@@ -100,7 +100,7 @@ export default function DecisionDrawer({ flowID, onClose }: { flowID: string; on
 
               {d.verdict === 'ALLOW' && !d.reason.matchedPolicy && (
                 <Block label="为什么放行">
-                  <div style={{ fontSize: 'var(--text-sm)' }}>
+                  <div className="text-sm">
                     {d.reason.unmanaged
                       ? '端点不受 NetworkPolicy 管控（hostNetwork），策略对它不生效 —— 这不是被策略放行。'
                       : '该方向未被任何 NetworkPolicy 选中，处于非隔离状态，默认放行。'}
@@ -110,7 +110,7 @@ export default function DecisionDrawer({ flowID, onClose }: { flowID: string; on
 
               {d.verdict === 'DENY' && (
                 <Block label="为什么阻断">
-                  <div style={{ fontSize: 'var(--text-sm)' }}>
+                  <div className="text-sm">
                     {d.reason.isolated
                       ? `${d.reason.direction === 'EGRESS' ? '出向' : '入向'}已被策略隔离，且没有任何规则匹配这条流量。`
                       : '策略判定为阻断。'}
@@ -164,7 +164,7 @@ function Block({ label, children }: { label: string; children: React.ReactNode }
 function Term({ k, v }: { k: string; v: string }) {
   return (
     <>
-      <dt style={{ color: 'var(--text-muted)' }}>{k}</dt>
+      <dt className="text-ink-muted">{k}</dt>
       <dd style={{ margin: 0, fontWeight: 500 }}>{v}</dd>
     </>
   )

@@ -14,7 +14,7 @@ import {
 } from './clusterForm'
 import { formatUtcTime, type VerifyOutcomeView } from './verifyView'
 import { VerifyBadge, VerifyOutcomeNote } from '../components/Verdict'
-import { Button, Card, Chip, EmptyState, Field, PageHeader, Section, Select, Skeleton, TableCard } from '../components/ui'
+import { Button, Card, Chip, EmptyState, ErrorNotice, Field, PageHeader, Section, Select, Skeleton, TableCard } from '../components/ui'
 
 /**
  * 集群管理页：注册、下线、Git 绑定、策略导入。
@@ -97,7 +97,7 @@ function ClusterListSection({ clusters, repos, reposError, error, loading, onCha
         缺了它界面只能显示一个光秃秃的 ID，而读者无从判断这是「仓库没
         登记」还是「这次没查到」。
       */}
-      {reposError && <FormError>仓库清单加载失败：{reposError}</FormError>}
+      {reposError && <ErrorNotice>仓库清单加载失败：{reposError}</ErrorNotice>}
       {error ? (
         <p className="text-deny">{error}</p>
       ) : loading || !clusters ? (
@@ -269,10 +269,7 @@ function GitBindingCell({ clusterId, git, repo, onChanged }: {
   }
 
   return (
-    <div style={{
-      display: 'flex', flexDirection: 'column', alignItems: 'flex-start',
-      gap: 'var(--space-1)', maxWidth: 340,
-    }}>
+    <div className="flex max-w-[340px] flex-col items-start gap-1">
       <span className="mono text-sm">{git.repoId}</span>
       <RepoReference repo={repo} repoId={git.repoId} />
       <span className="mono text-xs">路径 {git.policyPath}</span>
@@ -280,7 +277,7 @@ function GitBindingCell({ clusterId, git, repo, onChanged }: {
       <span className="text-xs text-ink-muted">
         {view.checkedAt}
       </span>
-      <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)' }}>
+      <span className="text-xs text-ink-2">
         {view.detail}
       </span>
       <Button
@@ -293,7 +290,7 @@ function GitBindingCell({ clusterId, git, repo, onChanged }: {
       </Button>
       {outcome && <VerifyOutcomeNote outcome={outcome} />}
       <DriftCheck clusterId={clusterId} />
-      {error && <FormError>{error}</FormError>}
+      {error && <ErrorNotice>{error}</ErrorNotice>}
     </div>
   )
 }
@@ -345,7 +342,7 @@ function DriftCheck({ clusterId }: { clusterId: string }) {
           <div className="text-ink-2">{view.action}</div>
         </div>
       )}
-      {error && <FormError>{error}</FormError>}
+      {error && <ErrorNotice>{error}</ErrorNotice>}
     </>
   )
 }
@@ -490,10 +487,10 @@ function ClusterFields({ values, patch, mode }: {
           display: 'flex', gap: 'var(--space-3)', alignItems: 'flex-end',
           marginBottom: 'var(--space-2)',
         }}>
-          <div style={{ flex: 1 }}>
+          <div className="flex-1">
             <TextField label="host" value={row.host} onChange={(v) => updateApiServerRow(i, { host: v })} mono />
           </div>
-          <div style={{ flex: 1 }}>
+          <div className="flex-1">
             <TextField label="cidr" value={row.cidr} onChange={(v) => updateApiServerRow(i, { cidr: v })} mono />
           </div>
           <div style={{ width: 110 }}>
@@ -724,7 +721,7 @@ function GitBindingForm({ cluster, repos, onChanged }: {
         <SelectedRepoDetail repo={repoOf(repos, values.repoId)} repoId={values.repoId} />
         <GitOutcome values={values} />
 
-        {error && <FormError>{error}</FormError>}
+        {error && <ErrorNotice>{error}</ErrorNotice>}
         {saved && (
           <p role="status" style={{
             margin: 'var(--space-2) 0 0', fontSize: 'var(--text-xs)', color: 'var(--text-secondary)',
@@ -767,7 +764,7 @@ function GitBindingForm({ cluster, repos, onChanged }: {
 function SelectedRepoDetail({ repo, repoId }: { repo: GitRepo | undefined; repoId: string }) {
   if (repoId === '') {
     return (
-      <p style={{ margin: 0, fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+      <p className="m-0 text-xs text-ink-muted">
         还没有选择仓库。仓库地址与分支在选定之后显示 —— 它们只读，改它们去「策略仓库」页。
       </p>
     )
@@ -781,9 +778,7 @@ function SelectedRepoDetail({ repo, repoId }: { repo: GitRepo | undefined; repoI
     )
   }
   return (
-    <p className="mono" style={{
-      margin: 0, fontSize: 'var(--text-xs)', color: 'var(--text-muted)',
-    }}>
+    <p className="mono m-0 text-xs text-ink-muted">
       {repo.repoUrl}@{repo.branch}
       {' · 凭据 '}
       {repo.credentialRef === '' ? '未配置' : repo.credentialRef}
@@ -852,7 +847,7 @@ function RegisterSection({ onCreated }: { onCreated: () => void }) {
         <form onSubmit={submit}>
           <ClusterFields values={values} patch={patch} mode="create" />
 
-          {error && <FormError>{error}</FormError>}
+          {error && <ErrorNotice>{error}</ErrorNotice>}
 
           <Button type="submit" disabled={busy} variant="primary" className="mt-3">
             {busy ? '提交中…' : '注册集群'}
@@ -921,7 +916,7 @@ function EditClusterForm({ cluster, onSaved, onCancel }: {
         </SubHeading>
         <ClusterFields values={values} patch={patch} mode="edit" />
 
-        {error && <FormError>{error}</FormError>}
+        {error && <ErrorNotice>{error}</ErrorNotice>}
 
         <div className="mt-3 flex gap-2">
           <Button type="submit" disabled={busy} variant="primary">
@@ -1066,7 +1061,7 @@ function ImportSection({ clusters, refreshKey, onChanged }: {
             required
           />
 
-          {error && <FormError>{error}</FormError>}
+          {error && <ErrorNotice>{error}</ErrorNotice>}
 
           <Button type="submit" disabled={busy} variant="primary" className="mt-3">
             {busy ? '提交中…' : '提交导入'}
@@ -1242,17 +1237,6 @@ function TextField({ label, value, onChange, required, mono, placeholder, readOn
   )
 }
 
-function FormError({ children }: { children: ReactNode }) {
-  return (
-    <p role="alert" style={{
-      margin: 'var(--space-3) 0 0', padding: 'var(--space-2)',
-      background: 'var(--verdict-deny-bg)', color: 'var(--verdict-deny)',
-      borderRadius: 'var(--radius)', fontSize: 'var(--text-sm)',
-    }}>
-      {children}
-    </p>
-  )
-}
 
 
 

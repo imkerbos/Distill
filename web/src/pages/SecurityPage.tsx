@@ -139,9 +139,9 @@ function RiskyTable({ rows }: { rows: RiskyFlow[] }) {
           <tr key={f.id}>
             <td><VerdictBadge verdict={f.verdict} confidence={f.confidence} /></td>
             <td>
-              <span style={{ fontWeight: 500 }}>{f.portName}</span>
-              <span className="mono" style={{ marginLeft: 6 }}>:{f.port}</span>
-              <span style={{ marginLeft: 8 }}>
+              <span className="font-medium">{f.portName}</span>
+              <span className="mono ml-[6px]">:{f.port}</span>
+              <span className="ml-2">
                 <Chip>{RISK_CATEGORY_LABEL[f.category] ?? f.category}</Chip>
               </span>
             </td>
@@ -217,10 +217,7 @@ function NakedSection({ rep }: { rep: SecurityReport }) {
           detail="统计口径：已排除 hostNetwork Pod。"
         />
       ) : (
-        <Card style={{
-          padding: 'var(--space-3)', display: 'flex',
-          flexWrap: 'wrap', gap: 'var(--space-2)',
-        }}>
+        <Card className="flex flex-wrap gap-2 p-3">
           {rep.nakedPods.map((p) => (
             <Chip key={`${p.namespace}/${p.name}`}>
               {p.namespace}/{p.name}

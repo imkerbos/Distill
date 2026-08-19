@@ -70,10 +70,7 @@ function CollectionRun({ summary }: { summary: CollectionSummary }) {
       */}
       {view.errorNote ? <Notice>{view.errorNote}</Notice> : null}
 
-      <div style={{
-        display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
-        gap: 'var(--space-3)',
-      }}>
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3">
         <StatTile label="本次采集结果" value={view.statusLabel} tone={view.statusTone}
           note={view.coverageNote} />
         <StatTile label="采集完成于" value={view.collectedAt}
@@ -114,15 +111,13 @@ function CollectionRun({ summary }: { summary: CollectionSummary }) {
                   </td>
                   <td>
                     {row.observed ? (
-                      <span className="text-ink-muted">—</span>
+                      <span className="text-ink-muted mono ml-2 text-xs">—</span>
                     ) : (
                       <span>
                         <span style={{ color: 'var(--verdict-unknown)', fontWeight: 600 }}>
                           {row.failureLabel}
                         </span>
-                        <span className="mono" style={{
-                          marginLeft: 8, fontSize: 'var(--text-xs)', color: 'var(--text-muted)',
-                        }}>
+                        <span>
                           {row.failureReason}
                         </span>
                         {row.failureAction && (

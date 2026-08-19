@@ -7,7 +7,7 @@ import {
   buildSettingsWrite, restartRequiredLabels, settingsDiff, settingsFormValuesOf,
   type SettingsDiffRow, type SettingsFormValues,
 } from './settingsForm'
-import { Button, Card, EmptyState, PageHeader, Section, Select, Skeleton, TableCard } from '../components/ui'
+import { Button, Card, EmptyState, ErrorNotice, PageHeader, Section, Select, Skeleton, TableCard } from '../components/ui'
 
 /**
  * 平台设置页。
@@ -165,10 +165,10 @@ function SettingsForm({ current, onSaved }: {
       >
         {built.ok
           ? <DiffTable rows={rows} />
-          : <FormError>{built.error}</FormError>}
+          : <ErrorNotice>{built.error}</ErrorNotice>}
       </Section>
 
-      {error && <FormError>{error}</FormError>}
+      {error && <ErrorNotice>{error}</ErrorNotice>}
 
       <Button
         type="submit"
@@ -202,11 +202,11 @@ function HostKeysSection({ fingerprint, value, onChange }: {
       title="SSH 信任锚（Git host key）"
       description="这是平台连接策略仓库时的信任锚：它决定平台愿意和哪一台 SSH 服务器说话。换掉它就等于换掉平台信任的那台服务器——一份被替换的 host key 会让平台接受一个中间人，而连接看起来一切正常。"
     >
-      <Card className="p-4">
-        <div className="mb-3">
+      <Card className="p-4 mb-3 mono text-sm break-all">
+        <div>
           <span style={fieldLabelStyle}>当前指纹</span>
           {fingerprint ? (
-            <div className="mono" style={{ fontSize: 'var(--text-sm)', wordBreak: 'break-all' }}>
+            <div>
               {fingerprint}
             </div>
           ) : (
@@ -359,26 +359,13 @@ function NumberField({ label, hint, afterRestart, value, onChange }: {
         onChange={(e) => onChange(e.target.value)}
         style={{ width: '100%', fontFamily: 'var(--mono)' }}
       />
-      <span style={{
-        display: 'block', marginTop: 4, fontSize: 'var(--text-xs)', color: 'var(--text-muted)',
-      }}>
+      <span className="mt-1 block text-xs text-ink-muted">
         {hint}
       </span>
     </label>
   )
 }
 
-function FormError({ children }: { children: ReactNode }) {
-  return (
-    <p role="alert" style={{
-      margin: 'var(--space-3) 0 0', padding: 'var(--space-2)',
-      background: 'var(--verdict-deny-bg)', color: 'var(--verdict-deny)',
-      borderRadius: 'var(--radius)', fontSize: 'var(--text-sm)',
-    }}>
-      {children}
-    </p>
-  )
-}
 
 function RestartNotice({ children }: { children: ReactNode }) {
   return (

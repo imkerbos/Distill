@@ -72,12 +72,12 @@ export default function TopologyPage({ cluster }: { cluster: string }) {
           padding: 'var(--space-3)', marginBottom: 'var(--space-4)',
           borderLeft: '3px solid var(--verdict-unknown)',
         }}>
-          <p style={{ margin: 0, fontSize: 'var(--text-sm)' }}>{trafficNotice(topo)}</p>
+          <p className="m-0 text-sm">{trafficNotice(topo)}</p>
         </Card>
       )}
 
       <Card style={{ padding: 'var(--space-3)', display: 'flex', gap: 'var(--space-4)' }}>
-        <div style={{ flex: 1, minWidth: 0 }}>
+        <div className="min-w-0 flex-1">
           {showsGraph(topo)
             ? <TopologyGraph topology={topo} />
             : <NodeList topo={topo} />}
@@ -198,7 +198,7 @@ function Item({ k, v }: { k: string; v: string }) {
   return (
     <>
       <dt className="text-ink-muted">{k}</dt>
-      <dd style={{ margin: 0, fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>{v}</dd>
+      <dd className="m-0 font-semibold tabular-nums">{v}</dd>
     </>
   )
 }
@@ -221,33 +221,33 @@ function NodeList({ topo }: { topo: Topology }) {
   const own = topo.nodes.filter((n) => !n.foreign)
   if (own.length === 0) return null
   return (
-    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--text-sm)' }}>
+    // 走统一的表格外壳，不自己拼一份：三个页面三种表格，读者会以为它们
+    // 在讲不同性质的事（ui.tsx 抬头）。
+    <TableCard>
       <thead>
-        <tr style={{ textAlign: 'left', color: 'var(--text-muted)' }}>
-          <th className="px-2 py-1">{topo.level === 'workload' ? '工作负载' : '命名空间'}</th>
-          <th className="px-2 py-1">Pod 数</th>
-          <th className="px-2 py-1">NetworkPolicy</th>
+        <tr>
+          <th>{topo.level === 'workload' ? '工作负载' : '命名空间'}</th>
+          <th className="num">Pod 数</th>
+          <th>NetworkPolicy</th>
         </tr>
       </thead>
       <tbody>
         {own.map((n) => (
-          <tr key={n.id} style={{ borderTop: '1px solid var(--border)' }}>
-            <td className="px-2 py-1">
+          <tr key={n.id}>
+            <td>
               {/* namespace 这一栏已经按粒度带好了展示名：workload 粒度下
                   后端放的是 "namespace/workload"（collectstore.nodeIDOf）。
                   这里不再另拼一次 —— 拼的那一版读的是一个后端从未下发过的
                   字段，因此那个分支从来没有成立过。 */}
               {n.namespace}
             </td>
-            <td style={{ padding: '4px 8px', fontVariantNumeric: 'tabular-nums' }}>{n.podCount}</td>
-            <td className="px-2 py-1">
-              {n.hasPolicy
-                ? '有'
-                : <span className="text-deny">无</span>}
+            <td className="num">{n.podCount}</td>
+            <td>
+              {n.hasPolicy ? '有' : <span className="text-deny">无</span>}
             </td>
           </tr>
         ))}
       </tbody>
-    </table>
+    </TableCard>
   )
 }

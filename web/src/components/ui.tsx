@@ -20,15 +20,13 @@ import type { ButtonHTMLAttributes, CSSProperties, ReactNode } from 'react'
 /** 页面标题与一句说明。说明解释这一屏回答什么问题，不是装饰。 */
 export function PageHeader({ title, description }: { title: string; description?: ReactNode }) {
   return (
-    <header className="mb-5">
+    <header className="mb-5 m-0 text-2xl tracking-[-0.02em] text-ink font-title mt-2 mb-0 max-w-[640px] text-sm leading-relaxed text-ink-muted">
       <h1
-        className="m-0 text-2xl tracking-[-0.02em] text-ink"
-        style={{ fontWeight: 'var(--weight-title)' }}
       >
         {title}
       </h1>
       {description && (
-        <p className="mt-2 mb-0 max-w-[640px] text-sm leading-relaxed text-ink-muted">
+        <p>
           {description}
         </p>
       )}
@@ -71,18 +69,16 @@ export function Section({
       {/* 标题下一条细线：此前标题与正文只差 2px 字号，"区块"读不出是区块。
           分隔线比放大字号便宜 —— 把标题放大到扎眼会让这一屏显得在推销结论，
           而这个平台的结论靠依据可查建立信任，不靠视觉音量。 */}
-      <div className="mb-3 border-b border-line pb-2">
-        <div className="flex flex-wrap items-baseline justify-between gap-2">
+      <div className="mb-3 border-b border-line pb-2 flex flex-wrap items-baseline justify-between gap-2 m-0 text-lg tracking-[-0.01em] text-ink font-section text-xs tabular-nums text-ink-muted mt-2 mb-0 max-w-[720px] text-sm leading-relaxed">
+        <div>
           <h2
-            className="m-0 text-lg tracking-[-0.01em] text-ink"
-            style={{ fontWeight: 'var(--weight-section)' }}
           >
             {title}
           </h2>
-          {meta && <span className="text-xs tabular-nums text-ink-muted">{meta}</span>}
+          {meta && <span>{meta}</span>}
         </div>
         {description && (
-          <p className="mt-2 mb-0 max-w-[720px] text-sm leading-relaxed text-ink-muted">
+          <p>
             {description}
           </p>
         )}
@@ -95,7 +91,7 @@ export function Section({
 /** 表格外壳。表格是本产品的主要信息载体，样式集中在这里，不由各页面各写一份。 */
 export function TableCard({ children }: { children: ReactNode }) {
   return (
-    <Card style={{ overflow: 'hidden' }}>
+    <Card className="overflow-hidden">
       <table className="dt">{children}</table>
     </Card>
   )
@@ -107,7 +103,7 @@ export function ScrollTableCard({ children, maxHeight = 420 }: {
   maxHeight?: number
 }) {
   return (
-    <Card style={{ overflow: 'hidden' }}>
+    <Card className="overflow-hidden">
       <div className="overflow-auto" style={{ maxHeight }}>
         <table className="dt">{children}</table>
       </div>
@@ -142,7 +138,7 @@ export function Chip({ children, strong = false }: { children: ReactNode; strong
  */
 export function EmptyState({ message, detail }: { message: string; detail: ReactNode }) {
   return (
-    <Card style={{ padding: 'var(--space-4)' }}>
+    <Card className="p-4">
       <p className="m-0 text-sm text-ink-2">{message}</p>
       <p className="mt-2 mb-0 text-xs text-ink-muted">{detail}</p>
     </Card>
@@ -286,7 +282,7 @@ export function Button({
  */
 export function Skeleton({ rows = 3 }: { rows?: number }) {
   return (
-    <Card style={{ padding: 'var(--space-3)' }}>
+    <Card className="p-3">
       <div className="flex flex-col gap-2" aria-busy="true" aria-live="polite">
         <span className="sr-only">加载中</span>
         {Array.from({ length: rows }, (_, i) => (
@@ -300,5 +296,27 @@ export function Skeleton({ rows = 3 }: { rows?: number }) {
         ))}
       </div>
     </Card>
+  )
+}
+
+/**
+ * 失败提示。
+ *
+ * 抽成组件而不是每处各写一遍：此前六处各自拼 `background: var(--verdict-deny-bg)`
+ * 加内边距，而失败提示是**唯一允许借用判定色的非判定场景** —— 借得越随意，
+ * 这条例外越站不住。收在一处，例外就只有一个位置，改主意时也只改一处。
+ *
+ * `role="alert"` 不是可选的：一次表单提交失败若只是视觉上出现，读屏器用户
+ * 会以为什么都没发生，然后再点一次。
+ */
+export function ErrorNotice({ children }: { children: ReactNode }) {
+  return (
+    <p
+      role="alert"
+      className="mt-3 mb-0 rounded-card px-3 py-2 text-sm"
+      style={{ background: 'var(--verdict-deny-bg)', color: 'var(--verdict-deny)' }}
+    >
+      {children}
+    </p>
   )
 }

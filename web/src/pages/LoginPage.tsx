@@ -33,14 +33,12 @@ export default function LoginPage() {
           把介绍塞进卡片会让第一屏显得在推销，而这是一个内部平台 ——
           它需要的是让人一眼确认"进对地方了"。
         */}
-        <div className="mb-4">
+        <div className="mb-4 m-0 text-2xl tracking-[-0.02em] text-ink font-title mt-1 mb-0 text-sm text-ink-muted">
           <h1
-            className="m-0 text-2xl tracking-[-0.02em] text-ink"
-            style={{ fontWeight: 'var(--weight-title)' }}
           >
             Distill
           </h1>
-          <p className="mt-1 mb-0 text-sm text-ink-muted">
+          <p>
             GKE NetworkPolicy 可见性与安全平台
           </p>
         </div>

@@ -34,7 +34,7 @@ export default function DataSourceNotice() {
     return (
       <Notice>
         <strong>{view.label}</strong>
-        <span style={{ marginLeft: 8 }}>{view.detail}</span>
+        <span className="ml-2">{view.detail}</span>
       </Notice>
     )
   }

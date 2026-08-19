@@ -80,3 +80,22 @@ test('表单控件走统一类，不各写一份内联样式', () => {
   assert.deepEqual(offenders, [],
     `这些页面又自己定义了输入控件样式：${offenders.join(', ')}；用 .ctl`)
 })
+
+test('失败提示只有一处定义', () => {
+  // 此前四个页面各抄了一份逐字节相同的 FormError。这是 buttonStyle 与
+  // textareaStyle 之后的第三次同一个病 —— 而失败提示是**唯一允许借用判定色
+  // 的非判定场景**，借得越随意，这条例外越站不住。收在一处，例外就只有
+  // 一个位置。
+  const offenders = pages.filter((f) => /function FormError\b/.test(read(f)))
+  assert.deepEqual(offenders, [],
+    `这些页面又自己定义了失败提示：${offenders.join(', ')}；用 ErrorNotice`)
+})
+
+test('表格只有一套样式', () => {
+  // 三个页面三种表格，读者会以为它们在讲不同性质的事（ui.tsx 抬头）。
+  // 表格是这个产品的主要信息载体，样式集中在 .dt 与 TableCard，不由各页
+  // 各写一份。
+  const offenders = pages.filter((f) => /<table(?![^>]*className="dt")/.test(read(f)))
+  assert.deepEqual(offenders, [],
+    `这些页面自己拼了表格：${offenders.join(', ')}；用 TableCard 或 className="dt"`)
+})

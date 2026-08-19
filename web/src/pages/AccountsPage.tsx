@@ -3,7 +3,7 @@ import { api, ApiError } from '../api/client'
 import type { Account } from '../api/types'
 import { useResource } from '../api/useResource'
 import { useSession } from '../auth/SessionContext'
-import { Button, Card, EmptyState, Notice, PageHeader, Section, Skeleton, TableCard } from '../components/ui'
+import { Button, Card, EmptyState, ErrorNotice, Notice, PageHeader, Section, Skeleton, TableCard } from '../components/ui'
 import {
   BOOTSTRAP_LOCKOUT_WARNING, accountStatusLabel, blankNewAccount, blankOwnPassword,
   blankResetPassword, enabledAdmins, previewAccountAction, resolveNewAccount, resolveOwnPassword,
@@ -150,7 +150,7 @@ function AccountListSection({ me, accounts, error, loading, onChanged }: {
                   <td className="mono">
                     {a.username}
                     {a.username === me && (
-                      <span style={{ marginLeft: 6, color: 'var(--text-muted)' }}>（你自己）</span>
+                      <span className="ml-[6px] text-ink-muted">（你自己）</span>
                     )}
                   </td>
                   <td>{roleLabel(a.role)}</td>
@@ -280,7 +280,7 @@ function ConfirmPanel({ kind, target, accounts, isSelf, onDone, onCancel }: {
 
   return (
     <Card className="my-3 p-4">
-      <div style={{ fontSize: 'var(--text-sm)', marginBottom: 'var(--space-2)' }}>
+      <div className="mb-2 text-sm">
         {preview.change}
       </div>
       {isSelf && (
@@ -312,7 +312,7 @@ function ConfirmPanel({ kind, target, accounts, isSelf, onDone, onCancel }: {
         </div>
       )}
 
-      {error && <FormError>{error}</FormError>}
+      {error && <ErrorNotice>{error}</ErrorNotice>}
 
       <div className="mt-3 flex gap-2">
         <Button type="button" onClick={run} disabled={busy} variant="primary">
@@ -430,7 +430,7 @@ function CreateAccountSection({ viaBootstrap, onCreated }: {
             {resolution.ok ? resolution.summary : resolution.error}
           </p>
 
-          {error && <FormError>{error}</FormError>}
+          {error && <ErrorNotice>{error}</ErrorNotice>}
           {done && <FormNote>{done}</FormNote>}
 
           <Button type="submit" disabled={busy} variant="primary" className="mt-3">
@@ -520,7 +520,7 @@ export function OwnPasswordPage() {
             />
           </div>
 
-          {error && <FormError>{error}</FormError>}
+          {error && <ErrorNotice>{error}</ErrorNotice>}
           {done && <FormNote>{done}</FormNote>}
 
           <Button type="submit" disabled={busy} variant="primary" className="mt-3">
@@ -553,7 +553,7 @@ function PasswordField({ label, value, onChange, autoComplete }: {
   autoComplete: 'current-password' | 'new-password'
 }) {
   return (
-    <label style={{ display: 'block', marginBottom: 'var(--space-3)' }}>
+    <label className="mb-3 block">
       <span style={fieldLabelStyle}>{label}</span>
       <input
         className="ctl"
@@ -582,17 +582,6 @@ function ConsequenceLine({ tone, children }: { tone: 'warn' | 'deny'; children: 
   )
 }
 
-function FormError({ children }: { children: ReactNode }) {
-  return (
-    <p role="alert" style={{
-      margin: 'var(--space-3) 0 0', padding: 'var(--space-2)',
-      background: 'var(--verdict-deny-bg)', color: 'var(--verdict-deny)',
-      borderRadius: 'var(--radius)', fontSize: 'var(--text-sm)',
-    }}>
-      {children}
-    </p>
-  )
-}
 
 function FormNote({ children }: { children: ReactNode }) {
   return (

@@ -84,7 +84,7 @@ export default function FlowsPage({ cluster }: { cluster: string }) {
                     （已按上限 {page.limit} 截断，尚有 {page.total - page.returned} 条未取回）
                   </strong>
                 )}
-                <span style={{ marginLeft: 10 }}>· 时间范围 {formatWindow(page.window)}</span>
+                <span className="ml-[10px]">· 时间范围 {formatWindow(page.window)}</span>
               </>
             }
           >
@@ -154,7 +154,7 @@ function Pager({ total, index, onChange }: {
       marginTop: 'var(--space-3)', fontSize: 'var(--text-sm)', color: 'var(--text-muted)',
     }}>
       <span>第 {from}–{to} 条（本次取回 {total} 条）</span>
-      <span style={{ display: 'flex', gap: 'var(--space-2)', marginLeft: 'auto' }}>
+      <span className="ml-auto flex gap-2">
         <PagerButton disabled={index === 0} onClick={() => onChange(index - 1)}>上一页</PagerButton>
         <Chip>{index + 1} / {pages}</Chip>
         <PagerButton disabled={index >= pages - 1} onClick={() => onChange(index + 1)}>下一页</PagerButton>
