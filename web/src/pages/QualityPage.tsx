@@ -22,8 +22,8 @@ export default function QualityPage({ cluster }: { cluster: string }) {
     </>
   )
 
-  if (error) return <div>{head}<p style={{ color: 'var(--verdict-deny)' }}>{error}</p></div>
-  if (loading || !q) return <div>{head}<p style={{ color: 'var(--text-muted)' }}>加载中…</p></div>
+  if (error) return <div>{head}<p className="text-deny">{error}</p></div>
+  if (loading || !q) return <div>{head}<p className="text-ink-muted">加载中…</p></div>
 
   return (
     <div>
@@ -42,7 +42,7 @@ export default function QualityPage({ cluster }: { cluster: string }) {
           note="hostNetwork，已排除出覆盖率" />
       </div>
 
-      <div style={{ marginTop: 'var(--space-5)' }}>
+      <div className="mt-5">
         <Section
           title="无法判定的构成"
           description={`只报一个比例无法告诉你该去修哪个子系统。下面是这 ${q.unknownCount} 条的具体成因。`}

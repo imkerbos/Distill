@@ -3,7 +3,7 @@ import { api, ApiError } from '../api/client'
 import type { GitRepo } from '../api/types'
 import { useResource } from '../api/useResource'
 import { VerifyBadge, VerifyOutcomeNote } from '../components/Verdict'
-import { Card, EmptyState, PageHeader, Section, TableCard } from '../components/ui'
+import { Button, Card, EmptyState, PageHeader, Section, TableCard } from '../components/ui'
 import {
   blankRepoValues, describeRepoVerifyOutcome, describeRepoVerifyStatus,
   repoFormValuesOf, resolveGitRepo, type RepoFormValues,
@@ -89,9 +89,9 @@ function RepoListSection({ repos, error, loading, onChanged }: {
     >
       {actionError && <FormError>{actionError}</FormError>}
       {error ? (
-        <p style={{ color: 'var(--verdict-deny)' }}>{error}</p>
+        <p className="text-deny">{error}</p>
       ) : loading || !repos ? (
-        <p style={{ color: 'var(--text-muted)' }}>加载中…</p>
+        <p className="text-ink-muted">加载中…</p>
       ) : repos.length === 0 ? (
         <EmptyState
           message="尚未登记任何策略仓库。"
@@ -117,34 +117,34 @@ function RepoListSection({ repos, error, loading, onChanged }: {
               <Fragment key={r.repoId}>
                 <tr>
                   <td className="mono">{r.repoId}</td>
-                  <td className="mono" style={{ fontSize: 'var(--text-xs)' }}>{r.repoUrl}</td>
+                  <td className="mono text-xs">{r.repoUrl}</td>
                   <td className="mono">{r.branch}</td>
-                  <td className="mono" style={{ fontSize: 'var(--text-xs)' }}>
+                  <td className="mono text-xs">
                     {/*
                       空的凭据引用是一个合法状态（仓库可以先登记、凭据稍后
                       再配），但它不能显示成空白：那一格空着时，「还没配」与
                       「配了但界面没读到」在屏幕上长得一模一样。
                     */}
                     {r.credentialRef === ''
-                      ? <span style={{ color: 'var(--text-muted)' }}>未配置</span>
+                      ? <span className="text-ink-muted">未配置</span>
                       : r.credentialRef}
                   </td>
                   <td><RepoVerifyCell repo={r} onChanged={onChanged} /></td>
                   <td>
-                    <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
-                      <button
+                    <div className="flex gap-2">
+                      <Button
                         onClick={() => setEditingId(editingId === r.repoId ? null : r.repoId)}
-                        style={secondaryButtonStyle}
+                        variant="secondary"
                       >
                         {editingId === r.repoId ? '收起' : '编辑'}
-                      </button>
-                      <button
+                      </Button>
+                      <Button
                         onClick={() => remove(r.repoId)}
                         disabled={busyId === r.repoId}
-                        style={buttonStyle}
+                        variant="primary"
                       >
                         {busyId === r.repoId ? '删除中…' : '删除'}
-                      </button>
+                      </Button>
                     </div>
                   </td>
                 </tr>
@@ -218,20 +218,20 @@ function RepoVerifyCell({ repo, onChanged }: { repo: GitRepo; onChanged: () => v
       gap: 'var(--space-1)', maxWidth: 340,
     }}>
       <VerifyBadge view={view} />
-      <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+      <span className="text-xs text-ink-muted">
         {view.checkedAt}
       </span>
       <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)' }}>
         {view.detail}
       </span>
-      <button
+      <Button
         type="button"
         onClick={reverify}
         disabled={busy}
-        style={{ ...secondaryButtonStyle, marginTop: 'var(--space-1)' }}
+        variant="secondary" className="mt-1"
       >
         {busy ? '校验中…' : '重新校验（只读）'}
-      </button>
+      </Button>
       {outcome && <VerifyOutcomeNote outcome={outcome} />}
       {error && <FormError>{error}</FormError>}
     </div>
@@ -352,9 +352,9 @@ function CreateRepoSection({ onCreated }: { onCreated: () => void }) {
           {error && <FormError>{error}</FormError>}
           {outcome && <VerifyOutcomeNote outcome={outcome} />}
 
-          <button type="submit" disabled={busy} style={{ ...buttonStyle, marginTop: 'var(--space-3)' }}>
+          <Button type="submit" disabled={busy} variant="primary" className="mt-3">
             {busy ? '提交中…' : '登记仓库'}
-          </button>
+          </Button>
         </form>
       </Card>
     </Section>
@@ -423,11 +423,11 @@ function EditRepoForm({ repo, onSaved, onCancel }: {
 
         {error && <FormError>{error}</FormError>}
 
-        <div style={{ display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-3)' }}>
-          <button type="submit" disabled={busy} style={buttonStyle}>
+        <div className="mt-3 flex gap-2">
+          <Button type="submit" disabled={busy} variant="primary">
             {busy ? '保存中…' : '保存修改'}
-          </button>
-          <button type="button" onClick={onCancel} style={secondaryButtonStyle}>取消</button>
+          </Button>
+          <Button type="button" onClick={onCancel} variant="secondary">取消</Button>
         </div>
       </form>
     </Card>
@@ -473,7 +473,7 @@ function TextField({ label, value, onChange, mono, placeholder, readOnly }: {
   readOnly?: boolean
 }) {
   return (
-    <label style={{ display: 'block' }}>
+    <label className="block">
       <span style={fieldLabelStyle}>{label}</span>
       <input
         className="ctl"
@@ -506,14 +506,4 @@ function FormError({ children }: { children: ReactNode }) {
   )
 }
 
-const buttonStyle: CSSProperties = {
-  padding: '6px 14px', fontSize: 'var(--text-sm)', fontWeight: 500,
-  color: 'var(--text-on-dark)', background: 'var(--accent)',
-  border: 'none', borderRadius: 'var(--radius-sm)', cursor: 'pointer',
-}
 
-const secondaryButtonStyle: CSSProperties = {
-  padding: '6px 12px', fontSize: 'var(--text-sm)', fontWeight: 500,
-  color: 'var(--text)', background: 'var(--surface)',
-  border: '1px solid var(--border-strong)', borderRadius: 'var(--radius-sm)', cursor: 'pointer',
-}

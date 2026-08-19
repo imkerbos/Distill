@@ -26,7 +26,7 @@ export function DryRunDetail({ view }: { view: DryRunDetailView }) {
         emptyDetail={view.emptyDetail}
       />
 
-      <div style={{ marginTop: 'var(--space-4)' }}>
+      <div className="mt-4">
         <ChangeDetailTable
           title="敞口会被扩大的连接" rows={d.changes.WOULD_OPEN}
           emptyMessage="没有会被这条推荐放宽为放行的连接。"
@@ -34,13 +34,13 @@ export function DryRunDetail({ view }: { view: DryRunDetailView }) {
         />
       </div>
 
-      <div style={{ marginTop: 'var(--space-4)' }}>
+      <div className="mt-4">
         <div style={{
           display: 'flex', alignItems: 'baseline', justifyContent: 'space-between',
           marginBottom: 'var(--space-2)', flexWrap: 'wrap', gap: 'var(--space-2)',
         }}>
-          <strong style={{ fontSize: 'var(--text-sm)' }}>UNKNOWN 的构成</strong>
-          <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+          <strong className="text-sm">UNKNOWN 的构成</strong>
+          <span className="text-xs text-ink-muted">
             只报一个总数无法说明该去修哪个子系统，下面是这 {d.counts.UNKNOWN} 条的具体成因。
           </span>
         </div>
@@ -105,8 +105,8 @@ function ChangeDetailTable({ title, rows, emptyMessage, emptyDetail }: {
         display: 'flex', alignItems: 'baseline', justifyContent: 'space-between',
         marginBottom: 'var(--space-2)',
       }}>
-        <strong style={{ fontSize: 'var(--text-sm)' }}>{title}</strong>
-        <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>{rows.length} 条</span>
+        <strong className="text-sm">{title}</strong>
+        <span className="text-xs text-ink-muted">{rows.length} 条</span>
       </div>
       {rows.length === 0 ? (
         <EmptyState message={emptyMessage} detail={emptyDetail} />
@@ -123,19 +123,19 @@ function ChangeDetailTable({ title, rows, emptyMessage, emptyDetail }: {
           <tbody>
             {rows.map((f) => (
               <tr key={f.flowId}>
-                <td className="mono" style={{ fontSize: 'var(--text-sm)' }}>
+                <td className="mono text-sm">
                   {f.sourceLabel} → {f.destLabel}
                 </td>
                 <td className="num">{f.protocol}:{f.port}</td>
                 <td>
                   <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                     <VerdictBadge verdict={f.current as Verdict} />
-                    <span style={{ color: 'var(--text-muted)' }}>→</span>
+                    <span className="text-ink-muted">→</span>
                     <VerdictBadge verdict={f.predicted as Verdict} confidence={f.confidence as Confidence} />
                   </span>
                 </td>
                 <td>
-                  <span style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                  <span className="flex flex-wrap gap-1">
                     {f.crossCluster && <CrossClusterMark />}
                     {f.unmanaged && <UnmanagedMark />}
                   </span>

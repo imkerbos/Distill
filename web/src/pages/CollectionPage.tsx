@@ -32,9 +32,9 @@ export default function CollectionPage({ cluster }: { cluster: string }) {
       <Notice>{COLLECTION_FEEDS_NOTHING}</Notice>
 
       {error ? (
-        <p style={{ color: 'var(--verdict-deny)' }}>{error}</p>
+        <p className="text-deny">{error}</p>
       ) : loading || !state ? (
-        <p style={{ color: 'var(--text-muted)' }}>加载中…</p>
+        <p className="text-ink-muted">加载中…</p>
       ) : state.kind === 'UNKNOWN_CLUSTER' ? (
         <EmptyState
           message="没有这个集群。"
@@ -83,7 +83,7 @@ function CollectionRun({ summary }: { summary: CollectionSummary }) {
           note="采到的事实与注册表登记不符" />
       </div>
 
-      <div style={{ marginTop: 'var(--space-5)' }}>
+      <div className="mt-5">
         <Section
           title="各类资源"
           description={
@@ -114,7 +114,7 @@ function CollectionRun({ summary }: { summary: CollectionSummary }) {
                   </td>
                   <td>
                     {row.observed ? (
-                      <span style={{ color: 'var(--text-muted)' }}>—</span>
+                      <span className="text-ink-muted">—</span>
                     ) : (
                       <span>
                         <span style={{ color: 'var(--verdict-unknown)', fontWeight: 600 }}>
@@ -151,7 +151,7 @@ function CollectionRun({ summary }: { summary: CollectionSummary }) {
         </Section>
       </div>
 
-      <div style={{ marginTop: 'var(--space-5)' }}>
+      <div className="mt-5">
         <Section
           title="采集告警"
           description={

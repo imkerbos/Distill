@@ -14,7 +14,7 @@ import {
 } from './clusterForm'
 import { formatUtcTime, type VerifyOutcomeView } from './verifyView'
 import { VerifyBadge, VerifyOutcomeNote } from '../components/Verdict'
-import { Card, Chip, EmptyState, Field, PageHeader, Section, Select, TableCard } from '../components/ui'
+import { Button, Card, Chip, EmptyState, Field, PageHeader, Section, Select, TableCard } from '../components/ui'
 
 /**
  * 集群管理页：注册、下线、Git 绑定、策略导入。
@@ -99,9 +99,9 @@ function ClusterListSection({ clusters, repos, reposError, error, loading, onCha
       */}
       {reposError && <FormError>仓库清单加载失败：{reposError}</FormError>}
       {error ? (
-        <p style={{ color: 'var(--verdict-deny)' }}>{error}</p>
+        <p className="text-deny">{error}</p>
       ) : loading || !clusters ? (
-        <p style={{ color: 'var(--text-muted)' }}>加载中…</p>
+        <p className="text-ink-muted">加载中…</p>
       ) : clusters.length === 0 ? (
         <EmptyState message="尚未注册任何集群。" detail="使用下方表单登记第一个集群。" />
       ) : (
@@ -146,23 +146,23 @@ function ClusterListSection({ clusters, repos, reposError, error, loading, onCha
                           repo={repoOf(repos, c.git.repoId)} onChanged={onChanged}
                         />
                       )
-                      : <span style={{ color: 'var(--text-muted)' }}>未绑定</span>}
+                      : <span className="text-ink-muted">未绑定</span>}
                   </td>
                   <td>
-                    <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
-                      <button
+                    <div className="flex gap-2">
+                      <Button
                         onClick={() => setEditingId(editingId === c.id ? null : c.id)}
-                        style={secondaryButtonStyle}
+                        variant="secondary"
                       >
                         {editingId === c.id ? '收起' : '编辑'}
-                      </button>
-                      <button
+                      </Button>
+                      <Button
                         onClick={() => offboard(c.id)}
                         disabled={busyId === c.id}
-                        style={buttonStyle}
+                        variant="primary"
                       >
                         {busyId === c.id ? '下线中…' : '下线'}
-                      </button>
+                      </Button>
                     </div>
                   </td>
                 </tr>
@@ -273,24 +273,24 @@ function GitBindingCell({ clusterId, git, repo, onChanged }: {
       display: 'flex', flexDirection: 'column', alignItems: 'flex-start',
       gap: 'var(--space-1)', maxWidth: 340,
     }}>
-      <span className="mono" style={{ fontSize: 'var(--text-sm)' }}>{git.repoId}</span>
+      <span className="mono text-sm">{git.repoId}</span>
       <RepoReference repo={repo} repoId={git.repoId} />
-      <span className="mono" style={{ fontSize: 'var(--text-xs)' }}>路径 {git.policyPath}</span>
+      <span className="mono text-xs">路径 {git.policyPath}</span>
       <VerifyBadge view={view} />
-      <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+      <span className="text-xs text-ink-muted">
         {view.checkedAt}
       </span>
       <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)' }}>
         {view.detail}
       </span>
-      <button
+      <Button
         type="button"
         onClick={reverify}
         disabled={busy}
-        style={{ ...secondaryButtonStyle, marginTop: 'var(--space-1)' }}
+        variant="secondary" className="mt-1"
       >
         {busy ? '校验中…' : '重新校验路径（只读）'}
-      </button>
+      </Button>
       {outcome && <VerifyOutcomeNote outcome={outcome} />}
       <DriftCheck clusterId={clusterId} />
       {error && <FormError>{error}</FormError>}
@@ -331,18 +331,18 @@ function DriftCheck({ clusterId }: { clusterId: string }) {
   const view = result === null ? null : driftView(result)
   return (
     <>
-      <button
+      <Button
         type="button"
         onClick={check}
         disabled={busy}
-        style={{ ...secondaryButtonStyle, marginTop: 'var(--space-1)' }}
+        variant="secondary" className="mt-1"
       >
         {busy ? '检测中…' : '检测漂移（只读）'}
-      </button>
+      </Button>
       {view && (
         <div style={{ fontSize: 'var(--text-xs)', marginTop: 2 }}>
           <div style={{ color: DRIFT_TONE_COLOR[view.tone] }}>{view.label}</div>
-          <div style={{ color: 'var(--text-secondary)' }}>{view.action}</div>
+          <div className="text-ink-2">{view.action}</div>
         </div>
       )}
       {error && <FormError>{error}</FormError>}
@@ -375,7 +375,7 @@ function RepoReference({ repo, repoId }: { repo: GitRepo | undefined; repoId: st
     )
   }
   return (
-    <span className="mono" style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+    <span className="mono text-xs text-ink-muted">
       {repo.repoUrl}@{repo.branch}
     </span>
   )
@@ -502,25 +502,21 @@ function ClusterFields({ values, patch, mode }: {
               mono placeholder="443"
             />
           </div>
-          <button
+          <Button
             type="button"
+            variant="secondary"
             onClick={() => removeApiServerRow(i)}
             disabled={values.apiServerRows.length <= 1}
-            style={{
-              ...secondaryButtonStyle,
-              opacity: values.apiServerRows.length <= 1 ? 0.5 : 1,
-              cursor: values.apiServerRows.length <= 1 ? 'default' : 'pointer',
-            }}
           >
             删除
-          </button>
+          </Button>
         </div>
       ))}
-      <button type="button" onClick={addApiServerRow} style={secondaryButtonStyle}>
+      <Button type="button" onClick={addApiServerRow} variant="secondary">
         + 添加 apiserver
-      </button>
+      </Button>
 
-      <div style={{ marginTop: 'var(--space-4)' }}>
+      <div className="mt-4">
         <SubHeading>健康检查网段（可选，每行一个 CIDR）</SubHeading>
         <textarea
           className="ctl"
@@ -532,7 +528,7 @@ function ClusterFields({ values, patch, mode }: {
         />
       </div>
 
-      <div style={{ marginTop: 'var(--space-4)' }}>
+      <div className="mt-4">
         <SubHeading>metrics 抓取端（可选，每行一个）</SubHeading>
         <p style={{
           margin: '0 0 6px', fontSize: 'var(--text-xs)', color: 'var(--text-muted)',
@@ -552,7 +548,7 @@ function ClusterFields({ values, patch, mode }: {
         />
       </div>
 
-      <div style={{ marginTop: 'var(--space-4)' }}>
+      <div className="mt-4">
         <SubHeading>节点级 agent（可选，每行一个）</SubHeading>
         <p style={{
           margin: '0 0 6px', fontSize: 'var(--text-xs)', color: 'var(--text-muted)',
@@ -572,7 +568,7 @@ function ClusterFields({ values, patch, mode }: {
         />
       </div>
 
-      <div style={{ marginTop: 'var(--space-3)' }}>
+      <div className="mt-3">
         <SubHeading>或：声明这个集群没有需要放行的节点 agent</SubHeading>
         <p style={{
           margin: '0 0 6px', fontSize: 'var(--text-xs)', color: 'var(--text-muted)',
@@ -703,7 +699,7 @@ function GitBindingForm({ cluster, repos, onChanged }: {
           保存会顺带做一次路径级只读校验，校验不通过不影响保存 —— 存下来和可信是两件事。
         </SubHeading>
         <FormGrid>
-          <label style={{ display: 'block' }}>
+          <label className="block">
             <span style={fieldLabelStyle}>仓库</span>
             <Select
               value={values.repoId}
@@ -747,18 +743,18 @@ function GitBindingForm({ cluster, repos, onChanged }: {
         )}
         {outcome && <VerifyOutcomeNote outcome={outcome} />}
 
-        <div style={{ display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-3)' }}>
-          <button type="submit" disabled={busy !== ''} style={buttonStyle}>
+        <div className="mt-3 flex gap-2">
+          <Button type="submit" disabled={busy !== ''} variant="primary">
             {busy === 'save' ? '保存中…' : current ? '保存绑定' : '绑定仓库'}
-          </button>
+          </Button>
           {/*
             未绑定时不渲染解绑按钮：一个点了会报 404 的按钮，读起来像是
             「这里本来有东西可以解除」。
           */}
           {current && (
-            <button type="button" onClick={unbind} disabled={busy !== ''} style={secondaryButtonStyle}>
+            <Button type="button" onClick={unbind} disabled={busy !== ''} variant="secondary">
               {busy === 'unbind' ? '解绑中…' : '解除绑定'}
-            </button>
+            </Button>
           )}
         </div>
       </form>
@@ -867,9 +863,9 @@ function RegisterSection({ onCreated }: { onCreated: () => void }) {
 
           {error && <FormError>{error}</FormError>}
 
-          <button type="submit" disabled={busy} style={{ ...buttonStyle, marginTop: 'var(--space-3)' }}>
+          <Button type="submit" disabled={busy} variant="primary" className="mt-3">
             {busy ? '提交中…' : '注册集群'}
-          </button>
+          </Button>
         </form>
       </Card>
     </Section>
@@ -936,11 +932,11 @@ function EditClusterForm({ cluster, onSaved, onCancel }: {
 
         {error && <FormError>{error}</FormError>}
 
-        <div style={{ display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-3)' }}>
-          <button type="submit" disabled={busy} style={buttonStyle}>
+        <div className="mt-3 flex gap-2">
+          <Button type="submit" disabled={busy} variant="primary">
             {busy ? '保存中…' : '保存修改'}
-          </button>
-          <button type="button" onClick={onCancel} style={secondaryButtonStyle}>取消</button>
+          </Button>
+          <Button type="button" onClick={onCancel} variant="secondary">取消</Button>
         </div>
       </form>
     </Card>
@@ -1024,7 +1020,7 @@ function ImportSection({ clusters, refreshKey, onChanged }: {
       <Card style={{ padding: 'var(--space-4)', marginBottom: 'var(--space-3)' }}>
         <form onSubmit={submit}>
           <FormGrid>
-            <label style={{ display: 'block' }}>
+            <label className="block">
               <span style={fieldLabelStyle}>集群</span>
               <Select
                 value={selected}
@@ -1082,18 +1078,18 @@ function ImportSection({ clusters, refreshKey, onChanged }: {
 
           {error && <FormError>{error}</FormError>}
 
-          <button type="submit" disabled={busy} style={{ ...buttonStyle, marginTop: 'var(--space-3)' }}>
+          <Button type="submit" disabled={busy} variant="primary" className="mt-3">
             {busy ? '提交中…' : '提交导入'}
-          </button>
+          </Button>
         </form>
       </Card>
 
       {!selected ? (
         <EmptyState message="选择一个集群以查看它的导入清单。" detail="清单按集群独立维护，不跨集群合并展示。" />
       ) : listError ? (
-        <p style={{ color: 'var(--verdict-deny)' }}>{listError}</p>
+        <p className="text-deny">{listError}</p>
       ) : loading || !imports ? (
-        <p style={{ color: 'var(--text-muted)' }}>加载中…</p>
+        <p className="text-ink-muted">加载中…</p>
       ) : imports.length === 0 ? (
         <EmptyState message={`${selected} 尚无已导入的策略。`} detail="使用上方表单导入第一条。" />
       ) : (
@@ -1112,14 +1108,14 @@ function ImportSection({ clusters, refreshKey, onChanged }: {
           <tbody>
             {imports.map((it) => (
               <tr key={it.importId}>
-                <td className="mono" style={{ fontSize: 'var(--text-sm)' }}>{it.namespace}/{it.name}</td>
+                <td className="mono text-sm">{it.namespace}/{it.name}</td>
                 <td><Chip>{IMPORT_ROLE_LABEL[it.role] ?? it.role}</Chip></td>
                 <td><Chip>{IMPORT_SOURCE_LABEL[it.source] ?? it.source}</Chip></td>
                 <td>{it.importedBy}</td>
-                <td className="mono" style={{ fontSize: 'var(--text-xs)' }}>{formatUtcTime(it.importedAt)}</td>
+                <td className="mono text-xs">{formatUtcTime(it.importedAt)}</td>
                 <td><GitVerifiedMark item={it} /></td>
                 <td>
-                  <button onClick={() => remove(it.importId)} style={buttonStyle}>删除</button>
+                  <Button onClick={() => remove(it.importId)} variant="primary">删除</Button>
                 </td>
               </tr>
             ))}
@@ -1183,7 +1179,7 @@ function CCNPMark({ present }: { present: boolean }) {
  */
 function ApiServerList({ servers }: { servers?: APIServer[] | null }) {
   if (!servers || servers.length === 0) {
-    return <span style={{ color: 'var(--text-muted)' }}>未配置</span>
+    return <span className="text-ink-muted">未配置</span>
   }
   return (
     <span className="mono" style={{
@@ -1236,7 +1232,7 @@ function TextField({ label, value, onChange, required, mono, placeholder, readOn
 }) {
   const inert = readOnly || disabled
   return (
-    <label style={{ display: 'block' }}>
+    <label className="block">
       <span style={fieldLabelStyle}>{label}</span>
       <input
         className="ctl"
@@ -1276,14 +1272,4 @@ const textareaStyle: CSSProperties = {
   fontSize: 'var(--text-sm)', padding: 'var(--space-2)', resize: 'vertical',
 }
 
-const buttonStyle: CSSProperties = {
-  padding: '6px 14px', fontSize: 'var(--text-sm)', fontWeight: 500,
-  color: 'var(--text-on-dark)', background: 'var(--accent)',
-  border: 'none', borderRadius: 'var(--radius-sm)', cursor: 'pointer',
-}
 
-const secondaryButtonStyle: CSSProperties = {
-  padding: '6px 12px', fontSize: 'var(--text-sm)', fontWeight: 500,
-  color: 'var(--text)', background: 'var(--surface)',
-  border: '1px solid var(--border-strong)', borderRadius: 'var(--radius-sm)', cursor: 'pointer',
-}

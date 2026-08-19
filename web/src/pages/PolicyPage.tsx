@@ -92,8 +92,8 @@ export default function PolicyPage({ cluster }: { cluster: string }) {
 
   if (current?.state === 'REGISTERED') return <NoTrafficNotice />
 
-  if (error) return <div>{head}<p style={{ color: 'var(--verdict-deny)' }}>{error}</p></div>
-  if (loading || !pv) return <div>{head}<p style={{ color: 'var(--text-muted)' }}>加载中…</p></div>
+  if (error) return <div>{head}<p className="text-deny">{error}</p></div>
+  if (loading || !pv) return <div>{head}<p className="text-ink-muted">加载中…</p></div>
 
   // 零条覆盖时后端把 overrides 序列化成 null（见 types.ts 里的注释）——
   // 在这唯一一处兜底成 []，下游所有组件都能假设它是数组，不必每处重复判空。
@@ -336,7 +336,7 @@ function DryRunMetric({
 
   return (
     <Card style={{ padding: 'var(--space-3)', borderLeft: accent ? `3px solid ${accent}` : undefined }}>
-      <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>{label}</div>
+      <div className="text-xs text-ink-muted">{label}</div>
       <div style={{
         display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 'var(--space-1)', flexWrap: 'wrap',
       }}>
@@ -346,7 +346,7 @@ function DryRunMetric({
         }}>
           {defaultValue}
         </span>
-        <span style={{ color: 'var(--text-muted)' }}>→</span>
+        <span className="text-ink-muted">→</span>
         <span style={{
           fontSize: size === 'lg' ? 'var(--text-2xl)' : 'var(--text-xl)', fontWeight: 600,
           color: accent ?? 'var(--text)', fontVariantNumeric: 'tabular-nums',
@@ -560,7 +560,7 @@ function WritebackControl({ view, pageCounts }: {
       )}
 
       {plan && drift && (
-        <div style={{ marginTop: 'var(--space-3)' }}>
+        <div className="mt-3">
           {/* 计数不一致时这条必须显著、必须在计划正文之前：把新数字悄悄
               渲染在旧数字的位置上，等于让人批准一个他从没考虑过的爆炸半径
               （design doc §4）。 */}
@@ -605,14 +605,14 @@ function WritebackControl({ view, pageCounts }: {
             {(plan.plan.existingBranches ?? []).length === 0
               ? '（无）'
               : (plan.plan.existingBranches ?? []).map((b) => <div key={b}>{b}</div>)}
-            <div style={{ color: 'var(--text-muted)' }}>
+            <div className="text-ink-muted">
               平台只列出这些分支存在，不判断它们是否已被合并。攒着几条没人合的分支，
               说明这条流程没在运转。
             </div>
           </PlanRow>
 
           <PlanRow label="重算后的四类计数">
-            <table style={{ fontSize: 'var(--text-xs)' }}>
+            <table className="text-xs">
               <thead>
                 <tr><th>类别</th><th>本页正在显示</th><th>计划重算</th></tr>
               </thead>
@@ -679,8 +679,8 @@ function WritebackControl({ view, pageCounts }: {
 /** 计划里的一项：左侧标签、右侧原样来自服务端的内容。 */
 function PlanRow({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div style={{ marginBottom: 'var(--space-2)' }}>
-      <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>{label}</div>
+    <div className="mb-2">
+      <div className="text-xs text-ink-muted">{label}</div>
       <div style={{ fontSize: 'var(--text-sm)', wordBreak: 'break-all' }}>{children}</div>
     </div>
   )
@@ -739,7 +739,7 @@ function OverrideControl({
 
   if (disabledReason) {
     return (
-      <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }} title={disabledReason}>
+      <span className="text-xs text-ink-muted" title={disabledReason}>
         不可禁用
       </span>
     )
@@ -880,9 +880,9 @@ function CandidateSection({ candidates, overrides, cluster, onChanged }: {
           const enabled = c.rules.filter((r) =>
             r.enabled && overrideIndex.get(overrideKey(c.namespace, c.workload, r.fingerprint))?.decision !== 'DISABLE')
           return (
-            <div key={`${c.namespace}/${c.workload}`} style={{ marginBottom: 'var(--space-4)' }}>
-              <div style={{ marginBottom: 'var(--space-2)' }}>
-                <strong className="mono" style={{ fontSize: 'var(--text-sm)' }}>
+            <div key={`${c.namespace}/${c.workload}`} className="mb-4">
+              <div className="mb-2">
+                <strong className="mono text-sm">
                   {c.namespace}/{c.workload}
                 </strong>
                 <span style={{ marginLeft: 8, fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
@@ -964,7 +964,7 @@ function RuleTable({ rules, namespace, workload, cluster, onChanged }: {
  */
 function RuleTargets({ values }: { values: string[] }) {
   if (!values || values.length === 0) {
-    return <span style={{ color: 'var(--text-muted)' }}>未限定</span>
+    return <span className="text-ink-muted">未限定</span>
   }
   return (
     <span className="mono" style={{
@@ -1020,7 +1020,7 @@ function RuleBasis({ rule }: { rule: CandidateRule }) {
       </div>
     )
   }
-  return <span style={{ color: 'var(--text-muted)' }}>—</span>
+  return <span className="text-ink-muted">—</span>
 }
 
 /* ---------------------------------------------------------------------- */
@@ -1130,11 +1130,11 @@ function PendingSection({ candidates, overrides, cluster, onChanged }: {
                 : false
               return (
                 <tr key={`${namespace}/${workload}/${r.fingerprint}`}>
-                  <td className="mono" style={{ fontSize: 'var(--text-sm)' }}>
+                  <td className="mono text-sm">
                     {namespace}/{workload}
                     {originallyEnabled && (
                       <div style={{ marginTop: 2 }}>
-                        <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>默认启用</span>
+                        <span className="text-xs text-ink-muted">默认启用</span>
                       </div>
                     )}
                   </td>
@@ -1145,7 +1145,7 @@ function PendingSection({ candidates, overrides, cluster, onChanged }: {
                         {RISK_CATEGORY_LABEL[r.risk.category] ?? r.risk.category} · {r.risk.name}:{r.risk.port}
                       </Chip>
                     ) : (
-                      <span style={{ color: 'var(--text-muted)' }}>—</span>
+                      <span className="text-ink-muted">—</span>
                     )}
                   </td>
                   <td><Chip>{r.direction}</Chip></td>
@@ -1154,11 +1154,11 @@ function PendingSection({ candidates, overrides, cluster, onChanged }: {
                     <RuleTargets values={r.ports} />
                   </td>
                   <td className="num">{r.flowCount}</td>
-                  <td style={{ fontSize: 'var(--text-xs)' }}>
+                  <td className="text-xs">
                     {!mirror ? (
-                      <span style={{ color: 'var(--text-muted)' }}>—</span>
+                      <span className="text-ink-muted">—</span>
                     ) : mirrorEnabled ? (
-                      <span style={{ color: 'var(--text-muted)' }}>
+                      <span className="text-ink-muted">
                         对端 {mirror.namespace}/{mirror.workload} 已放行
                       </span>
                     ) : (
@@ -1212,23 +1212,23 @@ function StaleOverridesSection({ staleOverrides }: { staleOverrides: StaleOverri
         <tbody>
           {staleOverrides.map((s) => (
             <tr key={`${s.override.namespace}/${s.override.workload}/${s.override.fingerprint}`}>
-              <td className="mono" style={{ fontSize: 'var(--text-sm)' }}>
+              <td className="mono text-sm">
                 {s.override.namespace}/{s.override.workload}
               </td>
-              <td style={{ fontSize: 'var(--text-xs)' }}>
+              <td className="text-xs">
                 {formatTime(s.override.decidedAt)} by {s.override.decidedBy}
                 <div style={{ marginTop: 2, color: 'var(--text-secondary)' }}>「{s.override.reason}」</div>
               </td>
-              <td style={{ fontSize: 'var(--text-xs)' }}>
+              <td className="text-xs">
                 {s.currentRules.length === 0 ? (
-                  <span style={{ color: 'var(--text-muted)' }}>该 workload 已不存在</span>
+                  <span className="text-ink-muted">该 workload 已不存在</span>
                 ) : (
                   <span className="mono" style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                     {s.currentRules.map((rule, ri) => <span key={ri}>{rule}</span>)}
                   </span>
                 )}
               </td>
-              <td style={{ fontSize: 'var(--text-xs)' }}>{s.reason}</td>
+              <td className="text-xs">{s.reason}</td>
             </tr>
           ))}
         </tbody>
@@ -1291,7 +1291,7 @@ function MissingBaselineSection({ missing, baselineKinds, notAssessed, notApplic
                   <tr key={m.namespace}>
                     <td className="mono">{m.namespace}</td>
                     <td>
-                      <span style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                      <span className="flex flex-wrap gap-1">
                         {gaps.map((g) => (
                           <span key={g.kind} style={{ display: 'inline-flex', gap: 4 }}>
                             <Chip strong>{g.kind}</Chip>
@@ -1304,7 +1304,7 @@ function MissingBaselineSection({ missing, baselineKinds, notAssessed, notApplic
                         ))}
                       </span>
                     </td>
-                    <td style={{ fontSize: 'var(--text-xs)' }}>
+                    <td className="text-xs">
                       {gaps.map((g) => (
                         <div key={g.kind}>
                           <span className="mono">{g.kind}</span>：{g.remedy}
@@ -1360,18 +1360,18 @@ function ExcludedWorkloadSection({ items }: { items: ExcludedWorkload[] }) {
         />
       ) : (
         [...groups.entries()].map(([reason, rows]) => (
-          <div key={reason} style={{ marginBottom: 'var(--space-4)' }}>
+          <div key={reason} className="mb-4">
             <div style={{
               display: 'flex', alignItems: 'baseline', gap: 'var(--space-2)',
               marginBottom: 'var(--space-2)', flexWrap: 'wrap',
             }}>
-              <strong style={{ fontSize: 'var(--text-sm)' }}>
+              <strong className="text-sm">
                 {WORKLOAD_EXCLUSION_REASON_LABEL[reason]}
               </strong>
-              <span className="mono" style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+              <span className="mono text-xs text-ink-muted">
                 {reason}
               </span>
-              <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>· {rows.length} 个</span>
+              <span className="text-xs text-ink-muted">· {rows.length} 个</span>
             </div>
             <ScrollTableCard maxHeight={320}>
               <StickyHead>
@@ -1400,10 +1400,10 @@ function ExcludedWorkloadSection({ items }: { items: ExcludedWorkload[] }) {
 function PodLabels({ labels }: { labels: Record<string, string> }) {
   const entries = Object.entries(labels)
   if (entries.length === 0) {
-    return <span style={{ color: 'var(--text-muted)' }}>无标签</span>
+    return <span className="text-ink-muted">无标签</span>
   }
   return (
-    <span style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+    <span className="flex flex-wrap gap-1">
       {entries.map(([k, v]) => <Chip key={k}>{k}={v}</Chip>)}
     </span>
   )
@@ -1431,18 +1431,18 @@ function UngeneratableSection({ items }: { items: UngeneratableItem[] }) {
         <EmptyState message="没有不可生成的流量。" detail="观测到的全部流量都能表达为候选规则。" />
       ) : (
         [...groups.entries()].map(([reason, rows]) => (
-          <div key={reason} style={{ marginBottom: 'var(--space-4)' }}>
+          <div key={reason} className="mb-4">
             <div style={{
               display: 'flex', alignItems: 'baseline', gap: 'var(--space-2)',
               marginBottom: 'var(--space-2)', flexWrap: 'wrap',
             }}>
-              <strong style={{ fontSize: 'var(--text-sm)' }}>
+              <strong className="text-sm">
                 {UNGENERATABLE_REASON_LABEL[reason as UngeneratableReason] ?? reason}
               </strong>
-              <span className="mono" style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+              <span className="mono text-xs text-ink-muted">
                 {reason}
               </span>
-              <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>· {rows.length} 条</span>
+              <span className="text-xs text-ink-muted">· {rows.length} 条</span>
             </div>
             <ScrollTableCard maxHeight={320}>
               <StickyHead>
@@ -1452,7 +1452,7 @@ function UngeneratableSection({ items }: { items: UngeneratableItem[] }) {
                 {rows.map((it) => (
                   <tr key={it.flowId}>
                     <td className="mono">{it.flowId}</td>
-                    <td style={{ fontSize: 'var(--text-sm)' }}>{it.detail}</td>
+                    <td className="text-sm">{it.detail}</td>
                   </tr>
                 ))}
               </tbody>

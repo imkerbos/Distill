@@ -7,7 +7,7 @@ import {
   buildSettingsWrite, restartRequiredLabels, settingsDiff, settingsFormValuesOf,
   type SettingsDiffRow, type SettingsFormValues,
 } from './settingsForm'
-import { Card, EmptyState, PageHeader, Section, Select, TableCard } from '../components/ui'
+import { Button, Card, EmptyState, PageHeader, Section, Select, TableCard } from '../components/ui'
 
 /**
  * 平台设置页。
@@ -35,9 +35,9 @@ export default function SettingsPage() {
         description="平台自身的运行期配置。除下面标注的四项之外，其余每一项都在使用处现读，保存后立刻生效，不需要重启。这一页的每一次保存都会写一条审计记录，前后值完整落库。"
       />
       {error ? (
-        <p style={{ color: 'var(--verdict-deny)' }}>{error}</p>
+        <p className="text-deny">{error}</p>
       ) : loading || !data ? (
-        <p style={{ color: 'var(--text-muted)' }}>加载中…</p>
+        <p className="text-ink-muted">加载中…</p>
       ) : (
         // key 绑在 refreshKey 上：保存成功后整块表单按服务端刚回的那一份
         // 重新播种，host key 输入框也随之清空——留着上一次粘进去的原文，
@@ -120,7 +120,7 @@ function SettingsForm({ current, onSaved }: {
       >
         <Card style={{ padding: 'var(--space-4)' }}>
           <FormGrid>
-            <label style={{ display: 'block' }}>
+            <label className="block">
               <span style={fieldLabelStyle}>凭据后端</span>
               <Select
                 value={values.secretsBackend}
@@ -170,13 +170,13 @@ function SettingsForm({ current, onSaved }: {
 
       {error && <FormError>{error}</FormError>}
 
-      <button
+      <Button
         type="submit"
         disabled={busy || !built.ok || rows.length === 0}
-        style={{ ...buttonStyle, marginTop: 'var(--space-3)' }}
+        variant="primary" className="mt-3"
       >
         {busy ? '保存中…' : '保存设置'}
-      </button>
+      </Button>
     </form>
   )
 }
@@ -203,7 +203,7 @@ function HostKeysSection({ fingerprint, value, onChange }: {
       description="这是平台连接策略仓库时的信任锚：它决定平台愿意和哪一台 SSH 服务器说话。换掉它就等于换掉平台信任的那台服务器——一份被替换的 host key 会让平台接受一个中间人，而连接看起来一切正常。"
     >
       <Card style={{ padding: 'var(--space-4)' }}>
-        <div style={{ marginBottom: 'var(--space-3)' }}>
+        <div className="mb-3">
           <span style={fieldLabelStyle}>当前指纹</span>
           {fingerprint ? (
             <div className="mono" style={{ fontSize: 'var(--text-sm)', wordBreak: 'break-all' }}>
@@ -218,7 +218,7 @@ function HostKeysSection({ fingerprint, value, onChange }: {
           )}
         </div>
 
-        <label style={{ display: 'block' }}>
+        <label className="block">
           <span style={fieldLabelStyle}>新的 known_hosts 原文（留空表示不修改）</span>
           <textarea
             className="ctl"
@@ -321,7 +321,7 @@ function TextField({ label, value, onChange, mono }: {
   mono?: boolean
 }) {
   return (
-    <label style={{ display: 'block' }}>
+    <label className="block">
       <span style={fieldLabelStyle}>{label}</span>
       <input
         className="ctl"
@@ -349,7 +349,7 @@ function NumberField({ label, hint, afterRestart, value, onChange }: {
   onChange: (v: string) => void
 }) {
   return (
-    <label style={{ display: 'block' }}>
+    <label className="block">
       <span style={fieldLabelStyle}>
         {label}
         {afterRestart && (
@@ -386,12 +386,10 @@ function FormError({ children }: { children: ReactNode }) {
 
 function RestartNotice({ children }: { children: ReactNode }) {
   return (
-    <p style={{
-      margin: 'var(--space-3) 0 0', padding: 'var(--space-2)',
-      background: 'var(--verdict-unknown-bg)', color: 'var(--verdict-unknown)',
-      border: '1px solid var(--verdict-unknown)',
-      borderRadius: 'var(--radius)', fontSize: 'var(--text-sm)',
-    }}>
+    // **不用判定语义色。** 这里此前拿 UNKNOWN 的琥珀色表示「需要重启」——
+    // 而 ALLOW / DENY / UNKNOWN 各自唯一，一旦被挪去表示别的东西，用户就
+    // 再也无法从颜色读出判定结论（tokens.css 抬头）。要强调靠文案自己说。
+    <p className="mt-3 rounded-card border border-line-strong bg-sunken px-3 py-2 text-sm text-ink-2">
       {children}
     </p>
   )
@@ -402,8 +400,3 @@ const textareaStyle: CSSProperties = {
   fontSize: 'var(--text-sm)', padding: 'var(--space-2)', resize: 'vertical',
 }
 
-const buttonStyle: CSSProperties = {
-  padding: '6px 14px', fontSize: 'var(--text-sm)', fontWeight: 500,
-  color: 'var(--text-on-dark)', background: 'var(--accent)',
-  border: 'none', borderRadius: 'var(--radius-sm)', cursor: 'pointer',
-}

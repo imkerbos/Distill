@@ -28,8 +28,8 @@ export default function TopologyPage({ cluster }: { cluster: string }) {
     </>
   )
 
-  if (error) return <div>{head}<p style={{ color: 'var(--verdict-deny)' }}>{error}</p></div>
-  if (loading || !topo) return <div>{head}<p style={{ color: 'var(--text-muted)' }}>加载中…</p></div>
+  if (error) return <div>{head}<p className="text-deny">{error}</p></div>
+  if (loading || !topo) return <div>{head}<p className="text-ink-muted">加载中…</p></div>
 
   return (
     <div>
@@ -105,7 +105,7 @@ export default function TopologyPage({ cluster }: { cluster: string }) {
         </aside>
       </Card>
 
-      <div style={{ marginTop: 'var(--space-5)' }}>
+      <div className="mt-5">
         <DirectionTable topo={topo} />
       </div>
 
@@ -197,7 +197,7 @@ function GraphSummary({ topo }: { topo: Topology }) {
 function Item({ k, v }: { k: string; v: string }) {
   return (
     <>
-      <dt style={{ color: 'var(--text-muted)' }}>{k}</dt>
+      <dt className="text-ink-muted">{k}</dt>
       <dd style={{ margin: 0, fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>{v}</dd>
     </>
   )
@@ -224,15 +224,15 @@ function NodeList({ topo }: { topo: Topology }) {
     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--text-sm)' }}>
       <thead>
         <tr style={{ textAlign: 'left', color: 'var(--text-muted)' }}>
-          <th style={{ padding: '4px 8px' }}>{topo.level === 'workload' ? '工作负载' : '命名空间'}</th>
-          <th style={{ padding: '4px 8px' }}>Pod 数</th>
-          <th style={{ padding: '4px 8px' }}>NetworkPolicy</th>
+          <th className="px-2 py-1">{topo.level === 'workload' ? '工作负载' : '命名空间'}</th>
+          <th className="px-2 py-1">Pod 数</th>
+          <th className="px-2 py-1">NetworkPolicy</th>
         </tr>
       </thead>
       <tbody>
         {own.map((n) => (
           <tr key={n.id} style={{ borderTop: '1px solid var(--border)' }}>
-            <td style={{ padding: '4px 8px' }}>
+            <td className="px-2 py-1">
               {/* namespace 这一栏已经按粒度带好了展示名：workload 粒度下
                   后端放的是 "namespace/workload"（collectstore.nodeIDOf）。
                   这里不再另拼一次 —— 拼的那一版读的是一个后端从未下发过的
@@ -240,10 +240,10 @@ function NodeList({ topo }: { topo: Topology }) {
               {n.namespace}
             </td>
             <td style={{ padding: '4px 8px', fontVariantNumeric: 'tabular-nums' }}>{n.podCount}</td>
-            <td style={{ padding: '4px 8px' }}>
+            <td className="px-2 py-1">
               {n.hasPolicy
                 ? '有'
-                : <span style={{ color: 'var(--verdict-deny)' }}>无</span>}
+                : <span className="text-deny">无</span>}
             </td>
           </tr>
         ))}

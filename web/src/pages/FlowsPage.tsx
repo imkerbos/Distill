@@ -59,8 +59,8 @@ export default function FlowsPage({ cluster }: { cluster: string }) {
         </Field>
       </Toolbar>
 
-      {error && <p style={{ color: 'var(--verdict-deny)' }}>{error}</p>}
-      {!page && !error && <p style={{ color: 'var(--text-muted)' }}>加载中…</p>}
+      {error && <p className="text-deny">{error}</p>}
+      {!page && !error && <p className="text-ink-muted">加载中…</p>}
 
       {page && (
         <>
@@ -107,7 +107,7 @@ export default function FlowsPage({ cluster }: { cluster: string }) {
                     <td className="mono">{f.destLabel}</td>
                     <td className="num">{f.protocol}:{f.port}</td>
                     <td>
-                      <span style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                      <span className="flex flex-wrap gap-1">
                         {f.crossCluster && <CrossClusterMark />}
                         {f.unmanaged && <UnmanagedMark />}
                       </span>

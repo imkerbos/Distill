@@ -3,7 +3,7 @@ import { api, ApiError } from '../api/client'
 import type { Account } from '../api/types'
 import { useResource } from '../api/useResource'
 import { useSession } from '../auth/SessionContext'
-import { Card, EmptyState, Notice, PageHeader, Section, TableCard } from '../components/ui'
+import { Button, Card, EmptyState, Notice, PageHeader, Section, TableCard } from '../components/ui'
 import {
   BOOTSTRAP_LOCKOUT_WARNING, accountStatusLabel, blankNewAccount, blankOwnPassword,
   blankResetPassword, enabledAdmins, previewAccountAction, resolveNewAccount, resolveOwnPassword,
@@ -120,9 +120,9 @@ function AccountListSection({ me, accounts, error, loading, onChanged }: {
       meta={accounts ? `${accounts.length} 个账号，其中 ${adminCount} 个启用中的管理员` : undefined}
     >
       {error ? (
-        <p style={{ color: 'var(--verdict-deny)' }}>{error}</p>
+        <p className="text-deny">{error}</p>
       ) : loading || !accounts ? (
-        <p style={{ color: 'var(--text-muted)' }}>加载中…</p>
+        <p className="text-ink-muted">加载中…</p>
       ) : accounts.length === 0 ? (
         <EmptyState
           message="账号表是空的。"
@@ -157,12 +157,12 @@ function AccountListSection({ me, accounts, error, loading, onChanged }: {
                   <td style={{ color: a.disabledAt ? 'var(--text-muted)' : undefined }}>
                     {accountStatusLabel(a)}
                   </td>
-                  <td style={{ fontSize: 'var(--text-xs)' }}>{formatUtcTime(a.createdAt)}</td>
-                  <td style={{ fontSize: 'var(--text-xs)' }}>{formatUtcTime(a.updatedAt)}</td>
+                  <td className="text-xs">{formatUtcTime(a.createdAt)}</td>
+                  <td className="text-xs">{formatUtcTime(a.updatedAt)}</td>
                   <td>
                     <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
                       {actionsFor(a).map((kind) => (
-                        <button
+                        <Button
                           key={kind}
                           type="button"
                           onClick={() => setPending(
@@ -170,10 +170,10 @@ function AccountListSection({ me, accounts, error, loading, onChanged }: {
                               ? null
                               : { kind, username: a.username },
                           )}
-                          style={secondaryButtonStyle}
+                          variant="secondary"
                         >
                           {previewAccountAction(kind, a, rows).verb}
-                        </button>
+                        </Button>
                       ))}
                     </div>
                   </td>
@@ -296,7 +296,7 @@ function ConfirmPanel({ kind, target, accounts, isSelf, onDone, onCancel }: {
       )}
 
       {kind === 'RESET_PASSWORD' && (
-        <div style={{ marginTop: 'var(--space-3)' }}>
+        <div className="mt-3">
           <PasswordField
             label="新密码"
             value={values.password}
@@ -314,11 +314,11 @@ function ConfirmPanel({ kind, target, accounts, isSelf, onDone, onCancel }: {
 
       {error && <FormError>{error}</FormError>}
 
-      <div style={{ display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-3)' }}>
-        <button type="button" onClick={run} disabled={busy} style={buttonStyle}>
+      <div className="mt-3 flex gap-2">
+        <Button type="button" onClick={run} disabled={busy} variant="primary">
           {busy ? '执行中…' : `确认${preview.verb}`}
-        </button>
-        <button type="button" onClick={onCancel} style={secondaryButtonStyle}>取消</button>
+        </Button>
+        <Button type="button" onClick={onCancel} variant="secondary">取消</Button>
       </div>
     </Card>
   )
@@ -399,7 +399,7 @@ function CreateAccountSection({ viaBootstrap, onCreated }: {
             display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
             gap: 'var(--space-3)', marginTop: 'var(--space-3)',
           }}>
-            <label style={{ display: 'block' }}>
+            <label className="block">
               <span style={fieldLabelStyle}>用户名</span>
               <input
                 className="ctl"
@@ -433,9 +433,9 @@ function CreateAccountSection({ viaBootstrap, onCreated }: {
           {error && <FormError>{error}</FormError>}
           {done && <FormNote>{done}</FormNote>}
 
-          <button type="submit" disabled={busy} style={{ ...buttonStyle, marginTop: 'var(--space-3)' }}>
+          <Button type="submit" disabled={busy} variant="primary" className="mt-3">
             {busy ? '提交中…' : '新建账号'}
-          </button>
+          </Button>
         </form>
       </Card>
     </Section>
@@ -496,10 +496,10 @@ export function OwnPasswordPage() {
       />
       <Card style={{ padding: 'var(--space-4)', maxWidth: 460 }}>
         <form onSubmit={submit}>
-          <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+          <div className="text-xs text-ink-muted">
             当前登录身份：{identity?.username ?? '未知'}
           </div>
-          <div style={{ marginTop: 'var(--space-3)' }}>
+          <div className="mt-3">
             <PasswordField
               label="当前密码"
               value={values.currentPassword}
@@ -523,9 +523,9 @@ export function OwnPasswordPage() {
           {error && <FormError>{error}</FormError>}
           {done && <FormNote>{done}</FormNote>}
 
-          <button type="submit" disabled={busy} style={{ ...buttonStyle, marginTop: 'var(--space-3)' }}>
+          <Button type="submit" disabled={busy} variant="primary" className="mt-3">
             {busy ? '提交中…' : '修改密码'}
-          </button>
+          </Button>
         </form>
       </Card>
     </div>
@@ -610,14 +610,4 @@ const fieldLabelStyle: CSSProperties = {
   display: 'block', marginBottom: 4, fontSize: 'var(--text-xs)', color: 'var(--text-muted)',
 }
 
-const buttonStyle: CSSProperties = {
-  padding: '6px 14px', fontSize: 'var(--text-sm)', fontWeight: 500,
-  color: 'var(--text-on-dark)', background: 'var(--accent)',
-  border: 'none', borderRadius: 'var(--radius-sm)', cursor: 'pointer',
-}
 
-const secondaryButtonStyle: CSSProperties = {
-  padding: '6px 12px', fontSize: 'var(--text-sm)', fontWeight: 500,
-  color: 'var(--text)', background: 'var(--surface)',
-  border: '1px solid var(--border-strong)', borderRadius: 'var(--radius-sm)', cursor: 'pointer',
-}

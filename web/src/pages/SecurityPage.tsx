@@ -46,8 +46,8 @@ export default function SecurityPage({ cluster }: { cluster: string }) {
     </>
   )
 
-  if (error) return <div>{head}<p style={{ color: 'var(--verdict-deny)' }}>{error}</p></div>
-  if (loading || !rep) return <div>{head}<p style={{ color: 'var(--text-muted)' }}>加载中…</p></div>
+  if (error) return <div>{head}<p className="text-deny">{error}</p></div>
+  if (loading || !rep) return <div>{head}<p className="text-ink-muted">加载中…</p></div>
 
   return (
     <div>
@@ -108,13 +108,13 @@ function RiskySection({ rep }: { rep: SecurityReport }) {
         />
       ) : (
         groups.map((g) => (
-          <div key={g.key} style={{ marginBottom: 'var(--space-4)' }}>
+          <div key={g.key} className="mb-4">
             <div style={{
               display: 'flex', alignItems: 'baseline', gap: 'var(--space-2)',
               marginBottom: 'var(--space-2)', flexWrap: 'wrap',
             }}>
-              <strong style={{ fontSize: 'var(--text-sm)' }}>{g.label}</strong>
-              <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+              <strong className="text-sm">{g.label}</strong>
+              <span className="text-xs text-ink-muted">
                 {g.rows.length} 条 · {g.hint}
               </span>
             </div>
@@ -148,8 +148,8 @@ function RiskyTable({ rows }: { rows: RiskyFlow[] }) {
                 <Chip>{RISK_CATEGORY_LABEL[f.category] ?? f.category}</Chip>
               </span>
             </td>
-            <td className="mono" style={{ fontSize: 'var(--text-sm)' }}>{f.sourceLabel}</td>
-            <td className="mono" style={{ fontSize: 'var(--text-sm)' }}>{f.destLabel}</td>
+            <td className="mono text-sm">{f.sourceLabel}</td>
+            <td className="mono text-sm">{f.destLabel}</td>
           </tr>
         ))}
       </tbody>
@@ -183,7 +183,7 @@ function EgressSection({ rep }: { rep: SecurityReport }) {
           <tbody>
             {rep.egressTargets.map((t) => (
               <tr key={t.address}>
-                <td className="mono" style={{ fontSize: 'var(--text-sm)' }}>{t.address}</td>
+                <td className="mono text-sm">{t.address}</td>
                 <td>{t.ports.map((p) => <Chip key={p}>{p}</Chip>)}</td>
                 <td className="num">{t.flowCount}</td>
                 <td className="num" style={{

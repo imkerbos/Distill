@@ -1,4 +1,4 @@
-import type { CSSProperties, ReactNode } from 'react'
+import type { ButtonHTMLAttributes, CSSProperties, ReactNode } from 'react'
 
 /*
  * 通用组件层。
@@ -30,10 +30,14 @@ export function PageHeader({ title, description }: { title: string; description?
 }
 
 /** 卡片：靠边框分层，不靠投影。投影一重就显得"演示用"。 */
-export function Card({ children, style }: { children: ReactNode; style?: CSSProperties }) {
+export function Card({ children, style, className = '' }: {
+  children: ReactNode
+  style?: CSSProperties
+  className?: string
+}) {
   return (
     <div
-      className="rounded-card border border-line bg-surface shadow-card"
+      className={`rounded-card border border-line bg-surface shadow-card ${className}`}
       style={style}
     >
       {children}
@@ -212,5 +216,41 @@ export function Notice({ children }: { children: ReactNode }) {
     <div className="mb-3 rounded-card border border-line bg-sunken px-3 py-2 text-sm text-ink-2">
       {children}
     </div>
+  )
+}
+
+/**
+ * 按钮。
+ *
+ * **一个定义，不是四个。** 在这之前 ClustersPage / GitReposPage /
+ * AccountsPage / SettingsPage 各自抄了一份同样的 buttonStyle 常量 —— 四份
+ * 会各自漂，而漂的症状是同一个动作在不同页面上长得不一样，读者会以为它们
+ * 的分量不同（同 ui.tsx 抬头那条：三种表格会让人以为在讲三件事）。
+ *
+ * 只有两个变体：主操作与次操作。**没有 danger 变体** —— 这一屏上唯一该用
+ * 颜色说话的是判定语义色，给按钮也上红会让画面出现第二套颜色语言，而读者
+ * 分不清哪一套在讲判定。危险动作靠文案与二次确认表达，不靠颜色。
+ */
+export function Button({
+  children, variant = 'primary', className = '', ...rest
+}: {
+  children: ReactNode
+  variant?: 'primary' | 'secondary'
+} & ButtonHTMLAttributes<HTMLButtonElement>) {
+  const look = variant === 'primary'
+    ? 'border-transparent bg-accent text-[var(--text-on-dark)]'
+    : 'border-line-strong bg-surface text-ink'
+  return (
+    <button
+      className={[
+        'inline-flex items-center gap-2 rounded-chip border px-3 py-[6px]',
+        'text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50',
+        'focus-visible:outline-2 focus-visible:outline-accent',
+        look, className,
+      ].join(' ')}
+      {...rest}
+    >
+      {children}
+    </button>
   )
 }

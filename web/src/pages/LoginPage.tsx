@@ -35,7 +35,7 @@ export default function LoginPage() {
           把介绍塞进卡片会让第一屏显得在推销，而这是一个内部平台 ——
           它需要的是让人一眼确认"进对地方了"。
         */}
-        <div style={{ marginBottom: 'var(--space-4)' }}>
+        <div className="mb-4">
           <h1 style={{
             margin: 0, fontSize: 'var(--text-2xl)', fontWeight: 600, letterSpacing: '-0.01em',
           }}>
