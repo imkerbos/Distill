@@ -233,7 +233,11 @@ function NodeList({ topo }: { topo: Topology }) {
         {own.map((n) => (
           <tr key={n.id} style={{ borderTop: '1px solid var(--border)' }}>
             <td style={{ padding: '4px 8px' }}>
-              {n.workload ? `${n.namespace}/${n.workload}` : n.namespace}
+              {/* namespace 这一栏已经按粒度带好了展示名：workload 粒度下
+                  后端放的是 "namespace/workload"（collectstore.nodeIDOf）。
+                  这里不再另拼一次 —— 拼的那一版读的是一个后端从未下发过的
+                  字段，因此那个分支从来没有成立过。 */}
+              {n.namespace}
             </td>
             <td style={{ padding: '4px 8px', fontVariantNumeric: 'tabular-nums' }}>{n.podCount}</td>
             <td style={{ padding: '4px 8px' }}>

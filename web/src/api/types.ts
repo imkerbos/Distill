@@ -711,6 +711,38 @@ export interface ClusterWrite {
   kubeconfigRef: string
   apiServers: APIServer[]
   healthCheckSources: string[]
+  /**
+   * METRICS_SCRAPE Baseline 依据的**登记那一半**（另一半是 Pod 上的
+   * prometheus.io/scrape 注解，观测得到）。
+   *
+   * PUT 是整体替换，与 kubeconfigRef 同理：漏带一次不是"改不了抓取端"，
+   * 而是把它清空了 —— 而症状是那一类 Baseline 继续报缺失，没有任何东西
+   * 指向登记。表单每次原样带上。
+   */
+  metricsScrapers: MetricsScraperWrite[]
+  /** 需要被放行的节点级 agent，同样是整体替换。 */
+  nodeAgents: NodeAgentWrite[]
+  /**
+   * 非空表示显式声明这个集群没有需要放行的节点 agent。
+   *
+   * 收理由而不是布尔：判错的方向是监控在下发之后静默中断，事后要答得出
+   * 「当初凭什么说不需要」。
+   */
+  noNodeAgentsReason: string
+}
+
+/** 一个 metrics 抓取端的登记。 */
+export interface MetricsScraperWrite {
+  namespace: string
+  labels: Record<string, string>
+}
+
+/** 一个节点级 agent 的登记。 */
+export interface NodeAgentWrite {
+  namespace: string
+  app: string
+  hostNetwork: boolean
+  targetPort: number
 }
 
 /**
@@ -775,6 +807,14 @@ export interface PolicyPreview {
   namespace: string
   window: TimeWindow
   candidates: CandidatePolicy[]
+  /**
+   * 这份预演背后有没有真实观测。
+   *
+   * 为 false 时 prediction 的每一项都是 0，而那个 0 **不是评估的结果，是
+   * 没有评估过** —— 「会拦断 0 条连接」读起来是「可以放心下发」，而这个
+   * 平台最不能给出的正是那种错觉（见 wouldBreakQualifierFor）。
+   */
+  trafficObserved: boolean
   /** 本次预览的粒度，后端回显。缺席按 WORKLOAD 读（见 granularityView）。 */
   granularity: Granularity | null
   /**

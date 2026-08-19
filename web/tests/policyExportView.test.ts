@@ -15,7 +15,7 @@ function rules(...enabled: boolean[]): CandidateRule[] {
 }
 
 function policy(namespace: string, workload: string, rs: CandidateRule[]): CandidatePolicy {
-  return { cluster: 'prod-asia-1', namespace, workload, rules: rs }
+  return { cluster: 'prod-asia-1', namespace, granularity: 'WORKLOAD', workload, rules: rs }
 }
 
 function preview(opts: {

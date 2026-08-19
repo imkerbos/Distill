@@ -1,0 +1,55 @@
+/*
+ * Tailwind 主题：**把既有 token 映射进来，不另起一套色板。**
+ *
+ * tokens.css 是设计语言的唯一真相源（语义色是硬约束，见那个文件的抬头）。
+ * 在这里重新定义一份色阶，等于给同一个概念开第二个定义 —— 而两份会漂，
+ * 漂的症状是某个页面的 ALLOW 绿与别处不是同一个绿，于是颜色不再读得出判定。
+ *
+ * 因此这里每一个值都是 var(--…)，一个字面量都没有。
+ */
+@import 'tailwindcss';
+
+@theme inline {
+  /* ---- 判定语义色：仅用于 verdict / confidence，全站不得挪作他用 ---- */
+  --color-allow: var(--verdict-allow);
+  --color-allow-bg: var(--verdict-allow-bg);
+  --color-deny: var(--verdict-deny);
+  --color-deny-bg: var(--verdict-deny-bg);
+  --color-unknown: var(--verdict-unknown);
+  --color-unknown-bg: var(--verdict-unknown-bg);
+  --color-degraded: var(--degraded-stroke);
+
+  /* ---- 中性色 ---- */
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-sunken: var(--surface-sunken);
+  --color-line: var(--border);
+  --color-line-strong: var(--border-strong);
+  --color-ink: var(--text);
+  --color-ink-2: var(--text-secondary);
+  --color-ink-muted: var(--text-muted);
+  --color-accent: var(--accent);
+
+  /* ---- 排版 ---- */
+  --font-sans: var(--font);
+  --font-mono: var(--mono);
+  --text-xs: var(--text-xs);
+  --text-sm: var(--text-sm);
+  --text-base: var(--text-base);
+  --text-lg: var(--text-lg);
+  --text-xl: var(--text-xl);
+  --text-2xl: var(--text-2xl);
+
+  /* ---- 间距：沿用既有的六档，不用 Tailwind 默认的 4px 阶 ---- */
+  --spacing-1: var(--space-1);
+  --spacing-2: var(--space-2);
+  --spacing-3: var(--space-3);
+  --spacing-4: var(--space-4);
+  --spacing-5: var(--space-5);
+  --spacing-6: var(--space-6);
+
+  /* ---- 形状 ---- */
+  --radius-card: var(--radius);
+  --radius-chip: var(--radius-sm);
+  --shadow-card: var(--shadow-card);
+}

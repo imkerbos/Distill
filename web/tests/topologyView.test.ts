@@ -16,9 +16,9 @@ const PAGE_SOURCE = src('pages', 'TopologyPage.tsx')
 function topo(over: Partial<Topology> = {}): Topology {
   return {
     nodes: [{
-      id: 'c/shop', cluster: 'c', namespace: 'shop', workload: '',
-      podCount: 3, hasPolicy: false, foreign: false,
-    } as Topology['nodes'][number]],
+      id: 'c/shop', cluster: 'c', namespace: 'shop',
+      inMesh: false, podCount: 3, unmanagedPodCount: 0, hasPolicy: false, foreign: false,
+    }],
     edges: [],
     unplaceableFlowCount: 0,
     level: 'namespace',

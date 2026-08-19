@@ -671,7 +671,12 @@ test('提交体带上抓取端', () => {
   const values = { ...blankFormValues(), id: 'c1', displayName: 'C', podCidr: '10.4.0.0/14',
     nodeCidr: '10.128.0.0/20', metricsScrapers: 'monitoring  app=prometheus' }
   const req = buildClusterWrite(values)
-  assert.deepEqual((req.body as Record<string, unknown>).metricsScrapers,
+  // 先把联合类型收窄：失败那一支没有 body，直接强转会让一次"构造失败"
+  // 伪装成一次"字段对不上"。
+  if (!req.ok) {
+    assert.fail(`buildClusterWrite refused a valid form: ${req.error}`)
+  }
+  assert.deepEqual(req.body.metricsScrapers,
     [{ namespace: 'monitoring', labels: { app: 'prometheus' } }])
 })
 

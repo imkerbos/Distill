@@ -3,7 +3,7 @@ import { driftView } from './driftView.ts'
 import { api, ApiError } from '../api/client'
 import {
   IMPORT_ROLE_LABEL, IMPORT_SOURCE_LABEL, ONBOARD_STATE_LABEL,
-  type APIServer, type GitBinding, type GitRepo, type ImportRole, type ImportSource,
+  type APIServer, type DriftResult, type GitBinding, type GitRepo, type ImportRole, type ImportSource,
   type PolicyImportItem, type RegisteredCluster,
 } from '../api/types'
 import { useResource } from '../api/useResource'

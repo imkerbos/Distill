@@ -1,9 +1,10 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
 
 // 前端固定 4000，后端 10100 —— 本机其他项目占用了 3X00 与 100X0 的其余槽位。
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
   server: {
     // 监听全部接口，便于从同网段的其他设备访问。代理目标仍写
     // localhost：它在跑 vite 的这台机器上解析，所以从别的设备访问
