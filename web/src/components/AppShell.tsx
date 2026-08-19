@@ -33,29 +33,69 @@ export default function AppShell({ cluster, onClusterChange, children }: Props) 
     }).catch(() => setClustersError(true))
   }, [onClusterChange])
 
+  // 导航按**回答什么问题**分组，不按功能名平铺。
+  //
+  // 十项平铺时，"网络拓扑"与"平台设置"看起来是同一量级的两件事，而前者是
+  // 每天看的、后者是配一次的。分组本身就是一次信息层次的表达。
+  const groups: Array<{ label: string; items: Array<{ to: string; label: string }> }> = [
+    {
+      label: '这个集群现在什么样',
+      items: [
+        { to: '/topology', label: '网络拓扑' },
+        { to: '/flows', label: '流量与判定' },
+        { to: '/security', label: '安全发现' },
+        { to: '/policy', label: '候选策略' },
+        { to: '/quality', label: '数据质量' },
+      ],
+    },
+    {
+      label: '接入与下发',
+      items: [
+        { to: '/clusters', label: '集群管理' },
+        // 资产采集讲的是"平台看见了这个集群的什么"，属于接入这一段，
+        // 不属于上面那五屏的判定链路。入口对所有角色都渲染 —— 服务端
+        // 声明 accessAdmin，隐藏它只会让只读账号以为这块界面不存在
+        // （规范 §34）。
+        { to: '/collection', label: '资产采集' },
+        { to: '/git-repos', label: '策略仓库' },
+      ],
+    },
+    {
+      label: '平台',
+      items: [
+        { to: '/settings', label: '平台设置' },
+        /*
+          账号管理入口只对管理员渲染。**这只是体验，不是安全** ——
+          服务端对 /api/v1/accounts 下的每一个端点都声明了 accessAdmin，
+          并在每次请求现读角色，只读账号把地址敲进浏览器一样是 403
+          （规范 §34、design doc 2026-08-14 §8）。隐藏这一项省下的只是
+          「点了才发现被拒」那一次无用点击；谁把它当成那些端点的保护，
+          删掉这一行时会以为自己只是改了导航。
+        */
+        ...(identity && showsAccountAdminEntry(identity.role)
+          ? [{ to: '/accounts', label: '账号管理' }]
+          : []),
+        // 改自己的密码任何角色都能做，因此不在上面那道过滤里。
+        { to: '/me/password', label: '修改密码' },
+      ],
+    },
+  ]
+
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '220px 1fr', minHeight: '100vh' }}>
-      <nav style={{
-        borderRight: '1px solid var(--border)', background: 'var(--surface)',
-        padding: 'var(--space-4) var(--space-3)', display: 'flex', flexDirection: 'column',
-      }}>
-        <div style={{
-          fontWeight: 600, fontSize: 'var(--text-lg)', letterSpacing: '-0.01em',
-          marginBottom: 'var(--space-1)',
-        }}>
-          Distill
-        </div>
-        <div style={{
-          fontSize: 'var(--text-xs)', color: 'var(--text-muted)',
-          marginBottom: 'var(--space-4)',
-        }}>
-          NetworkPolicy 可见性
+    <div className="grid min-h-screen grid-cols-[236px_1fr] bg-bg">
+      <nav className="flex flex-col gap-4 border-r border-line bg-surface px-3 py-4">
+        <div>
+          <div
+            className="text-lg tracking-[-0.01em] text-ink"
+            style={{ fontWeight: 'var(--weight-title)' }}
+          >
+            Distill
+          </div>
+          <div className="text-xs text-ink-muted">NetworkPolicy 可见性</div>
         </div>
 
-        <label style={{ display: 'block', marginBottom: 'var(--space-4)' }}>
-          <span style={{ display: 'block', fontSize: 12, color: 'var(--text-muted)', marginBottom: 4 }}>
-            集群
-          </span>
+        <label className="block">
+          <span className="mb-1 block text-xs text-ink-muted">集群</span>
           <Select
             value={cluster}
             ariaLabel="集群"
@@ -64,75 +104,48 @@ export default function AppShell({ cluster, onClusterChange, children }: Props) 
             style={{ width: '100%' }}
           />
           {clustersError && (
-            <span style={{
-              display: 'block', marginTop: 4, fontSize: 12, color: 'var(--verdict-deny)',
-            }}>
-              集群列表加载失败
-            </span>
+            <span className="mt-1 block text-xs text-deny">集群列表加载失败</span>
           )}
         </label>
 
-        {[
-          { to: '/topology', label: '网络拓扑' },
-          { to: '/flows', label: '流量与判定' },
-          { to: '/security', label: '安全发现' },
-          { to: '/policy', label: '候选策略' },
-          { to: '/quality', label: '数据质量' },
-          { to: '/clusters', label: '集群管理' },
-          /*
-            资产采集排在集群管理之后、策略仓库之前：它讲的是"平台看见了
-            这个集群的什么"，属于接入这一段，不属于上面那四屏的判定链路。
-            入口对所有角色都渲染 —— 服务端声明 accessAdmin，隐藏它只会
-            让一个只读账号以为这块界面不存在（规范 §34）。
-          */
-          { to: '/collection', label: '资产采集' },
-          { to: '/git-repos', label: '策略仓库' },
-          { to: '/settings', label: '平台设置' },
-          /*
-            账号管理入口只对管理员渲染。**这只是体验，不是安全** ——
-            服务端对 /api/v1/accounts 下的每一个端点都声明了 accessAdmin，
-            并在每次请求现读角色，只读账号把地址敲进浏览器一样是 403
-            （规范 §34、design doc 2026-08-14 §8）。隐藏这一项省下的只是
-            「点了才发现被拒」那一次无用点击；谁把它当成那些端点的保护，
-            删掉这一行时会以为自己只是改了导航。
-          */
-          ...(identity && showsAccountAdminEntry(identity.role)
-            ? [{ to: '/accounts', label: '账号管理' }]
-            : []),
-          // 改自己的密码任何角色都能做，因此不在上面那道过滤里。
-          { to: '/me/password', label: '修改密码' },
-        ].map((item) => (
-          <NavLink
-            key={item.to}
-            to={item.to}
-            style={({ isActive }) => ({
-              padding: '8px 10px 8px 12px', marginBottom: 2,
-              fontSize: 'var(--text-base)',
-              borderRadius: 'var(--radius-sm)', textDecoration: 'none',
-              color: isActive ? 'var(--text)' : 'var(--text-muted)',
-              background: isActive ? 'var(--surface-sunken)' : 'transparent',
-              fontWeight: isActive ? 600 : 400,
-              // 左侧色条：只靠底色变化的 active 态在浅色系里几乎读不出来，
-              // 使用者会不确定自己正在看哪一屏。
-              borderLeft: isActive
-                ? '3px solid var(--accent)'
-                : '3px solid transparent',
-            })}
-          >
-            {item.label}
-          </NavLink>
-        ))}
+        <div className="flex flex-col gap-4">
+          {groups.map((g) => (
+            <div key={g.label}>
+              <div className="mb-1 px-3 text-[11px] tracking-[0.04em] text-ink-muted uppercase">
+                {g.label}
+              </div>
+              {g.items.map((item) => (
+                <NavLink
+                  key={item.to}
+                  to={item.to}
+                  className={({ isActive }) => [
+                    'block rounded-chip px-3 py-[7px] text-sm no-underline transition-colors',
+                    isActive
+                      // 选中态用品牌色，不用中性底：只靠底色深浅在浅色系里
+                      // 几乎读不出来，使用者会不确定自己正在看哪一屏。
+                      ? 'bg-brand-weak text-brand-strong'
+                      : 'text-ink-muted hover:bg-sunken hover:text-ink',
+                  ].join(' ')}
+                  style={({ isActive }) => (
+                    isActive ? { fontWeight: 'var(--weight-section)' } : undefined
+                  )}
+                >
+                  {item.label}
+                </NavLink>
+              ))}
+            </div>
+          ))}
+        </div>
 
-        <div style={{ marginTop: 'auto', fontSize: 12, color: 'var(--text-muted)' }}>
-          <div style={{ marginBottom: 'var(--space-2)' }}>{identity?.username}</div>
+        <div className="mt-auto border-t border-line pt-3 text-xs text-ink-muted">
+          <div className="mb-2 truncate">{identity?.username}</div>
           <button
             onClick={async () => { await logout(); navigate('/login') }}
-            style={{
-              padding: '4px 8px', fontSize: 12, background: 'transparent',
-              border: '1px solid var(--border)', borderRadius: 'var(--radius)',
-              cursor: 'pointer', color: 'var(--text-muted)',
-            }}
-          >登出</button>
+            className="rounded-chip border border-line px-2 py-1 text-xs text-ink-muted
+                       hover:border-line-strong hover:text-ink"
+          >
+            登出
+          </button>
         </div>
       </nav>
 
@@ -140,7 +153,7 @@ export default function AppShell({ cluster, onClusterChange, children }: Props) 
         限制正文宽度：宽屏下表格列会被拉到一两千像素，同一行的源与目的
         相隔太远，读者无法把它们连成一条记录。
       */}
-      <div style={{ padding: 'var(--space-5) var(--space-4)', overflow: 'auto' }}>
+      <div className="overflow-auto px-5 py-5">
         {/*
           数据来源沿这里下发给每一屏的内容区。取的是这一次已经发生的集群
           列表请求里的字段，不为标识本身再发一次请求（design doc

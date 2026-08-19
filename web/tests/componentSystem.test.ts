@@ -42,3 +42,24 @@ test('逐行重复的长说明要抽出来，不印在每一行上', () => {
   assert.match(page, /RemedyLegend/,
     '整表一次的处置说明不见了 —— 说明被删掉与被折起来是两回事')
 })
+
+test('品牌色不用于任何数据', () => {
+  // 主色（靛蓝）只用于导航选中态、焦点环、链接。它出现在数据上，界面就有了
+  // 第二套颜色语言 —— 而读者分不清哪一套在讲判定。数据只由语义色与中性色
+  // 表达（tokens.css 里 --brand 的说明）。
+  const offenders = pages.filter((f) => /var\(--brand/.test(read(f)))
+  assert.deepEqual(offenders, [],
+    `这些页面用了品牌色：${offenders.join(', ')}；数据只用语义色与中性色`)
+})
+
+test('暗色模式必须重映射判定色，不能只换中性色', () => {
+  const tokens = readFileSync(
+    join(import.meta.dirname, '..', 'src', 'tokens.css'), 'utf8')
+  const dark = tokens.slice(tokens.indexOf('prefers-color-scheme: dark'))
+  assert.notEqual(dark, '', 'tokens.css 里没有暗色模式')
+  for (const name of ['--verdict-allow', '--verdict-deny', '--verdict-unknown']) {
+    assert.ok(dark.includes(`${name}:`),
+      `暗色下没有重新定义 ${name} —— 浅色那三个在深底上会掉到读不出的对比度，`
+      + '而它们是判定结论的唯一载体，读不出等于结论丢了')
+  }
+})

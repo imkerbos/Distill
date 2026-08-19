@@ -29,6 +29,9 @@
   --color-ink-2: var(--text-secondary);
   --color-ink-muted: var(--text-muted);
   --color-accent: var(--accent);
+  --color-brand: var(--brand);
+  --color-brand-weak: var(--brand-weak);
+  --color-brand-strong: var(--brand-strong);
 
   /* ---- 排版 ---- */
   --font-sans: var(--font);
@@ -39,6 +42,9 @@
   --text-lg: var(--text-lg);
   --text-xl: var(--text-xl);
   --text-2xl: var(--text-2xl);
+
+  --font-weight-title: var(--weight-title);
+  --font-weight-section: var(--weight-section);
 
   /* ---- 间距：沿用既有的六档，不用 Tailwind 默认的 4px 阶 ---- */
   --spacing-1: var(--space-1);

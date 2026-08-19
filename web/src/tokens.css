@@ -36,13 +36,38 @@
   --text-on-dark: #ffffff;
   --accent: #2c2c28;
 
+  /*
+   * 品牌色：一个克制的靛蓝，只用于导航选中态、焦点环、链接。
+   *
+   * **与判定语义色不冲突**是选它的硬条件：绿 / 红 / 琥珀已经各自占着
+   * ALLOW / DENY / UNKNOWN，主色再取其中任何一个色相，界面上就会出现
+   * 两个"绿"而含义不同。靛蓝在这三者之外，因此它出现在哪里都不会被
+   * 误读成一个判定。
+   *
+   * 也因此它**不用于任何数据**：数据只由语义色与中性色表达。
+   */
+  --brand: #3b4b8f;
+  --brand-weak: #eef0f9;
+  --brand-strong: #2d3a70;
+
   /* ---- 排版尺度 ---- */
   --text-xs: 12px;
   --text-sm: 13px;
   --text-base: 14px;
-  --text-lg: 16px;
-  --text-xl: 20px;
-  --text-2xl: 26px;
+  --text-lg: 17px;
+  --text-xl: 21px;
+  --text-2xl: 28px;
+
+  /*
+   * 字重按层级分开给，不在各处手写数字。
+   *
+   * 此前标题与正文只差 2px 字号、字重都是 600，于是"区块"读不出是区块。
+   * 拉开的是**层级**，不是尺寸 —— 把标题放大到扎眼会让这一屏显得在推销
+   * 结论，而这个平台的结论要靠依据可查建立信任，不靠视觉音量。
+   */
+  --weight-title: 650;
+  --weight-section: 600;
+  --weight-medium: 500;
 
   /* ---- 间距 ---- */
   --space-1: 4px;
@@ -69,6 +94,47 @@
   --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
 }
 
+/*
+ * 暗色模式。
+ *
+ * **语义色必须换一组，不能沿用浅色那三个。** 在 #16161a 的底上，
+ * #1a7f5a 的绿与 #b3261e 的红都会掉到读不出的对比度 —— 而这三个颜色
+ * 是判定结论的唯一载体，读不出等于结论丢了。换的是明度，不是色相：
+ * 绿仍然是绿、红仍然是红，否则同一个人在两种模式下会学到两套颜色语言。
+ *
+ * DEGRADED 仍然只用描边、不降对比度：它的结论成立，只是不可信，
+ * 必须与正常结论同等显著（见本文件抬头）。
+ */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --verdict-allow: #4ade80;
+    --verdict-allow-bg: #10291f;
+    --verdict-deny: #f87171;
+    --verdict-deny-bg: #2c1616;
+    --verdict-unknown: #fbbf24;
+    --verdict-unknown-bg: #2a2210;
+    --degraded-stroke: #a78bfa;
+
+    --bg: #131316;
+    --surface: #1a1a1e;
+    --surface-sunken: #202026;
+    --border: #2c2c33;
+    --border-strong: #3d3d45;
+    --text: #e8e8e6;
+    --text-secondary: #b9b9b4;
+    --text-muted: #8a8a86;
+    --text-on-dark: #ffffff;
+    --accent: #e8e8e6;
+
+    --brand: #8fa0e8;
+    --brand-weak: #1e2136;
+    --brand-strong: #a9b6ee;
+
+    /* 深底上投影读不出来，靠边框分层即可 —— 硬加投影只会糊。 */
+    --shadow-card: none;
+  }
+}
+
 * { box-sizing: border-box; }
 
 body {
@@ -92,11 +158,15 @@ body {
 }
 .dt thead th {
   text-align: left;
-  padding: var(--space-2) var(--space-3);
+  padding: 10px var(--space-3);
   color: var(--text-muted);
-  font-size: var(--text-xs);
-  font-weight: 500;
-  letter-spacing: 0.02em;
+  font-size: 11px;
+  font-weight: var(--weight-medium);
+  /* 字距放开 + 全大写：表头与数据行的字号只差 2px，不做区分时读者会把
+     表头当成第一条记录。 */
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  background: var(--surface-sunken);
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
 }
@@ -108,8 +178,11 @@ body {
   vertical-align: middle;
 }
 .dt tbody tr:last-child td { border-bottom: none; }
+/* 所有行都给悬停反馈，不只是可点的：横向比对时手要跟着眼睛走，
+   而一行没有反馈的表格会让人反复确认自己看的是哪一行。 */
+.dt tbody tr { transition: background-color 100ms ease; }
+.dt tbody tr:hover { background: var(--surface-sunken); }
 .dt tbody tr.clickable { cursor: pointer; }
-.dt tbody tr.clickable:hover { background: var(--surface-sunken); }
 
 /* 数值列右对齐并等宽，便于纵向比对量级。 */
 .dt .num {
