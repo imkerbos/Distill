@@ -1,4 +1,5 @@
 import type { ButtonHTMLAttributes, CSSProperties, ReactNode } from 'react'
+import { Dropdown } from './radix'
 
 /*
  * 通用组件层。
@@ -198,7 +199,16 @@ export function Field({ label, children }: { label: string; children: ReactNode 
   )
 }
 
-/** 下拉框。控件高度统一取 --control-h，避免各处自己拍尺寸。 */
+/**
+ * 下拉框。
+ *
+ * 转发到 Radix 的无头实现（components/radix 的 Dropdown）：原生 `<select>`
+ * 在 macOS 与 Windows 上外观差异很大，与卡片、表格的质感对不上，界面会显得
+ * 是几段拼起来的。
+ *
+ * 保留这个名字与签名，是为了调用方不必跟着改 —— 换实现不该变成一次跨十个
+ * 页面的改动。
+ */
 export function Select({ value, onChange, options, ariaLabel, style }: {
   value: string
   onChange: (v: string) => void
@@ -207,15 +217,12 @@ export function Select({ value, onChange, options, ariaLabel, style }: {
   style?: CSSProperties
 }) {
   return (
-    <select
-      aria-label={ariaLabel}
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      className="rounded-chip border border-line-strong bg-surface px-2 text-sm text-ink"
-      style={{ height: 'var(--control-h)', ...style }}
-    >
-      {options.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
-    </select>
+    <span style={style} className="inline-block">
+      <Dropdown
+        value={value} onChange={onChange} options={options}
+        ariaLabel={ariaLabel} className="w-full"
+      />
+    </span>
   )
 }
 

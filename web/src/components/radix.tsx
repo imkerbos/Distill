@@ -1,4 +1,7 @@
+import * as RadixCheckbox from '@radix-ui/react-checkbox'
 import * as Collapsible from '@radix-ui/react-collapsible'
+import * as RadixDialog from '@radix-ui/react-dialog'
+import * as RadixSelect from '@radix-ui/react-select'
 import * as RadixTabs from '@radix-ui/react-tabs'
 import * as RadixTooltip from '@radix-ui/react-tooltip'
 import type { ReactNode } from 'react'
@@ -112,5 +115,127 @@ export function Hint({ label, children }: { label: ReactNode; children: ReactNod
         </RadixTooltip.Portal>
       </RadixTooltip.Root>
     </RadixTooltip.Provider>
+  )
+}
+
+/**
+ * 右侧抽屉。
+ *
+ * **手写的浮层跑不掉这四样**：焦点陷阱、Escape 关闭、`role="dialog"`、
+ * `aria-modal`。写漏的症状不会出现在截图里 —— 键盘用户打开它之后焦点还留在
+ * 背景里，读屏器根本不知道弹出了东西。这正是当初选无头组件的理由，而在这
+ * 之前这一处一直是自己摆的一个 `position: fixed` 盒子。
+ *
+ * `title` 不是可选的：Radix 要求每个 Dialog 有可访问名，没有名字的浮层在
+ * 读屏器里只会被念成"对话框"。
+ */
+export function Drawer({ open, onClose, title, children }: {
+  open: boolean
+  onClose: () => void
+  title: string
+  children: ReactNode
+}) {
+  return (
+    <RadixDialog.Root open={open} onOpenChange={(o) => { if (!o) onClose() }}>
+      <RadixDialog.Portal>
+        {/* 遮罩：抽屉直接压在表格上时，被盖住的那几列看起来像"数据缺了"。
+            压暗背景让读者知道那是被临时遮挡，不是内容不全。 */}
+        <RadixDialog.Overlay className="fixed inset-0 z-10 bg-[rgba(28,28,26,.28)]" />
+        <RadixDialog.Content
+          className="fixed inset-y-0 right-0 z-20 flex w-[480px] max-w-full flex-col
+                     overflow-auto border-l border-line bg-bg shadow-[-4px_0_24px_rgba(28,28,26,.10)]"
+        >
+          <header className="sticky top-0 flex items-center justify-between border-b border-line
+                             bg-surface px-4 py-3">
+            <RadixDialog.Title
+              className="m-0 text-lg text-ink"
+              style={{ fontWeight: 'var(--weight-section)' }}
+            >
+              {title}
+            </RadixDialog.Title>
+            <RadixDialog.Close
+              className="rounded-chip border border-line bg-surface px-3 py-1 text-sm text-ink-2
+                         hover:border-line-strong hover:text-ink"
+            >
+              关闭
+            </RadixDialog.Close>
+          </header>
+          {children}
+        </RadixDialog.Content>
+      </RadixDialog.Portal>
+    </RadixDialog.Root>
+  )
+}
+
+/**
+ * 下拉框。
+ *
+ * 原生 `<select>` 在 macOS 与 Windows 上外观差异很大，与卡片、表格的质感
+ * 对不上，界面会显得是几段拼起来的。这里换成无头实现 —— 键盘与无障碍行为
+ * 由 Radix 保证，外观由我们决定。
+ */
+export function Dropdown({ value, onChange, options, ariaLabel, className = '' }: {
+  value: string
+  onChange: (v: string) => void
+  options: ReadonlyArray<[string, string]>
+  ariaLabel?: string
+  className?: string
+}) {
+  return (
+    <RadixSelect.Root value={value} onValueChange={onChange}>
+      <RadixSelect.Trigger
+        aria-label={ariaLabel}
+        className={`ctl inline-flex items-center justify-between gap-2 ${className}`}
+      >
+        <RadixSelect.Value />
+        <RadixSelect.Icon className="text-ink-muted">▾</RadixSelect.Icon>
+      </RadixSelect.Trigger>
+      <RadixSelect.Portal>
+        <RadixSelect.Content
+          position="popper" sideOffset={4}
+          className="z-30 overflow-hidden rounded-card border border-line-strong bg-surface shadow-card"
+        >
+          <RadixSelect.Viewport className="p-1">
+            {options.map(([v, label]) => (
+              <RadixSelect.Item
+                key={v} value={v}
+                className="cursor-pointer rounded-chip px-2 py-1 text-sm text-ink outline-none
+                           data-[highlighted]:bg-sunken data-[state=checked]:font-medium"
+              >
+                <RadixSelect.ItemText>{label}</RadixSelect.ItemText>
+              </RadixSelect.Item>
+            ))}
+          </RadixSelect.Viewport>
+        </RadixSelect.Content>
+      </RadixSelect.Portal>
+    </RadixSelect.Root>
+  )
+}
+
+/**
+ * 勾选框。
+ *
+ * 原生 checkbox 同样无法统一外观，而它常常与一段说明并排 —— 两者对不齐时
+ * 整段读起来像没排版。这里由 Radix 承担状态与键盘，外观自己给。
+ */
+export function Checkbox({ checked, onChange, ariaLabel, className = '' }: {
+  checked: boolean
+  onChange: (v: boolean) => void
+  ariaLabel?: string
+  className?: string
+}) {
+  return (
+    <RadixCheckbox.Root
+      checked={checked}
+      onCheckedChange={(v) => onChange(v === true)}
+      aria-label={ariaLabel}
+      className={`inline-flex size-4 shrink-0 items-center justify-center rounded-[4px]
+                  border border-line-strong bg-surface
+                  data-[state=checked]:border-brand data-[state=checked]:bg-brand ${className}`}
+    >
+      <RadixCheckbox.Indicator className="text-[10px] leading-none text-[var(--text-on-dark)]">
+        ✓
+      </RadixCheckbox.Indicator>
+    </RadixCheckbox.Root>
   )
 }

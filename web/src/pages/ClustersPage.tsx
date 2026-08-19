@@ -6,6 +6,7 @@ import {
   type APIServer, type DriftResult, type GitBinding, type GitRepo, type ImportRole, type ImportSource,
   type PolicyImportItem, type RegisteredCluster,
 } from '../api/types'
+import { Checkbox } from '../components/radix'
 import { useResource } from '../api/useResource'
 import {
   blankFormValues, blankGitValues, buildClusterWrite, describePathVerifyOutcome,
@@ -461,11 +462,11 @@ function ClusterFields({ values, patch, mode }: {
         display: 'flex', alignItems: 'flex-start', gap: 'var(--space-2)',
         fontSize: 'var(--text-sm)', marginBottom: 'var(--space-3)',
       }}>
-        <input
-          type="checkbox"
+        <Checkbox
           checked={values.ccnpPresent}
-          onChange={(e) => patch({ ccnpPresent: e.target.checked })}
-          style={{ marginTop: 3 }}
+          onChange={(v) => patch({ ccnpPresent: v })}
+          ariaLabel="集群启用了 CiliumClusterwideNetworkPolicy"
+          className="mt-[3px]"
         />
         <span>
           该集群存在 CiliumClusterwideNetworkPolicy

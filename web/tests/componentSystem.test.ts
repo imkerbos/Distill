@@ -99,3 +99,34 @@ test('表格只有一套样式', () => {
   assert.deepEqual(offenders, [],
     `这些页面自己拼了表格：${offenders.join(', ')}；用 TableCard 或 className="dt"`)
 })
+
+/* ---------------------------------------------------------------------- */
+/* 交互控件走无头组件，不手写                                                */
+/* ---------------------------------------------------------------------- */
+
+const COMPONENTS_DIR = join(import.meta.dirname, '..', 'src', 'components')
+const readComp = (f: string) => readFileSync(join(COMPONENTS_DIR, f), 'utf8')
+
+test('抽屉/弹层由 Radix Dialog 承担，不是自己摆一个 fixed 的盒子', () => {
+  // 手写的浮层跑不掉这四样：焦点陷阱、Escape 关闭、role="dialog"、
+  // aria-modal。写漏的症状不会出现在截图里 —— 键盘用户打开它之后焦点
+  // 还留在背景里，读屏器根本不知道弹出了东西。
+  const drawer = readComp('DecisionDrawer.tsx')
+  assert.match(drawer, /<Drawer\b/, 'DecisionDrawer 没走共用的 Drawer')
+  assert.doesNotMatch(drawer, /position:\s*'fixed'/,
+    '还留着手写的 fixed 定位浮层')
+  // Drawer 本体必须真的建在 Dialog 上，否则上一条只是换了个名字。
+  assert.match(readComp('radix.tsx'), /@radix-ui\/react-dialog/,
+    'Drawer 不是建在 Radix Dialog 上')
+})
+
+test('下拉与勾选走无头组件', () => {
+  // 只看真的渲染出来的标签，不看注释里提到的那个词。
+  const ui = readComp('ui.tsx').replace(/\/\*[\s\S]*?\*\//g, '')
+  assert.doesNotMatch(ui, /<select\b/,
+    'Select 还在包原生 <select>：原生下拉在 macOS 与 Windows 上外观差异很大，'
+    + '与卡片、表格的质感对不上，界面会显得是几段拼起来的')
+  const offenders = pages.filter((f) => /<input[^>]*type="checkbox"/.test(read(f)))
+  assert.deepEqual(offenders, [],
+    `这些页面还在用原生 checkbox：${offenders.join(', ')}`)
+})

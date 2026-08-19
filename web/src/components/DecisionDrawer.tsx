@@ -1,6 +1,7 @@
 import { api } from '../api/client'
 import { UNKNOWN_REASON_LABEL } from '../api/types'
 import { useResource } from '../api/useResource'
+import { Drawer } from './radix'
 import { CrossClusterMark, UnmanagedMark, VerdictBadge } from './Verdict'
 
 /**
@@ -14,36 +15,7 @@ export default function DecisionDrawer({ flowID, onClose }: { flowID: string; on
   const { data: d, error } = useResource(flowID, () => api.decision(flowID))
 
   return (
-    <>
-      {/*
-        遮罩：抽屉直接压在表格上时，被盖住的那几列看起来像"数据缺了"。
-        压暗背景让读者知道那是被临时遮挡，不是内容不全。
-      */}
-      <div
-        onClick={onClose}
-        style={{
-          position: 'fixed', inset: 0, background: 'rgba(28,28,26,.28)', zIndex: 10,
-        }}
-      />
-      <aside style={{
-        position: 'fixed', top: 0, right: 0, bottom: 0, width: 480, zIndex: 11,
-        background: 'var(--bg)', borderLeft: '1px solid var(--border)',
-        overflow: 'auto', boxShadow: '-4px 0 24px rgba(28,28,26,.10)',
-        display: 'flex', flexDirection: 'column',
-      }}>
-        <header style={{
-          position: 'sticky', top: 0, background: 'var(--surface)',
-          borderBottom: '1px solid var(--border)', padding: 'var(--space-3) var(--space-4)',
-          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-        }}>
-          <h2 style={{ margin: 0, fontSize: 'var(--text-lg)', fontWeight: 600 }}>判定解释</h2>
-          <button onClick={onClose} style={{
-            border: '1px solid var(--border)', background: 'var(--surface)',
-            borderRadius: 'var(--radius-sm)', padding: '4px 10px', cursor: 'pointer',
-            fontSize: 'var(--text-sm)', color: 'var(--text-secondary)',
-          }}>关闭</button>
-        </header>
-
+    <Drawer open onClose={onClose} title="判定解释">
         <div className="p-4">
           {error && <p className="text-deny">{error}</p>}
           {!d && !error && <p className="text-ink-muted">加载中…</p>}
@@ -138,8 +110,7 @@ export default function DecisionDrawer({ flowID, onClose }: { flowID: string; on
             </>
           )}
         </div>
-      </aside>
-    </>
+    </Drawer>
   )
 }
 

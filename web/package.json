@@ -13,7 +13,10 @@
     "check": "npm run typecheck && npm run lint && npm test"
   },
   "dependencies": {
+    "@radix-ui/react-checkbox": "^1.3.11",
     "@radix-ui/react-collapsible": "^1.1.20",
+    "@radix-ui/react-dialog": "^1.1.23",
+    "@radix-ui/react-select": "^2.3.7",
     "@radix-ui/react-tabs": "^1.1.21",
     "@radix-ui/react-tooltip": "^1.2.16",
     "d3-force": "^3.0.0",
