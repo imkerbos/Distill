@@ -20,31 +20,39 @@ import (
 	applog "github.com/imkerbos/Distill/internal/log"
 )
 
-// defaultRunTimeout 是一次运行的默认上限。
+// defaultRunTimeout 是**单轮**的上限。
+//
+// 常驻进程本身不设总超时：它是一个 DaemonSet，生命周期由 SIGTERM 结束，
+// 不由一个计时器结束。这个值管的是一轮采集卡住多久算失败。
 const defaultRunTimeout = 10 * time.Minute
 
 func main() {
 	platformURL := flag.String("platform-url", "", "base URL of the platform")
 	tokenFile := flag.String("token-file", "", "path to the mounted agent token")
 	timeout := flag.Duration("timeout", defaultRunTimeout, "upper bound on one collection run")
-	// **缺省是 assets** —— 本轮之前的行为，没有回归。conntrack 是按节点的，
-	// 跑 DaemonSet + hostNetwork；assets 是按集群的，跑 CronJob。
-	// 同一个二进制两个模式：一个镜像、一条认证路径、一个摄入客户端。
-	mode := flag.String("mode", string(modeAssets),
-		"what to collect: assets (per cluster, CronJob) or conntrack (per node, DaemonSet)")
 	// 默认关闭。打开它就是让 token 明文过网 —— 只该在本机开发时用。
 	allowPlaintext := flag.Bool("allow-plaintext", false,
 		"allow a plaintext http:// platform URL; the agent token then crosses the network in the clear")
 	tablePath := flag.String("conntrack-table", defaultTablePath,
-		"path to the conntrack table; only read in -mode=conntrack")
-	polls := flag.Int("conntrack-polls", defaultPolls, "how many times to poll the conntrack table")
-	interval := flag.Duration("conntrack-interval", defaultPollInterval, "wait between conntrack polls")
+		"path to the node's conntrack table")
+	polls := flag.Int("conntrack-polls", defaultPolls, "how many times to poll it per round")
+	interval := flag.Duration("conntrack-interval", defaultPollInterval, "wait between polls")
+	flowEvery := flag.Duration("flow-every", defaultFlowEvery,
+		"how often to push a round of conntrack observations (every pod)")
+	assetsEvery := flag.Duration("assets-every", defaultAssetsEvery,
+		"how often to collect the cluster's assets (only the pod holding the lease)")
+	leaseNamespace := flag.String("lease-namespace", "",
+		"namespace holding the leader-election Lease; defaults to this pod's own namespace")
+	leaseName := flag.String("lease-name", defaultLeaseName,
+		"name of the leader-election Lease")
 	flag.Parse()
 
 	if err := dispatch(options{
-		platformURL: *platformURL, tokenFile: *tokenFile, mode: collectMode(*mode),
+		platformURL: *platformURL, tokenFile: *tokenFile,
 		allowPlaintext: *allowPlaintext,
 		tablePath:      *tablePath, polls: *polls, pollInterval: *interval,
+		flowEvery: *flowEvery, assetsEvery: *assetsEvery,
+		leaseNamespace: *leaseNamespace, leaseName: *leaseName,
 	}, *timeout); err != nil {
 		// 日志器可能尚未构造成功，直接写 stderr。
 		_, _ = os.Stderr.WriteString("agent run failed: " + err.Error() + "\n")

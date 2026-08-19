@@ -285,25 +285,3 @@ func TestTheSourceIsNamedForWhatActuallySawIt(t *testing.T) {
 		t.Errorf("source = %q, want NODE_CONNTRACK", got)
 	}
 }
-
-// **拼错的 -mode 要被拒，不能当成默认。**
-//
-// 一个拼错了 -mode 的 DaemonSet 会安安静静地去采资产，而运维以为它在采流量
-// —— 那个集群于是永远显示「还没有任何流量观测」，而没有任何东西说得出为什么。
-func TestAMisspelledModeIsRefusedNotDefaulted(t *testing.T) {
-	base := options{platformURL: "https://platform.example", tokenFile: "/x"}
-	for _, m := range []collectMode{modeAssets, modeConntrack} {
-		o := base
-		o.mode = m
-		if err := o.validate(); err != nil {
-			t.Errorf("mode %q was refused: %v", m, err)
-		}
-	}
-	for _, m := range []collectMode{"", "conntrak", "ASSETS", "flows"} {
-		o := base
-		o.mode = m
-		if err := o.validate(); err == nil {
-			t.Errorf("mode %q was accepted; it would silently collect the other thing", m)
-		}
-	}
-}

@@ -8,7 +8,7 @@ import (
 )
 
 func opts(url string) options {
-	return options{platformURL: url, tokenFile: "/x", mode: modeAssets}
+	return options{platformURL: url, tokenFile: "/x"}
 }
 
 // **明文一律拒绝。** Authorization 头里那把 token 等价于一把能往平台写这个

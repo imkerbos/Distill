@@ -24,12 +24,20 @@ import (
 type options struct {
 	// platformURL 是平台的地址。
 	platformURL string
-	// mode 决定这一次采什么。
-	mode collectMode
-	// tablePath / polls / pollInterval 只在 conntrack 模式下有意义。
+	// tablePath / polls / pollInterval 是 conntrack 那条循环的参数。
 	tablePath    string
 	polls        int
 	pollInterval time.Duration
+	// flowEvery / assetsEvery 是两条循环各自的间隔。
+	//
+	// 分开是因为两件事的基数不同：conntrack 按节点（每个 Pod 都跑），
+	// 资产按集群（只有 leader 跑）。一个共用的间隔只能取两者里更频繁的
+	// 那个，而那会让每三十分钟才需要一次的整集群 list 变成每分钟一次。
+	flowEvery   time.Duration
+	assetsEvery time.Duration
+	// leaseNamespace / leaseName 是 leader 选举用的那个 Lease。
+	leaseNamespace string
+	leaseName      string
 	// allowPlaintext 显式允许 http:// 的平台地址。
 	//
 	// **默认关闭，且只该在本机开发时打开。** Authorization 头里那把 token
@@ -49,33 +57,7 @@ type options struct {
 // errTimeoutNotPositive 是一个写错了的超时配置。
 var errTimeoutNotPositive = errors.New("-timeout must be positive: an unbounded collection is one nobody can cancel")
 
-// collectMode 是这个二进制的采集模式，封闭枚举。
-//
-// 显式 switch 校验而不是「认不出就当默认」：一个拼错了 -mode 的 DaemonSet
-// 会安安静静地去采资产，而运维以为它在采流量 —— 那个集群于是永远显示
-// 「还没有任何流量观测」，而没有任何东西说得出为什么。
-type collectMode string
-
-const (
-	// modeAssets 采本集群资产，按集群一份（CronJob）。
-	modeAssets collectMode = "assets"
-	// modeConntrack 轮询本节点的 conntrack 表，按节点一份（DaemonSet）。
-	modeConntrack collectMode = "conntrack"
-)
-
-func (m collectMode) valid() bool {
-	switch m {
-	case modeAssets, modeConntrack:
-		return true
-	default:
-		return false
-	}
-}
-
 func (o options) validate() error {
-	if !o.mode.valid() {
-		return fmt.Errorf("-mode must be %q or %q", modeAssets, modeConntrack)
-	}
 	if o.platformURL == "" {
 		return errors.New("-platform-url is required in push mode")
 	}
@@ -202,33 +184,25 @@ func run(ctx context.Context, opts options, timeout time.Duration, logger *slog.
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	cfg, err := fetchAgentConfig(ctx, opts.platformURL, token)
-	if err != nil {
-		return err
-	}
 	if opts.allowPlaintext {
 		// 打开了明文就要一直吵。一个静默接受明文的 agent，在生产上没有
 		// 任何东西会提醒你那把 token 正在裸奔。
 		logger.Warn("this agent is talking to the platform over plaintext http; " +
 			"its token crosses the network in the clear")
 	}
-	logger.Info("starting a push collection",
-		"cluster", cfg.ClusterID, "mode", string(opts.mode))
+
+	// 预检用一个有限的超时；常驻循环本身不设总超时 —— 那是一个 DaemonSet，
+	// 它的生命周期由 SIGTERM 结束，不由一个计时器结束。timeout 管的是
+	// **单轮**（见下）。
+	preflight, cancelPre := context.WithTimeout(ctx, timeout)
+	cfg, err := fetchAgentConfig(preflight, opts.platformURL, token)
+	cancelPre()
+	if err != nil {
+		return err
+	}
+	logger.Info("agent starting", "cluster", cfg.ClusterID)
 
 	sink := newHTTPSink(opts.platformURL, token)
-
-	if opts.mode == modeConntrack {
-		// conntrack 模式不建 Kubernetes 客户端：它读的是本节点的
-		// /proc/net/nf_conntrack，一个 API 都不调。不建也就不需要那份
-		// ServiceAccount —— 权限面小一圈。
-		return conntrackOnce(ctx, conntrackOptions{
-			clusterID: cfg.ClusterID, tablePath: opts.tablePath,
-			polls: opts.polls, interval: opts.pollInterval,
-		}, sink, logger)
-	}
 
 	client, err := inClusterClient()
 	if err != nil {
@@ -239,10 +213,49 @@ func run(ctx context.Context, opts options, timeout time.Duration, logger *slog.
 		return err
 	}
 
-	// fleet 传 nil：**归属由平台判定**（design doc §3.4）。把 fleet 网段
-	// 下发给每一个被管集群，等于把整个 fleet 的拓扑发出去。
-	_, err = collectrun.Once(ctx, cfg.ClusterID, client, nil, sink, logger)
-	return err
+	// leader 选举跑在后台，结果反映到 gate 上。**每一轮现问**，不抄一份：
+	// leadership 会变，而抄下来的答案会让刚接手的 Pod 永远不采资产、
+	// 或让刚失去 leadership 的 Pod 继续采（两份会撞 observed_at 主键）。
+	leaseNS, err := resolveNamespace(opts.leaseNamespace)
+	if err != nil {
+		return err
+	}
+	var gate leaderGate
+	identity, err := os.Hostname()
+	if err != nil || identity == "" {
+		return errors.New("this pod has no hostname to use as a leader-election identity")
+	}
+	go runLeaderElection(ctx, client,
+		leaseNS, opts.leaseName, identity, &gate, logger)
+
+	<-runLoops(ctx, loops{
+		// conntrack：**每个 Pod 都跑**。少跑一个节点就是少一个节点的盲区，
+		// 而盲区在库里与「这段时间没有流量」长得一模一样。
+		flow: func(ctx context.Context) error {
+			ctx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+			return conntrackOnce(ctx, conntrackOptions{
+				clusterID: cfg.ClusterID, tablePath: opts.tablePath,
+				polls: opts.polls, interval: opts.pollInterval,
+			}, sink, logger)
+		},
+		flowEvery: opts.flowEvery,
+		// 资产：**只有 leader 跑**。每个节点都跑会让 650 Pod × N 节点的
+		// API 压力落到 apiserver 上，且 N 份数据撞 observed_at 主键。
+		assets: func(ctx context.Context) error {
+			ctx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+			// fleet 传 nil：**归属由平台判定**（design doc §3.4）。把 fleet
+			// 网段下发给每一个被管集群，等于把整个 fleet 的拓扑发出去。
+			_, err := collectrun.Once(ctx, cfg.ClusterID, client, nil, sink, logger)
+			return err
+		},
+		assetsEvery: opts.assetsEvery,
+		leaderFor:   gate.isLeader,
+		logger:      logger,
+	})
+	logger.Info("agent stopped", "cluster", cfg.ClusterID)
+	return nil
 }
 
 // reportAborted 尽力上报一次没能开始的运行；失败只记日志。
