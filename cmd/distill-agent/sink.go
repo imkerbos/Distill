@@ -42,9 +42,22 @@ type httpSink struct {
 // newHTTPSink 构造一个推送 sink。
 func newHTTPSink(base, token string) *httpSink {
 	return &httpSink{
-		base:   strings.TrimSuffix(base, "/"),
-		token:  token,
-		client: &http.Client{Timeout: pushTimeout},
+		base:  strings.TrimSuffix(base, "/"),
+		token: token,
+		client: &http.Client{
+			Timeout: pushTimeout,
+			// **不跟随重定向。** Go 默认会跟，而 https → http 的**同主机**
+			// 降级重定向不会剥掉 Authorization 头 —— 那把 token 于是明文
+			// 发了出去。摄入端点没有任何理由重定向，因此干脆不跟：一次
+			// 意外的重定向要以失败的形态出现，而不是以一次成功但泄漏了
+			// 凭据的推送出现。
+			//
+			// 错误里不带目标地址：那是部署拓扑信息，而这个进程的输出终点
+			// 是被管集群的日志（规范 §19、§22）。
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return errors.New("the platform answered with a redirect; refusing to follow it")
+			},
+		},
 	}
 }
 

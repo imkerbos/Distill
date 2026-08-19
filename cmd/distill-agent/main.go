@@ -32,6 +32,9 @@ func main() {
 	// 同一个二进制两个模式：一个镜像、一条认证路径、一个摄入客户端。
 	mode := flag.String("mode", string(modeAssets),
 		"what to collect: assets (per cluster, CronJob) or conntrack (per node, DaemonSet)")
+	// 默认关闭。打开它就是让 token 明文过网 —— 只该在本机开发时用。
+	allowPlaintext := flag.Bool("allow-plaintext", false,
+		"allow a plaintext http:// platform URL; the agent token then crosses the network in the clear")
 	tablePath := flag.String("conntrack-table", defaultTablePath,
 		"path to the conntrack table; only read in -mode=conntrack")
 	polls := flag.Int("conntrack-polls", defaultPolls, "how many times to poll the conntrack table")
@@ -40,7 +43,8 @@ func main() {
 
 	if err := dispatch(options{
 		platformURL: *platformURL, tokenFile: *tokenFile, mode: collectMode(*mode),
-		tablePath: *tablePath, polls: *polls, pollInterval: *interval,
+		allowPlaintext: *allowPlaintext,
+		tablePath:      *tablePath, polls: *polls, pollInterval: *interval,
 	}, *timeout); err != nil {
 		// 日志器可能尚未构造成功，直接写 stderr。
 		_, _ = os.Stderr.WriteString("agent run failed: " + err.Error() + "\n")

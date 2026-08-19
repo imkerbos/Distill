@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -29,6 +30,13 @@ type options struct {
 	tablePath    string
 	polls        int
 	pollInterval time.Duration
+	// allowPlaintext 显式允许 http:// 的平台地址。
+	//
+	// **默认关闭，且只该在本机开发时打开。** Authorization 头里那把 token
+	// 等价于一把能往平台写这个集群全部数据的钥匙，走明文就是让它在集群
+	// 网络里裸奔。做成显式开关而不是默认允许：一个默认允许明文的实现，
+	// 生产上没有任何东西会提醒你忘了配 TLS。
+	allowPlaintext bool
 	// tokenFile 是挂进来的 agent token 文件路径。
 	//
 	// **从文件读，不从环境变量读**（规范 §33）：环境变量会出现在
@@ -71,7 +79,21 @@ func (o options) validate() error {
 	if o.platformURL == "" {
 		return errors.New("-platform-url is required in push mode")
 	}
-	if !strings.HasPrefix(o.platformURL, "http://") && !strings.HasPrefix(o.platformURL, "https://") {
+	// 按解析出来的 scheme 判，不按字符串前缀：前缀比对对大小写与畸形输入
+	// 的处理各家不同，而这里判错的方向是放行一次明文推送。
+	u, err := url.Parse(o.platformURL)
+	if err != nil || u.Host == "" {
+		return errors.New("-platform-url must be an http(s) URL")
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+	case "http":
+		if !o.allowPlaintext {
+			return errors.New(
+				"-platform-url is plaintext http: the agent token would cross the network in " +
+					"the clear. Use https, or pass -allow-plaintext if this is a local test")
+		}
+	default:
 		return errors.New("-platform-url must be an http(s) URL")
 	}
 	if o.tokenFile == "" {
@@ -186,6 +208,12 @@ func run(ctx context.Context, opts options, timeout time.Duration, logger *slog.
 	cfg, err := fetchAgentConfig(ctx, opts.platformURL, token)
 	if err != nil {
 		return err
+	}
+	if opts.allowPlaintext {
+		// 打开了明文就要一直吵。一个静默接受明文的 agent，在生产上没有
+		// 任何东西会提醒你那把 token 正在裸奔。
+		logger.Warn("this agent is talking to the platform over plaintext http; " +
+			"its token crosses the network in the clear")
 	}
 	logger.Info("starting a push collection",
 		"cluster", cfg.ClusterID, "mode", string(opts.mode))
