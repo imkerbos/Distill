@@ -72,12 +72,12 @@ function fitToCanvas(nodes: SimNode[], W: number) {
  * 最小的圆点，读者会把"看不见"读成"这里几乎没有 Pod"。
  */
 function nodeRadius(n: SimNode): number {
-  if (n.foreign) return 8
+  if (n.foreign) return 10
   const c = n.podCount
-  if (c >= 8) return 17
-  if (c >= 4) return 14
-  if (c >= 2) return 12
-  return 10
+  if (c >= 8) return 22
+  if (c >= 4) return 18
+  if (c >= 2) return 15
+  return 13
 }
 
 const EDGE_COLOR: Record<Verdict, string> = {
@@ -218,16 +218,24 @@ export default function TopologyGraph({
         const e = l.edge
         return (
           <g key={i} onClick={() => onSelectEdge?.(e)} style={{ cursor: onSelectEdge ? 'pointer' : 'default' }}>
-            {/* 终点收到目标节点的边缘之外，否则箭头会被圆形盖住 ——
-                一个看不见的箭头与没有箭头是同一件事。 */}
-            <line
-              x1={s.x} y1={s.y}
-              {...shortenToEdge(s, t, nodeRadius(t) + 6)}
+            {/*
+              **弧线，不是直线。** 五六条边汇到同一个节点时，直线会叠成一束
+              分不开的线，读者数不出有几条、也看不出各自从哪来。轻微的弧度
+              让它们各走各的路径。
+
+              终点收到目标节点边缘之外：箭头画在圆心会被节点自己的填充盖掉，
+              而一个看不见的箭头与没有箭头是同一件事。
+            */}
+            <path
+              d={arcPath(s, t, nodeRadius(t) + 7)}
+              fill="none"
               stroke={EDGE_COLOR[e.verdict]}
-              strokeWidth={e.confidence === 'DEGRADED' ? 3 : 1.5}
+              strokeWidth={e.confidence === 'DEGRADED' ? 2.5 : 1.25}
               strokeDasharray={e.crossCluster ? '6 4' : undefined}
               markerEnd={`url(#arrow-${e.verdict})`}
-              opacity={0.85}
+              /* 线身压淡、箭头保持满色：线是背景关系，箭头是那条要被读出来
+                 的信息。整条都拉满时一屏十几条线会糊成一片。 */
+              opacity={0.45}
             />
             <title>
               {`${e.source} → ${e.target}\n${e.verdict}${e.confidence === 'DEGRADED' ? '（降级）' : ''}`
@@ -253,9 +261,17 @@ export default function TopologyGraph({
             strokeWidth={n.inMesh ? 2 : 1.25}
             strokeDasharray={n.foreign ? '3 3' : undefined}
           />
+          {/*
+            标签描一圈背景色再填字（paint-order）：力导图里连线必然从标签
+            底下穿过，不描边的字会被线切断，读者要凑近才认得出是哪个
+            namespace —— 而认不出节点名，这张图就什么都答不了。
+          */}
           <text
-            x={n.x} y={(n.y ?? 0) + nodeRadius(n) + 14} textAnchor="middle"
-            fontSize={12} fill={n.foreign ? 'var(--text-muted)' : 'var(--text)'}
+            x={n.x} y={(n.y ?? 0) + nodeRadius(n) + 15} textAnchor="middle"
+            fontSize={12} fontWeight={500}
+            fill={n.foreign ? 'var(--text-muted)' : 'var(--text)'}
+            stroke="var(--surface)" strokeWidth={3.5}
+            style={{ paintOrder: 'stroke' }}
           >{n.namespace}</text>
           {/*
             "无策略"不用 DENY 的红：语义色是判定结论的专属载体（spec §17.1）。
@@ -263,8 +279,9 @@ export default function TopologyGraph({
             染成红色会让人读成"这里被阻断了"。
           */}
           {!n.hasPolicy && !n.foreign && (
-            <text x={n.x} y={(n.y ?? 0) + nodeRadius(n) + 28} textAnchor="middle" fontSize={10}
-              fill="var(--text-secondary)" fontWeight={600}>
+            <text x={n.x} y={(n.y ?? 0) + nodeRadius(n) + 29} textAnchor="middle" fontSize={10}
+              fill="var(--text-secondary)" fontWeight={600}
+              stroke="var(--surface)" strokeWidth={3} style={{ paintOrder: 'stroke' }}>
               无策略
             </text>
           )}
@@ -297,6 +314,28 @@ export default function TopologyGraph({
  * 不收的话箭头落在圆心，被节点自己的填充盖掉 —— 而一个看不见的箭头与
  * 没有箭头是同一件事。两点重合时原样返回：算不出方向就不假装有方向。
  */
+/**
+ * 一条从 s 到 t 的弧线，终点收到目标节点边缘之外 gap 像素处。
+ *
+ * 弧度取两点距离的一个小比例，因此短边几乎是直的、长边才明显弯 ——
+ * 弧度取常数的话，短边会弯成一个突兀的括号。
+ */
+function arcPath(
+  s: { x?: number; y?: number }, t: { x?: number; y?: number }, gap: number,
+): string {
+  const sx = s.x ?? 0, sy = s.y ?? 0
+  const { x2, y2 } = shortenToEdge(s, t, gap)
+  const dx = x2 - sx, dy = y2 - sy
+  const len = Math.hypot(dx, dy)
+  if (len === 0) return `M ${sx} ${sy}`
+  // 控制点落在中点、沿法线偏移。方向固定取一侧，让 A→B 与 B→A 分成两条
+  // 看得见的弧，而不是重叠成一条。
+  const bow = Math.min(len * 0.14, 42)
+  const cx = (sx + x2) / 2 + (-dy / len) * bow
+  const cy = (sy + y2) / 2 + (dx / len) * bow
+  return `M ${sx} ${sy} Q ${cx} ${cy} ${x2} ${y2}`
+}
+
 function shortenToEdge(
   s: { x?: number; y?: number }, t: { x?: number; y?: number }, gap: number,
 ): { x2: number; y2: number } {

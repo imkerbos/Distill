@@ -39,7 +39,7 @@ export default function AppShell({ cluster, onClusterChange, children }: Props) 
   // 每天看的、后者是配一次的。分组本身就是一次信息层次的表达。
   const groups: Array<{ label: string; items: Array<{ to: string; label: string }> }> = [
     {
-      label: '这个集群现在什么样',
+      label: '现状',
       items: [
         { to: '/topology', label: '网络拓扑' },
         { to: '/flows', label: '流量与判定' },
@@ -49,7 +49,7 @@ export default function AppShell({ cluster, onClusterChange, children }: Props) 
       ],
     },
     {
-      label: '接入与下发',
+      label: '接入',
       items: [
         { to: '/clusters', label: '集群管理' },
         // 资产采集讲的是"平台看见了这个集群的什么"，属于接入这一段，
@@ -106,10 +106,10 @@ export default function AppShell({ cluster, onClusterChange, children }: Props) 
           )}
         </label>
 
-        <div className="flex flex-col gap-4">
+        <div className="flex flex-col gap-5">
           {groups.map((g) => (
             <div key={g.label}>
-              <div className="mb-1 px-3 text-[11px] tracking-[0.04em] text-ink-muted uppercase">
+              <div className="mb-[6px] px-3 text-[11px] tracking-[0.06em] text-ink-muted uppercase">
                 {g.label}
               </div>
               {g.items.map((item) => (
@@ -117,7 +117,7 @@ export default function AppShell({ cluster, onClusterChange, children }: Props) 
                   key={item.to}
                   to={item.to}
                   className={({ isActive }) => [
-                    'block rounded-chip px-3 py-[7px] text-sm no-underline transition-colors',
+                    'block rounded-chip px-3 py-[6px] text-sm no-underline transition-colors',
                     isActive
                       // 选中态用品牌色，不用中性底：只靠底色深浅在浅色系里
                       // 几乎读不出来，使用者会不确定自己正在看哪一屏。
@@ -135,8 +135,8 @@ export default function AppShell({ cluster, onClusterChange, children }: Props) 
           ))}
         </div>
 
-        <div className="mt-auto border-t border-line pt-3 text-xs text-ink-muted">
-          <div className="mb-2 truncate">{identity?.username}</div>
+        <div className="mt-auto border-t border-line px-3 pt-4 text-xs text-ink-muted">
+          <div className="mb-2 truncate text-ink-2">{identity?.username}</div>
           <button
             onClick={async () => { await logout(); navigate('/login') }}
             className="rounded-chip border border-line px-2 py-1 text-xs text-ink-muted

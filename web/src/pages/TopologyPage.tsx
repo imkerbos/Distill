@@ -1,4 +1,6 @@
 import { useState } from 'react'
+import type { ReactNode } from 'react'
+
 import { edgeCountLabel, showsGraph, trafficNotice } from './topologyView.ts'
 import { api } from '../api/client'
 import type { Topology, TopologyLevel } from '../api/types'
@@ -83,25 +85,27 @@ export default function TopologyPage({ cluster }: { cluster: string }) {
             : <NodeList topo={topo} />}
         </div>
 
-        <aside style={{
-          width: 216, flexShrink: 0, borderLeft: '1px solid var(--border)',
-          paddingLeft: 'var(--space-3)', fontSize: 'var(--text-xs)',
-        }}>
+        {/* 图例与概览分成两块、各带小标题：此前是一列裸文字，读者要
+            自己看出前四行讲颜色、后四行讲形状。 */}
+        <aside className="w-[236px] shrink-0 border-l border-line pl-4 text-xs">
+          <SideHeading>概览</SideHeading>
           <GraphSummary topo={topo} />
 
-          <div style={{
-            marginTop: 'var(--space-4)', color: 'var(--text-muted)',
-            display: 'flex', flexDirection: 'column', gap: 6,
-          }}>
-            <span><Swatch color="var(--verdict-allow)" /> 放行</span>
-            <span><Swatch color="var(--verdict-deny)" /> 阻断</span>
-            <span><Swatch color="var(--verdict-unknown)" /> 无法判定</span>
-            <span><Swatch color="var(--degraded-stroke)" width={3} /> 粗线＝可信度降级</span>
-            <span>虚线＝跨集群</span>
-            <span>紫色描边节点＝在 mesh 中</span>
-            <span>虚线圆＝其他集群的节点</span>
-            <span>节点大小＝Pod 数量</span>
-          </div>
+          <SideHeading className="mt-5">线的颜色＝判定</SideHeading>
+          <ul className="m-0 flex list-none flex-col gap-[6px] p-0 text-ink-2">
+            <li><Swatch color="var(--verdict-allow)" /> 放行</li>
+            <li><Swatch color="var(--verdict-deny)" /> 阻断</li>
+            <li><Swatch color="var(--verdict-unknown)" /> 无法判定</li>
+          </ul>
+
+          <SideHeading className="mt-4">线与点的形状</SideHeading>
+          <ul className="m-0 flex list-none flex-col gap-[6px] p-0 text-ink-muted">
+            <li><Swatch color="var(--degraded-stroke)" width={3} /> 粗线＝可信度降级</li>
+            <li>虚线＝跨集群</li>
+            <li>紫色描边＝在 mesh 中</li>
+            <li>虚线圆＝其他集群的节点</li>
+            <li>圆的大小＝Pod 数量</li>
+          </ul>
         </aside>
       </Card>
 
@@ -181,10 +185,7 @@ function GraphSummary({ topo }: { topo: Topology }) {
   const foreign = topo.nodes.filter((n) => n.foreign).length
 
   return (
-    <dl style={{
-      margin: 0, display: 'grid', gridTemplateColumns: '1fr auto',
-      rowGap: 6, columnGap: 'var(--space-2)',
-    }}>
+    <dl className="m-0 grid grid-cols-[1fr_auto] gap-x-2 gap-y-[6px]">
       <Item k="节点" v={`${topo.nodes.length - foreign}`} />
       <Item k="其他集群节点" v={`${foreign}`} />
       <Item k="边" v={edgeCountLabel(topo)} />
@@ -204,10 +205,19 @@ function Item({ k, v }: { k: string; v: string }) {
 }
 
 function Swatch({ color, width = 2 }: { color: string; width?: number }) {
-  return <span style={{
-    display: 'inline-block', width: 18, height: width,
-    background: color, verticalAlign: 'middle', marginRight: 4,
-  }} />
+  return <span
+    className="mr-2 inline-block w-[18px] rounded-full align-middle"
+    style={{ height: width, background: color }}
+  />
+}
+
+/** 侧栏小标题。图例分块之后需要它，否则两块之间只有一段空白。 */
+function SideHeading({ children, className = '' }: { children: ReactNode; className?: string }) {
+  return (
+    <div className={`mb-2 text-[11px] tracking-[0.06em] text-ink-muted uppercase ${className}`}>
+      {children}
+    </div>
+  )
 }
 
 /**

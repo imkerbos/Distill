@@ -89,3 +89,21 @@ test('每个判定一个箭头 marker，不共用一个', () => {
   assert.match(GRAPH_SOURCE, /arrow-\$\{v\}|arrow-\$\{e\.verdict\}/,
     '箭头 marker 的 id 不随判定变化，说明三种判定共用了一个箭头颜色')
 })
+
+test('边是弧线，五六条汇到一个节点时才分得开', () => {
+  // 直线在多条边汇聚时会叠成一束分不开的线，读者数不出有几条、也看不出
+  // 各自从哪来。轻微的弧度让它们各走各的路径。
+  assert.match(GRAPH_SOURCE, /arcPath\(/, '边退回直线了')
+  assert.doesNotMatch(GRAPH_SOURCE, /<line\b/, '还留着直线画法')
+})
+
+test('节点标签描背景色，否则会被连线切断', () => {
+  // 力导图里连线必然从标签底下穿过。不描边的字会被线切断，读者要凑近才
+  // 认得出是哪个 namespace —— 而认不出节点名，这张图什么都答不了。
+  // 数出来，不只看"有没有出现过"：图上有两处文字（节点名与「无策略」），
+  // 只描其中一处时另一处照样会被线切断，而一条只看存在性的断言分辨不出来。
+  const labels = GRAPH_SOURCE.match(/<text\b/g) ?? []
+  const haloed = GRAPH_SOURCE.match(/paintOrder:\s*'stroke'/g) ?? []
+  assert.equal(haloed.length, labels.length,
+    `${labels.length} 处文字里只有 ${haloed.length} 处描了边；没描的那处会被连线切断`)
+})
