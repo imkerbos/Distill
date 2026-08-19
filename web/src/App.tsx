@@ -19,7 +19,10 @@ function Protected() {
   const [cluster, setCluster] = useState('')
 
   // loading 期间不能判定未登录：那会让刷新页面的已登录用户先闪一下登录页。
-  if (loading) return <div style={{ padding: 'var(--space-5)' }}>加载中…</div>
+  // 会话未定时不能判定未登录：那会让刷新页面的已登录用户先闪一下登录页。
+  // 这里刻意留空而不是画骨架 —— 骨架给的是"版面的形状"，而此刻连要画哪
+  // 一屏都还不知道。
+  if (loading) return <div />
   if (!identity) return <Navigate to="/login" replace />
 
   return (

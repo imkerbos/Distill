@@ -3,7 +3,7 @@ import { api, ApiError } from '../api/client'
 import type { GitRepo } from '../api/types'
 import { useResource } from '../api/useResource'
 import { VerifyBadge, VerifyOutcomeNote } from '../components/Verdict'
-import { Button, Card, EmptyState, PageHeader, Section, TableCard } from '../components/ui'
+import { Button, Card, EmptyState, PageHeader, Section, Skeleton, TableCard } from '../components/ui'
 import {
   blankRepoValues, describeRepoVerifyOutcome, describeRepoVerifyStatus,
   repoFormValuesOf, resolveGitRepo, type RepoFormValues,
@@ -91,7 +91,7 @@ function RepoListSection({ repos, error, loading, onChanged }: {
       {error ? (
         <p className="text-deny">{error}</p>
       ) : loading || !repos ? (
-        <p className="text-ink-muted">加载中…</p>
+        <Skeleton />
       ) : repos.length === 0 ? (
         <EmptyState
           message="尚未登记任何策略仓库。"

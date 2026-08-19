@@ -14,7 +14,7 @@ import {
 } from './clusterForm'
 import { formatUtcTime, type VerifyOutcomeView } from './verifyView'
 import { VerifyBadge, VerifyOutcomeNote } from '../components/Verdict'
-import { Button, Card, Chip, EmptyState, Field, PageHeader, Section, Select, TableCard } from '../components/ui'
+import { Button, Card, Chip, EmptyState, Field, PageHeader, Section, Select, Skeleton, TableCard } from '../components/ui'
 
 /**
  * 集群管理页：注册、下线、Git 绑定、策略导入。
@@ -101,7 +101,7 @@ function ClusterListSection({ clusters, repos, reposError, error, loading, onCha
       {error ? (
         <p className="text-deny">{error}</p>
       ) : loading || !clusters ? (
-        <p className="text-ink-muted">加载中…</p>
+        <Skeleton />
       ) : clusters.length === 0 ? (
         <EmptyState message="尚未注册任何集群。" detail="使用下方表单登记第一个集群。" />
       ) : (
@@ -519,12 +519,11 @@ function ClusterFields({ values, patch, mode }: {
       <div className="mt-4">
         <SubHeading>健康检查网段（可选，每行一个 CIDR）</SubHeading>
         <textarea
-          className="ctl"
+          className="ctl w-full"
           aria-label="健康检查网段"
           value={values.healthChecks}
           onChange={(e) => patch({ healthChecks: e.target.value })}
           rows={3}
-          style={textareaStyle}
         />
       </div>
 
@@ -537,12 +536,11 @@ function ClusterFields({ values, patch, mode }: {
           —— 平台不会去猜谁是抓取端，猜错会生成一条选不中任何 Pod 的规则。
         </p>
         <textarea
-          className="ctl"
+          className="ctl w-full"
           aria-label="metrics 抓取端"
           value={values.metricsScrapers}
           onChange={(e) => patch({ metricsScrapers: e.target.value })}
           rows={3}
-          style={textareaStyle}
         />
       </div>
 
@@ -555,12 +553,11 @@ function ClusterFields({ values, patch, mode }: {
           不需要放行。端口只有你知道，平台不猜。
         </p>
         <textarea
-          className="ctl"
+          className="ctl w-full"
           aria-label="节点级 agent"
           value={values.nodeAgents}
           onChange={(e) => patch({ nodeAgents: e.target.value })}
           rows={3}
-          style={textareaStyle}
         />
       </div>
 
@@ -572,7 +569,7 @@ function ClusterFields({ values, patch, mode }: {
           而那要到事故发生时才显现。**与上面那一栏互斥。**
         </p>
         <input
-          className="ctl"
+          className="ctl w-full"
           aria-label="没有节点 agent 的理由"
           value={values.noNodeAgentsReason}
           onChange={(e) => patch({ noNodeAgentsReason: e.target.value })}
@@ -1062,12 +1059,11 @@ function ImportSection({ clusters, refreshKey, onChanged }: {
 
           <SubHeading>NetworkPolicy YAML</SubHeading>
           <textarea
-            className="ctl"
+            className="ctl w-full"
             value={yaml}
             onChange={(e) => setYaml(e.target.value)}
             rows={10}
             required
-            style={textareaStyle}
           />
 
           {error && <FormError>{error}</FormError>}
@@ -1083,7 +1079,7 @@ function ImportSection({ clusters, refreshKey, onChanged }: {
       ) : listError ? (
         <p className="text-deny">{listError}</p>
       ) : loading || !imports ? (
-        <p className="text-ink-muted">加载中…</p>
+        <Skeleton />
       ) : imports.length === 0 ? (
         <EmptyState message={`${selected} 尚无已导入的策略。`} detail="使用上方表单导入第一条。" />
       ) : (
@@ -1226,7 +1222,7 @@ function TextField({ label, value, onChange, required, mono, placeholder, readOn
     <label className="block">
       <span style={fieldLabelStyle}>{label}</span>
       <input
-        className="ctl"
+        className="ctl w-full"
         value={value}
         onChange={(e) => onChange(e.target.value)}
         required={required}
@@ -1258,9 +1254,5 @@ function FormError({ children }: { children: ReactNode }) {
   )
 }
 
-const textareaStyle: CSSProperties = {
-  width: '100%', height: 'auto', fontFamily: 'var(--mono)',
-  fontSize: 'var(--text-sm)', padding: 'var(--space-2)', resize: 'vertical',
-}
 
 

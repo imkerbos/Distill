@@ -1,7 +1,7 @@
 import { api } from '../api/client'
 import type { CollectionSummary } from '../api/types'
 import { useResource } from '../api/useResource'
-import { Card, EmptyState, Notice, PageHeader, Section, StatTile, TableCard } from '../components/ui'
+import { Card, EmptyState, Notice, PageHeader, Section, Skeleton, StatTile, TableCard } from '../components/ui'
 import { COLLECTION_FEEDS_NOTHING, collectionSummaryView } from './collectionView'
 
 /**
@@ -34,7 +34,7 @@ export default function CollectionPage({ cluster }: { cluster: string }) {
       {error ? (
         <p className="text-deny">{error}</p>
       ) : loading || !state ? (
-        <p className="text-ink-muted">加载中…</p>
+        <Skeleton />
       ) : state.kind === 'UNKNOWN_CLUSTER' ? (
         <EmptyState
           message="没有这个集群。"

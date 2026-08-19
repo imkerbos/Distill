@@ -224,7 +224,30 @@ select.ctl {
   background-repeat: no-repeat;
   cursor: pointer;
 }
-.ctl:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+/* 多行输入不能吃单行控件那个固定高度：套上 .ctl 之后 32px 会把三行的
+   textarea 压成一行，而那种坏法在截图里看得见、在代码里看不见。 */
+textarea.ctl {
+  height: auto;
+  min-height: calc(var(--control-h) * 2);
+  padding: 8px 10px;
+  line-height: 1.5;
+  resize: vertical;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
 }
+
+/* 焦点环用品牌色而不是近黑：近黑的环在浅色边框上几乎看不出来，而键盘
+   用户判断"我现在在哪个控件上"只有这一个线索。 */
+.ctl:focus-visible,
+button:focus-visible,
+a:focus-visible,
+[role="tab"]:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 1px;
+  border-radius: var(--radius-sm);
+}
+
+/* 输入框在悬停时给一点反馈，让"这里可以输入"不必靠点一下才知道。 */
+.ctl:hover:not(:focus) { border-color: var(--text-muted); }
+
+::placeholder { color: var(--text-muted); opacity: 1; }

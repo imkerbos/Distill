@@ -63,3 +63,20 @@ test('暗色模式必须重映射判定色，不能只换中性色', () => {
       + '而它们是判定结论的唯一载体，读不出等于结论丢了')
   }
 })
+
+test('加载态不是一行字', () => {
+  // 一行「加载中…」与一个失败的空屏在视觉上没有区别，而"这一屏是空的"
+  // 与"这一屏还没答上来"是两件必须分得开的事（同 EmptyState 的纪律）。
+  const offenders = pages.filter((f) => /<p[^>]*>加载中…<\/p>/.test(read(f)))
+  assert.deepEqual(offenders, [],
+    `这些页面又用纯文字当加载态：${offenders.join(', ')}；用 Skeleton`)
+})
+
+test('表单控件走统一类，不各写一份内联样式', () => {
+  // 此前 ClustersPage 与 SettingsPage 各抄了一份 textareaStyle，与
+  // buttonStyle 是同一个病：几份会各自漂，而漂的症状是同一种控件在不同
+  // 页面上高矮不一。
+  const offenders = pages.filter((f) => /const (input|textarea)Style\b/i.test(read(f)))
+  assert.deepEqual(offenders, [],
+    `这些页面又自己定义了输入控件样式：${offenders.join(', ')}；用 .ctl`)
+})

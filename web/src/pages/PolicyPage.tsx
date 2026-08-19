@@ -21,7 +21,7 @@ import {
   writebackCountDrift, writebackPushBody, writebackView,
   type WritebackPushBody, type WritebackView,
 } from './writebackView'
-import { Card, Chip, EmptyState, Notice, PageHeader, ScrollTableCard, Section, StickyHead, StatTile, TableCard } from '../components/ui'
+import { Card, Chip, EmptyState, Notice, PageHeader, ScrollTableCard, Section, Skeleton, StatTile, StickyHead, TableCard } from '../components/ui'
 
 /**
  * 不可生成原因的中文标签。只在本页使用，未像 unknownReason / RiskCategory
@@ -93,7 +93,7 @@ export default function PolicyPage({ cluster }: { cluster: string }) {
   if (current?.state === 'REGISTERED') return <NoTrafficNotice />
 
   if (error) return <div>{head}<p className="text-deny">{error}</p></div>
-  if (loading || !pv) return <div>{head}<p className="text-ink-muted">加载中…</p></div>
+  if (loading || !pv) return <div>{head}<Skeleton /></div>
 
   // 零条覆盖时后端把 overrides 序列化成 null（见 types.ts 里的注释）——
   // 在这唯一一处兜底成 []，下游所有组件都能假设它是数组，不必每处重复判空。

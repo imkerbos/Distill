@@ -2,7 +2,7 @@ import { api } from '../api/client'
 import { UNKNOWN_REASON_LABEL } from '../api/types'
 import { useResource } from '../api/useResource'
 import DataSourceNotice from '../components/DataSourceNotice'
-import { EmptyState, PageHeader, Section, StatTile, TableCard } from '../components/ui'
+import { EmptyState, PageHeader, Section, Skeleton, StatTile, TableCard } from '../components/ui'
 
 const pct = (v: number) => `${(v * 100).toFixed(1)}%`
 
@@ -23,7 +23,7 @@ export default function QualityPage({ cluster }: { cluster: string }) {
   )
 
   if (error) return <div>{head}<p className="text-deny">{error}</p></div>
-  if (loading || !q) return <div>{head}<p className="text-ink-muted">加载中…</p></div>
+  if (loading || !q) return <div>{head}<Skeleton /></div>
 
   return (
     <div>

@@ -5,7 +5,7 @@ import type { Topology, TopologyLevel } from '../api/types'
 import { useResource } from '../api/useResource'
 import DataSourceNotice from '../components/DataSourceNotice'
 import TopologyGraph from '../components/TopologyGraph'
-import { Card, Chip, Field, Notice, PageHeader, Section, Select, TableCard, Toolbar } from '../components/ui'
+import { Card, Chip, Field, Notice, PageHeader, Section, Select, Skeleton, TableCard, Toolbar } from '../components/ui'
 
 export default function TopologyPage({ cluster }: { cluster: string }) {
   const [level, setLevel] = useState<TopologyLevel>('namespace')
@@ -29,7 +29,7 @@ export default function TopologyPage({ cluster }: { cluster: string }) {
   )
 
   if (error) return <div>{head}<p className="text-deny">{error}</p></div>
-  if (loading || !topo) return <div>{head}<p className="text-ink-muted">加载中…</p></div>
+  if (loading || !topo) return <div>{head}<Skeleton /></div>
 
   return (
     <div>

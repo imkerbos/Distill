@@ -7,7 +7,7 @@ import {
   buildSettingsWrite, restartRequiredLabels, settingsDiff, settingsFormValuesOf,
   type SettingsDiffRow, type SettingsFormValues,
 } from './settingsForm'
-import { Button, Card, EmptyState, PageHeader, Section, Select, TableCard } from '../components/ui'
+import { Button, Card, EmptyState, PageHeader, Section, Select, Skeleton, TableCard } from '../components/ui'
 
 /**
  * 平台设置页。
@@ -37,7 +37,7 @@ export default function SettingsPage() {
       {error ? (
         <p className="text-deny">{error}</p>
       ) : loading || !data ? (
-        <p className="text-ink-muted">加载中…</p>
+        <Skeleton />
       ) : (
         // key 绑在 refreshKey 上：保存成功后整块表单按服务端刚回的那一份
         // 重新播种，host key 输入框也随之清空——留着上一次粘进去的原文，
@@ -221,12 +221,11 @@ function HostKeysSection({ fingerprint, value, onChange }: {
         <label className="block">
           <span style={fieldLabelStyle}>新的 known_hosts 原文（留空表示不修改）</span>
           <textarea
-            className="ctl"
+            className="ctl w-full"
             value={value}
             onChange={(e) => onChange(e.target.value)}
             rows={4}
             placeholder="gitlab.example.com ssh-ed25519 AAAA…"
-            style={textareaStyle}
           />
         </label>
         <SubHeading>
@@ -321,7 +320,7 @@ function TextField({ label, value, onChange, mono }: {
     <label className="block">
       <span style={fieldLabelStyle}>{label}</span>
       <input
-        className="ctl"
+        className="ctl w-full"
         value={value}
         onChange={(e) => onChange(e.target.value)}
         style={{ width: '100%', fontFamily: mono ? 'var(--mono)' : undefined }}
@@ -354,7 +353,7 @@ function NumberField({ label, hint, afterRestart, value, onChange }: {
         )}
       </span>
       <input
-        className="ctl"
+        className="ctl w-full"
         value={value}
         inputMode="numeric"
         onChange={(e) => onChange(e.target.value)}
@@ -392,8 +391,4 @@ function RestartNotice({ children }: { children: ReactNode }) {
   )
 }
 
-const textareaStyle: CSSProperties = {
-  width: '100%', height: 'auto', fontFamily: 'var(--mono)',
-  fontSize: 'var(--text-sm)', padding: 'var(--space-2)', resize: 'vertical',
-}
 

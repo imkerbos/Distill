@@ -273,3 +273,32 @@ export function Button({
     </button>
   )
 }
+
+/**
+ * 加载骨架。
+ *
+ * 换掉一行「加载中…」不是为了好看：一行文字与一个失败的空屏在视觉上没有
+ * 区别，而这个平台上"这一屏是空的"与"这一屏还没答上来"是两件必须分得开的
+ * 事（同 EmptyState 的纪律）。骨架给出的是**版面的形状**，因此它一眼就能
+ * 与"查过了，确实没有"区分开。
+ *
+ * 不做闪光动画：动得越花，越像在掩饰慢。这里只用一个低幅度的呼吸。
+ */
+export function Skeleton({ rows = 3 }: { rows?: number }) {
+  return (
+    <Card style={{ padding: 'var(--space-3)' }}>
+      <div className="flex flex-col gap-2" aria-busy="true" aria-live="polite">
+        <span className="sr-only">加载中</span>
+        {Array.from({ length: rows }, (_, i) => (
+          <div
+            key={i}
+            className="h-3 animate-pulse rounded-chip bg-sunken"
+            // 参差的宽度让它读起来像一段内容，而不是一个进度条 ——
+            // 进度条会让人以为有确定的完成度，而这里没有。
+            style={{ width: `${[92, 74, 83, 66, 88][i % 5]}%` }}
+          />
+        ))}
+      </div>
+    </Card>
+  )
+}

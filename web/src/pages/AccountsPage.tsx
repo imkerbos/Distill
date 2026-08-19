@@ -3,7 +3,7 @@ import { api, ApiError } from '../api/client'
 import type { Account } from '../api/types'
 import { useResource } from '../api/useResource'
 import { useSession } from '../auth/SessionContext'
-import { Button, Card, EmptyState, Notice, PageHeader, Section, TableCard } from '../components/ui'
+import { Button, Card, EmptyState, Notice, PageHeader, Section, Skeleton, TableCard } from '../components/ui'
 import {
   BOOTSTRAP_LOCKOUT_WARNING, accountStatusLabel, blankNewAccount, blankOwnPassword,
   blankResetPassword, enabledAdmins, previewAccountAction, resolveNewAccount, resolveOwnPassword,
@@ -122,7 +122,7 @@ function AccountListSection({ me, accounts, error, loading, onChanged }: {
       {error ? (
         <p className="text-deny">{error}</p>
       ) : loading || !accounts ? (
-        <p className="text-ink-muted">加载中…</p>
+        <Skeleton />
       ) : accounts.length === 0 ? (
         <EmptyState
           message="账号表是空的。"

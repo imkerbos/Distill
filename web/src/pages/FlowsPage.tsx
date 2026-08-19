@@ -5,7 +5,7 @@ import { useResource } from '../api/useResource'
 import DataSourceNotice from '../components/DataSourceNotice'
 import DecisionDrawer from '../components/DecisionDrawer'
 import { CrossClusterMark, UnmanagedMark, VerdictBadge } from '../components/Verdict'
-import { Chip, Field, PageHeader, Section, Select, TableCard, Toolbar } from '../components/ui'
+import { Chip, Field, PageHeader, Section, Select, Skeleton, TableCard, Toolbar } from '../components/ui'
 
 /**
  * 把时间窗格式化成可读区间。用 UTC 而非本地时区：判定与快照都以 UTC
@@ -60,7 +60,7 @@ export default function FlowsPage({ cluster }: { cluster: string }) {
       </Toolbar>
 
       {error && <p className="text-deny">{error}</p>}
-      {!page && !error && <p className="text-ink-muted">加载中…</p>}
+      {!page && !error && <Skeleton />}
 
       {page && (
         <>

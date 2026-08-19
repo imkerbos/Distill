@@ -3,7 +3,7 @@ import { RISK_CATEGORY_LABEL, type RiskPosition, type RiskyFlow, type SecurityRe
 import { useResource } from '../api/useResource'
 import DataSourceNotice from '../components/DataSourceNotice'
 import { VerdictBadge } from '../components/Verdict'
-import { Card, Chip, EmptyState, PageHeader, Section, TableCard } from '../components/ui'
+import { Card, Chip, EmptyState, PageHeader, Section, Skeleton, TableCard } from '../components/ui'
 import { listTruncationView, type ListTruncationView } from './preconditionsView'
 
 /**
@@ -47,7 +47,7 @@ export default function SecurityPage({ cluster }: { cluster: string }) {
   )
 
   if (error) return <div>{head}<p className="text-deny">{error}</p></div>
-  if (loading || !rep) return <div>{head}<p className="text-ink-muted">加载中…</p></div>
+  if (loading || !rep) return <div>{head}<Skeleton /></div>
 
   return (
     <div>
