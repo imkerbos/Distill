@@ -95,7 +95,7 @@ function SettingsForm({ current, onSaved }: {
         title="运行参数"
         description="超时与有效期。每一项都必须为正：填 0 不是「不限制」，而是会话立即过期或超时保护被关闭。"
       >
-        <Card style={{ padding: 'var(--space-4)' }}>
+        <Card className="p-4">
           <FormGrid>
             {NUMERIC_FIELDS.map((f) => (
               <NumberField
@@ -118,7 +118,7 @@ function SettingsForm({ current, onSaved }: {
         title="凭据解析后端"
         description="平台去哪里取访问策略仓库的凭据。后端选择是唯一真相：选中的后端与填写的字段必须互相印证，否则库里会同时留着两套配置而只有一套在生效——服务端会拒绝这样的组合，这里在提交前就说明它。"
       >
-        <Card style={{ padding: 'var(--space-4)' }}>
+        <Card className="p-4">
           <FormGrid>
             <label className="block">
               <span style={fieldLabelStyle}>凭据后端</span>
@@ -202,7 +202,7 @@ function HostKeysSection({ fingerprint, value, onChange }: {
       title="SSH 信任锚（Git host key）"
       description="这是平台连接策略仓库时的信任锚：它决定平台愿意和哪一台 SSH 服务器说话。换掉它就等于换掉平台信任的那台服务器——一份被替换的 host key 会让平台接受一个中间人，而连接看起来一切正常。"
     >
-      <Card style={{ padding: 'var(--space-4)' }}>
+      <Card className="p-4">
         <div className="mb-3">
           <span style={fieldLabelStyle}>当前指纹</span>
           {fingerprint ? (
@@ -301,10 +301,7 @@ function FormGrid({ children }: { children: ReactNode }) {
 
 function SubHeading({ children }: { children: ReactNode }) {
   return (
-    <div style={{
-      fontSize: 'var(--text-xs)', color: 'var(--text-muted)',
-      marginBottom: 'var(--space-2)',
-    }}>
+    <div className="mb-2 text-xs text-ink-muted">
       {children}
     </div>
   )

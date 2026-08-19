@@ -168,7 +168,7 @@ function ClusterListSection({ clusters, repos, reposError, error, loading, onCha
                 </tr>
                 {editingId === c.id && (
                   <tr>
-                    <td colSpan={9} style={{ background: 'var(--surface-sunken)' }}>
+                    <td colSpan={9} className="bg-sunken">
                       {/*
                         key 绑定集群 ID：换一个集群展开时必须重新播种，
                         复用同一份表单状态会把上一个集群的网段带进来。
@@ -530,9 +530,7 @@ function ClusterFields({ values, patch, mode }: {
 
       <div className="mt-4">
         <SubHeading>metrics 抓取端（可选，每行一个）</SubHeading>
-        <p style={{
-          margin: '0 0 6px', fontSize: 'var(--text-xs)', color: 'var(--text-muted)',
-        }}>
+        <p className="mt-0 mb-[6px] text-xs text-ink-muted">
           格式 <code>命名空间&nbsp;&nbsp;标签键=值,标签键=值</code>，例如{' '}
           <code>monitoring&nbsp;&nbsp;app.kubernetes.io/name=prometheus</code>。
           填了它，被抓的工作负载才会拿到放行抓取端的 Baseline；不填就照旧报缺失
@@ -550,9 +548,7 @@ function ClusterFields({ values, patch, mode }: {
 
       <div className="mt-4">
         <SubHeading>节点级 agent（可选，每行一个）</SubHeading>
-        <p style={{
-          margin: '0 0 6px', fontSize: 'var(--text-xs)', color: 'var(--text-muted)',
-        }}>
+        <p className="mt-0 mb-[6px] text-xs text-ink-muted">
           格式 <code>命名空间&nbsp;&nbsp;app&nbsp;&nbsp;host|pod&nbsp;&nbsp;端口</code>，例如{' '}
           <code>logging&nbsp;&nbsp;filebeat&nbsp;&nbsp;host&nbsp;&nbsp;9200</code>。
           只填**会向工作负载建连接**的那些 —— 读文件的日志 agent（filebeat、promtail）
@@ -570,9 +566,7 @@ function ClusterFields({ values, patch, mode }: {
 
       <div className="mt-3">
         <SubHeading>或：声明这个集群没有需要放行的节点 agent</SubHeading>
-        <p style={{
-          margin: '0 0 6px', fontSize: 'var(--text-xs)', color: 'var(--text-muted)',
-        }}>
+        <p className="mt-0 mb-[6px] text-xs text-ink-muted">
           填了理由，NODE_AGENT 这一类会标为「不适用」而不再报缺失。
           它是一次会被记进审计的判断：判错的方向是监控在下发之后静默中断，
           而那要到事故发生时才显现。**与上面那一栏互斥。**
@@ -689,7 +683,7 @@ function GitBindingForm({ cluster, repos, onChanged }: {
   }
 
   return (
-    <Card style={{ padding: 'var(--space-4)', margin: 'var(--space-3) 0' }}>
+    <Card className="my-3 p-4">
       <form onSubmit={submit}>
         <SubHeading>
           {cluster.id} 的 Git 绑定 —— 这是一次独立提交，不会改动上面的登记信息，也不会改动仓库。
@@ -857,7 +851,7 @@ function RegisterSection({ onCreated }: { onCreated: () => void }) {
       title="注册新集群"
       description="仅登记元数据；接入状态从「已登记」起步，不受本表单任何字段影响，包括你在这里可能填的任何值。Git 绑定不在这里：它是一个独立资源，集群注册完成后在上方列表里展开「编辑」单独绑定——注册时不知道仓库路径是常态。"
     >
-      <Card style={{ padding: 'var(--space-4)' }}>
+      <Card className="p-4">
         <form onSubmit={submit}>
           <ClusterFields values={values} patch={patch} mode="create" />
 
@@ -921,7 +915,7 @@ function EditClusterForm({ cluster, onSaved, onCancel }: {
   }
 
   return (
-    <Card style={{ padding: 'var(--space-4)', margin: 'var(--space-3) 0' }}>
+    <Card className="my-3 p-4">
       <form onSubmit={submit}>
         <SubHeading>
           编辑 {cluster.id}：提交会整体替换该集群的登记信息，表单里的每一项都会被写入，
@@ -1207,10 +1201,7 @@ function FormGrid({ children }: { children: ReactNode }) {
 
 function SubHeading({ children }: { children: ReactNode }) {
   return (
-    <div style={{
-      fontSize: 'var(--text-xs)', color: 'var(--text-muted)',
-      marginBottom: 'var(--space-2)',
-    }}>
+    <div className="mb-2 text-xs text-ink-muted">
       {children}
     </div>
   )

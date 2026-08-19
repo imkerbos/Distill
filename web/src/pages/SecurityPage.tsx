@@ -109,10 +109,7 @@ function RiskySection({ rep }: { rep: SecurityReport }) {
       ) : (
         groups.map((g) => (
           <div key={g.key} className="mb-4">
-            <div style={{
-              display: 'flex', alignItems: 'baseline', gap: 'var(--space-2)',
-              marginBottom: 'var(--space-2)', flexWrap: 'wrap',
-            }}>
+            <div className="mb-2 flex flex-wrap items-baseline gap-2">
               <strong className="text-sm">{g.label}</strong>
               <span className="text-xs text-ink-muted">
                 {g.rows.length} 条 · {g.hint}

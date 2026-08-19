@@ -31,3 +31,14 @@ test('组件层自己不写死颜色', () => {
   assert.equal(literals, null,
     `components/ui.tsx 里有写死的颜色：${literals?.join(', ')}；色板只能来自 tokens.css`)
 })
+
+test('逐行重复的长说明要抽出来，不印在每一行上', () => {
+  const page = readFileSync(join(PAGES_DIR, 'PolicyPage.tsx'), 'utf8')
+  // 处置只取决于缺口种类，与 namespace 无关。UAT 上 42 个 namespace 全缺
+  // NODE_AGENT，逐行渲染就是同一句话印 42 遍 —— 而一面读不完的墙与没有
+  // 说明是同一个效果。
+  assert.doesNotMatch(page, /\{gaps\.map\(\(g\) => \([\s\S]{0,120}g\.remedy/,
+    '「处置」又回到了逐行渲染')
+  assert.match(page, /RemedyLegend/,
+    '整表一次的处置说明不见了 —— 说明被删掉与被折起来是两回事')
+})

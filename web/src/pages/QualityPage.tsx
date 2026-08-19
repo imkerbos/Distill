@@ -71,7 +71,7 @@ export default function QualityPage({ cluster }: { cluster: string }) {
                           不得因为没有标签就消失 —— unknown_reason 是封闭枚举，
                           少显示一种成因等于把一类系统性问题藏起来。 */}
                       <td className="mono">{reason}</td>
-                      <td className="num" style={{ fontWeight: 600 }}>{count}</td>
+                      <td className="num font-semibold">{count}</td>
                     </tr>
                   ))}
               </tbody>

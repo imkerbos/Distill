@@ -150,7 +150,7 @@ function RepoListSection({ repos, error, loading, onChanged }: {
                 </tr>
                 {editingId === r.repoId && (
                   <tr>
-                    <td colSpan={6} style={{ background: 'var(--surface-sunken)' }}>
+                    <td colSpan={6} className="bg-sunken">
                       {/*
                         key 绑定仓库 ID：换一个仓库展开时必须重新播种，
                         复用同一份表单状态会把上一个仓库的地址带进来。
@@ -344,7 +344,7 @@ function CreateRepoSection({ onCreated }: { onCreated: () => void }) {
       title="登记新仓库"
       description="repoUrl 必须是 SSH 形态（ssh://git@host/path 或 git@host:path）：平台按仓库发放 deploy key，https:// 地址连拨号都不会发生，服务端会在保存时直接拒绝并说明理由。登记会顺带做一次只读校验，校验不通过不影响登记 —— 存下来和可信是两件事。"
     >
-      <Card style={{ padding: 'var(--space-4)' }}>
+      <Card className="p-4">
         <form onSubmit={submit}>
           <RepoFields values={values} patch={patch} mode="create" />
           <RepoOutcome values={values} />
@@ -411,7 +411,7 @@ function EditRepoForm({ repo, onSaved, onCancel }: {
   }
 
   return (
-    <Card style={{ padding: 'var(--space-4)', margin: 'var(--space-3) 0' }}>
+    <Card className="my-3 p-4">
       <form onSubmit={submit}>
         <SubHeading>
           编辑 {repo.repoId}：提交会整体替换该仓库的登记信息，表单里的每一项都会被写入，
@@ -451,10 +451,7 @@ function FormGrid({ children }: { children: ReactNode }) {
 
 function SubHeading({ children }: { children: ReactNode }) {
   return (
-    <div style={{
-      fontSize: 'var(--text-xs)', color: 'var(--text-muted)',
-      marginBottom: 'var(--space-2)',
-    }}>
+    <div className="mb-2 text-xs text-ink-muted">
       {children}
     </div>
   )

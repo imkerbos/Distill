@@ -160,7 +160,7 @@ function AccountListSection({ me, accounts, error, loading, onChanged }: {
                   <td className="text-xs">{formatUtcTime(a.createdAt)}</td>
                   <td className="text-xs">{formatUtcTime(a.updatedAt)}</td>
                   <td>
-                    <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
+                    <div className="flex flex-wrap gap-2">
                       {actionsFor(a).map((kind) => (
                         <Button
                           key={kind}
@@ -180,7 +180,7 @@ function AccountListSection({ me, accounts, error, loading, onChanged }: {
                 </tr>
                 {pending?.username === a.username && (
                   <tr>
-                    <td colSpan={6} style={{ background: 'var(--surface-sunken)' }}>
+                    <td colSpan={6} className="bg-sunken">
                       {/*
                         key 绑定账号与动作：换一个动作展开时必须重新挂载，
                         复用同一份状态会把上一次输入的密码带进来。
@@ -279,7 +279,7 @@ function ConfirmPanel({ kind, target, accounts, isSelf, onDone, onCancel }: {
   }
 
   return (
-    <Card style={{ padding: 'var(--space-4)', margin: 'var(--space-3) 0' }}>
+    <Card className="my-3 p-4">
       <div style={{ fontSize: 'var(--text-sm)', marginBottom: 'var(--space-2)' }}>
         {preview.change}
       </div>
@@ -387,7 +387,7 @@ function CreateAccountSection({ viaBootstrap, onCreated }: {
       title="新建账号"
       description="新账号一律建成只读，这是服务端定死的 —— 提升为管理员是另一次操作，有它自己的审计行。密码由你在这里指定，服务端只存 bcrypt 哈希：它不会回显给你，也没有任何接口能把它读回来，忘了只能重置。密码规则（最短 12 个字符、最长 72 字节）由服务端判定，不满足时它会点名说清楚。"
     >
-      <Card style={{ padding: 'var(--space-4)' }}>
+      <Card className="p-4">
         <form onSubmit={submit}>
           {viaBootstrap && (
             <ConsequenceLine tone="warn">

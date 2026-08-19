@@ -181,7 +181,7 @@ function CollectionRun({ summary }: { summary: CollectionSummary }) {
                         取值必须照原样显示，少显示一种成因等于把一类系统性
                         问题藏起来。 */}
                     <td className="mono">{w.kind}</td>
-                    <td className="num" style={{ fontWeight: 600 }}>{w.count}</td>
+                    <td className="num font-semibold">{w.count}</td>
                   </tr>
                 ))}
               </tbody>

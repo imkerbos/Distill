@@ -58,7 +58,7 @@ export function DryRunDetail({ view }: { view: DryRunDetailView }) {
                   <tr key={reason}>
                     <td>{UNKNOWN_REASON_LABEL[reason] ?? reason}</td>
                     <td className="mono">{reason}</td>
-                    <td className="num" style={{ fontWeight: 600 }}>{count}</td>
+                    <td className="num font-semibold">{count}</td>
                   </tr>
                 ))}
             </tbody>

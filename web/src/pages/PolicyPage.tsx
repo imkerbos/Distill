@@ -175,7 +175,7 @@ function NoTrafficNotice() {
         </ul>
       </Card>
 
-      <Card style={{ padding: 'var(--space-4)' }}>
+      <Card className="p-4">
         <p style={{ margin: 0, fontSize: 'var(--text-sm)' }}>
           已可用的部分：五类必备 Baseline 的推导依据来自资产快照，不依赖流量。
         </p>
@@ -620,7 +620,7 @@ function WritebackControl({ view, pageCounts }: {
                 {drift.rows.map((r) => (
                   <tr key={r.kind} style={{ color: r.changed ? 'var(--verdict-deny)' : undefined }}>
                     <td>{r.kind}</td>
-                    <td style={{ fontVariantNumeric: 'tabular-nums' }}>{r.pageText}</td>
+                    <td className="tabular-nums">{r.pageText}</td>
                     <td style={{
                       fontVariantNumeric: 'tabular-nums', fontWeight: r.changed ? 600 : undefined,
                     }}>
@@ -1273,6 +1273,7 @@ function MissingBaselineSection({ missing, baselineKinds, notAssessed, notApplic
           而这两句话对下一步做什么的含义不同。少了它，那几行会凭空消失
           （design doc 2026-08-18-baseline-applicability §5）。 */}
       {naNote !== '' && <Notice>{naNote}</Notice>}
+      {missing.length > 0 && <RemedyLegend missing={missing} notAssessed={notAssessed} />}
       {missing.length === 0 ? (
         <EmptyState
           message="没有 namespace 缺失 baseline。"
@@ -1282,7 +1283,7 @@ function MissingBaselineSection({ missing, baselineKinds, notAssessed, notApplic
         <>
           <TableCard>
             <thead>
-              <tr><th>namespace</th><th>缺失类型</th><th>处置</th></tr>
+              <tr><th>namespace</th><th>缺失类型</th></tr>
             </thead>
             <tbody>
               {missing.map((m) => {
@@ -1304,13 +1305,11 @@ function MissingBaselineSection({ missing, baselineKinds, notAssessed, notApplic
                         ))}
                       </span>
                     </td>
-                    <td className="text-xs">
-                      {gaps.map((g) => (
-                        <div key={g.kind}>
-                          <span className="mono">{g.kind}</span>：{g.remedy}
-                        </div>
-                      ))}
-                    </td>
+                    {/* 处置**不逐行重复**：它只取决于缺口种类（真缺失 /
+                        未评估 / 无从判断），与 namespace 无关。UAT 上 42 个
+                        namespace 全缺 NODE_AGENT，逐行渲染就是同一句话印
+                        42 遍 —— 而一面读不完的墙与没有说明是同一个效果。
+                        三种处置抽到表格上方，折一次。 */}
                   </tr>
                 )
               })}
@@ -1361,10 +1360,7 @@ function ExcludedWorkloadSection({ items }: { items: ExcludedWorkload[] }) {
       ) : (
         [...groups.entries()].map(([reason, rows]) => (
           <div key={reason} className="mb-4">
-            <div style={{
-              display: 'flex', alignItems: 'baseline', gap: 'var(--space-2)',
-              marginBottom: 'var(--space-2)', flexWrap: 'wrap',
-            }}>
+            <div className="mb-2 flex flex-wrap items-baseline gap-2">
               <strong className="text-sm">
                 {WORKLOAD_EXCLUSION_REASON_LABEL[reason]}
               </strong>
@@ -1432,10 +1428,7 @@ function UngeneratableSection({ items }: { items: UngeneratableItem[] }) {
       ) : (
         [...groups.entries()].map(([reason, rows]) => (
           <div key={reason} className="mb-4">
-            <div style={{
-              display: 'flex', alignItems: 'baseline', gap: 'var(--space-2)',
-              marginBottom: 'var(--space-2)', flexWrap: 'wrap',
-            }}>
+            <div className="mb-2 flex flex-wrap items-baseline gap-2">
               <strong className="text-sm">
                 {UNGENERATABLE_REASON_LABEL[reason as UngeneratableReason] ?? reason}
               </strong>
@@ -1544,5 +1537,44 @@ function GranularitySection({ current, onPick, echoed, widening, count }: {
         </Disclosure>
       </div>
     </Section>
+  )
+}
+
+/**
+ * 三种缺口各自的处置，**整表一次**。
+ *
+ * 处置只取决于缺口种类，与 namespace 无关 —— 逐行渲染会在 UAT 那种
+ * 「42 个 namespace 全缺同一类」的集群上把同一句话印 42 遍，而一面读不完
+ * 的墙与没有说明是同一个效果。
+ *
+ * 只列**这一次真的出现过**的那几种：把三种都摆出来，读者要自己去表里
+ * 比对哪一种与自己有关，而那正是这一块想省掉的动作。
+ */
+function RemedyLegend({ missing, notAssessed }: {
+  missing: MissingBaseline[]
+  notAssessed: Kind[] | null
+}) {
+  const present = new Map<string, { badge: string; remedy: string }>()
+  for (const m of missing) {
+    for (const g of baselineGapViews(m.kinds, notAssessed)) {
+      const key = g.assessment
+      if (!present.has(key)) present.set(key, { badge: g.badge, remedy: g.remedy })
+    }
+  }
+  const rows = [...present.entries()]
+  if (rows.length === 0) return null
+  return (
+    <div className="mb-2">
+      <Disclosure summary={<span>这份清单里有 <strong>{rows.length}</strong> 种缺口，各自的处置不同</span>}>
+        <dl className="m-0 grid gap-2">
+          {rows.map(([kind, v]) => (
+            <div key={kind}>
+              <dt className="text-xs font-semibold text-ink">{v.badge === '' ? '真缺失' : v.badge}</dt>
+              <dd className="m-0 text-xs text-ink-muted">{v.remedy}</dd>
+            </div>
+          ))}
+        </dl>
+      </Disclosure>
+    </div>
   )
 }
