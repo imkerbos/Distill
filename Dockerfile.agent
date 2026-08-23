@@ -1,0 +1,38 @@
+# distill-agent 的生产镜像。
+#
+# 与 Dockerfile.dev 是两回事，不是它的变体：那个装的是完整 Go 工具链与 air，
+# 因为热更新要在容器内重新编译。这个要被装进**别人的集群**，因此镜像里不该
+# 有编译器、包管理器、shell —— 它们在一个只需要读 /proc 与发 HTTPS 的进程
+# 旁边，只是攻击面。
+FROM golang:1.25 AS build
+WORKDIR /src
+
+# 先只拷 go.mod/go.sum：依赖没变时这一层命中缓存，不必每次重拉 k8s.io。
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+# CGO_ENABLED=0 是必需的，不是习惯：scratch 里没有 libc，动态链接的二进制
+# 起不来。-trimpath 去掉构建机的绝对路径 —— 那是部署布局信息，不该跟着
+# 二进制进别人的集群（规范 §19）。
+ARG TARGETOS=linux
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags="-s -w" -o /out/distill-agent ./cmd/distill-agent
+
+FROM scratch
+
+# 根证书。平台地址必须是 https（agent 自己拒绝明文），而 scratch 里没有
+# 任何根证书 —— 少了这一行，每一次上报都会以证书校验失败结束。
+#
+# **这只覆盖公共 CA。** 平台证书由内部 CA 签发时这里仍然不够，那是一个还
+# 没有出口的缺口（agent 没有 -ca-file 参数）。
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+
+COPY --from=build /out/distill-agent /distill-agent
+
+# 不设 USER：读宿主机的 /proc/net/nf_conntrack 需要 root。
+# 其余收敛靠 DaemonSet 的 securityContext —— capabilities 全 drop、
+# 根文件系统只读、不允许提权。
+ENTRYPOINT ["/distill-agent"]

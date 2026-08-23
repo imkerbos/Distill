@@ -9,3 +9,8 @@
 /CLAUDE.md
 /docs/
 /需求.md
+
+# 编译产物：go build -o 落在仓库根的二进制。不入库（35MB Mach-O 差点被提交）。
+/distill-agent
+/distill-api
+/distill-collector
