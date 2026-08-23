@@ -7,6 +7,26 @@ import type { IngestSummary } from '../api/types'
  * 摄入落了库，但没有任何一屏读它，于是每一屏都空着而**说不出为什么**。
  */
 
+/**
+ * 「这个集群从来没有过任何一次流量摄入」对应的后端业务码（response.CodeNoIngestRun）。
+ *
+ * **按码判，不按文案判。** 之前这里是一个 `/从来没有过|从未|20009/` 的正则去
+ * 匹配错误字符串，而后端那句话是「这个集群**还没有过**任何一次流量摄入」——
+ * 三个关键词一个都不中。它一直是绿的，只因为落回的那条分支恰好也是对的；
+ * 哪天不再恰好，屏幕上就会出现一句没有人写过的话。文案会改，码不会。
+ *
+ * 与 20005 分开是必需的：那一条说的是「采过资产，但这次问到的窗口没有可用
+ * 数据」，处置是去补那次采集；这一条说的是「流量这条链路从来没跑过」，处置是
+ * 去部署采集器或开流量日志。
+ */
+export const FLOW_NEVER_INGESTED_CODE = 20009
+
+/** isNeverIngestedError 判断一次失败是不是「这个集群从未摄入过流量」。 */
+export function isNeverIngestedError(e: unknown): boolean {
+  return typeof e === 'object' && e !== null && 'code' in e
+    && (e as { code: unknown }).code === FLOW_NEVER_INGESTED_CODE
+}
+
 export type FlowIngestCode = 'NEVER' | 'FAILED' | 'EMPTY' | 'OK' | 'NOT_WIRED'
 
 export interface FlowIngestView {

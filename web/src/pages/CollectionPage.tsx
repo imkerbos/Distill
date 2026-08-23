@@ -3,7 +3,7 @@ import type { CollectionSummary } from '../api/types'
 import { useResource } from '../api/useResource'
 import { Card, EmptyState, Notice, PageHeader, Section, Skeleton, StatTile, TableCard } from '../components/ui'
 import { COLLECTION_FEEDS_NOTHING, collectionSummaryView } from './collectionView'
-import { flowIngestView, missingEvidence } from './flowIngestView'
+import { flowIngestView, isNeverIngestedError, missingEvidence } from './flowIngestView'
 import { Disclosure } from '../components/radix'
 
 /**
@@ -209,14 +209,18 @@ function CollectionRun({ summary }: { summary: CollectionSummary }) {
  * 两者都有（design doc 2026-08-19-flow-ingest-visibility §2）。
  */
 function FlowIngestSection({ cluster }: { cluster: string }) {
-  const { data, error, loading } = useResource(
+  const { data, cause, loading } = useResource(
     cluster ? `flow-ingest:${cluster}` : '',
     () => api.flowIngest(cluster),
   )
 
   // 「从未摄入过」是服务端的一个业务码，不是一次读取失败 —— 它到这里是
   // 一个 ApiError，而 view(null) 正是它该显示的那句话。
-  const neverIngested = error !== '' && /从来没有过|从未|20009/.test(error ?? '')
+  //
+  // **按码判。** 这里原先是 /从来没有过|从未|20009/ 去匹配错误文案，而后端
+  // 那句是「这个集群**还没有过**任何一次流量摄入」—— 三个关键词一个都不中。
+  // 它一直是绿的，只因为落回的 view(null) 恰好也是对的那一句。
+  const neverIngested = isNeverIngestedError(cause)
   const summary = data ?? null
   const view = flowIngestView(loading && !neverIngested ? undefined : summary)
 

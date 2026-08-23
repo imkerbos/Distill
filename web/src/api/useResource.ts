@@ -3,6 +3,14 @@ import { useEffect, useRef, useState } from 'react'
 export interface ResourceState<T> {
   data: T | null
   error: string
+  /**
+   * 那次失败本身，原样带出来。
+   *
+   * `error` 只是它的文案。**有几种失败是状态而不是故障**（"这个集群从未摄入
+   * 过流量"、"这个集群还没被采过"），调用方要按业务码分辨它们 —— 而按文案
+   * 关键词去猜是错的：文案会改，猜中与猜不中都不会有人发现。
+   */
+  cause: unknown
   loading: boolean
 }
 
@@ -22,7 +30,9 @@ export interface ResourceState<T> {
  * 真正决定"要不要发起新请求"的只有 key 本身。
  */
 export function useResource<T>(key: string, fetcher: () => Promise<T>): ResourceState<T> {
-  const [state, setState] = useState<ResourceState<T>>({ data: null, error: '', loading: false })
+  const [state, setState] = useState<ResourceState<T>>(
+    { data: null, error: '', cause: null, loading: false },
+  )
   const fetcherRef = useRef(fetcher)
   fetcherRef.current = fetcher
 
@@ -30,20 +40,20 @@ export function useResource<T>(key: string, fetcher: () => Promise<T>): Resource
     let cancelled = false
 
     if (!key) {
-      setState({ data: null, error: '', loading: false })
+      setState({ data: null, error: '', cause: null, loading: false })
       return
     }
 
-    setState({ data: null, error: '', loading: true })
+    setState({ data: null, error: '', cause: null, loading: true })
 
     fetcherRef.current()
       .then((data) => {
         if (cancelled) return
-        setState({ data, error: '', loading: false })
+        setState({ data, error: '', cause: null, loading: false })
       })
       .catch((e) => {
         if (cancelled) return
-        setState({ data: null, error: String(e.message ?? e), loading: false })
+        setState({ data: null, error: String(e.message ?? e), cause: e, loading: false })
       })
 
     return () => {

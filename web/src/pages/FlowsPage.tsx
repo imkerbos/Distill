@@ -5,7 +5,8 @@ import { useResource } from '../api/useResource'
 import DataSourceNotice from '../components/DataSourceNotice'
 import DecisionDrawer from '../components/DecisionDrawer'
 import { CrossClusterMark, UnmanagedMark, VerdictBadge } from '../components/Verdict'
-import { Chip, Field, PageHeader, Section, Select, Skeleton, TableCard, Toolbar } from '../components/ui'
+import { Card, Chip, Field, PageHeader, Section, Select, Skeleton, TableCard, Toolbar } from '../components/ui'
+import { flowIngestView, isNeverIngestedError } from './flowIngestView'
 
 /**
  * 把时间窗格式化成可读区间。用 UTC 而非本地时区：判定与快照都以 UTC
@@ -31,11 +32,19 @@ export default function FlowsPage({ cluster }: { cluster: string }) {
   // 读者会把它读成"这个筛选没有结果"。
   useEffect(() => { setPageIndex(0) }, [key])
 
-  const { data: page, error } = useResource(key, () => api.flows({
+  const { data: page, error, cause } = useResource(key, () => api.flows({
     cluster,
     verdict: verdict || undefined,
     confidence: confidence || undefined,
   }))
+
+  // 「这个集群从未摄入过流量」是一个状态，不是一次读取故障。
+  //
+  // 渲染成一行红字，操作者读到的是"这一屏坏了"；而后端在这条路径上给的
+  // 恰恰是那句该照着做的话。文案取自 flowIngestView —— 采集页说的是同一句，
+  // 两屏对同一个状态给两套指示，人会按先看到的那一屏行动。
+  const neverIngested = isNeverIngestedError(cause)
+  const ingest = flowIngestView(null)
 
   return (
     <div>
@@ -59,7 +68,13 @@ export default function FlowsPage({ cluster }: { cluster: string }) {
         </Field>
       </Toolbar>
 
-      {error && <p className="text-deny">{error}</p>}
+      {neverIngested && (
+        <Card className="mb-3 px-4 py-3">
+          <p className="m-0 text-sm">{ingest.headline}</p>
+          <p className="mt-2 mb-0 text-xs leading-relaxed text-ink-muted">{ingest.action}</p>
+        </Card>
+      )}
+      {error && !neverIngested && <p className="text-deny">{error}</p>}
       {!page && !error && <Skeleton />}
 
       {page && (
