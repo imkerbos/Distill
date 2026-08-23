@@ -10,26 +10,73 @@ import (
 	"github.com/imkerbos/Distill/internal/snapshot"
 )
 
+// exposedService 是一个对外暴露、要放行健康检查的后端 Service。
+//
+// gateway 指向它时非 nil：那条溯源要记 SourceGateway，好回答「这条规则从
+// 哪来」。为 nil 表示它是被一个 LoadBalancer/NodePort Service 直接暴露的。
+type exposedService struct {
+	svc     snapshot.Service
+	gateway *snapshot.Gateway
+}
+
 // deriveLBHealth 推导负载均衡健康检查入向 Baseline。
 //
 // 健康检查流量在学习窗口中极可能被当作噪声过滤掉（spec 锚点 2），
 // 所以必须由 Baseline 显式给出，不能指望从流量里学到。
+//
+// **暴露面有两种，都要覆盖**：Ingress/Gateway 的后端 Service，以及
+// type=LoadBalancer / NodePort 的 Service 本身。少了后一种，一个只用
+// LoadBalancer Service 暴露、没有 Ingress 的 namespace 会永远推不出这条
+// Baseline，而 applicability.exposed() 认它暴露、要求这条 —— 写回 gate 于是
+// 永久卡死这个 namespace（kind 集群 gateway ns 实测出的这个缺口）。两种
+// 归到同一个后端 Service 上去重：一个既被 Gateway 指向、又是 LoadBalancer
+// 的 Service 只放行一次，且保留 Gateway 那条溯源。
 func deriveLBHealth(a snapshot.Assets) []Rule {
 	if len(a.Registry.HealthCheckSources) == 0 {
 		return nil
 	}
+
+	// 按 (namespace, service) 去重，保序：先扫 Gateway 后端（好让 SourceGateway
+	// 溯源被记下），再扫 LoadBalancer/NodePort Service。
+	seen := map[string]int{}
+	var order []string
+	var exposed []exposedService
+	add := func(svc snapshot.Service, gw *snapshot.Gateway) {
+		if len(svc.Ports) == 0 {
+			return
+		}
+		key := svc.Namespace + "/" + svc.Name
+		if _, dup := seen[key]; dup {
+			return
+		}
+		seen[key] = len(exposed)
+		order = append(order, key)
+		exposed = append(exposed, exposedService{svc: svc, gateway: gw})
+	}
+	for i := range a.Gateways {
+		gw := a.Gateways[i]
+		if svc, ok := a.Service(gw.Namespace, gw.BackendService); ok {
+			add(svc, &gw)
+		}
+	}
+	for i := range a.Services {
+		svc := a.Services[i]
+		if svc.Type == serviceTypeLoadBalancer || svc.Type == serviceTypeNodePort {
+			add(svc, nil)
+		}
+	}
+
+	peers := make([]networkingv1.NetworkPolicyPeer, 0, len(a.Registry.HealthCheckSources))
+	for _, cidr := range a.Registry.HealthCheckSources {
+		peers = append(peers, networkingv1.NetworkPolicyPeer{
+			IPBlock: &networkingv1.IPBlock{CIDR: cidr},
+		})
+	}
+
 	var out []Rule
-	for _, gw := range a.Gateways {
-		svc, ok := a.Service(gw.Namespace, gw.BackendService)
-		if !ok || len(svc.Ports) == 0 {
-			continue
-		}
-		peers := make([]networkingv1.NetworkPolicyPeer, 0, len(a.Registry.HealthCheckSources))
-		for _, cidr := range a.Registry.HealthCheckSources {
-			peers = append(peers, networkingv1.NetworkPolicyPeer{
-				IPBlock: &networkingv1.IPBlock{CIDR: cidr},
-			})
-		}
+	for _, key := range order {
+		es := exposed[seen[key]]
+		svc := es.svc
 		// 端口取 targetPort 而非 Service port：健康检查直接打到 Pod，
 		// 放行 Service port 会放开一个后端没监听的端口，真正的检查仍被挡。
 		ports := make([]networkingv1.NetworkPolicyPort, 0, len(svc.Ports))
@@ -38,17 +85,23 @@ func deriveLBHealth(a snapshot.Assets) []Rule {
 			target := intstr.FromInt32(p.TargetPort)
 			ports = append(ports, networkingv1.NetworkPolicyPort{Protocol: &proto, Port: &target})
 		}
+		// 溯源：有 Gateway 就记 Gateway 那一跳；Service 与 Registry 始终记。
+		derivations := make([]Derivation, 0, 3)
+		if es.gateway != nil {
+			derivations = append(derivations, Derivation{
+				SourceKind: SourceGateway, Cluster: a.ClusterID, Namespace: es.gateway.Namespace,
+				Name: es.gateway.Name, Field: "backendService"})
+		}
+		derivations = append(derivations,
+			Derivation{SourceKind: SourceService, Cluster: a.ClusterID, Namespace: svc.Namespace,
+				Name: svc.Name, Field: "spec.ports.targetPort"},
+			Derivation{SourceKind: SourceClusterRegistry, Cluster: a.ClusterID,
+				Name: a.ClusterID, Field: "healthCheckSources"},
+		)
 		rule, err := NewRule(
 			KindLBHealth, replay.DirectionIngress,
 			&networkingv1.NetworkPolicyIngressRule{From: peers, Ports: ports}, nil,
-			[]Derivation{
-				{SourceKind: SourceGateway, Cluster: a.ClusterID, Namespace: gw.Namespace,
-					Name: gw.Name, Field: "backendService"},
-				{SourceKind: SourceService, Cluster: a.ClusterID, Namespace: svc.Namespace,
-					Name: svc.Name, Field: "spec.ports.targetPort"},
-				{SourceKind: SourceClusterRegistry, Cluster: a.ClusterID,
-					Name: a.ClusterID, Field: "healthCheckSources"},
-			},
+			derivations,
 		)
 		if err != nil {
 			continue

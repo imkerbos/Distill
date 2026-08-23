@@ -92,13 +92,14 @@ func TestPolicyPreviewMissingBaselinesContent(t *testing.T) {
 	// 其余 namespace 既没有暴露面也没有 Pod 声明要被抓 —— 它们没有健康检查
 	// 与抓取流量要放行，报缺就是误报。
 	//
-	// eu 的 partner 是真缺：它有一个 type=LoadBalancer 的 Service（健康检查
-	// 确实会打进来），但平台今天只从 Ingress 类入口对象推 LB Baseline；
-	// 它也有 Pod 声明要被抓，却没有抓取端登记到它。
+	// eu 的 partner 真缺 METRICS_SCRAPE：它有 Pod 声明要被抓，却没有抓取端
+	// 登记到它。**LB_HEALTH_CHECK 不再缺**：partner 有一个 type=LoadBalancer
+	// 的 Service，deriveLBHealth 现在直接从它推出健康检查放行（此前只认
+	// Ingress，会把它误报成缺失、让写回 gate 永久卡死这个 namespace）。
 	want := map[string]map[string][]baseline.Kind{
 		"prod-asia-1": {},
 		"prod-eu-1": {
-			"partner": {baseline.KindLBHealth, baseline.KindMetrics},
+			"partner": {baseline.KindMetrics},
 		},
 	}
 	r := reader()

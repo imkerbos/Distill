@@ -50,8 +50,13 @@ func Derive(a snapshot.Assets, namespace string, unassessed []Kind) Set {
 	for _, r := range deriveLBHealth(a) {
 		// LB Baseline 按暴露面所在 namespace 归属：一个 namespace 的入口
 		// 暴露不该给另一个 namespace 放行健康检查网段。
+		//
+		// 按 SourceService 归属而不是 SourceGateway：暴露面可能是 Gateway 的
+		// 后端 Service，也可能是一个 LoadBalancer/NodePort Service 直接暴露 ——
+		// 后者没有 SourceGateway 溯源。每条 LB 规则都带一条 SourceService，
+		// 且它落在暴露面所在的 namespace，是两种暴露共同的归属键。
 		for _, d := range r.Derivations {
-			if d.SourceKind == SourceGateway && d.Namespace == namespace {
+			if d.SourceKind == SourceService && d.Namespace == namespace {
 				set.Rules = append(set.Rules, r)
 				break
 			}

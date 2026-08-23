@@ -99,8 +99,15 @@ func TestPlanIsRefusedWhenAPushedNamespaceIsMissingABaseline(t *testing.T) {
 	if !strings.Contains(msg, "partner") {
 		t.Errorf("refusal does not name the namespace that blocks it: %q", msg)
 	}
-	if !strings.Contains(msg, "LB_HEALTH_CHECK") || !strings.Contains(msg, "METRICS_SCRAPE") {
-		t.Errorf("refusal does not name the missing kinds: %q", msg)
+	// partner 仍缺 METRICS_SCRAPE（登记那一半没配），门禁据此拒绝。
+	if !strings.Contains(msg, "METRICS_SCRAPE") {
+		t.Errorf("refusal does not name the missing kind METRICS_SCRAPE: %q", msg)
+	}
+	// **不再报 LB_HEALTH_CHECK**：partner 由一个 LoadBalancer/NodePort Service
+	// 暴露，deriveLBHealth 现在直接从它推出健康检查放行（此前只认 Ingress，
+	// 会把它误报成缺失、永久卡死这个 namespace）。
+	if strings.Contains(msg, "LB_HEALTH_CHECK") {
+		t.Errorf("refusal still reports LB_HEALTH_CHECK missing for an LB-exposed namespace: %q", msg)
 	}
 	if f.writer.calls != 0 {
 		t.Error("a refused plan reached the repository")

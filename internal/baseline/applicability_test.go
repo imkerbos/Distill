@@ -35,12 +35,13 @@ func TestAnUnexposedNamespaceNeedsNoLBOrMetricsBaseline(t *testing.T) {
 
 // 守 spec §4.1：暴露面不只是 Ingress。
 //
-// batch 加一个 type=LoadBalancer 的 Service（没有 Gateway）。健康检查
-// 打的是它，因此这一类**变回适用**；而 deriveLBHealth 只遍历 Gateways，
-// 推不出规则 —— 于是它是缺失。
+// batch 加一个 type=LoadBalancer 的 Service（没有 Gateway）。健康检查打的
+// 是它，因此这一类既**适用**、也**推得出** —— deriveLBHealth 直接从这个
+// Service 推出健康检查放行。
 //
-// 一个只看 a.Gateways 的适用性实现会在这里答"不适用"，从而放行一次
-// 会打断入口的下发。
+// 一个只看 a.Gateways 的适用性实现会在这里答"不适用"，放行一次会打断入口
+// 的下发；一个只从 a.Gateways 推导的实现会答"适用却缺失"，让写回 gate 把
+// 这个 namespace 永久卡死（kind gateway ns 实测出的那个缺口）。
 func TestALoadBalancerServiceMakesTheLBBaselineApplicable(t *testing.T) {
 	a := assetsOf(t, "prod-asia-1")
 	a.Services = append(slices.Clone(a.Services), snapshot.Service{
@@ -52,8 +53,8 @@ func TestALoadBalancerServiceMakesTheLBBaselineApplicable(t *testing.T) {
 	if slices.Contains(set.NotApplicable, baseline.KindLBHealth) {
 		t.Error("LB_HEALTH_CHECK reported inapplicable for a namespace exposed by a LoadBalancer Service")
 	}
-	if !slices.Contains(set.Missing(), baseline.KindLBHealth) {
-		t.Error("LB_HEALTH_CHECK not reported missing: the namespace is exposed and no rule was derived for it")
+	if slices.Contains(set.Missing(), baseline.KindLBHealth) {
+		t.Error("LB_HEALTH_CHECK still missing for a LoadBalancer-exposed namespace; the rule must derive from the Service")
 	}
 }
 
