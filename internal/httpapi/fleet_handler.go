@@ -67,6 +67,15 @@ func writeReaderError(w http.ResponseWriter, r *http.Request, d Deps, err error)
 		response.WriteBusiness(w, response.CodeNotFound)
 		return
 	}
+	// **先判 ErrNoFlowIngest，再判 ErrNoCollection。** 前者用 %w 包着后者，
+	// 顺序反过来外层那条会把它整个吃掉，而两者的处置完全相反：20005 的文案
+	// 是「请先跑一次采集与流量摄入」，一个已经采过资产、只是没接上流量来源的
+	// 集群读到它会去重跑那一步已经成功过的资产采集，跑多少次这一屏都不会出数。
+	// 该做的是部署采集器或开流量日志，而那句话只在 20009 里。
+	if errors.Is(err, collectstore.ErrNoFlowIngest) {
+		response.WriteBusiness(w, response.CodeNoIngestRun)
+		return
+	}
 	if errors.Is(err, collectstore.ErrNoCollection) {
 		response.WriteBusiness(w, response.CodeNoUsableCollection)
 		return

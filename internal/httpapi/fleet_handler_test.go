@@ -137,7 +137,7 @@ func (noCollectionReader) PolicyPreview(
 }
 
 func noCollection() error {
-	return fmt.Errorf("%w: cluster prod-asia-1 has no flow ingest", collectstore.ErrNoCollection)
+	return fmt.Errorf("%w: cluster prod-asia-1 has no usable collection", collectstore.ErrNoCollection)
 }
 
 // 「还没有可用的采集」不是服务故障，必须说得出原因。
@@ -335,6 +335,96 @@ func TestReaderFailureIsInternalErrorAndLeaksNothing(t *testing.T) {
 					}
 				}
 			}
+		}
+	}
+}
+
+// noFlowIngestReader 让每个查询都以「资产采过了，但一次流量摄入都没有」结束。
+//
+// 与 noCollectionReader 分开，因为返回的哨兵不同：真实的 collectstore 在这种
+// 情形下给的是 ErrNoFlowIngest，而它**包着** ErrNoCollection。只有一个假实现
+// 时，映射里那条 ErrNoCollection 分支会把两种情形一起吃掉，而测试看不见 ——
+// 假实现返回的正是被吃掉的那一个。
+type noFlowIngestReader struct{ brokenReader }
+
+func (noFlowIngestReader) DefaultWindow(context.Context, string) (store.TimeWindow, error) {
+	return store.TimeWindow{}, noFlowIngest()
+}
+
+func (noFlowIngestReader) Topology(
+	context.Context, string, store.TopologyLevel,
+) (store.Topology, error) {
+	return store.Topology{}, noFlowIngest()
+}
+
+func (noFlowIngestReader) Flows(context.Context, store.FlowFilter) (store.FlowPage, error) {
+	return store.FlowPage{}, noFlowIngest()
+}
+
+func (noFlowIngestReader) Flow(context.Context, string) (store.Decision, bool, error) {
+	return store.Decision{}, false, noFlowIngest()
+}
+
+func (noFlowIngestReader) Quality(context.Context, string) (store.Quality, error) {
+	return store.Quality{}, noFlowIngest()
+}
+
+func (noFlowIngestReader) Security(
+	context.Context, string, store.TimeWindow,
+) (store.SecurityReport, error) {
+	return store.SecurityReport{}, noFlowIngest()
+}
+
+func (noFlowIngestReader) PolicyPreviewAtGranularity(
+	context.Context, string, string, store.TimeWindow, policygen.Granularity,
+) (store.PolicyPreview, error) {
+	return store.PolicyPreview{}, noFlowIngest()
+}
+
+func (noFlowIngestReader) PolicyPreview(
+	context.Context, string, string, store.TimeWindow,
+) (store.PolicyPreview, error) {
+	return store.PolicyPreview{}, noFlowIngest()
+}
+
+func noFlowIngest() error {
+	return fmt.Errorf("%w: cluster prod-asia-1", collectstore.ErrNoFlowIngest)
+}
+
+// 资产采过、流量没摄入过，说的必须是「没摄入过」，不是「没有可用的采集数据」。
+//
+// 20005 的文案是「该集群还没有可用的采集数据，请先跑一次采集与流量摄入」。
+// 一个已经采过三次资产、只是没接上流量来源的集群读到这句话，会去重跑资产
+// 采集 —— 那一步已经成功过，再跑一百次也不会让这一屏出数。真正该做的是部署
+// 采集器或开流量日志，而那句话只在 20009 里。
+//
+// 这不是文案偏好：ErrNoFlowIngest 包着 ErrNoCollection，映射里先判外层就会
+// 把它整个吃掉，两种处置完全相反的情形从此在界面上长得一模一样。
+func TestNeverIngestedSaysNeverIngestedNotNoCollection(t *testing.T) {
+	h, _, cookie := newTestRouter(t, noFlowIngestReader{})
+
+	for _, path := range []string{
+		"/api/v1/clusters/prod-asia-1/topology",
+		"/api/v1/clusters/prod-asia-1/quality",
+		"/api/v1/clusters/prod-asia-1/security",
+		"/api/v1/clusters/prod-asia-1/policy-preview",
+		"/api/v1/flows",
+		"/api/v1/flows/flow-0001/decision",
+	} {
+		rec := authedGet(t, h, cookie, path)
+
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s status = %d, want 200 —— 一个还没接上流量来源的集群不是服务故障",
+				path, rec.Code)
+		}
+		body := bodyOf(t, rec)
+		if body["code"] != float64(response.CodeNoIngestRun) {
+			t.Errorf("%s code = %v, want %d（还没有过任何一次流量摄入）；"+
+				"20005 会让操作者去重跑一次已经成功过的资产采集",
+				path, body["code"], int(response.CodeNoIngestRun))
+		}
+		if body["data"] != nil {
+			t.Errorf("%s 在拒绝的同时还给了 data", path)
 		}
 	}
 }

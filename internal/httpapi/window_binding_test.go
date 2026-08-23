@@ -349,3 +349,48 @@ func TestEveryWindowedPathRefusesWhenTheClusterHasNoIngestRun(t *testing.T) {
 		}
 	}
 }
+
+// 同一批路由上，「资产采过、流量没摄入过」答的是 20009，不是 20005。
+//
+// 与上一条并列而不是替代它：上一条钉的是「答不出窗口时不得兜底」，这一条钉
+// 的是**拒绝时说的是哪一句**。两句话指向完全相反的处置 —— 20005 让人去重跑
+// 资产采集（已经成功过），20009 让人去部署采集器或开流量日志（真正缺的那一步）。
+//
+// 走同一份路由表，因为映射在 writeReaderError 里是共用的、路由却不是：
+// 只测其中一条，另外几条改走别的错误处理时全套仍然全绿。
+func TestEveryWindowedPathNamesTheMissingIngestRunSpecifically(t *testing.T) {
+	// 这条路由**故意**不在没有摄入时拒绝：记一个人工决定不需要看过流量，
+	// 候选集来自资产（override_handler 里那段 ErrNoFlowIngest 吸收）。挡住它，
+	// 操作者能看见几百条推荐却一条都确认不了。
+	//
+	// 写成名单而不是在断言里跳过，是为了让"名单里那条路由已经不存在了"能红：
+	// 下面那个 exempted 检查走的是同一份走出来的路由表。
+	const overrideRoute = "/api/v1/clusters/{clusterID}/rule-overrides"
+	exempted := false
+
+	for _, rt := range walkWindowedRoutes(t) {
+		if rt.route == overrideRoute && rt.method == http.MethodPost {
+			exempted = true
+			continue
+		}
+		h, cookie := newWindowProbeRouter(t, noFlowIngestReader{})
+		rec := callProbe(t, h, rt.method, rt.path+"?cluster="+probeCluster, cookie, routeBody[rt.route])
+
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s %s status = %d, want 200 — a cluster that has assets but no flow "+
+				"ingest is not a server fault", rt.method, rt.route, rec.Code)
+		}
+		if got := bodyOf(t, rec)["code"]; got != float64(response.CodeNoIngestRun) {
+			t.Errorf("%s %s code = %v, want %d（还没有过任何一次流量摄入）— %d tells the "+
+				"operator to re-run an asset collection that has already succeeded, which "+
+				"will never make this screen answer",
+				rt.method, rt.route, got, int(response.CodeNoIngestRun),
+				int(response.CodeNoUsableCollection))
+		}
+	}
+
+	if !exempted {
+		t.Errorf("the walk never reached POST %s; the exemption above now covers nothing, "+
+			"and whatever that route became is unguarded", overrideRoute)
+	}
+}
