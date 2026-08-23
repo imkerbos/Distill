@@ -480,6 +480,44 @@ export interface PredictionReport {
 
 /** 集群接入状态：登记完成 → 学习中 → 可产出候选策略。由服务端推进，前端只读。 */
 export type OnboardState = 'REGISTERED' | 'OBSERVING' | 'READY'
+
+/**
+ * 一个集群 agent（机器身份）的状态。封闭枚举，与后端 registry.AgentState 逐值对齐。
+ *
+ * 联合而不是 string：ACTIVE 与 REVOKED 在界面上是两句不同的话（「这把还能用」
+ * 与「这把已作废、永不复活」），string 会让后端某天多一个取值时界面照旧渲染
+ * 出一个空标签。
+ */
+export type AgentState = 'ACTIVE' | 'REVOKED'
+
+/**
+ * 一个集群 agent 在可见面上的形态（design doc 2026-08-18 §3）。
+ *
+ * **没有 token、没有摘要**：明文只在签发那一次的响应里出现一次，此后平台只
+ * 剩哈希。这个类型里连字段都不给，是为了让「把 token 显示在列表里」写不出来。
+ */
+export interface ClusterAgent {
+  agentId: string
+  state: AgentState
+  /** 签发它的操作者，回答「这把钥匙是谁发的」。 */
+  createdBy: string
+  createdAt: string
+  /** 为空表示这把 token 从未被用过 —— 与「很久以前用过」是两件事。 */
+  lastSeenAt?: string
+  /** 为空表示尚未吊销。 */
+  revokedAt?: string
+}
+
+/**
+ * 签发一把新 token 的响应。**token 明文只在这里出现一次**。
+ *
+ * 调用方把它交给操作者之后就该从内存里清掉：不落 localStorage、不进 URL、
+ * 不二次展示。丢了只能重签一把、把旧的吊销 —— 找回不可能，这正是期望性质。
+ */
+export interface IssuedAgentToken {
+  agentId: string
+  token: string
+}
 export type ImportRole = 'BASELINE_CURRENT' | 'CANDIDATE_ADDITION'
 export type ImportSource = 'PASTE' | 'GIT' | 'CLUSTER'
 

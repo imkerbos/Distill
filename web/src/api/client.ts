@@ -1,7 +1,7 @@
 import { isNoRunError, isUnknownClusterError } from '../pages/collectionView'
 import type {
-  Account, ClusterWrite, CollectionState, CollectionSummary,
-  CurrentSession, Decision, Envelope, FlowFilter, FlowPage, GitBindingWrite,
+  Account, ClusterAgent, ClusterWrite, CollectionState, CollectionSummary,
+  CurrentSession, Decision, Envelope, FlowFilter, FlowPage, GitBindingWrite, IssuedAgentToken,
   GitRepo, GitRepoWrite, Granularity, Identity, ImportRole, ImportSource, IngestSummary, OverrideDecision,
   PathVerifyStatus, PlatformSettingView, PlatformSettingWrite, PolicyImportItem, PolicyPreview,
   Quality, RegisteredCluster, RepoVerifyStatus, Role, SecurityReport, Topology, TopologyLevel,
@@ -226,6 +226,25 @@ export const api = {
     request<{ id: string }>(`/api/v1/clusters/${encodeURIComponent(cluster)}`, {
       method: 'DELETE',
     }),
+
+  // 集群 agent（推送式采集的机器身份，design doc 2026-08-18 §3）。
+  // 三条都声明 accessAdmin，只读账号一律 403。
+  clusterAgents: (cluster: string) =>
+    request<ClusterAgent[]>(`/api/v1/clusters/${encodeURIComponent(cluster)}/agents`),
+
+  // 签发返回明文 token —— **全平台唯一一处**。调用方展示一次即弃，不留存。
+  issueClusterAgent: (cluster: string) =>
+    request<IssuedAgentToken>(`/api/v1/clusters/${encodeURIComponent(cluster)}/agents`, {
+      method: 'POST',
+      body: '{}',
+    }),
+
+  // 吊销不可逆。clusterID 一并带上：少了它，一个管理员能吊销别的集群的 agent。
+  revokeClusterAgent: (cluster: string, agentId: string) =>
+    request<null>(
+      `/api/v1/clusters/${encodeURIComponent(cluster)}/agents/${encodeURIComponent(agentId)}`,
+      { method: 'DELETE' },
+    ),
 
   // 策略仓库：独立于集群的资源，绑定只指向它（design doc 2026-08-13 §3.1）。
   gitRepos: () => request<GitRepo[]>('/api/v1/git-repos'),

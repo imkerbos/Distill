@@ -14,6 +14,10 @@ import {
   type ApiServerRow, type ClusterFormValues, type GitFormValues,
 } from './clusterForm'
 import { formatUtcTime, type VerifyOutcomeView } from './verifyView'
+import {
+  AGENT_TOKEN_ONCE_WARNING, activeAgentCount, agentStateLabel, isRevocable, lastSeenLabel,
+} from './agentTokenView'
+import type { IssuedAgentToken } from '../api/types'
 import { VerifyBadge, VerifyOutcomeNote } from '../components/Verdict'
 import { Button, Card, Chip, EmptyState, ErrorNotice, Field, PageHeader, Section, Select, Skeleton, TableCard } from '../components/ui'
 
@@ -73,6 +77,7 @@ function ClusterListSection({ clusters, repos, reposError, error, loading, onCha
 }) {
   const [busyId, setBusyId] = useState<string | null>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
+  const [agentsId, setAgentsId] = useState<string | null>(null)
 
   async function offboard(id: string) {
     if (!window.confirm(`确认下线集群 ${id}？`)) return
@@ -165,6 +170,16 @@ function ClusterListSection({ clusters, repos, reposError, error, loading, onCha
                       >
                         {editingId === c.id ? '收起' : '编辑'}
                       </Button>
+                      {/* 推送式采集的机器身份：签发/查看/吊销这个集群的
+                          agent token。与「编辑」并列而不是塞进编辑面板 ——
+                          它是一条独立的接入操作，有自己的审计（design doc
+                          2026-08-18 §3）。 */}
+                      <Button
+                        onClick={() => setAgentsId(agentsId === c.id ? null : c.id)}
+                        variant="secondary"
+                      >
+                        {agentsId === c.id ? '收起' : 'agent'}
+                      </Button>
                       {/* 下线用次要样式：它是这一行里唯一不可逆的动作，
                           而把它画成视觉上最重的那一个，等于邀请人去点。
                           拦住误点的是二次确认，不是颜色 —— 但也不该反过来
@@ -206,6 +221,15 @@ function ClusterListSection({ clusters, repos, reposError, error, loading, onCha
                     </td>
                   </tr>
                 )}
+                {agentsId === c.id && (
+                  <tr>
+                    <td colSpan={9} className="bg-sunken">
+                      {/* key 绑集群 ID：换集群展开必须重挂载，否则上一个
+                          集群刚签出的一次性 token 会残留在这个面板里。 */}
+                      <AgentPanel key={c.id} clusterId={c.id} />
+                    </td>
+                  </tr>
+                )}
               </Fragment>
             ))}
           </tbody>
@@ -223,6 +247,137 @@ function ClusterListSection({ clusters, repos, reposError, error, loading, onCha
  * 绑定只存一个 repoId，而仓库清单本身可能这次没拉到、那个仓库也可能已被
  * 下线。这两种情形都不能显示成空白。
  */
+/**
+ * 一个集群的 agent 面板：查看、签发、吊销推送式采集的 token。
+ *
+ * **明文 token 只在签发那一次的响应里出现一次**（design doc 2026-08-18 §3、
+ * 规范 §33）。它只活在这个组件的 state 里，随面板关闭一起消失 —— 不落
+ * localStorage、不进 URL、列表里也永远不含它。丢了只能重签、吊销旧的。
+ */
+function AgentPanel({ clusterId }: { clusterId: string }) {
+  const [refreshKey, setRefreshKey] = useState(0)
+  const bump = () => setRefreshKey((k) => k + 1)
+  const { data: agents, error, loading } = useResource(
+    `agents:${clusterId}:${refreshKey}`,
+    () => api.clusterAgents(clusterId),
+  )
+
+  const [issued, setIssued] = useState<IssuedAgentToken | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [actionError, setActionError] = useState('')
+
+  async function issue() {
+    setActionError('')
+    setBusy(true)
+    try {
+      const token = await api.issueClusterAgent(clusterId)
+      // 明文只此一次。放进 state 当场展示，不写任何持久化的地方。
+      setIssued(token)
+      bump()
+    } catch (e) {
+      setActionError(e instanceof ApiError ? e.msg : '签发失败，请稍后重试')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function revoke(agentId: string) {
+    setActionError('')
+    setBusy(true)
+    try {
+      await api.revokeClusterAgent(clusterId, agentId)
+      // 吊销的可能正是刚签出、还显示在上面的那把：一并清掉，别让一把已
+      // 作废的 token 继续摆在屏幕上像是还能用。
+      if (issued?.agentId === agentId) setIssued(null)
+      bump()
+    } catch (e) {
+      setActionError(e instanceof ApiError ? e.msg : '吊销失败，请稍后重试')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const active = agents ? activeAgentCount(agents) : 0
+
+  return (
+    <div className="p-3">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <span className="text-sm text-ink-2">
+          推送式采集凭据{agents ? ` · ${active} 把可用 / 共 ${agents.length} 把` : ''}
+        </span>
+        <Button onClick={issue} disabled={busy} variant="primary">
+          {busy ? '处理中…' : '签发新 token'}
+        </Button>
+      </div>
+
+      {issued && <IssuedTokenCard token={issued} onDismiss={() => setIssued(null)} />}
+      {actionError && <ErrorNotice>{actionError}</ErrorNotice>}
+
+      {error ? (
+        <p className="text-deny">{error}</p>
+      ) : loading || !agents ? (
+        <Skeleton rows={2} />
+      ) : agents.length === 0 ? (
+        <EmptyState
+          message="这个集群还没有签发过任何 agent token。"
+          detail="签发一把，装进被管集群里的 DaemonSet（见 docs/agent-daemonset-example.yaml），它就会把资产与流量推回来。平台自己从不持有那个集群的凭据。"
+        />
+      ) : (
+        <TableCard>
+          <thead>
+            <tr>
+              <th>agent ID</th><th>状态</th><th>签发人</th><th>签发于</th><th>上次连接</th><th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {agents.map((a) => (
+              <tr key={a.agentId}>
+                <td className="mono">{a.agentId}</td>
+                <td><Chip strong={a.state === 'ACTIVE'}>{agentStateLabel(a.state)}</Chip></td>
+                <td className="mono">{a.createdBy}</td>
+                <td className="text-xs">{formatUtcTime(a.createdAt)}</td>
+                <td className="text-xs">{lastSeenLabel(a)}</td>
+                <td>
+                  {isRevocable(a) ? (
+                    <Button onClick={() => revoke(a.agentId)} disabled={busy} variant="secondary">
+                      吊销
+                    </Button>
+                  ) : (
+                    <span className="text-ink-muted text-xs">
+                      {a.revokedAt ? `已于 ${formatUtcTime(a.revokedAt)} 吊销` : '—'}
+                    </span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </TableCard>
+      )}
+    </div>
+  )
+}
+
+/**
+ * 刚签发的一把 token —— **只显示这一次**。
+ *
+ * 用 <code> 让它可整段选中复制；不加「复制」以外的花样。旁边那句一次性告示
+ * 是它存在的前提：关掉面板它就没了。
+ */
+function IssuedTokenCard({ token, onDismiss }: { token: IssuedAgentToken; onDismiss: () => void }) {
+  return (
+    <Card className="mb-3 border-line-strong p-3">
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <span className="text-sm font-medium text-ink">新 token（agent ID {token.agentId}）</span>
+        <Button onClick={onDismiss} variant="secondary">我已保存，隐藏</Button>
+      </div>
+      <code className="block w-full select-all break-all rounded-chip border border-line bg-surface px-3 py-2 font-mono text-sm text-ink">
+        {token.token}
+      </code>
+      <p className="mt-2 mb-0 text-xs leading-relaxed text-ink-muted">{AGENT_TOKEN_ONCE_WARNING}</p>
+    </Card>
+  )
+}
+
 function repoOf(repos: GitRepo[] | null, repoId: string): GitRepo | undefined {
   return repos?.find((r) => r.repoId === repoId)
 }
