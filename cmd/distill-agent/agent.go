@@ -51,6 +51,17 @@ type options struct {
 	// /proc/<pid>/environ、崩溃转储与一部分运维工具的进程列表里，而挂载
 	// 的 Secret 文件不会。
 	tokenFile string
+	// caFile 是一份 PEM 证书包的路径，用来验证平台的 TLS 证书。可选。
+	//
+	// 平台证书由内部 CA 签发时必填：系统根里没有它，agent 每一次请求都会以
+	// 证书校验失败结束，而这个进程在别人的集群里，没有别的出口。空着就用
+	// 系统根（多数部署走公共 CA）。
+	caFile string
+	// heartbeatFile 是 flow 循环每转一圈写一次时间戳的文件。可选。
+	//
+	// 存活探针（-healthcheck 模式）读它判断这个 Pod 卡没卡死。空着就不写，
+	// 也就没有存活探针 —— 一个卡死的 agent 不会被重启，静默停摆。
+	heartbeatFile string
 }
 
 // validate 在做任何事之前检查推送参数。
@@ -123,12 +134,25 @@ type agentConfig struct {
 	SchemaVersion int    `json:"schemaVersion"`
 }
 
+// errAgentRefused 表示平台**明确拒绝**了这个 agent —— 401/403。
+//
+// 与「平台暂时不可达」分得开是这条错误存在的全部理由：前者是致命的，token
+// 被吊销或无效，重试一万次都不会变好，正确的处置是响亮退出、让人去重签一把
+// （CrashLoopBackOff 就是那个可见信号）；后者是暂态，平台在重部署、网络在
+// 抖，退避重试就能过去。塌成一个，一次平台重部署会让全体 agent 崩，而一把
+// 真被吊销的 token 会被无限重试、永远看不见（上一轮实测：预检硬依赖导致
+// CrashLoop）。
+var errAgentRefused = errors.New("the platform refused this agent")
+
 // fetchAgentConfig 问平台「我是哪个集群、该按哪个契约上报」。
 //
 // 集群归属由平台按 token 反查，agent 不自己声明（design doc §2）。这一步
 // 同时是一次连通性与凭据的预检：token 被吊销时这里就失败，而不是采完
 // 一整轮资产之后在最后一步失败。
-func fetchAgentConfig(ctx context.Context, base, token string) (agentConfig, error) {
+//
+// **认证失败（401/403）包 errAgentRefused，其余失败不包** —— 调用方
+// resolveConfig 据此决定「立刻退出」还是「退避重试」。
+func fetchAgentConfig(ctx context.Context, client *http.Client, base, token string) (agentConfig, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		strings.TrimSuffix(base, "/")+"/api/v1/agent/config", nil)
 	if err != nil {
@@ -136,7 +160,6 @@ func fetchAgentConfig(ctx context.Context, base, token string) (agentConfig, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 
-	client := &http.Client{Timeout: pushTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		return agentConfig{}, errors.New("the platform could not be reached")
@@ -154,21 +177,71 @@ func fetchAgentConfig(ctx context.Context, base, token string) (agentConfig, err
 	if err := json.Unmarshal(raw, &envelope); err != nil {
 		return agentConfig{}, fmt.Errorf("the platform replied with something that is not a result (HTTP %d)", resp.StatusCode)
 	}
+	// 401/403 是认证被拒 —— 致命。包 errAgentRefused。
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return agentConfig{}, fmt.Errorf("%w (HTTP %d, code %d)", errAgentRefused, resp.StatusCode, envelope.Code)
+	}
+	// 其余非 200 / code!=0 当暂态：5xx 是平台自己的毛病、会好，交给重试。
 	if resp.StatusCode != http.StatusOK || envelope.Code != 0 {
-		return agentConfig{}, fmt.Errorf("the platform refused this agent (HTTP %d, code %d)", resp.StatusCode, envelope.Code)
+		return agentConfig{}, fmt.Errorf("the platform did not accept the config request (HTTP %d, code %d)", resp.StatusCode, envelope.Code)
 	}
 	if envelope.Data.ClusterID == "" {
 		return agentConfig{}, errors.New("the platform did not say which cluster this agent belongs to")
 	}
 	// 版本不认识就停在这里，不采：采完再发现对不上，等于白读一遍别人的
-	// 集群（design doc §4）。
+	// 集群（design doc §4）。**版本不匹配也是致命的**：重试不会让平台改口，
+	// 该升级的是这个二进制。包 errAgentRefused 走同一条「立刻退出」。
 	if envelope.Data.SchemaVersion != agentSchemaVersion {
 		return agentConfig{}, fmt.Errorf(
-			"the platform speaks ingest schema %d and this collector speaks %d",
-			envelope.Data.SchemaVersion, agentSchemaVersion)
+			"%w: it speaks ingest schema %d and this collector speaks %d",
+			errAgentRefused, envelope.Data.SchemaVersion, agentSchemaVersion)
 	}
 	return envelope.Data, nil
 }
+
+// resolveConfig 反复预检，直到拿到配置、被明确拒绝、或预算耗尽。
+//
+// **认证被拒（errAgentRefused）立刻返回，不重试**：token 无效或版本不匹配，
+// 重试只是拿噪音换不来结果，CrashLoop 才是让人去处理的信号。**暂态失败退避
+// 重试**：平台重部署、网络抖，退避几秒就过去了，不该让 agent 一崩了之。
+//
+// 预算是调用方给的 ctx —— 复用 run() 那个 preflight 超时，不另设旋钮。预算
+// 耗尽仍失败就返回错误、由 run() 退出：一个**持续**的故障仍要以退出的形态
+// 浮现（restart 计数看得见），不能让 Pod 显示 Running 却永远什么都不做。
+func resolveConfig(
+	ctx context.Context, client *http.Client, base, token string,
+	backoff time.Duration, logger *slog.Logger,
+) (agentConfig, error) {
+	if backoff <= 0 {
+		backoff = defaultPreflightBackoff
+	}
+	const backoffCap = 30 * time.Second
+	for {
+		cfg, err := fetchAgentConfig(ctx, client, base, token)
+		if err == nil {
+			return cfg, nil
+		}
+		if errors.Is(err, errAgentRefused) {
+			return agentConfig{}, err
+		}
+		// 暂态：记一句、退避、重试；期间 ctx 结束就带着最后那个错误返回。
+		logger.Warn("preflight could not reach the platform yet; will retry", "err", err)
+		select {
+		case <-ctx.Done():
+			return agentConfig{}, fmt.Errorf("gave up reaching the platform: %w", err)
+		case <-time.After(backoff):
+		}
+		if backoff < backoffCap {
+			backoff *= 2
+			if backoff > backoffCap {
+				backoff = backoffCap
+			}
+		}
+	}
+}
+
+// defaultPreflightBackoff 是预检重试的首个退避间隔，之后翻倍到 30s 封顶。
+const defaultPreflightBackoff = 3 * time.Second
 
 // run 跑一次推送式采集。
 //
@@ -191,18 +264,36 @@ func run(ctx context.Context, opts options, timeout time.Duration, logger *slog.
 			"its token crosses the network in the clear")
 	}
 
-	// 预检用一个有限的超时；常驻循环本身不设总超时 —— 那是一个 DaemonSet，
-	// 它的生命周期由 SIGTERM 结束，不由一个计时器结束。timeout 管的是
-	// **单轮**（见下）。
+	// CA 池建一次，同时喂给配置预检与 sink：两条路径带的是同一把 token，
+	// 必须信任同一组 CA。读不到或不是 PEM 就在这里失败 —— 早于任何一次带
+	// token 的请求，而不是让它以「证书校验失败」的形态在每一轮里反复出现。
+	pool, err := loadCAPool(opts.caFile)
+	if err != nil {
+		return err
+	}
+	httpClient := agentClient(pool)
+
+	// 预检用一个有限的超时当**重试预算**；常驻循环本身不设总超时 —— 那是一个
+	// DaemonSet，它的生命周期由 SIGTERM 结束，不由一个计时器结束。timeout
+	// 管的是单轮（见下），这里借它当「预检最多重试多久」。
+	//
+	// resolveConfig 而不是 fetchAgentConfig：平台在这一刻不可达（重部署、
+	// 网络抖）时退避重试，不让 agent 一崩了之；只有平台**明确拒绝**（token
+	// 无效、版本不匹配）才立刻退出（上一轮实测：一次平台抖动让全体 agent
+	// CrashLoop，正是这条要消除的）。
 	preflight, cancelPre := context.WithTimeout(ctx, timeout)
-	cfg, err := fetchAgentConfig(preflight, opts.platformURL, token)
+	cfg, err := resolveConfig(preflight, httpClient, opts.platformURL, token, defaultPreflightBackoff, logger)
 	cancelPre()
 	if err != nil {
 		return err
 	}
 	logger.Info("agent starting", "cluster", cfg.ClusterID)
 
-	sink := newHTTPSink(opts.platformURL, token)
+	// sink 现读 token（fileTokenReader），不抄启动时那一份：一把泄漏的 token
+	// 被吊销、换上新的之后，下一次上报就该带新的，不必重启整个 DaemonSet。
+	// 启动时的 readToken 仍然做一次 fail-fast（上面），预检也用那一份 ——
+	// 那是一次性的，与轮换无关。
+	sink := newHTTPSinkReading(opts.platformURL, fileTokenReader(opts.tokenFile), httpClient)
 
 	client, err := inClusterClient()
 	if err != nil {
@@ -220,13 +311,13 @@ func run(ctx context.Context, opts options, timeout time.Duration, logger *slog.
 	if err != nil {
 		return err
 	}
-	var gate leaderGate
+	gate := newLeaderGate()
 	identity, err := os.Hostname()
 	if err != nil || identity == "" {
 		return errors.New("this pod has no hostname to use as a leader-election identity")
 	}
 	go runLeaderElection(ctx, client,
-		leaseNS, opts.leaseName, identity, &gate, logger)
+		leaseNS, opts.leaseName, identity, gate, logger)
 
 	<-runLoops(ctx, loops{
 		// conntrack：**每个 Pod 都跑**。少跑一个节点就是少一个节点的盲区，
@@ -250,9 +341,18 @@ func run(ctx context.Context, opts options, timeout time.Duration, logger *slog.
 			_, err := collectrun.Once(ctx, cfg.ClusterID, client, nil, sink, logger)
 			return err
 		},
-		assetsEvery: opts.assetsEvery,
-		leaderFor:   gate.isLeader,
-		logger:      logger,
+		assetsEvery:   opts.assetsEvery,
+		leaderFor:     gate.isLeader,
+		leaderChanged: gate.changed,
+		// 心跳写失败只记日志、不停循环：卷写不动是个真问题，但让它顺着
+		// 心跳把整条采集也停掉，是拿一个小故障换一个大盲区。写不动会自然
+		// 表现为心跳变旧 → liveness 重启，路径本来就通。
+		flowHeartbeat: func() {
+			if err := writeHeartbeat(opts.heartbeatFile); err != nil {
+				logger.Warn("could not write the liveness heartbeat", "err", err)
+			}
+		},
+		logger: logger,
 	})
 	logger.Info("agent stopped", "cluster", cfg.ClusterID)
 	return nil

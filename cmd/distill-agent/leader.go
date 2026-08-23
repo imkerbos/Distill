@@ -31,11 +31,36 @@ const (
 // 用原子布尔而不是 channel：调用方是每一轮现问一次，而 leadership 会在
 // 进程生命周期内变化 —— 一个启动时抄下来的答案会让刚接手的 Pod 永远不采
 // 资产、或让刚失去 leadership 的 Pod 继续采（两份资产会撞 observed_at 主键）。
+//
+// changed 是一个独立的**通知**：状态可能变了，快去 isLeader 现问一次。
+// 它存在的唯一理由是让资产循环对「刚当选」立刻反应，而不是空等一整个
+// assetsEvery（生产 30m）。缓冲 1 + 非阻塞发送：信号只是「去看一眼」，
+// 多个挤在一起合并成一个就够，绝不阻塞选举回调。
 type leaderGate struct {
-	held atomic.Bool
+	held    atomic.Bool
+	changed chan struct{}
+}
+
+// newLeaderGate 建一个带通知通道的 gate。
+func newLeaderGate() *leaderGate {
+	return &leaderGate{changed: make(chan struct{}, 1)}
 }
 
 func (g *leaderGate) isLeader(context.Context) bool { return g.held.Load() }
+
+// notify 非阻塞地发一个「状态可能变了」的信号。
+//
+// 缓冲已满（已有一个待处理信号）时直接丢弃：两个「去看一眼」合并成一个，
+// 消费方看到的仍是最新的 held。绝不阻塞 —— 这跑在选举回调里。
+func (g *leaderGate) notify() {
+	if g.changed == nil {
+		return
+	}
+	select {
+	case g.changed <- struct{}{}:
+	default:
+	}
+}
 
 // runLeaderElection 在后台参与选举，并把结果反映到 gate 上。
 //
@@ -63,12 +88,16 @@ func runLeaderElection(
 		Callbacks: leaderelection.LeaderCallbacks{
 			OnStartedLeading: func(context.Context) {
 				gate.held.Store(true)
+				// 先置位再通知：资产循环收到信号后会 isLeader 现问，那时
+				// held 必须已经是 true，否则这次当选的立即采集会被漏掉。
+				gate.notify()
 				logger.Info("this pod now collects the cluster's assets", "identity", identity)
 			},
 			OnStoppedLeading: func() {
 				// 立刻放下：还握着的话，下一轮会与新 leader 同时采一份资产，
 				// 而两份会撞 observed_at 主键。
 				gate.held.Store(false)
+				gate.notify()
 				logger.Info("this pod no longer collects the cluster's assets", "identity", identity)
 			},
 			OnNewLeader: func(who string) {

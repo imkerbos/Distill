@@ -3,11 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -35,30 +38,125 @@ const pushTimeout = 60 * time.Second
 // 二进制原样塞进客户集群，等于把口令发出去。
 type httpSink struct {
 	base   string
-	token  string
+	token  tokenReader
 	client *http.Client
 }
 
-// newHTTPSink 构造一个推送 sink。
-func newHTTPSink(base, token string) *httpSink {
-	return &httpSink{
-		base:  strings.TrimSuffix(base, "/"),
-		token: token,
-		client: &http.Client{
-			Timeout: pushTimeout,
-			// **不跟随重定向。** Go 默认会跟，而 https → http 的**同主机**
-			// 降级重定向不会剥掉 Authorization 头 —— 那把 token 于是明文
-			// 发了出去。摄入端点没有任何理由重定向，因此干脆不跟：一次
-			// 意外的重定向要以失败的形态出现，而不是以一次成功但泄漏了
-			// 凭据的推送出现。
-			//
-			// 错误里不带目标地址：那是部署拓扑信息，而这个进程的输出终点
-			// 是被管集群的日志（规范 §19、§22）。
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				return errors.New("the platform answered with a redirect; refusing to follow it")
-			},
-		},
+// tokenReader 现取一把当前的 agent token。
+//
+// **是一个函数，不是一个字符串**：token 会被轮换（吊销一把泄漏的、换一把新
+// 的），而一个在启动时抄下来的字符串要等整个 DaemonSet 重启才换得掉 ——
+// 重启前那个 Pod 一直在用旧 token 推。现取则让轮换在 kubelet 同步完挂载的
+// Secret 之后自然生效，不必重启。
+type tokenReader func() (string, error)
+
+// staticTokenReader 把一个固定的 token 包成 reader。测试与不需要轮换的调用
+// 方用它。
+func staticTokenReader(token string) tokenReader {
+	return func() (string, error) { return token, nil }
+}
+
+// fileTokenReader 每次都从挂载的 Secret 文件现读。
+//
+// kubelet 更新 Secret 挂载是原子的（symlink 换名），读到的永远是完整的旧
+// 值或完整的新值，不会是半截 —— 因此这里不必自己做原子性。空文件报错，
+// 不当成一把空 token 发出去。错误里不带路径（规范 §19、§22）。
+func fileTokenReader(path string) tokenReader {
+	return func() (string, error) {
+		raw, err := os.ReadFile(path) //nolint:gosec // G304: path comes from this process's own flags, not a request.
+		if err != nil {
+			return "", errors.New("the agent token file could not be read")
+		}
+		token := strings.TrimSpace(string(raw))
+		if token == "" {
+			return "", errors.New("the agent token file is empty")
+		}
+		return token, nil
 	}
+}
+
+// newHTTPSink 构造一个用系统根证书、固定 token 的推送 sink。
+//
+// 内部 CA 的部署走 newHTTPSinkWithClient —— 那条路把一个 pin 了 CA 的 client
+// 注进来。默认这条留给公共 CA 与测试。
+func newHTTPSink(base, token string) *httpSink {
+	return newHTTPSinkWithClient(base, token, agentClient(nil))
+}
+
+// newHTTPSinkWithClient 用一个现成的 client、固定 token 构造 sink。
+//
+// client 由 run() 建一次、同时喂给 sink 与配置预检：两条路径带的是同一把
+// token，必须信任同一组 CA、遵守同一条「不跟重定向」。各建各的会让「内部 CA
+// 只配了一半」这种半通半不通的状态成为可能。
+func newHTTPSinkWithClient(base, token string, client *http.Client) *httpSink {
+	return newHTTPSinkReading(base, staticTokenReader(token), client)
+}
+
+// newHTTPSinkReading 用一个现取 token 的 reader 构造 sink。
+//
+// 常驻的 agent 走这条：token 从文件现读，轮换不必重启。
+func newHTTPSinkReading(base string, token tokenReader, client *http.Client) *httpSink {
+	return &httpSink{
+		base:   strings.TrimSuffix(base, "/"),
+		token:  token,
+		client: client,
+	}
+}
+
+// refuseRedirect 是共享 client 的 CheckRedirect。
+//
+// **不跟随重定向。** Go 默认会跟，而 https → http 的**同主机**降级重定向不会
+// 剥掉 Authorization 头 —— 那把 token 于是明文发了出去。平台的两个端点都没有
+// 任何理由重定向，因此干脆不跟：一次意外的重定向要以失败的形态出现，而不是
+// 以一次成功但泄漏了凭据的请求出现。
+//
+// 错误里不带目标地址：那是部署拓扑信息，而这个进程的输出终点是被管集群的
+// 日志（规范 §19、§22）。
+func refuseRedirect(*http.Request, []*http.Request) error {
+	return errors.New("the platform answered with a redirect; refusing to follow it")
+}
+
+// agentClient 建一个 agent 用的 HTTP client。
+//
+// pool 为 nil 时用系统根证书；非 nil 时**只**信任 pool 里的 CA（RootCAs 一旦
+// 设置就替换掉系统根，不是叠加）—— 这正是内部 CA 的部署要的：平台证书由内部
+// CA 签，就该由内部 CA 验，不该因为系统根里恰好有别的东西而放宽。
+//
+// 从 http.DefaultTransport 克隆而不是新建一个空的：那样会丢掉 ProxyFromEnvironment
+// 与各项连接超时，而集群里到平台常要过一个出口代理。MinVersion 明钉 TLS 1.2 ——
+// 与 Go 当前默认一致，写出来是为了它不随某次依赖升级悄悄降下去。
+func agentClient(pool *x509.CertPool) *http.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone() //nolint:errcheck // DefaultTransport is always *http.Transport
+	if pool != nil {
+		tr.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+	}
+	return &http.Client{
+		Timeout:       pushTimeout,
+		Transport:     tr,
+		CheckRedirect: refuseRedirect,
+	}
+}
+
+// loadCAPool 把一份 PEM 证书包读成一个证书池。
+//
+// 空路径返回 (nil, nil)：不 pin，用系统根 —— 多数部署走公共 CA，-ca-file 可选。
+//
+// **认不出任何证书时报错，不静默退回系统根。** 静默退回的后果是运维以为自己
+// 钉了内部 CA、实际走系统根 —— 内部 CA 签的证书于是被拒，而错误看起来像
+// 「网络不通」，查错方向全错。错误里不带路径（规范 §19、§22）。
+func loadCAPool(caFile string) (*x509.CertPool, error) {
+	if caFile == "" {
+		return nil, nil
+	}
+	pemBytes, err := os.ReadFile(caFile) //nolint:gosec // G304: path comes from this process's own flags, not a request.
+	if err != nil {
+		return nil, errors.New("the CA bundle file could not be read")
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pemBytes) {
+		return nil, errors.New("the CA bundle file contained no valid PEM certificate")
+	}
+	return pool, nil
 }
 
 // agentPodPayload 是上报的一个 Pod。
@@ -315,6 +413,14 @@ func (s *httpSink) postTo(ctx context.Context, path string, payload any, what st
 		return fmt.Errorf("encode the %s: %w", what, err)
 	}
 
+	// token 现取，不抄一份：轮换后的下一次上报就该带新 token。读不到就在
+	// 这里失败，绝不带一个空 Authorization 发出去 —— 那会以一次「凭据无效」
+	// 的形态到平台，把「Secret 挂载出了问题」误导成「这把 token 被吊销了」。
+	token, err := s.token()
+	if err != nil {
+		return errors.New("the agent token could not be read")
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		s.base+path, bytes.NewReader(body))
 	if err != nil {
@@ -322,7 +428,7 @@ func (s *httpSink) postTo(ctx context.Context, path string, payload any, what st
 		return errors.New("cannot build the ingest request")
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+s.token)
+	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := s.client.Do(req)
 	if err != nil {

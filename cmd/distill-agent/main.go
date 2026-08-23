@@ -29,6 +29,9 @@ const defaultRunTimeout = 10 * time.Minute
 func main() {
 	platformURL := flag.String("platform-url", "", "base URL of the platform")
 	tokenFile := flag.String("token-file", "", "path to the mounted agent token")
+	caFile := flag.String("ca-file", "",
+		"path to a PEM CA bundle for verifying the platform's TLS certificate; "+
+			"required when the platform cert is signed by an internal CA, empty uses system roots")
 	timeout := flag.Duration("timeout", defaultRunTimeout, "upper bound on one collection run")
 	// 默认关闭。打开它就是让 token 明文过网 —— 只该在本机开发时用。
 	allowPlaintext := flag.Bool("allow-plaintext", false,
@@ -45,20 +48,48 @@ func main() {
 		"namespace holding the leader-election Lease; defaults to this pod's own namespace")
 	leaseName := flag.String("lease-name", defaultLeaseName,
 		"name of the leader-election Lease")
+	heartbeatFile := flag.String("heartbeat-file", "",
+		"path the flow loop touches each round; the liveness probe reads it")
+	// 存活探针模式：读心跳文件、判新鲜、退出 0/1。**不采集、不联网、不需要
+	// token**。做成同一个二进制的一个模式，是因为镜像是 scratch —— 里面没有
+	// shell，exec 探针跑不了脚本，只能再跑一次这个二进制自己。
+	healthcheck := flag.Bool("healthcheck", false,
+		"liveness probe mode: exit 0 if the heartbeat file is fresh, 1 otherwise; needs -heartbeat-file")
+	staleAfter := flag.Duration("stale-after", defaultStaleAfter,
+		"in -healthcheck mode, how old the heartbeat may be before the agent is judged wedged; "+
+			"must exceed flow-every + timeout")
 	flag.Parse()
 
+	// 存活探针在任何采集配置之前就短路：它只读一个本地文件。
+	if *healthcheck {
+		if err := checkHeartbeat(*heartbeatFile, *staleAfter); err != nil {
+			_, _ = os.Stderr.WriteString("liveness: " + err.Error() + "\n")
+			os.Exit(1)
+		}
+		return
+	}
+
 	if err := dispatch(options{
-		platformURL: *platformURL, tokenFile: *tokenFile,
+		platformURL: *platformURL, tokenFile: *tokenFile, caFile: *caFile,
 		allowPlaintext: *allowPlaintext,
 		tablePath:      *tablePath, polls: *polls, pollInterval: *interval,
 		flowEvery: *flowEvery, assetsEvery: *assetsEvery,
 		leaseNamespace: *leaseNamespace, leaseName: *leaseName,
+		heartbeatFile: *heartbeatFile,
 	}, *timeout); err != nil {
 		// 日志器可能尚未构造成功，直接写 stderr。
 		_, _ = os.Stderr.WriteString("agent run failed: " + err.Error() + "\n")
 		os.Exit(1)
 	}
 }
+
+// defaultStaleAfter 是存活探针默认的「多旧算卡死」。
+//
+// 必须宽于 flow-every + timeout：一轮 conntrack 采集最长跑满 timeout（默认
+// 5m），加上轮间等待 flow-every（默认 1m），两次心跳之间最坏 6m。10m 给了
+// 富余，同时仍然远短于「一个真卡死拖着不重启」会造成的盲区。改激进的
+// flow-every / timeout 时要同步调大这个值。
+const defaultStaleAfter = 10 * time.Minute
 
 // dispatch 校验参数并跑一次。
 //

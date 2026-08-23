@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -205,4 +206,123 @@ func TestTheLeaseNamespaceComesFromTheServiceAccountNotTheEnvironment(t *testing
 		t.Errorf("resolveNamespace(\"\") = %q with no error; outside a cluster it must refuse "+
 			"rather than guess, and it must not read POD_NAMESPACE", got)
 	}
+}
+
+// flipLeader 是一个可以中途翻转的 leader 判据。
+type flipLeader struct {
+	v      sync.Mutex
+	leader bool
+}
+
+func (f *flipLeader) is(context.Context) bool { f.v.Lock(); defer f.v.Unlock(); return f.leader }
+func (f *flipLeader) set(b bool)              { f.v.Lock(); f.leader = b; f.v.Unlock() }
+
+// **刚当选的 leader 必须立刻采一次资产，不能空等一整个 assetsEvery。**
+//
+// leader 选举是并发 goroutine：进程刚起来时 leaderFor 还是 false，于是资产
+// 那条循环的立即首轮被跳过，然后 tick 要等满一个间隔才再看一眼。生产
+// assetsEvery=30m —— 首次部署后头 30 分钟没有任何资产，flows 全程答「还没有
+// 可用的采集数据」；leader 中途换手也一样，新 leader 静默空窗最多 30 分钟。
+//
+// 实测复现：worker 13:22:15 抢到租约，首次资产采集 13:24:16 = 正好 +2m。
+//
+// 修法是让「当选」这件事本身触发一次采集，而不是等下一个 tick。changed
+// 通道就是那个信号。
+func TestANewlyElectedLeaderCollectsWithoutWaitingAFullInterval(t *testing.T) {
+	flows, assets := &fakeJob{}, &fakeJob{}
+	gate := &flipLeader{} // 起步不是 leader
+	changed := make(chan struct{}, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := runLoops(ctx, loops{
+		flow:          flows.run,
+		flowEvery:     time.Millisecond,
+		assets:        assets.run,
+		assetsEvery:   time.Hour, // 大到「等一个间隔」等于永远不采
+		leaderFor:     gate.is,
+		leaderChanged: changed,
+		logger:        quietLogger(t),
+	})
+
+	// 还不是 leader：立即首轮必须被跳过，一次都不该采。
+	waitFor(t, "the flow loop to prove the loops are running", func() bool { return flows.count() > 3 })
+	if assets.count() != 0 {
+		t.Fatalf("a non-leader collected assets %d times before winning the election", assets.count())
+	}
+
+	// 当选。信号一到，必须**立刻**采一次，而不是等满一个 assetsEvery（一小时）。
+	gate.set(true)
+	changed <- struct{}{}
+	waitFor(t, "the freshly-elected leader to collect at once", func() bool { return assets.count() == 1 })
+
+	cancel()
+	<-done
+}
+
+// 已经是 leader 时，一次 changed 信号不该再多采一份。
+//
+// 两次相邻的采集会撞 observed_at 主键（实测报过 CodeConcurrentCollection）。
+// 只有 false→true 那一次跳变才触发立即采集，重复的 changed 不触发。
+func TestAChangedSignalWhileAlreadyLeaderDoesNotDoubleCollect(t *testing.T) {
+	flows, assets := &fakeJob{}, &fakeJob{}
+	gate := &flipLeader{leader: true} // 起步就是 leader
+	changed := make(chan struct{}, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := runLoops(ctx, loops{
+		flow:          flows.run,
+		flowEvery:     time.Millisecond,
+		assets:        assets.run,
+		assetsEvery:   time.Hour,
+		leaderFor:     gate.is,
+		leaderChanged: changed,
+		logger:        quietLogger(t),
+	})
+
+	// 立即首轮采一次。
+	waitFor(t, "the immediate first collection", func() bool { return assets.count() == 1 })
+
+	// 再来一个 changed（还是 leader，没有跳变）——不该再采。
+	changed <- struct{}{}
+	waitFor(t, "the flow loop to advance so we know time passed", func() bool { return flows.count() > 5 })
+	if got := assets.count(); got != 1 {
+		t.Errorf("assets collected %d times; a redundant changed signal while already leader "+
+			"must not trigger a second collection (they collide on observed_at)", got)
+	}
+
+	cancel()
+	<-done
+}
+
+// flow 循环每转一圈都打一次心跳；资产循环不打。
+//
+// 心跳要能代表「这个 Pod 的进程还在转」，而资产只有 leader 采 —— 把心跳挂在
+// 资产上，非 leader 的 Pod 会永远显示卡死、被 liveness 反复重启。
+func TestTheFlowLoopBeatsTheHeartbeatButAssetsDoNot(t *testing.T) {
+	flows, assets := &fakeJob{}, &fakeJob{}
+	var beats atomic.Int64
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := runLoops(ctx, loops{
+		flow:          flows.run,
+		flowEvery:     time.Millisecond,
+		assets:        assets.run,
+		assetsEvery:   time.Hour, // 资产基本不转，好证明心跳不是它打的
+		leaderFor:     neverLeader,
+		flowHeartbeat: func() { beats.Add(1) },
+		logger:        quietLogger(t),
+	})
+
+	waitFor(t, "the flow loop to beat several times", func() bool {
+		return beats.Load() > 3 && flows.count() > 3
+	})
+	// 非 leader 一次资产都没采，而心跳照打 —— 证明心跳不依赖资产、不依赖 leader。
+	if assets.count() != 0 {
+		t.Errorf("a non-leader collected assets %d times", assets.count())
+	}
+	cancel()
+	<-done
 }
