@@ -3,7 +3,7 @@ import { api, ApiError } from '../api/client'
 import type { Account } from '../api/types'
 import { useResource } from '../api/useResource'
 import { useSession } from '../auth/SessionContext'
-import { Button, Card, EmptyState, ErrorNotice, Notice, PageHeader, Section, Skeleton, TableCard } from '../components/ui'
+import { Button, Card, Chip, EmptyState, ErrorNotice, Notice, PageHeader, Section, Skeleton, TableCard } from '../components/ui'
 import {
   BOOTSTRAP_LOCKOUT_WARNING, accountStatusLabel, blankNewAccount, blankOwnPassword,
   blankResetPassword, enabledAdmins, previewAccountAction, resolveNewAccount, resolveOwnPassword,
@@ -153,9 +153,17 @@ function AccountListSection({ me, accounts, error, loading, onChanged }: {
                       <span className="ml-[6px] text-ink-muted">（你自己）</span>
                     )}
                   </td>
-                  <td>{roleLabel(a.role)}</td>
-                  <td style={{ color: a.disabledAt ? 'var(--text-muted)' : undefined }}>
-                    {accountStatusLabel(a)}
+                  <td>
+                    {/* 管理员用 strong chip 稍微压出分量：这一列一眼要能扫出
+                        谁能改集群、谁只读。文本仍来自 roleLabel（带测试）。 */}
+                    <Chip strong={a.role === 'ADMIN'}>{roleLabel(a.role)}</Chip>
+                  </td>
+                  <td>
+                    <span className="inline-flex items-center gap-[6px]"
+                      style={{ color: a.disabledAt ? 'var(--text-muted)' : undefined }}>
+                      <StatusDot on={!a.disabledAt} />
+                      {accountStatusLabel(a)}
+                    </span>
                   </td>
                   <td className="text-xs">{formatUtcTime(a.createdAt)}</td>
                   <td className="text-xs">{formatUtcTime(a.updatedAt)}</td>
@@ -488,47 +496,137 @@ export function OwnPasswordPage() {
     }
   }
 
+  // 两次新密码的一致性只用来给一个当场的提示，**不替代** resolveOwnPassword：
+  // 提交时仍以那一个纯函数为准（它带测试）。这里只是让人不必等到提交才知道
+  // 自己拼错了第二遍。
+  const bothFilled = values.newPassword !== '' && values.confirm !== ''
+  const matches = values.newPassword === values.confirm
+  // 三个框都非空才让提交。不在这里拦「两次不一致」——那由 resolveOwnPassword
+  // 回一句明确的话，拦在按钮上只会让人对着一个灰按钮猜为什么点不动。
+  const canSubmit = values.currentPassword !== '' && bothFilled && !busy
+
   return (
-    <div>
+    <div className="mx-auto max-w-[540px]">
       <PageHeader
         title="修改密码"
-        description="改的永远是你自己的密码 —— 目标取自服务端的会话，这一页发不出「改别人密码」的请求。必须先输入当前密码：一张被捡到的会话不该能把账号的控制权拿走。"
+        description="改的永远是你自己的密码——目标取自服务端的会话，这一页发不出「改别人密码」的请求。"
       />
-      <Card style={{ padding: 'var(--space-4)', maxWidth: 460 }}>
-        <form onSubmit={submit}>
-          <div className="text-xs text-ink-muted">
-            当前登录身份：{identity?.username ?? '未知'}
+      <Card className="overflow-hidden">
+        {/* 身份条：改的是谁的密码，先说清。会话被捡到时，这一行就是那句
+            「你确定坐在这里的是本人吗」的视觉锚点。 */}
+        <div className="flex items-center gap-3 border-b border-line bg-sunken px-5 py-4">
+          <IdentityGlyph />
+          <div className="min-w-0">
+            <div className="text-xs text-ink-muted">当前登录身份</div>
+            <div className="truncate text-sm font-medium text-ink">
+              {identity?.username ?? '未知'}
+            </div>
           </div>
-          <div className="mt-3">
-            <PasswordField
-              label="当前密码"
-              value={values.currentPassword}
-              autoComplete="current-password"
-              onChange={(v) => setValues((s) => ({ ...s, currentPassword: v }))}
-            />
-            <PasswordField
-              label="新密码"
-              value={values.newPassword}
-              autoComplete="new-password"
-              onChange={(v) => setValues((s) => ({ ...s, newPassword: v }))}
-            />
-            <PasswordField
-              label="再输一次新密码"
-              value={values.confirm}
-              autoComplete="new-password"
-              onChange={(v) => setValues((s) => ({ ...s, confirm: v }))}
-            />
-          </div>
+        </div>
+
+        <form onSubmit={submit} className="px-5 py-5">
+          <PasswordField
+            label="当前密码"
+            value={values.currentPassword}
+            autoComplete="current-password"
+            onChange={(v) => setValues((s) => ({ ...s, currentPassword: v }))}
+          />
+          <PasswordField
+            label="新密码"
+            value={values.newPassword}
+            autoComplete="new-password"
+            onChange={(v) => setValues((s) => ({ ...s, newPassword: v }))}
+          />
+          <PasswordField
+            label="再输一次新密码"
+            value={values.confirm}
+            autoComplete="new-password"
+            onChange={(v) => setValues((s) => ({ ...s, confirm: v }))}
+            hint={bothFilled ? <MatchHint ok={matches} /> : undefined}
+          />
 
           {error && <ErrorNotice>{error}</ErrorNotice>}
           {done && <FormNote>{done}</FormNote>}
 
-          <Button type="submit" disabled={busy} variant="primary" className="mt-3">
+          <Button
+            type="submit"
+            disabled={!canSubmit}
+            variant="primary"
+            className="mt-4 w-full justify-center"
+          >
             {busy ? '提交中…' : '修改密码'}
           </Button>
         </form>
+
+        {/* 安全脚注：把原先挤在标题里的两条保证挪到这里，各带一个字形，
+            读起来是「这一步做了什么、没做什么」，而不是一段免责声明。 */}
+        <div className="border-t border-line px-5 py-4">
+          <SecurityNote>必须先输入当前密码：一张被捡到的会话不该能把账号的控制权拿走。</SecurityNote>
+          <SecurityNote>改完后已经签发的会话不会失效——包括你现在这一张。</SecurityNote>
+        </div>
       </Card>
     </div>
+  )
+}
+
+/**
+ * 账号状态的小圆点。启用中用 allow 绿，已停用用中性灰。
+ *
+ * 只是「状态」列文本旁的一个视觉锚点，不承载任何判定语义 —— 文本（启用中／
+ * 已停用）仍由 accountStatusLabel 给出，圆点脱落也不丢信息。
+ */
+function StatusDot({ on }: { on: boolean }) {
+  return (
+    <span
+      className="inline-block h-[7px] w-[7px] shrink-0 rounded-full"
+      style={{ background: on ? 'var(--verdict-allow)' : 'var(--border-strong)' }}
+      aria-hidden
+    />
+  )
+}
+
+/** 身份条左侧的字形：一把钥匙，指向「这是谁的凭据」。 */
+function IdentityGlyph() {
+  return (
+    <span
+      className="flex h-9 w-9 shrink-0 items-center justify-center rounded-chip border border-line bg-surface text-ink-muted"
+      aria-hidden
+    >
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+        strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="8" cy="15" r="4" />
+        <path d="M10.85 12.15 19 4" />
+        <path d="m18 5 2 2" />
+        <path d="m15 8 2 2" />
+      </svg>
+    </span>
+  )
+}
+
+/** 两次新密码是否一致的当场提示。绿色表示一致，判定红表示不一致。 */
+function MatchHint({ ok }: { ok: boolean }) {
+  const color = ok ? 'var(--verdict-allow)' : 'var(--verdict-deny)'
+  return (
+    <span className="inline-flex items-center gap-1 text-xs" style={{ color }}>
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"
+        strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+        {ok ? <path d="M20 6 9 17l-5-5" /> : <><path d="M18 6 6 18" /><path d="m6 6 12 12" /></>}
+      </svg>
+      {ok ? '两次输入一致' : '两次输入不一致'}
+    </span>
+  )
+}
+
+/** 安全脚注的一行：一个盾牌字形 + 一句话。 */
+function SecurityNote({ children }: { children: ReactNode }) {
+  return (
+    <p className="m-0 flex items-start gap-2 text-xs leading-relaxed text-ink-muted [&+&]:mt-2">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+        strokeLinecap="round" strokeLinejoin="round" className="mt-[2px] shrink-0" aria-hidden>
+        <path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" />
+      </svg>
+      <span>{children}</span>
+    </p>
   )
 }
 
@@ -546,15 +644,20 @@ export function OwnPasswordPage() {
  * 值只活在调用方的组件状态里，提交后当场清空；这里不碰 localStorage、
  * sessionStorage，也不把值放进任何 URL。
  */
-function PasswordField({ label, value, onChange, autoComplete }: {
+function PasswordField({ label, value, onChange, autoComplete, hint }: {
   label: string
   value: string
   onChange: (v: string) => void
   autoComplete: 'current-password' | 'new-password'
+  // hint 是标签右侧的一个当场提示（如两次是否一致）。可选：多数框不需要它。
+  hint?: ReactNode
 }) {
   return (
-    <label className="mb-3 block">
-      <span style={fieldLabelStyle}>{label}</span>
+    <label className="mb-4 block">
+      <span className="mb-1 flex items-center justify-between gap-2">
+        <span style={fieldLabelStyle} className="mb-0">{label}</span>
+        {hint}
+      </span>
       <input
         className="ctl"
         type="password"
