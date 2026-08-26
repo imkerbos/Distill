@@ -110,11 +110,17 @@ func (s stubSource) RuleOverrides(context.Context, string) ([]registry.RuleOverr
 //
 // 两个都登记，是为了让"没有采集"这个答案不可能来自"这个集群没登记"。
 func testSource() stubSource {
+	// **OtherPlanes 显式写 NONE。** 零值是「没查过」，而没查过的集群一律降级
+	// （design doc 2026-08-25 §2.2）—— 那正是这个字段存在的理由。这一组用例
+	// 断言的是 TRUSTED，因此它的前提必须写出来：平台确认过这个集群里没有
+	// 别的策略平面。不写就是在靠一个零值碰巧成立。
 	return stubSource{clusters: []registry.Cluster{
 		{ID: collectedID, DataSource: registry.DataSourceCollected,
-			PodCIDR: "10.4.0.0/14", NodeCIDR: "10.128.0.0/20"},
+			OtherPlanes: registry.PlanesNone,
+			PodCIDR:     "10.4.0.0/14", NodeCIDR: "10.128.0.0/20"},
 		{ID: silentID, DataSource: registry.DataSourceCollected,
-			PodCIDR: "10.6.0.0/14", NodeCIDR: "10.130.0.0/20"},
+			OtherPlanes: registry.PlanesNone,
+			PodCIDR:     "10.6.0.0/14", NodeCIDR: "10.130.0.0/20"},
 	}}
 }
 

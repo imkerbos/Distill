@@ -1,6 +1,9 @@
 package collectstore_test
 
 import (
+	networkingv1 "k8s.io/api/networking/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"context"
 	"database/sql"
 	"database/sql/driver"
@@ -122,6 +125,35 @@ func sourceGuardCases(ctx context.Context, window store.TimeWindow) []sourceGuar
 			}
 			if ok {
 				return "resolved a decision for a cluster declared FIXTURE"
+			}
+			return ""
+		}},
+		{method: "Reconciliation", name: "Reconciliation", refusal: func(r *collectstore.Reader, id string) string {
+			// 一致率同样是一句关于这个集群的断言。一个登记为 FIXTURE 的集群
+			// 在这里答得出数字，就等于拿合成数据回答「你的平台准不准」。
+			if _, err := r.Reconciliation(ctx, id, window); err == nil {
+				return "answered a reconciliation for a cluster declared FIXTURE"
+			}
+			return ""
+		}},
+		{method: "LivePolicies", name: "LivePolicies", refusal: func(r *collectstore.Reader, id string) string {
+			// 「集群里现在有什么策略」同样是一句关于这个集群的断言。一个
+			// 登记为 FIXTURE 的集群在这里答得出东西，就等于拿合成数据回答
+			// 「你的集群里跑着什么」。
+			if _, err := r.LivePolicies(ctx, id); err == nil {
+				return "answered live policies for a cluster declared FIXTURE"
+			}
+			return ""
+		}},
+		{method: "DeletionImpact", name: "DeletionImpact", refusal: func(r *collectstore.Reader, id string) string {
+			// 删除影响同样是一次关于这个集群的结论。一个登记为 FIXTURE 的
+			// 集群在这里答得出数字，就等于拿合成数据回答"删掉它会断多少条"
+			// —— 而那份数字会被拿去批准一次真实的删除。
+			_, err := r.DeletionImpact(ctx, id, window, []networkingv1.NetworkPolicy{{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "payment", Name: "allow-gateway"},
+			}})
+			if err == nil {
+				return "answered a deletion impact for a cluster declared FIXTURE"
 			}
 			return ""
 		}},

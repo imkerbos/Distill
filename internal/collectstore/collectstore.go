@@ -343,10 +343,36 @@ func (r *Reader) latestFlowWindow(ctx context.Context, clusterID string) (flow.W
 // 而"没在看"与"那时什么都没有"必须分开。
 func (r *Reader) assetAnchor(ctx context.Context, clusterID string, at time.Time) (time.Time, error) {
 	var anchor sql.NullTime
+	// **判定必需的那几类资源没采回来的运行，不能当锚点**
+	// （design doc 2026-08-25 §7）。
+	//
+	// 在这条判断之前，锚点只排除 FAILED。于是一次「策略被 403、其余照采」的
+	// 运行会落成 PARTIAL 并被当成事实：策略集读出来是空的，而空策略集在
+	// NetworkPolicy 语义下等于**全部放行** —— 真集群上实测的表现是所有 DENY
+	// 判定凭空消失，且置信度不降级（2026-08-25）。
+	//
+	// 三类都必需，理由各不相同：
+	//   NETWORKPOLICY  少一条 default-deny，判定直接翻转
+	//   NAMESPACE      少了标签，namespaceSelector 命不中，放行被读成拦断
+	//   POD            少了主体，selector 无从判断
+	//
+	// 回退到更早一次完整采集；没有就答 ErrNoCollection。方向是「用旧的完整
+	// 快照、或者答不出」，不是「用新的残缺快照」——后者是这个平台唯一那个
+	// 自信地答错的方向。
 	err := r.db.QueryRowContext(ctx,
-		`SELECT MAX(observed_at) FROM collection_run
-		  WHERE cluster_id = ? AND observed_at <= ? AND status <> ?`,
-		clusterID, at, string(snapshot.RunFailed)).Scan(&anchor)
+		`SELECT MAX(run.observed_at) FROM collection_run AS run
+		  WHERE run.cluster_id = ? AND run.observed_at <= ? AND run.status <> ?
+		    AND NOT EXISTS (
+		          SELECT 1 FROM collection_run_failure AS fail
+		           JOIN collection_run AS peer
+		             ON peer.cluster_id = fail.cluster_id AND peer.run_id = fail.run_id
+		           WHERE peer.cluster_id = run.cluster_id
+		             AND peer.observed_at = run.observed_at
+		             AND fail.resource IN (?, ?, ?))`,
+		clusterID, at, string(snapshot.RunFailed),
+		string(snapshot.ResourceNetworkPolicy),
+		string(snapshot.ResourceNamespace),
+		string(snapshot.ResourcePod)).Scan(&anchor)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("collectstore: read asset anchor: %w", err)
 	}
