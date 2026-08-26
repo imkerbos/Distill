@@ -131,6 +131,17 @@ func ValidateCluster(c Cluster) error {
 	if len(c.NodeAgents) > 0 && c.NoNodeAgentsReason != "" {
 		return invalid("已经登记了节点 agent，就不能同时声明这个集群没有需要放行的节点 agent")
 	}
+	// 业务周期与它的理由必须一起出现（design doc 2026-08-25 §5）。
+	//
+	// 只填时长不填理由：事后没有人答得出「当初凭什么说一周够」。
+	// 只填理由不填时长：门禁拿不到可比的数，那条理由等于没写。
+	if (c.BusinessCycle > 0) != (c.BusinessCycleReason != "") {
+		return invalid("业务周期与它的理由必须同时给出：" +
+			"只给时长，事后答不出当初凭什么这么定；只给理由，门禁拿不到可比的数")
+	}
+	if c.BusinessCycle < 0 {
+		return invalid("业务周期不能是负数")
+	}
 	for i, sc := range c.MetricsScrapers {
 		if err := ValidateMetricsScraper(sc); err != nil {
 			return wrapInvalid(fmt.Sprintf("metricsScrapers[%d] 不合法", i), err)

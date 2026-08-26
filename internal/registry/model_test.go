@@ -182,3 +182,70 @@ func TestDataSourceValidIsClosed(t *testing.T) {
 			"frontend copy and the assembly as well", got)
 	}
 }
+
+// 其它策略平面是三态，且**零值必须是 UNKNOWN**
+// （design doc 2026-08-25 §2.2）。
+//
+// 今天那个 bool 的零值是 false，含义是「不存在其它平面」—— 于是一个装了
+// CiliumNetworkPolicy 或 AdminNetworkPolicy、但没人去勾那个框的集群，
+// 平台会以满置信度回答每一条判定。默认值必须朝"难看但可见"的方向掉。
+func TestOtherPlanesZeroValueIsUnknown(t *testing.T) {
+	// 字符串枚举的零值是空串，因此判据落在 EffectivePlanes 上：**每一个
+	// 消费方都必须经由它取值**，而它对空串的答案必须是 UNKNOWN。
+	var c registry.Cluster
+	if got := c.EffectivePlanes(); got != registry.PlanesUnknown {
+		t.Errorf("零值集群的 EffectivePlanes() = %q, want %q —— 没查过不能等于确认不存在",
+			got, registry.PlanesUnknown)
+	}
+	if !c.EffectivePlanes().Degrades() {
+		t.Error("零值不降级 —— 那正是今天那个 bool 的问题")
+	}
+	// 未登记的取值同样落到 UNKNOWN，而不是被当成 NONE 放行。
+	weird := registry.Cluster{OtherPlanes: registry.PolicyPlanes("whatever")}
+	if got := weird.EffectivePlanes(); got != registry.PlanesUnknown {
+		t.Errorf("未登记取值的 EffectivePlanes() = %q, want %q", got, registry.PlanesUnknown)
+	}
+}
+
+// 三态各自的降级行为。
+func TestOtherPlanesDegradation(t *testing.T) {
+	for _, tc := range []struct {
+		planes   registry.PolicyPlanes
+		degrades bool
+	}{
+		{registry.PlanesNone, false},
+		{registry.PlanesPresent, true},
+		{registry.PlanesUnknown, true},
+	} {
+		if got := tc.planes.Degrades(); got != tc.degrades {
+			t.Errorf("%s.Degrades() = %v, want %v", tc.planes, got, tc.degrades)
+		}
+	}
+}
+
+// 人工登记只能把结论**往降级方向**拨，不能往上拨（design doc §2.3）。
+//
+// 采集测出 NONE、而操作者声明存在，取 PRESENT：他可能知道平台看不见的东西。
+// 反过来采集测出 PRESENT、操作者说没有，仍取 PRESENT —— 一次"我说了算"
+// 的向上覆盖，会让平台把一份不可信的判定标成可信。
+func TestOperatorCanOnlyDegradeThePlaneVerdict(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		detected registry.PolicyPlanes
+		declared bool // 操作者登记的 ccnpPresent
+		want     registry.PolicyPlanes
+	}{
+		{"采集确认没有、也没人声明", registry.PlanesNone, false, registry.PlanesNone},
+		{"采集确认没有、但人声明有", registry.PlanesNone, true, registry.PlanesPresent},
+		{"采集确认有", registry.PlanesPresent, false, registry.PlanesPresent},
+		{"采集查不动、没人声明", registry.PlanesUnknown, false, registry.PlanesUnknown},
+		{"采集查不动、人声明有", registry.PlanesUnknown, true, registry.PlanesPresent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := registry.Cluster{OtherPlanes: tc.detected, CCNPPresent: tc.declared}
+			if got := c.EffectivePlanes(); got != tc.want {
+				t.Errorf("EffectivePlanes() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

@@ -5,6 +5,7 @@
 package registry
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/imkerbos/Distill/internal/snapshot"
@@ -230,6 +231,44 @@ type GitBinding struct {
 	VerifyResult BindingVerifyResult `json:"verifyResult"`
 }
 
+// PolicyPlanes 说的是「这个集群里除了标准 NetworkPolicy 之外，还有没有别的
+// 策略平面」（design doc 2026-08-25 §2）。
+//
+// **三态，不是布尔。** 布尔的零值是「不存在」，于是「没查过」与「确认不存在」
+// 长得一模一样 —— 一个装了 CiliumNetworkPolicy 或 AdminNetworkPolicy 的集群，
+// 只要没人去勾那个框，平台就以满置信度回答每一条判定。而 AdminNetworkPolicy
+// 的优先级**高于** NetworkPolicy，能整体覆盖结论：平台算出的 ALLOW 在那种
+// 集群上可能实际是 DENY。
+type PolicyPlanes string
+
+const (
+	// PlanesUnknown 表示平台没查过、或查不动（无权限、无发现能力、超时）。
+	//
+	// **零值必须是它。** 与 data_source 默认 COLLECTED 是同一条纪律的两面：
+	// 默认值要朝"难看但可见"的方向掉。
+	PlanesUnknown PolicyPlanes = "UNKNOWN"
+	// PlanesNone 表示平台**确认过**：这个集群里没有其它策略平面。
+	PlanesNone PolicyPlanes = "NONE"
+	// PlanesPresent 表示确认存在（Cilium、AdminNetworkPolicy 或其它）。
+	PlanesPresent PolicyPlanes = "PRESENT"
+)
+
+// Degrades 报告这个取值是否应当让判定降级为 DEGRADED。
+//
+// UNKNOWN 与 PRESENT 都降级：前者是"我不知道有没有东西在覆盖我的结论"，
+// 后者是"我知道有"。只有确认过的 NONE 才配得上满置信度。
+func (p PolicyPlanes) Degrades() bool { return p != PlanesNone }
+
+// Valid 报告取值是否已登记。空串按 UNKNOWN 处理，见 EffectivePlanes。
+func (p PolicyPlanes) Valid() bool {
+	switch p {
+	case PlanesUnknown, PlanesNone, PlanesPresent:
+		return true
+	default:
+		return false
+	}
+}
+
 // Cluster 是一个已注册的集群。
 type Cluster struct {
 	// ID 是集群标识，全平台的身份主键。
@@ -240,6 +279,12 @@ type Cluster struct {
 	PodCIDR string `json:"podCidr"`
 	// NodeCIDR 是节点网段，节点级 Baseline 取它。
 	NodeCIDR string `json:"nodeCidr"`
+	// OtherPlanes 是采集测出来的「有没有别的策略平面」，三态
+	// （design doc 2026-08-25 §2）。
+	//
+	// 由采集层写，不由人填：它是一个关于集群的**事实**，而人填的那一份是
+	// CCNPPresent（见下）。两者的合并规则在 EffectivePlanes。
+	OtherPlanes PolicyPlanes `json:"otherPlanes"`
 	// CCNPPresent 表示集群存在 Cilium 策略，判定需降级。
 	CCNPPresent bool `json:"ccnpPresent"`
 	// KubeconfigRef 是 Secret Manager 中该集群 kubeconfig 的引用
@@ -287,6 +332,24 @@ type Cluster struct {
 	// 与 NodeAgents 互斥：同时给出两者是一次自相矛盾的登记，收下之后没有
 	// 任何一屏知道该信哪一半（见 ValidateCluster）。
 	NoNodeAgentsReason string `json:"noNodeAgentsReason,omitempty"`
+	// BusinessCycle 是这个集群看全一轮流量需要多久（design doc 2026-08-25 §5）。
+	//
+	// **由人填，且必须带理由**（同 NoNodeAgentsReason）：平台观测不出"多久算
+	// 一轮"——它只看得见自己看过的那段时间。月结批处理、季度对账、只在故障
+	// 时走的灾备链路，都要靠知道业务的人说出来。
+	//
+	// 零值表示还没有人回答过这个问题。**那比"周期很长"更危险**：写回门禁
+	// 因此拒绝出计划，逼这个判断被显式地做一次，而不是默认放行。
+	// 序列化成**秒**，不直接序列化 time.Duration：后者的 JSON 形态是纳秒，
+	// 界面上会显示成一串十几位的数字，而没有人会想到那是纳秒。
+	BusinessCycle time.Duration `json:"-"`
+	// BusinessCycleReason 是凭什么这么定。
+	//
+	// 存理由而不是只存一个时长：这是一次有后果的判断 —— 定短了，平台会在
+	// 只看过一小段流量时就允许下发一套 default-deny。事后要答得出「当初凭
+	// 什么说一周够」，一个数字答不出来。
+	BusinessCycleReason string `json:"businessCycleReason,omitempty"`
+
 	// MetricsScrapers 是这个集群里的 metrics 抓取端。
 	//
 	// 与 HealthCheckSources 并列、理由同源：它是 METRICS_SCRAPE Baseline
@@ -355,4 +418,36 @@ type PolicyImport struct {
 // 把引导输入与 Git 同步结果显示成同一种东西会高估现状的可信度。
 func (p PolicyImport) VerifiedAgainstGit() bool {
 	return p.Source == SourceGit && p.GitCommitSHA != ""
+}
+
+// EffectivePlanes 合并「采集测出来的」与「操作者登记的」，得到实际用于降级的结论。
+//
+// **人工只能往降级方向拨，不能往上拨**（design doc 2026-08-25 §2.3）：
+// 操作者声明存在，就当存在 —— 他可能知道平台看不见的东西；但他说"没有"
+// 不能把一次采集测出的 PRESENT 或一次查不动的 UNKNOWN 拨成 NONE。
+// 一次"我说了算"的向上覆盖，会让平台把一份不可信的判定标成可信。
+func (c Cluster) EffectivePlanes() PolicyPlanes {
+	if c.CCNPPresent {
+		return PlanesPresent
+	}
+	if !c.OtherPlanes.Valid() {
+		// 空串或未登记取值一律当作没查过。零值走的正是这条。
+		return PlanesUnknown
+	}
+	return c.OtherPlanes
+}
+
+// MarshalJSON 把业务周期以秒输出。
+//
+// 手写这一个方法而不是给整个 Cluster 换一套 DTO：其余字段的 json 标签
+// 已经是对外契约，加一层 DTO 等于把它们全部抄一遍，而抄本会漂移。
+func (c Cluster) MarshalJSON() ([]byte, error) {
+	type alias Cluster // 借别名切断递归
+	return json.Marshal(struct {
+		alias
+		BusinessCycleSeconds int `json:"businessCycleSeconds"`
+	}{
+		alias:                alias(c),
+		BusinessCycleSeconds: int(c.BusinessCycle.Seconds()),
+	})
 }

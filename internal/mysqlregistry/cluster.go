@@ -14,8 +14,9 @@ import (
 // Clusters 返回全部未删除的集群，按 ID 升序。
 func (s *Store) Clusters(ctx context.Context) ([]registry.Cluster, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT cluster_id, display_name, pod_cidr, node_cidr, ccnp_present, onboard_state,
-		        kubeconfig_ref, data_source, no_node_agents_reason
+		`SELECT cluster_id, display_name, pod_cidr, node_cidr, ccnp_present, other_planes,
+		        business_cycle_seconds, business_cycle_reason,
+		        onboard_state, kubeconfig_ref, data_source, no_node_agents_reason
 		   FROM cluster WHERE deleted_at IS NULL ORDER BY cluster_id`)
 	if err != nil {
 		return nil, fmt.Errorf("query clusters: %w", err)
@@ -25,11 +26,14 @@ func (s *Store) Clusters(ctx context.Context) ([]registry.Cluster, error) {
 	var out []registry.Cluster
 	for rows.Next() {
 		var c registry.Cluster
+		var cycleSeconds uint32
 		if err := rows.Scan(&c.ID, &c.DisplayName, &c.PodCIDR, &c.NodeCIDR,
-			&c.CCNPPresent, &c.State, &c.KubeconfigRef, &c.DataSource,
+			&c.CCNPPresent, &c.OtherPlanes, &cycleSeconds, &c.BusinessCycleReason,
+			&c.State, &c.KubeconfigRef, &c.DataSource,
 			&c.NoNodeAgentsReason); err != nil {
 			return nil, fmt.Errorf("scan cluster: %w", err)
 		}
+		c.BusinessCycle = time.Duration(cycleSeconds) * time.Second
 		out = append(out, c)
 	}
 	if err := rows.Err(); err != nil {
@@ -45,19 +49,25 @@ func (s *Store) Clusters(ctx context.Context) ([]registry.Cluster, error) {
 
 // Cluster 按 ID 查一个未删除的集群。
 func (s *Store) Cluster(ctx context.Context, id string) (registry.Cluster, bool, error) {
-	var c registry.Cluster
+	var (
+		c            registry.Cluster
+		cycleSeconds uint32
+	)
 	err := s.db.QueryRowContext(ctx,
-		`SELECT cluster_id, display_name, pod_cidr, node_cidr, ccnp_present, onboard_state,
-		        kubeconfig_ref, data_source, no_node_agents_reason
+		`SELECT cluster_id, display_name, pod_cidr, node_cidr, ccnp_present, other_planes,
+		        business_cycle_seconds, business_cycle_reason,
+		        onboard_state, kubeconfig_ref, data_source, no_node_agents_reason
 		   FROM cluster WHERE cluster_id = ? AND deleted_at IS NULL`, id).
-		Scan(&c.ID, &c.DisplayName, &c.PodCIDR, &c.NodeCIDR, &c.CCNPPresent, &c.State,
-			&c.KubeconfigRef, &c.DataSource, &c.NoNodeAgentsReason)
+		Scan(&c.ID, &c.DisplayName, &c.PodCIDR, &c.NodeCIDR, &c.CCNPPresent, &c.OtherPlanes,
+			&cycleSeconds, &c.BusinessCycleReason,
+			&c.State, &c.KubeconfigRef, &c.DataSource, &c.NoNodeAgentsReason)
 	if errors.Is(err, sql.ErrNoRows) {
 		return registry.Cluster{}, false, nil
 	}
 	if err != nil {
 		return registry.Cluster{}, false, fmt.Errorf("query cluster: %w", err)
 	}
+	c.BusinessCycle = time.Duration(cycleSeconds) * time.Second
 	if err := s.loadChildren(ctx, &c); err != nil {
 		return registry.Cluster{}, false, err
 	}
@@ -190,10 +200,12 @@ func (s *Store) CreateCluster(ctx context.Context, actor registry.Actor, c regis
 			if _, err := tx.ExecContext(ctx,
 				`INSERT INTO cluster
 				   (cluster_id, display_name, pod_cidr, node_cidr, ccnp_present,
+				    business_cycle_seconds, business_cycle_reason,
 				    no_node_agents_reason, onboard_state, kubeconfig_ref,
 				    created_at, updated_at)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				c.ID, c.DisplayName, c.PodCIDR, c.NodeCIDR, c.CCNPPresent,
+				uint32(c.BusinessCycle.Seconds()), c.BusinessCycleReason,
 				c.NoNodeAgentsReason, string(c.State), c.KubeconfigRef, now, now,
 			); err != nil {
 				return writeFailure("insert cluster",
@@ -226,10 +238,12 @@ func (s *Store) UpdateCluster(ctx context.Context, actor registry.Actor, c regis
 		func(tx *sql.Tx) error {
 			res, err := tx.ExecContext(ctx,
 				`UPDATE cluster SET display_name = ?, pod_cidr = ?, node_cidr = ?,
-				        ccnp_present = ?, no_node_agents_reason = ?,
+				        ccnp_present = ?, business_cycle_seconds = ?, business_cycle_reason = ?,
+				        no_node_agents_reason = ?,
 				        onboard_state = ?, kubeconfig_ref = ?, updated_at = ?
 				  WHERE cluster_id = ? AND deleted_at IS NULL`,
 				c.DisplayName, c.PodCIDR, c.NodeCIDR, c.CCNPPresent,
+				uint32(c.BusinessCycle.Seconds()), c.BusinessCycleReason,
 				c.NoNodeAgentsReason, string(c.State), c.KubeconfigRef, s.now(), c.ID,
 			)
 			if err != nil {
@@ -366,4 +380,52 @@ func nullTimeIfNil(t *time.Time) any {
 		return nil
 	}
 	return *t
+}
+
+// SetOtherPlanes 记下一次策略平面探测的结论（design doc 2026-08-25 §2.3）。
+//
+// **与 data_source 同一条纪律：它不在 CreateCluster / UpdateCluster 的 SET
+// 清单里。** 这是一个关于集群的**事实**，由采集层测出来写下，而不是人在页面上
+// 填的 —— 一条能从常规 CRUD 改掉它的路径，等于允许操作者把一份不可信的判定
+// 拨成可信。人能拨的那一份是 ccnp_present，且只能往降级方向拨
+// （registry.Cluster.EffectivePlanes）。
+//
+// 不写审计：这与 SetGitVerifyResult 同类，是采集的产物而不是一次人的动作，
+// 记进审计只会把"谁改了这个集群"淹没在探测流水里。运行记录在采集运行那张表。
+func (s *Store) SetOtherPlanes(
+	ctx context.Context, clusterID string, planes registry.PolicyPlanes,
+) error {
+	if !planes.Valid() {
+		return fmt.Errorf("%w: other planes %q", registry.ErrInvalid, planes)
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE cluster SET other_planes = ? WHERE cluster_id = ? AND deleted_at IS NULL`,
+		string(planes), clusterID)
+	if err != nil {
+		return fmt.Errorf("set other planes: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set other planes: %w", err)
+	}
+	if n > 0 {
+		return nil
+	}
+	// **RowsAffected 为 0 不等于「这个集群不存在」。** MySQL 对一次值没有
+	// 变化的 UPDATE 报 0 行受影响（除非连接开了 CLIENT_FOUND_ROWS），而这个
+	// 写入天生是幂等的：探测结论连续两轮相同是常态。把 0 直接当成 ErrNotFound
+	// 的后果是每一轮采集都记一条"写不下去"的告警，然后没有人再看那类告警。
+	//
+	// 因此这里再问一次行在不在。多一次查询换掉一个只在"值没变"时才出现的
+	// 假错误 —— 而那正是最常见的那种情形（本条由真集群上的一次采集发现）。
+	var exists bool
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM cluster WHERE cluster_id = ? AND deleted_at IS NULL`, clusterID,
+	).Scan(&exists); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return registry.ErrNotFound
+		}
+		return fmt.Errorf("set other planes: %w", err)
+	}
+	return nil
 }

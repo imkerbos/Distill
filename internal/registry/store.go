@@ -94,6 +94,11 @@ type Store interface {
 	// —— 写失败不该拒掉一次合法推送。
 	TouchClusterAgent(ctx context.Context, agentID string, at time.Time) error
 
+	// SetOtherPlanes 记下一次策略平面探测的结论（design doc 2026-08-25 §2.3）。
+	//
+	// 由采集层调用，**不在集群 CRUD 的写路径里**：它是一个关于集群的事实，
+	// 不是一项人填的配置。人能拨的那一份是 CCNPPresent，且只能往降级方向拨。
+	SetOtherPlanes(ctx context.Context, clusterID string, planes PolicyPlanes) error
 	// PolicyImports 返回一个集群下未删除的导入策略。
 	PolicyImports(ctx context.Context, clusterID string) ([]PolicyImport, error)
 	// CreatePolicyImport 记录一条导入，同事务写审计。

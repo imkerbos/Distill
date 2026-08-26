@@ -298,6 +298,11 @@ func TestClusterSurvivesAFullRoundTripThroughMySQL(t *testing.T) {
 	// 列默认值 COLLECTED 上（000014）。它出现在 want 里而不是 sampleCluster
 	// 里，正是因为它是读回来的登记，不是写进去的输入。
 	want.DataSource = registry.DataSourceCollected
+	// 策略平面同理，且方向相反：CreateCluster 不落这一列，新注册的集群一律
+	// 停在列默认值 **UNKNOWN** 上（000021）——「还没查过」而不是「确认没有」。
+	// 这一行是这条纪律在落库层的落点：一个新集群的判定从第一天起就是
+	// DEGRADED，直到采集真的探测过一次（design doc 2026-08-25 §2.2）。
+	want.OtherPlanes = registry.PlanesUnknown
 
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("round-tripped cluster =\n%+v\nwant\n%+v", got, want)
@@ -618,5 +623,36 @@ func TestUpdateClusterReplacesMetricsScrapers(t *testing.T) {
 	got, _, _ := s.Cluster(ctx, c.ID)
 	if len(got.MetricsScrapers) != 0 {
 		t.Errorf("MetricsScrapers = %+v after removing them, want none", got.MetricsScrapers)
+	}
+}
+
+// 探测结论连续两轮相同是常态，因此写入必须幂等（2026-08-25 真集群上发现）。
+//
+// MySQL 对一次值没有变化的 UPDATE 报 0 行受影响。把 0 直接当成「这个集群
+// 不存在」，每一轮采集都会记一条"写不下去"的告警 —— 而没有人会一直看
+// 一类每轮都出现的告警。
+func TestSetOtherPlanesIsIdempotent(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	if err := s.CreateCluster(ctx, registry.Actor{Username: "admin"}, sampleCluster()); err != nil {
+		t.Fatalf("CreateCluster() error = %v", err)
+	}
+
+	for i := range 2 {
+		if err := s.SetOtherPlanes(ctx, "prod-asia-1", registry.PlanesNone); err != nil {
+			t.Fatalf("第 %d 次写入 = %v, want nil", i+1, err)
+		}
+	}
+	got, ok, err := s.Cluster(ctx, "prod-asia-1")
+	if err != nil || !ok {
+		t.Fatalf("Cluster() = %v, %v", ok, err)
+	}
+	if got.OtherPlanes != registry.PlanesNone {
+		t.Errorf("OtherPlanes = %q, want %q", got.OtherPlanes, registry.PlanesNone)
+	}
+	// 不存在的集群仍然要报 ErrNotFound —— 上面那条放宽不能把它一起放过。
+	if err := s.SetOtherPlanes(ctx, "no-such-cluster", registry.PlanesNone); !errors.Is(
+		err, registry.ErrNotFound) {
+		t.Errorf("对不存在的集群写入 = %v, want ErrNotFound", err)
 	}
 }
