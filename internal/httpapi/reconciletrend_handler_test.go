@@ -2,6 +2,7 @@ package httpapi_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"os"
 	"strings"
@@ -37,8 +38,31 @@ func newTrendFixture(t *testing.T, trend httpapi.ReconciliationTrendReader) tren
 	if trend != nil {
 		dep = trend
 	}
-	h, _, cookie := buildTestRouterWithTrend(t, reg, dep)
+	h, _, cookie := buildTestRouterWithTrend(t, reg, dep, nil)
 	return trendFixture{h: h, cookie: cookie}
+}
+
+// newTrendFixtureWithCoverage 是 newTrendFixture 多带一个观测覆盖读取端的版本。
+func newTrendFixtureWithCoverage(
+	t *testing.T, trend httpapi.ReconciliationTrendReader, fi httpapi.FlowIngestReader,
+) trendFixture {
+	t.Helper()
+	reg := newMemRegistry()
+	for _, c := range fixtureClusters() {
+		reg.clusters[c.ID] = c
+	}
+	h, _, cookie := buildTestRouterWithTrend(t, reg, trend, fi)
+	return trendFixture{h: h, cookie: cookie}
+}
+
+// fetchCoverage 取趋势里那一栏观测覆盖；为 null 时返回 nil。
+func fetchCoverage(t *testing.T, f trendFixture) map[string]any {
+	t.Helper()
+	rec := authedGet(t, f.h, f.cookie, trendPath)
+	body := bodyOf(t, rec)
+	data, _ := body["data"].(map[string]any)
+	cov, _ := data["coverage"].(map[string]any)
+	return cov
 }
 
 // fetchTrend 取一次趋势，要求成功，返回点的原始 JSON。
@@ -207,3 +231,79 @@ func TestTrendWithoutAStoreIsNotAnEmptyTrend(t *testing.T) {
 		t.Errorf("code = %v, want 20007（这条读路径没接通）", body["code"])
 	}
 }
+
+// stubCoverage 是趋势那一屏要的观测覆盖。
+type stubCoverage struct {
+	span, covered time.Duration
+	ok            bool
+	err           error
+}
+
+func (s stubCoverage) LatestIngest(
+	context.Context, string,
+) (snapshotstore.IngestSummary, error) {
+	return snapshotstore.IngestSummary{}, nil
+}
+
+func (s stubCoverage) ObservedCoverage(
+	context.Context, string,
+) (time.Duration, time.Duration, bool, error) {
+	return s.span, s.covered, s.ok, s.err
+}
+
+// 观测跨度与实际覆盖必须并列给出，差额单独报。
+//
+// 一个集群 90 天前摄入过一次、之后停了 89 天、今天恢复：只报跨度读起来是
+// "我们看了三个月"。差额就是那段没有任何摄入的时间 —— 它是操作者要看的结论
+// 本身，让界面自己去减会被跳过。
+func TestTrendReportsObservationGaps(t *testing.T) {
+	f := newTrendFixtureWithCoverage(t, &stubTrend{}, stubCoverage{
+		span: 90 * 24 * time.Hour, covered: 2 * time.Minute, ok: true,
+	})
+
+	cov := fetchCoverage(t, f)
+	if cov == nil {
+		t.Fatal("趋势里没有观测覆盖这一栏")
+	}
+	if cov["spanSeconds"].(float64) != (90 * 24 * time.Hour).Seconds() {
+		t.Errorf("spanSeconds = %v", cov["spanSeconds"])
+	}
+	if cov["coveredSeconds"].(float64) != 120 {
+		t.Errorf("coveredSeconds = %v, want 120", cov["coveredSeconds"])
+	}
+	// 差额必须自洽：两个数来自同一次合并。
+	want := (90*24*time.Hour - 2*time.Minute).Seconds()
+	if cov["gapSeconds"].(float64) != want {
+		t.Errorf("gapSeconds = %v, want %v —— 间隙与跨度/覆盖对不上",
+			cov["gapSeconds"], want)
+	}
+}
+
+// 一次成功摄入都没有时，覆盖是 null，**不是三个零**。
+//
+// 0/0/0 读起来是"观测过、但一秒都没覆盖到"，而事实是从没观测过 —— 两者的
+// 处置不同（前者查采集链路，后者去把采集器跑起来）。
+func TestTrendWithoutIngestsReportsNullCoverageNotZero(t *testing.T) {
+	f := newTrendFixtureWithCoverage(t, &stubTrend{}, stubCoverage{ok: false})
+	if cov := fetchCoverage(t, f); cov != nil {
+		t.Errorf("coverage = %v, want null —— 三个零会被读成「观测过但没覆盖到」", cov)
+	}
+}
+
+// 覆盖读失败不拖垮走向：一致率曲线本身仍然读得出来。
+func TestTrendSurvivesACoverageFailure(t *testing.T) {
+	at := time.Date(2026, 8, 26, 10, 0, 0, 0, time.UTC)
+	f := newTrendFixtureWithCoverage(t,
+		&stubTrend{runs: []snapshotstore.ReconciliationRun{trendRun(at, 9, 1, 0, 0, true)}},
+		stubCoverage{err: errStubCoverage})
+
+	points := fetchTrend(t, f)
+	if len(points) != 1 {
+		t.Fatalf("覆盖算不出来，把整条走向也拖没了：%v", points)
+	}
+	if cov := fetchCoverage(t, f); cov != nil {
+		t.Errorf("coverage = %v, want null", cov)
+	}
+}
+
+var errStubCoverage = errors.New("stub: coverage unavailable")

@@ -181,6 +181,28 @@ type trendPoint struct {
 	SourceReports bool `json:"sourceReports"`
 }
 
+// observationCoverage 是"这个集群到底被观测了多久"。
+//
+// **跨度与覆盖必须并列**（design doc §5、§6.2a）：一个集群 90 天前摄入过一次、
+// 之后采集器坏了 89 天、今天恢复，跨度是 90 天而真正被观测到的只有两分钟。
+// 只报跨度，读起来是"我们看了三个月"。
+//
+// 这一栏防的是一条**当前正在发生**的静默丢失：Hubble 的事件环形缓冲只保留
+// 最近很短一段（演练集群实测约 107 秒，繁忙集群是个位数秒），采集间隔一旦超过
+// 它，中间那段流量平台永远看不到，而库里没有任何迹象。间隙从相邻摄入窗口之间
+// 算得出来，**不需要问 Hubble**。
+type observationCoverage struct {
+	// SpanSeconds 是最早与最晚一次摄入之间的墙钟跨度。
+	SpanSeconds float64 `json:"spanSeconds"`
+	// CoveredSeconds 是实际被窗口覆盖的时长，重叠与相邻的窗口合并后只算一次。
+	CoveredSeconds float64 `json:"coveredSeconds"`
+	// GapSeconds 是两者之差：这段时间里**没有任何摄入**。
+	//
+	// 单独给出而不是让界面自己减：这个数字是操作者要看的结论本身，
+	// 而一个要读者自己心算的差额会被跳过。
+	GapSeconds float64 `json:"gapSeconds"`
+}
+
 // handleReconciliationTrend 返回一致率的历史走向，最近的在前。
 //
 // **不带时间窗参数**：趋势要回答的是"最近这些轮里在变好还是变坏"，而按窗口
@@ -225,6 +247,36 @@ func handleReconciliationTrend(d Deps) http.HandlerFunc {
 			}
 			points = append(points, p)
 		}
-		response.WriteOK(w, map[string]any{"cluster": clusterID, "points": points})
+		// 观测覆盖与走向同屏：走向回答"算出来的一致率在变好还是变坏"，
+		// 覆盖回答"这些数字背后到底看了多久"。分开两屏，读的人会拿一条
+		// 基于两分钟观测的曲线当成三个月的结论。
+		//
+		// **读不到就给 null，不给零**：零读起来是"一次都没观测过"，而
+		// 那是一句没人算过的话（同 trendPoint.Rate 那条）。
+		out := map[string]any{"cluster": clusterID, "points": points}
+		out["coverage"] = observationCoverageOf(r.Context(), d, clusterID)
+		response.WriteOK(w, out)
+	}
+}
+
+// observationCoverageOf 取这个集群的观测覆盖；取不到时返回 nil。
+//
+// **失败不拖垮趋势**：覆盖是这一屏的补充信息，而一致率走向本身仍然读得出来。
+// 但失败也不能伪造成零 —— 返回 nil，界面据此说"这一栏没算出来"。
+func observationCoverageOf(ctx context.Context, d Deps, clusterID string) *observationCoverage {
+	if d.FlowIngest == nil {
+		return nil
+	}
+	span, covered, ok, err := d.FlowIngest.ObservedCoverage(ctx, clusterID)
+	if err != nil || !ok {
+		// ok 为 false 是"一次成功摄入都没有"。那时跨度与覆盖都无从谈起，
+		// 给 0/0/0 会读成"观测过、但一秒都没覆盖到"，与事实不同。
+		return nil
+	}
+	return &observationCoverage{
+		SpanSeconds:    span.Seconds(),
+		CoveredSeconds: covered.Seconds(),
+		// 相减而不是另算一遍：两个数来自同一次合并，差额才必然自洽。
+		GapSeconds: (span - covered).Seconds(),
 	}
 }

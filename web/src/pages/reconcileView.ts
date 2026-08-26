@@ -1,6 +1,6 @@
 import type {
   ReconcileCounts, ReconcileSubjectCounts,
-  ReconciliationReport, ReconciliationSample, TrendPoint,
+  ObservationCoverage, ReconciliationReport, ReconciliationSample, TrendPoint,
 } from '../api/types'
 
 /**
@@ -310,3 +310,90 @@ export const TREND_HELP =
 /** 一轮都没有时显示的话。 */
 export const TREND_NONE =
   '这个集群还没有对账历史。对账在每次流量摄入之后自动跑，跑过一轮之后这里就会有记录。'
+
+/** 观测覆盖在界面上要显示的东西。 */
+export interface CoverageView {
+  /** 算不算得出来。为 false 时下面几项是占位符。 */
+  available: boolean
+  /** 算不出时的说明；算得出时是空串。 */
+  unavailableReason: string
+  spanText: string
+  coveredText: string
+  gapText: string
+  /**
+   * true 表示间隙已经大到值得去查采集链路。
+   *
+   * 判据是**间隙占了跨度的一半以上**：那时"我们观测了多久"这句话的一半以上
+   * 是空的，而操作者多半以为整段都看着。
+   */
+  alarming: boolean
+  /** alarming 为 true 时该说的那句话；否则是空串。 */
+  alarm: string
+}
+
+/**
+ * 间隙占比超过它就报警。
+ *
+ * **纯展示口径，不解锁也不阻断任何操作**：真正拦人的是写回那道学习期门禁，
+ * 它拿的是覆盖时长与业务周期比（§5）。这里只负责让人在门禁拦他之前就看见。
+ */
+export const ALARMING_GAP_RATIO = 0.5
+
+/**
+ * coverageView 把观测覆盖渲染成一栏。
+ *
+ * 防的是一条**当前正在发生**的静默丢失：Hubble 的事件环形缓冲只保留最近很短
+ * 一段（演练集群实测约 107 秒，繁忙集群是个位数秒），采集间隔一旦超过它，
+ * 中间那段流量平台永远看不到，而库里没有任何迹象（design doc §6.2a）。
+ */
+export function coverageView(c: ObservationCoverage | null | undefined): CoverageView {
+  const empty: CoverageView = {
+    available: false, unavailableReason: '', spanText: '—', coveredText: '—',
+    gapText: '—', alarming: false, alarm: '',
+  }
+  if (c == null) {
+    return {
+      ...empty,
+      unavailableReason:
+        '还算不出这个集群被观测了多久：一次成功的流量摄入都没有。'
+        + '这不是"覆盖为零"——是还没开始。先把采集器跑起来。',
+    }
+  }
+  const ratio = c.spanSeconds > 0 ? c.gapSeconds / c.spanSeconds : 0
+  const alarming = ratio > ALARMING_GAP_RATIO
+  return {
+    available: true, unavailableReason: '',
+    spanText: humanSeconds(c.spanSeconds),
+    coveredText: humanSeconds(c.coveredSeconds),
+    gapText: humanSeconds(c.gapSeconds),
+    alarming,
+    alarm: alarming
+      ? `最早与最晚一次摄入之间跨了 ${humanSeconds(c.spanSeconds)}，`
+        + `而其中只有 ${humanSeconds(c.coveredSeconds)} 真的收到了流量 —— `
+        + '中间存在没有任何摄入的时段。Hubble 的事件缓冲只保留最近很短一段，'
+        + '采集间隔超过它，那段流量就永远看不到了，而库里不会有任何迹象。'
+        + '先查采集链路：光等不会把那一段补回来。'
+      : '',
+  }
+}
+
+/**
+ * humanSeconds 把秒数写成人读得懂的样子。
+ *
+ * 与后端 humanDuration 同一套口径：同一段时长在写回的拒绝理由与这一屏上
+ * 必须是同一种写法，否则操作者会以为是两个不同的数。
+ */
+export function humanSeconds(sec: number): string {
+  if (!Number.isFinite(sec) || sec < 0) return '—'
+  const day = 86400, hour = 3600, minute = 60
+  if (sec >= day) {
+    const days = Math.floor(sec / day)
+    const hours = Math.floor((sec % day) / hour)
+    return hours === 0 ? `${days} 天` : `${days} 天 ${hours} 小时`
+  }
+  if (sec >= hour) {
+    return `${Math.floor(sec / hour)} 小时 ${Math.floor((sec % hour) / minute)} 分`
+  }
+  if (sec >= minute) return `${Math.floor(sec / minute)} 分`
+  return `${Math.round(sec)} 秒`
+}

@@ -2,7 +2,7 @@ import { api } from '../api/client'
 import { UNKNOWN_REASON_LABEL } from '../api/types'
 import { useResource } from '../api/useResource'
 import {
-  reconcileView, SAMPLES_HELP, SAMPLES_NONE,
+  coverageView, reconcileView, SAMPLES_HELP, SAMPLES_NONE,
   TREND_HELP, TREND_NONE, trendRows,
 } from './reconcileView'
 import DataSourceNotice from '../components/DataSourceNotice'
@@ -23,6 +23,7 @@ export default function QualityPage({ cluster }: { cluster: string }) {
   // 而一个没有对账历史的部署仍然要能看到这一窗的一致率。
   const { data: trend } = useResource(cluster, () => api.reconciliationTrend(cluster))
   const trendData = trendRows(trend?.points)
+  const cov = coverageView(trend?.coverage)
 
   // 标题与数据来源一起提到早退分支之前：来源标识必须与内容同屏，包括这一
   // 屏读不到数据的时候——一句"加载失败"同样要说清它说的是哪一种集群
@@ -139,6 +140,35 @@ export default function QualityPage({ cluster }: { cluster: string }) {
               )}
           </div>
         )}
+
+        {/* 观测覆盖排在走向之前：走向上那些数字算在多长的一段观测上，
+            决定了它们值多少。先知道"看了多久"，再读"看出了什么"
+            （design doc §6.2a）。 */}
+        <div className="mt-4">
+          <h3 className="mb-1 text-sm">观测覆盖</h3>
+          {!cov.available
+            ? <p className="mt-0 mb-0 text-xs text-ink-2">{cov.unavailableReason}</p>
+            : (
+              <>
+                <div className="flex gap-4">
+                  <StatTile label="观测跨度" value={cov.spanText} />
+                  <StatTile label="实际观测" value={cov.coveredText} />
+                  {/* 间隙单独成一块，且在显著时上语义色：它是这一栏的结论，
+                      不是一个附注。 */}
+                  <StatTile
+                    label="其中没有摄入"
+                    value={cov.gapText}
+                    tone={cov.alarming ? 'deny' : undefined}
+                  />
+                </div>
+                {cov.alarm !== '' && (
+                  <p role="alert" className="mt-1 mb-0 text-xs" style={{ color: 'var(--verdict-deny)' }}>
+                    {cov.alarm}
+                  </p>
+                )}
+              </>
+            )}
+        </div>
 
         {/* 走向排在最后：先看这一轮怎么样、分歧在谁身上、具体哪几条，
             再看它是在变好还是变坏。绝对值没有行动含义，走向才有。 */}

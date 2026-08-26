@@ -564,6 +564,7 @@ func firstIngestReader(in []httpapi.FlowIngestReader) httpapi.FlowIngestReader {
 // 读路径"的形态，给它一个完整 Reader 会让别的分支意外参与进来。
 func buildTestRouterWithTrend(
 	t *testing.T, reg registry.Store, trend httpapi.ReconciliationTrendReader,
+	fi httpapi.FlowIngestReader,
 ) (http.Handler, *auth.SessionStore, *http.Cookie) {
 	t.Helper()
 	hash, err := bcrypt.GenerateFromPassword([]byte(testPassword), bcrypt.MinCost)
@@ -581,6 +582,9 @@ func buildTestRouterWithTrend(
 		Logger:          logger,
 		Registry:        reg,
 		Reconciliations: trend,
+		// 观测覆盖那一栏走摄入读取端：它读的是 flow_ingest_run，与对账历史
+		// 是两张表，因此两个依赖各给各的。
+		FlowIngest: fi,
 	})
 	login := postJSON(t, h, "/api/v1/sessions", map[string]string{
 		"username": "demo", "password": testPassword,

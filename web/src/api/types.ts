@@ -1077,6 +1077,27 @@ export interface ReconciliationTrend {
   cluster: string
   /** 最近的在前。 */
   points: TrendPoint[]
+  /**
+   * 这个集群到底被观测了多久。
+   *
+   * **为 null 表示算不出来**（一次成功摄入都没有，或读失败），不是三个零 ——
+   * 0/0/0 读起来是"观测过、但一秒都没覆盖到"，而事实可能是从没观测过。
+   */
+  coverage: ObservationCoverage | null
+}
+
+/**
+ * 观测覆盖：跨度、实际覆盖、以及两者之差。
+ *
+ * **跨度与覆盖必须并列**：一个集群 90 天前摄入过一次、之后采集器坏了 89 天、
+ * 今天恢复，跨度是 90 天而真正被观测到的只有两分钟。只报跨度，读起来是
+ * "我们看了三个月"。
+ */
+export interface ObservationCoverage {
+  spanSeconds: number
+  coveredSeconds: number
+  /** 这段时间里**没有任何摄入**。让界面自己去减会被跳过。 */
+  gapSeconds: number
 }
 
 /** 趋势上的一个点。 */

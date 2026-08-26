@@ -4,6 +4,7 @@ import test from 'node:test'
 
 import {
   DISAGREEMENT_HELP, MAX_UNDER_PERMISSIVE_RATE,
+  coverageView, humanSeconds,
   MAX_SAMPLES_PER_CLASS, reconcileView, sampleRows, SAMPLES_HELP,
   TREND_HELP, trendRows, type ReconcileView,
 } from '../src/pages/reconcileView.ts'
@@ -316,4 +317,60 @@ test('质量页渲染一致率走向，排在证据之后', () => {
   const trend = PAGE_SOURCE.indexOf('trendData.map')
   assert.ok(trend > 0, '质量页没有渲染一致率走向')
   assert.ok(samples < trend, '走向要排在证据之后：先看这一轮，再看它在变好还是变坏')
+})
+
+// 跨度与实际观测必须并列，差额单独给。
+//
+// 一个集群 90 天前摄入过一次、之后停了 89 天：只报跨度读起来是"我们看了
+// 三个月"，而真正被观测到的只有两分钟。
+test('观测覆盖并列跨度与实际观测', () => {
+  const v = coverageView({
+    spanSeconds: 90 * 86400, coveredSeconds: 120, gapSeconds: 90 * 86400 - 120,
+  })
+  assert.equal(v.available, true)
+  assert.match(v.spanText, /90 天/)
+  assert.equal(v.coveredText, '2 分')
+  assert.equal(v.alarming, true, '间隙占了跨度的绝大部分，必须报警')
+  assert.match(v.alarm, /采集链路/, '要指向该去查的地方，而不是让人干等')
+})
+
+// 连续观测不报警。
+//
+// 没有这一条，一个恒报警的实现照样能让上面那条通过，而那等于把这个信号
+// 变成永远为真、因而没有信息的一句话。
+test('连续观测不报警', () => {
+  const v = coverageView({ spanSeconds: 7 * 86400, coveredSeconds: 7 * 86400, gapSeconds: 0 })
+  assert.equal(v.alarming, false)
+  assert.equal(v.alarm, '')
+  assert.equal(v.gapText, '0 秒')
+})
+
+// **一次成功摄入都没有时是 null，不是三个零。**
+//
+// 0/0/0 读起来是"观测过、但一秒都没覆盖到"，而事实是还没开始 —— 前者查
+// 采集链路，后者去把采集器跑起来。
+test('没有摄入时说清是还没开始', () => {
+  const v = coverageView(null)
+  assert.equal(v.available, false)
+  assert.match(v.unavailableReason, /还没开始/)
+  assert.equal(v.gapText, '—', '算不出时不能显示成 0')
+})
+
+// 时长写法与后端 humanDuration 一致：同一段时长在写回拒绝理由与这一屏上
+// 必须是同一种写法，否则会被读成两个不同的数。
+test('时长写法可读且与后端同口径', () => {
+  assert.equal(humanSeconds(7 * 86400), '7 天')
+  assert.equal(humanSeconds(86400 + 3600 * 5), '1 天 5 小时')
+  assert.equal(humanSeconds(3600 + 120), '1 小时 2 分')
+  assert.equal(humanSeconds(90), '1 分')
+  assert.equal(humanSeconds(30), '30 秒')
+  assert.equal(humanSeconds(-1), '—', '负数是数据有问题，不能显示成一个时长')
+})
+
+// 观测覆盖要排在走向之前：先知道看了多久，再读看出了什么。
+test('质量页把观测覆盖排在走向之前', () => {
+  const coverage = PAGE_SOURCE.indexOf('观测覆盖')
+  const trend = PAGE_SOURCE.indexOf('一致率走向')
+  assert.ok(coverage > 0, '质量页没有渲染观测覆盖')
+  assert.ok(coverage < trend, '覆盖要排在走向之前：那些数字算在多长的观测上决定了它们值多少')
 })
