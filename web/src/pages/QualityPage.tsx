@@ -1,7 +1,7 @@
 import { api } from '../api/client'
 import { UNKNOWN_REASON_LABEL } from '../api/types'
 import { useResource } from '../api/useResource'
-import { reconcileView } from './reconcileView'
+import { reconcileView, SAMPLES_HELP, SAMPLES_NONE } from './reconcileView'
 import DataSourceNotice from '../components/DataSourceNotice'
 import { EmptyState, PageHeader, Section, Skeleton, StatTile, TableCard } from '../components/ui'
 
@@ -96,6 +96,40 @@ export default function QualityPage({ cluster }: { cluster: string }) {
               ))}
               </tbody>
             </table>
+          </div>
+        )}
+
+        {/* 证据紧跟主体表：上面那张表回答"谁对不上、多少"，这里回答
+            "具体是哪几条"。分开放会让操作者拿着一个比率无从下一步，而门禁
+            正是按那个比率拦人的。 */}
+        {rv.available && (
+          <div className="mt-4">
+            <h3 className="mb-1 text-sm">分歧证据</h3>
+            {rv.samples.length === 0
+              ? <p className="mt-0 mb-0 text-xs text-ink-2">{SAMPLES_NONE}</p>
+              : (
+                <>
+                  <table className="dt">
+                    <thead>
+                      <tr><th>主体</th><th>方向</th><th>连接</th><th>发生时刻</th></tr>
+                    </thead>
+                    <tbody>
+                      {rv.samples.map((row, i) => (
+                        <tr
+                          key={`${row.subject}/${row.connection}/${i}`}
+                          style={{ color: row.blocking ? 'var(--verdict-deny)' : undefined }}
+                        >
+                          <td>{row.subject}</td>
+                          <td>{row.classLabel}</td>
+                          <td className="mono">{row.connection}</td>
+                          <td>{row.atText}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <p className="mt-1 mb-0 text-xs text-ink-2">{SAMPLES_HELP}</p>
+                </>
+              )}
           </div>
         )}
       </Section>

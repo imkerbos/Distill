@@ -573,11 +573,17 @@ func (r *Reader) Reconciliation(
 			Subject:  store.SubjectOfEndpoint(a.flow.Source),
 			Platform: a.decision.Verdict,
 			Observed: v, Reported: ok,
+			// 连接本身带上：分歧被抽成样本时要拿它渲染证据。带的是**这一次
+			// 求值用的那条流量**，不是回头再查一次 —— 窗口边界一漂，二次查询
+			// 拿到的就是另一批连接。
+			Flow: a.flow,
 		})
 	}
+	rep := reconcile.Run(obs)
 	return store.ReconciliationReport{
 		Cluster: clusterID, Window: window,
 		SourceReportsVerdicts: reported,
-		Report:                reconcile.Run(obs),
+		Report:                rep,
+		Samples:               store.ReconciliationSamplesOf(rep.Samples),
 	}, nil
 }

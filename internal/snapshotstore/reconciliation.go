@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/imkerbos/Distill/internal/reconcile"
+	"github.com/imkerbos/Distill/internal/replay"
 )
 
 // maxReconciliationSubjects 是一次对账允许落库的主体数上限。
@@ -87,7 +88,75 @@ func (s *Store) SaveReconciliation(ctx context.Context, run ReconciliationRun) (
 			return fmt.Errorf("snapshotstore: insert reconciliation subject: %w", err)
 		}
 	}
+
+	// 样本与计数同一个事务：一份有比率却没有证据的记录，正是这张表要消除的
+	// 那种状态。条数上限由 reconcile.MaxSamplesPerClass 与主体数共同封顶，
+	// 主体数上面已经拦过，因此这里不再单独设限。
+	//
+	// seq 由本地计数给出，不用连接内容做键：同一条连接在一个窗口里可能出现
+	// 多次，而"同一个端口反复出现"恰恰是最要紧的那个信号，用五元组做键会把
+	// 它折叠掉。
+	seq := map[string]int{}
+	for _, smp := range run.Report.Samples {
+		k := smp.Subject.Namespace + "\x00" + smp.Subject.Workload + "\x00" + string(smp.Class)
+		if _, err = tx.ExecContext(ctx,
+			`INSERT INTO reconciliation_sample
+			   (cluster_id, run_id, namespace, workload, class, seq,
+			    src_ip, dst_ip, protocol, dst_port, occurred_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			run.ClusterID, run.RunID, smp.Subject.Namespace, smp.Subject.Workload,
+			string(smp.Class), seq[k],
+			smp.Flow.Source.IP, smp.Flow.Dest.IP, string(smp.Flow.Protocol),
+			smp.Flow.Port, smp.Flow.Timestamp.UTC(),
+		); err != nil {
+			return fmt.Errorf("snapshotstore: insert reconciliation sample: %w", err)
+		}
+		seq[k]++
+	}
 	return tx.Commit()
+}
+
+// ReconciliationSamples 读回一次对账留下的分歧样本。
+//
+// 按 (class, namespace, workload, seq) 排序，与 reconcile.Run 的输出次序同源：
+// UNDER_PERMISSIVE 排在前面 —— 它是唯一能造成生产阻断的那一类，而翻页翻不到
+// 的证据等于没有。
+func (s *Store) ReconciliationSamples(
+	ctx context.Context, clusterID, runID string,
+) ([]reconcile.Sample, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT namespace, workload, class, src_ip, dst_ip, protocol, dst_port, occurred_at
+		   FROM reconciliation_sample
+		  WHERE cluster_id = ? AND run_id = ?
+		  ORDER BY class = ? DESC, namespace, workload, seq`,
+		clusterID, runID, string(reconcile.ClassUnderPermissive))
+	if err != nil {
+		return nil, fmt.Errorf("snapshotstore: read reconciliation samples: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []reconcile.Sample
+	for rows.Next() {
+		var (
+			smp      reconcile.Sample
+			class    string
+			protocol string
+		)
+		if err := rows.Scan(
+			&smp.Subject.Namespace, &smp.Subject.Workload, &class,
+			&smp.Flow.Source.IP, &smp.Flow.Dest.IP, &protocol,
+			&smp.Flow.Port, &smp.Flow.Timestamp,
+		); err != nil {
+			return nil, fmt.Errorf("snapshotstore: scan reconciliation sample: %w", err)
+		}
+		smp.Class = reconcile.Class(class)
+		smp.Flow.Protocol = replay.Protocol(protocol)
+		out = append(out, smp)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("snapshotstore: iterate reconciliation samples: %w", err)
+	}
+	return out, nil
 }
 
 // ReconciliationTrend 是一致率随时间的走向，最近的在前。

@@ -7,6 +7,7 @@ import (
 
 	"github.com/imkerbos/Distill/internal/flow"
 	"github.com/imkerbos/Distill/internal/reconcile"
+	"github.com/imkerbos/Distill/internal/replay"
 	"github.com/imkerbos/Distill/internal/snapshotstore"
 )
 
@@ -190,5 +191,64 @@ func TestObservedCoverageIgnoresFailedIngests(t *testing.T) {
 	}
 	if covered != time.Minute {
 		t.Errorf("covered = %v, want 1 分钟 —— 失败的那次被算进了覆盖", covered)
+	}
+}
+
+// 分歧样本与计数落在同一个事务里，且读得回来。
+//
+// 一份有比率却没有证据的记录，正是样本表要消除的那种状态：门禁按比率拦人，
+// 而操作者拿着一个比率无从判断平台漏了什么。
+func TestReconciliationSamplesArePersistedWithTheCounts(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	at := time.Date(2026, 8, 26, 10, 0, 0, 0, time.UTC)
+	subject := reconcile.Subject{Namespace: "payment", Workload: "api"}
+
+	run := snapshotstore.ReconciliationRun{
+		ClusterID: clusterA, RunID: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeee1",
+		WindowFrom: at, WindowTo: at.Add(time.Minute), ComputedAt: at,
+		SourceReports: true,
+		Report: reconcile.Report{
+			Total:   2,
+			Overall: reconcile.Counts{reconcile.ClassUnderPermissive: 2},
+			BySubject: []reconcile.SubjectCounts{{
+				Subject: subject,
+				Counts:  reconcile.Counts{reconcile.ClassUnderPermissive: 2},
+			}},
+			Samples: []reconcile.Sample{
+				{Subject: subject, Class: reconcile.ClassUnderPermissive, Flow: replay.Flow{
+					Source: replay.Endpoint{IP: "10.0.0.1"}, Dest: replay.Endpoint{IP: "10.0.0.9"},
+					Protocol: replay.ProtocolTCP, Port: 5432, Timestamp: at,
+				}},
+				// 同一条连接在一个窗口里出现两次是正常的，而"同一个端口反复
+				// 出现"恰恰是最要紧的信号 —— 两条都必须留下来，不能被折叠。
+				{Subject: subject, Class: reconcile.ClassUnderPermissive, Flow: replay.Flow{
+					Source: replay.Endpoint{IP: "10.0.0.1"}, Dest: replay.Endpoint{IP: "10.0.0.9"},
+					Protocol: replay.ProtocolTCP, Port: 5432, Timestamp: at,
+				}},
+			},
+		},
+	}
+	if err := s.SaveReconciliation(ctx, run); err != nil {
+		t.Fatalf("SaveReconciliation() = %v", err)
+	}
+
+	got, err := s.ReconciliationSamples(ctx, clusterA, run.RunID)
+	if err != nil {
+		t.Fatalf("ReconciliationSamples() = %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("拿到 %d 条样本, want 2 —— 同一条连接的两次出现被折叠掉了: %+v", len(got), got)
+	}
+	if got[0].Subject != subject || got[0].Class != reconcile.ClassUnderPermissive {
+		t.Errorf("样本挂错了主体或类别：%+v", got[0])
+	}
+	if got[0].Flow.Port != 5432 || got[0].Flow.Dest.IP != "10.0.0.9" {
+		t.Errorf("样本没带回可下钻的内容：%+v", got[0].Flow)
+	}
+	if !got[0].Flow.Timestamp.Equal(at) {
+		t.Errorf("Timestamp = %v, want %v —— 存的必须是连接发生的时刻，"+
+			"不是记录写入的时刻，否则下钻会对齐到错误的那份 Pod 名册",
+			got[0].Flow.Timestamp, at)
 	}
 }

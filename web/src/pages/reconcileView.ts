@@ -1,5 +1,6 @@
 import type {
-  ReconcileCounts, ReconcileSubjectCounts, ReconciliationReport,
+  ReconcileCounts, ReconcileSubjectCounts,
+  ReconciliationReport, ReconciliationSample,
 } from '../api/types'
 
 /**
@@ -58,6 +59,22 @@ export interface ReconcileView {
   over: DirectionView
   /** 按主体的明细，会被门禁拦的排在最前。 */
   subjects: SubjectRow[]
+  /** 分歧证据的抽样，后端已按能造成阻断的那一类在前排好。 */
+  samples: SampleRow[]
+}
+
+/** 一条分歧证据在界面上要显示的东西。 */
+export interface SampleRow {
+  /** 主体的写法，与 SubjectRow.label 同源 —— 两处不同会让人对不上号。 */
+  subject: string
+  /** 方向标签：能造成阻断的那一类要一眼可辨。 */
+  classLabel: string
+  /** true 表示这一条属于会造成阻断的那一类，界面据此上语义色。 */
+  blocking: boolean
+  /** 形如 `shop/web-1 -> payment/api-1  TCP/8080`。 */
+  connection: string
+  /** 连接发生的时刻，本地时间；不合法时原样回显。 */
+  atText: string
 }
 
 /** comparableOf 是一致率的分母：只含可比对的那三类，与后端同一口径。 */
@@ -77,7 +94,7 @@ export function reconcileView(r: ReconciliationReport | null): ReconcileView {
     comparable: 0, platformUnknown: 0,
     under: { count: 0, help: DISAGREEMENT_HELP.under, tone: 'danger' },
     over: { count: 0, help: DISAGREEMENT_HELP.over, tone: 'warn' },
-    subjects: [],
+    subjects: [], samples: [],
   }
   if (r === null) return empty
 
@@ -114,8 +131,66 @@ export function reconcileView(r: ReconciliationReport | null): ReconcileView {
     comparable, platformUnknown: c.PLATFORM_UNKNOWN,
     under, over,
     subjects: subjectRows(r.report.bySubject),
+    samples: sampleRows(r.samples),
   }
 }
+
+/**
+ * sampleRows 把分歧证据排成一张表。
+ *
+ * **后端已经按"能造成阻断的那一类在前"排好了，这里不重排**：一份在两处各排
+ * 一次的清单迟早会有两种次序，而操作者拿着界面上的第 3 条去对后端日志时，
+ * 对不上号比排序不好看严重得多。
+ */
+export function sampleRows(samples: readonly ReconciliationSample[] | null): SampleRow[] {
+  return (samples ?? []).map(s => ({
+    subject: s.subject.workload === ''
+      ? `${s.subject.namespace}/（这些 Pod 没有 workload 归属标签）`
+      : `${s.subject.namespace}/${s.subject.workload}`,
+    classLabel: s.class === 'DISAGREE_UNDER_PERMISSIVE'
+      ? '平台判 DENY、集群放行'
+      : '平台判 ALLOW、集群拦下',
+    blocking: s.class === 'DISAGREE_UNDER_PERMISSIVE',
+    connection: `${s.source} → ${s.dest}  ${s.protocol}/${s.port}`,
+    atText: sampleTime(s.at),
+  }))
+}
+
+/**
+ * sampleTime 渲染连接发生的时刻。
+ *
+ * 不合法时原样回显而不是显示 `Invalid Date`：前者读起来是"这条数据有问题"，
+ * 后者读起来是"界面坏了"，而排查方向不同（同 formatCollectedAt）。
+ */
+function sampleTime(iso: string): string {
+  const t = new Date(iso)
+  return Number.isNaN(t.getTime()) ? iso : t.toLocaleString()
+}
+
+/**
+ * MAX_SAMPLES_PER_CLASS 与后端 reconcile.MaxSamplesPerClass 是同一个数。
+ *
+ * 界面上说"至多留 N 条"，那个 N 必须就是后端真的留下的条数 —— 两个数一旦
+ * 分家，读的人会以为自己看到的是全部（同 MAX_UNDER_PERMISSIVE_RATE）。
+ */
+export const MAX_SAMPLES_PER_CLASS = 5
+
+/**
+ * 样本区块的说明。
+ *
+ * 必须说清**为什么只有几条**：一个只列了 5 条的清单，读的人会以为分歧只有
+ * 5 条，而它其实是抽样 —— 真实条数在上面的计数里。
+ */
+export const SAMPLES_HELP =
+  `这里是抽样，不是全部：每个 workload 每个方向至多留 ${MAX_SAMPLES_PER_CLASS} 条，`
+  + '真实条数看上面的计数。取的是窗口里最早的几条，因此同一份报告反复打开是一样的。'
+  + '要判断平台漏了什么，先看这些连接的对端与端口有没有共同点 —— '
+  + '集中在少数几个端口，多半是某条策略被平台看不见的平面放行了。'
+
+/** 一条样本都没有时显示的话。空区块读起来像"这一栏坏了"，而它是一条结论。 */
+export const SAMPLES_NONE =
+  '没有分歧证据：这段窗口里平台判定与集群实际执行没有对不上的连接。'
+
 
 /**
  * subjectRows 把按主体的计数排成一张表，**会被门禁拦的排在最前**。

@@ -643,6 +643,60 @@ type ReconciliationReport struct {
 	SourceReportsVerdicts bool `json:"sourceReportsVerdicts"`
 	// Report 是分类计数与按 workload 的聚合。
 	Report reconcile.Report `json:"report"`
+	// Samples 是两类分歧的抽样证据，渲染成可读形式。
+	//
+	// **与 reconcile.Sample 分开**：那个类型带的是 replay.Flow，而 k8s 与
+	// 引擎的内部结构一旦进了响应体，界面就得自己解释端点语义 —— 与
+	// policygen.Rule 只出 Peers/Ports 视图是同一条纪律。
+	//
+	// 门禁按分歧率拦人，而一个只有比率的界面给不出下一步：操作者要看的是
+	// 哪几条连接对不上，才能判断平台漏了什么（多半是它不解释的另一个策略
+	// 平面）。
+	Samples []ReconciliationSample `json:"samples"`
+}
+
+// ReconciliationSample 是一条分歧证据的展示视图。
+type ReconciliationSample struct {
+	Subject reconcile.Subject `json:"subject"`
+	Class   reconcile.Class   `json:"class"`
+	// Source 与 Dest 是渲染好的端点：解析得出身份时是 namespace/name，
+	// 否则是 IP。
+	//
+	// **两者必须可区分**：一条对端是 IP 的分歧，与一条对端是具体 Pod 的
+	// 分歧，排查方向完全不同 —— 前者多半是外部地址或身份解析没跟上，
+	// 后者才是策略语义的问题。
+	Source string `json:"source"`
+	Dest   string `json:"dest"`
+	// Port 与 Protocol 形如 5432、TCP。
+	Port     int32  `json:"port"`
+	Protocol string `json:"protocol"`
+	// At 是**连接发生的时刻**，不是记录写入的时刻：下钻要按它去对齐历史
+	// 快照，用写入时刻会把人带到错误的那一份 Pod 名册上。
+	At time.Time `json:"at"`
+}
+
+// ReconciliationSamplesOf 把纯包给出的样本渲染成展示视图。
+//
+// 一处渲染，两个 Reader 共用：两边各写一遍，同一条分歧在采集集群与演示
+// 集群上会有两种写法，而读的人无从知道哪一种是真的。
+func ReconciliationSamplesOf(samples []reconcile.Sample) []ReconciliationSample {
+	out := make([]ReconciliationSample, 0, len(samples))
+	for _, s := range samples {
+		out = append(out, ReconciliationSample{
+			Subject: s.Subject,
+			Class:   s.Class,
+			// 复用流量列表那一个渲染（fixturestore.endpointLabel）：同一个
+			// 端点在两屏上必须是同一种写法，各写一份迟早会分家，而读的人
+			// 无从知道哪一种是真的。身份解析不出来时它回落到 IP —— 那不是
+			// 留空，"这一端没认出是谁"本身就是排查线索。
+			Source:   endpointLabel(s.Flow.Source),
+			Dest:     endpointLabel(s.Flow.Dest),
+			Port:     s.Flow.Port,
+			Protocol: string(s.Flow.Protocol),
+			At:       s.Flow.Timestamp.UTC(),
+		})
+	}
+	return out
 }
 
 // Reconciliation 对合成数据集答「对不了账」。
@@ -668,10 +722,14 @@ func (r *FixtureReader) Reconciliation(
 			Reported: false,
 		})
 	}
+	rep := reconcile.Run(obs)
 	return ReconciliationReport{
 		Cluster: clusterID, Window: window,
 		SourceReportsVerdicts: false,
-		Report:                reconcile.Run(obs),
+		Report:                rep,
+		// 恒为空数组，不是 null：合成数据集对不了账，因此不会有分歧，
+		// 而"没有分歧证据"与"这一栏没人算过"在界面上必须能分开。
+		Samples: ReconciliationSamplesOf(rep.Samples),
 	}, nil
 }
 

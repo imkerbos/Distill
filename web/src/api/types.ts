@@ -1037,6 +1037,35 @@ export interface ReconciliationReport {
     overall: ReconcileCounts
     bySubject: ReconcileSubjectCounts[]
   }
+  /**
+   * 两类分歧的抽样证据，每 (主体, 类别) 至多 5 条。
+   *
+   * **门禁按分歧率拦人，而一个只有比率的界面给不出下一步。** 操作者要看的
+   * 是哪几条连接对不上，才能判断平台漏了什么（多半是它不解释的另一个策略
+   * 平面）。没有它，那道门只能拦住人，不能告诉他怎么办。
+   *
+   * 恒为数组：合成数据集对不了账，因此没有分歧，那时是空数组而不是 null ——
+   * "没有分歧证据"与"这一栏没人算过"必须能分开。
+   */
+  samples: ReconciliationSample[]
+}
+
+/** 一条分歧证据。 */
+export interface ReconciliationSample {
+  subject: ReconcileSubject
+  class: ReconcileClass
+  /**
+   * 渲染好的两端：解析得出身份时是 cluster/namespace/name，否则是 IP。
+   *
+   * **两者必须可区分**：对端是 IP 的分歧与对端是具体 Pod 的分歧，排查方向
+   * 完全不同 —— 前者多半是外部地址或身份没跟上，后者才是策略语义的问题。
+   */
+  source: string
+  dest: string
+  port: number
+  protocol: string
+  /** 连接**发生**的时刻，不是记录写入的时刻：下钻要按它对齐历史快照。 */
+  at: string
 }
 
 /** 一个多余文件的处置分类，对应 registry.DeletionClass。 */

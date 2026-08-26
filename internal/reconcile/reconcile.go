@@ -113,6 +113,12 @@ type Report struct {
 	Overall Counts `json:"overall"`
 	// BySubject 是按主体的分类计数，按 (namespace, workload) 排序。
 	BySubject []SubjectCounts `json:"bySubject"`
+	// Samples 是两类分歧的抽样证据，每 (主体, 类别) 至多 MaxSamplesPerClass 条。
+	//
+	// **只抽分歧。** AGREE 量最大且没有下钻价值；SOURCE_SILENT 与
+	// PLATFORM_UNKNOWN 不是"我们算错了"，前者来源什么都没说，后者平台明说
+	// 不知道。把它们一并存下来，样本表就会按流量规模增长。
+	Samples []Sample `json:"samples"`
 }
 
 // SubjectCounts 是一个主体的对账结果。
@@ -149,6 +155,27 @@ func (c Counts) UnderPermissiveRate() (float64, bool) {
 	return float64(c[ClassUnderPermissive]) / float64(comparable), true
 }
 
+// MaxSamplesPerClass 是每个 (主体, 类别) 保留的分歧样本条数。
+//
+// **不全存**（design doc 2026-08-25 §3.4）：分歧量随流量规模增长，全存会让
+// 账单失控，而这个平台的失控方向是账单不是性能（CLAUDE.md §5）。
+//
+// 五条足以看出模式 —— 同一个端口反复出现、还是散在几十个端口上，是两种完全
+// 不同的排查方向。再多不会让结论更清楚，只会让表更大。
+const MaxSamplesPerClass = 5
+
+// Sample 是一条留下来供下钻的分歧证据。
+//
+// 门禁按分歧率拦人（§3.4），而"payment/api 20%"本身给不出下一步 —— 操作者
+// 要看的是**哪几条连接**对不上，才能判断平台漏了什么（多半是它不解释的另一
+// 个策略平面）。没有样本，那道门只能拦住人，不能告诉他怎么办。
+type Sample struct {
+	Subject Subject `json:"subject"`
+	Class   Class   `json:"class"`
+	// Flow 是那条连接本身：源端、目的端、协议与端口。
+	Flow replay.Flow `json:"-"`
+}
+
 // Observation 是对账的一条输入。
 type Observation struct {
 	// Subject 是这条连接归属的主体，取源端 —— 候选规则按源端 workload 生成，
@@ -159,6 +186,24 @@ type Observation struct {
 	// Observed 与 Reported 是执行平面报的判定，以及它到底报没报。
 	Observed flow.Verdict
 	Reported bool
+	// Flow 是这条连接本身，只在被抽成样本时用到。
+	//
+	// 带在输入上而不是让落库层回头再查一次：对账比较的是**这一次求值**得出
+	// 的判定，而一次二次查询拿到的可能已经是另一批连接（窗口边界一漂就会）。
+	Flow replay.Flow
+}
+
+// sampled 报告这一类是否值得留证据。
+func sampled(c Class) bool {
+	return c == ClassUnderPermissive || c == ClassOverPermissive
+}
+
+// classRank 决定样本的展示次序：能造成阻断的那一类排在最前面。
+func classRank(c Class) int {
+	if c == ClassUnderPermissive {
+		return 0
+	}
+	return 1
 }
 
 // Run 对一批观测做一次对账。
@@ -168,10 +213,28 @@ func Run(in []Observation) Report {
 		rep.Overall[k] = 0
 	}
 	bySubject := map[Subject]Counts{}
+	// 抽样配额按 (主体, 类别) 各算各的：一个分歧极多的 workload 不该把别人的
+	// 名额吃光，而"每个主体都有几条证据"正是按主体排查的前提。
+	type quota struct {
+		Subject
+		Class
+	}
+	taken := map[quota]int{}
+	var samples []Sample
 
 	for _, o := range in {
 		class := Classify(o.Platform, o.Observed, o.Reported)
 		rep.Overall[class]++
+		if sampled(class) {
+			k := quota{o.Subject, class}
+			// 取**前 N 条**，不随机：同一批输入两次跑出的样本必须相同，
+			// 否则一份报告刷新一次就换一批证据，操作者无从核对。偏向窗口
+			// 早期是已知且可预测的偏差，比不可复现的取样有用。
+			if taken[k] < MaxSamplesPerClass {
+				taken[k]++
+				samples = append(samples, Sample{Subject: o.Subject, Class: class, Flow: o.Flow})
+			}
+		}
 		c, ok := bySubject[o.Subject]
 		if !ok {
 			c = Counts{}
@@ -183,12 +246,25 @@ func Run(in []Observation) Report {
 		c[class]++
 	}
 
+	rep.Samples = samples
 	rep.BySubject = make([]SubjectCounts, 0, len(bySubject))
 	for s, c := range bySubject {
 		rep.BySubject = append(rep.BySubject, SubjectCounts{Subject: s, Counts: c})
 	}
 	// 排序输出：这份报告会进指纹之外的很多地方（界面、指标、门禁），
 	// 而一个随 map 遍历顺序变化的清单会让同一批数据每次读起来都不一样。
+	// 样本排序：UNDER_PERMISSIVE 在前 —— 它是唯一能造成生产阻断的那一类，
+	// 而翻页翻不到的证据等于没有。同类内保持输入次序（稳定排序）。
+	sort.SliceStable(rep.Samples, func(i, j int) bool {
+		a, b := rep.Samples[i], rep.Samples[j]
+		if a.Class != b.Class {
+			return classRank(a.Class) < classRank(b.Class)
+		}
+		if a.Subject.Namespace != b.Subject.Namespace {
+			return a.Subject.Namespace < b.Subject.Namespace
+		}
+		return a.Subject.Workload < b.Subject.Workload
+	})
 	sort.Slice(rep.BySubject, func(i, j int) bool {
 		if rep.BySubject[i].Subject.Namespace != rep.BySubject[j].Subject.Namespace {
 			return rep.BySubject[i].Subject.Namespace < rep.BySubject[j].Subject.Namespace

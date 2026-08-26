@@ -50,6 +50,7 @@ var cleanupStatements = []string{
 	// 对账两张表排在最前：reconciliation_subject 有指向 reconciliation_run
 	// 的外键，父表先删会撞外键；而留下来的行会让下一轮同名 run_id 撞主键 ——
 	// 表现是"第一次跑绿、第二次跑红"，最难查的那一类。
+	"DELETE FROM reconciliation_sample",
 	"DELETE FROM rule_evidence",
 	"DELETE FROM reconciliation_subject",
 	"DELETE FROM reconciliation_run",
