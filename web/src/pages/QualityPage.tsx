@@ -1,7 +1,10 @@
 import { api } from '../api/client'
 import { UNKNOWN_REASON_LABEL } from '../api/types'
 import { useResource } from '../api/useResource'
-import { reconcileView, SAMPLES_HELP, SAMPLES_NONE } from './reconcileView'
+import {
+  reconcileView, SAMPLES_HELP, SAMPLES_NONE,
+  TREND_HELP, TREND_NONE, trendRows,
+} from './reconcileView'
 import DataSourceNotice from '../components/DataSourceNotice'
 import { EmptyState, PageHeader, Section, Skeleton, StatTile, TableCard } from '../components/ui'
 
@@ -16,6 +19,10 @@ export default function QualityPage({ cluster }: { cluster: string }) {
   // 对不了账的集群仍然要能看到覆盖率与无法判定比例。
   const { data: rec } = useResource(cluster, () => api.reconciliation(cluster))
   const rv = reconcileView(rec ?? null)
+  // 趋势再单独一次请求：它读的是历史记录，与当前窗口的对账是两条不同的路，
+  // 而一个没有对账历史的部署仍然要能看到这一窗的一致率。
+  const { data: trend } = useResource(cluster, () => api.reconciliationTrend(cluster))
+  const trendData = trendRows(trend?.points)
 
   // 标题与数据来源一起提到早退分支之前：来源标识必须与内容同屏，包括这一
   // 屏读不到数据的时候——一句"加载失败"同样要说清它说的是哪一种集群
@@ -132,6 +139,45 @@ export default function QualityPage({ cluster }: { cluster: string }) {
               )}
           </div>
         )}
+
+        {/* 走向排在最后：先看这一轮怎么样、分歧在谁身上、具体哪几条，
+            再看它是在变好还是变坏。绝对值没有行动含义，走向才有。 */}
+        <div className="mt-4">
+          <h3 className="mb-1 text-sm">一致率走向</h3>
+          {trendData.length === 0
+            ? <p className="mt-0 mb-0 text-xs text-ink-2">{TREND_NONE}</p>
+            : (
+              <>
+                <table className="dt">
+                  <thead>
+                    <tr>
+                      <th>窗口</th><th className="num">一致率</th>
+                      <th className="num">可比对</th><th className="num">低估</th>
+                      <th className="num">高估</th><th>说明</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {trendData.map((row, i) => (
+                      <tr
+                        key={`${row.atText}/${i}`}
+                        style={{ color: row.blocked ? 'var(--verdict-deny)' : undefined }}
+                      >
+                        <td>{row.atText}</td>
+                        {/* 算不出的那几轮显示 '—'：一个 0% 在这一列里读起来
+                            是"那天全错了"，而事实是那天没得比。 */}
+                        <td className="num">{row.rateText}</td>
+                        <td className="num">{row.comparable}</td>
+                        <td className="num">{row.under}</td>
+                        <td className="num">{row.over}</td>
+                        <td className="text-ink-2">{row.missingReason}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <p className="mt-1 mb-0 text-xs text-ink-2">{TREND_HELP}</p>
+              </>
+            )}
+        </div>
       </Section>
 
       <div className="mt-5">

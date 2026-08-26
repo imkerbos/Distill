@@ -137,6 +137,9 @@ func run(configPath string) error {
 		Collection: snapshotstore.New(db),
 		// 流量摄入的只读摘要，与资产采集并列。
 		FlowIngest: snapshotstore.New(db),
+		// 对账历史与摄入摘要同一个库：拆成两个参数只会给装配方一个传进
+		// 两个不同数据库的位置（同 collectstore.New 那条）。
+		Reconciliations: snapshotstore.New(db),
 		// 推送式接入的落库口（design doc 2026-08-18）。
 		//
 		// 这里出现一条写路径，与上面那句「只拿读的那一面」并不矛盾：写进来

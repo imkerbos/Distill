@@ -557,3 +557,37 @@ func firstIngestReader(in []httpapi.FlowIngestReader) httpapi.FlowIngestReader {
 	}
 	return in[0]
 }
+
+// buildTestRouterWithTrend 装一个只带对账历史读取端的路由器。
+//
+// 与 buildTestRouterWithFlowIngest 同形、同理由：趋势用例装配的是"只有这条
+// 读路径"的形态，给它一个完整 Reader 会让别的分支意外参与进来。
+func buildTestRouterWithTrend(
+	t *testing.T, reg registry.Store, trend httpapi.ReconciliationTrendReader,
+) (http.Handler, *auth.SessionStore, *http.Cookie) {
+	t.Helper()
+	hash, err := bcrypt.GenerateFromPassword([]byte(testPassword), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	sessions := auth.NewSessionStore(time.Hour, nil)
+	logger, err := applog.New("ERROR", io.Discard)
+	if err != nil {
+		t.Fatalf("logger: %v", err)
+	}
+	h := httpapi.NewRouter(httpapi.Deps{
+		Sessions:        sessions,
+		Verifier:        auth.NewVerifier(config.User{Username: "demo", PasswordHash: string(hash)}, reg),
+		Logger:          logger,
+		Registry:        reg,
+		Reconciliations: trend,
+	})
+	login := postJSON(t, h, "/api/v1/sessions", map[string]string{
+		"username": "demo", "password": testPassword,
+	})
+	cookies := login.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("login returned no cookie")
+	}
+	return h, sessions, cookies[0]
+}

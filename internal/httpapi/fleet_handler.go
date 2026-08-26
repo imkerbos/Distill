@@ -1,13 +1,17 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/imkerbos/Distill/internal/collectstore"
+	"github.com/imkerbos/Distill/internal/reconcile"
 	"github.com/imkerbos/Distill/internal/response"
+	"github.com/imkerbos/Distill/internal/snapshotstore"
 	"github.com/imkerbos/Distill/internal/store"
 )
 
@@ -130,4 +134,97 @@ func writeReaderError(w http.ResponseWriter, r *http.Request, d Deps, err error)
 		"path", r.URL.Path,
 		"error", err)
 	response.WriteSystem(w, http.StatusInternalServerError, response.CodeInternal)
+}
+
+// ReconciliationTrendReader 读一致率的历史走向。
+//
+// 窄成一个方法而不是让 handler 拿整个 snapshotstore：这条路只需要"把历次
+// 对账按时间取回来"，而那个 Store 还带着全部写方法（同 FlowIngestReader、
+// settings.Provider 的理由）。
+type ReconciliationTrendReader interface {
+	ReconciliationTrend(
+		ctx context.Context, clusterID string, limit int,
+	) ([]snapshotstore.ReconciliationRun, error)
+}
+
+// maxTrendPoints 是趋势一次最多回多少个点。
+//
+// 与存储层的上限同值：两处不一致时，一个"要 200 个点"的请求会拿到 50 个，
+// 而界面上那条线看起来只是短一点，没有任何迹象说明它被截断了。
+const maxTrendPoints = 200
+
+// trendPoint 是趋势上的一个点。
+type trendPoint struct {
+	WindowFrom time.Time `json:"windowFrom"`
+	WindowTo   time.Time `json:"windowTo"`
+	ComputedAt time.Time `json:"computedAt"`
+	// Rate 是这个窗口的一致率；**算不出时为 null，不是 0**。
+	//
+	// 这是这个结构里最要紧的一件事：把"算不出"画成 0，趋势图上就会出现一个
+	// 触底的点，读起来是"那天全错了"，而事实是那天没有可比对的连接（来源
+	// 不报判定，或分母为零）。一条会说谎的曲线比没有曲线更糟。
+	Rate *float64 `json:"rate"`
+	// Comparable 是参与计算的连接数，一致率的分母。
+	//
+	// 必须跟着走：一个基于 3 条连接的 100% 与一个基于 3 万条的 100% 在图上
+	// 是同一个点，而它们的含义差着数量级。
+	Comparable int `json:"comparable"`
+	// Under 与 Over 是两类分歧的条数。
+	Under int `json:"under"`
+	Over  int `json:"over"`
+	// PlatformUnknown 是平台答不出的条数：**不是分歧**，是未覆盖。
+	PlatformUnknown int `json:"platformUnknown"`
+	// SourceReports 表示那次对账的来源到底报不报判定。
+	//
+	// Rate 为 null 时靠它区分两种原因：来源压根不报判定（这条接入方式对不了
+	// 账），还是报了但那个窗口没有可比对的连接。两者的处置完全不同。
+	SourceReports bool `json:"sourceReports"`
+}
+
+// handleReconciliationTrend 返回一致率的历史走向，最近的在前。
+//
+// **不带时间窗参数**：趋势要回答的是"最近这些轮里在变好还是变坏"，而按窗口
+// 筛会让调用方有机会挑一段好看的区间。要看某一个窗口的明细，走
+// /reconciliation 那条路。
+func handleReconciliationTrend(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		clusterID := chi.URLParam(r, "clusterID")
+		// 先确认集群存在：不确认的话，一个拼错的集群名会拿到一份空趋势，
+		// 而空趋势读起来是"这个集群还没对过账"—— 一句没人算过的断言。
+		if !registeredCluster(w, r, d) {
+			return
+		}
+		if d.Reconciliations == nil {
+			// 本部署不记录对账历史。**不是空数组** —— 空数组读起来是
+			// "这个集群还没对过账"，而事实是这里根本没在记；前者会让操作者
+			// 去等一份永远不会出现的趋势。
+			response.WriteBusiness(w, response.CodeReadNotWired)
+			return
+		}
+		runs, err := d.Reconciliations.ReconciliationTrend(r.Context(), clusterID, maxTrendPoints)
+		if err != nil {
+			writeReaderError(w, r, d, err)
+			return
+		}
+		points := make([]trendPoint, 0, len(runs))
+		for _, run := range runs {
+			c := run.Report.Overall
+			p := trendPoint{
+				WindowFrom: run.WindowFrom.UTC(), WindowTo: run.WindowTo.UTC(),
+				ComputedAt:      run.ComputedAt.UTC(),
+				Under:           c[reconcile.ClassUnderPermissive],
+				Over:            c[reconcile.ClassOverPermissive],
+				PlatformUnknown: c[reconcile.ClassPlatformUnknown],
+				SourceReports:   run.SourceReports,
+			}
+			p.Comparable = c[reconcile.ClassAgree] + p.Under + p.Over
+			// 一致率复用纯包那一个定义，不在这里再算一遍：一个每处各算一遍
+			// 的比率迟早会有两个口径，而门禁按其中一个拦人。
+			if rate, ok := c.AgreementRate(); ok {
+				p.Rate = &rate
+			}
+			points = append(points, p)
+		}
+		response.WriteOK(w, map[string]any{"cluster": clusterID, "points": points})
+	}
 }

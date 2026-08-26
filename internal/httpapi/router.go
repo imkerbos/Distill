@@ -84,6 +84,14 @@ type Deps struct {
 	// 各自重试，而一个部署可以只有其中一条。允许为 nil —— nil 表示"本部署
 	// 没有流量读取端"，**不是**"这个集群没有摄入记录"。
 	FlowIngest FlowIngestReader
+	// Reconciliations 读一致率的历史走向（design doc 2026-08-25 §9 第 3 条）。
+	//
+	// 与 Reader.Reconciliation 分开：那个算的是**一个窗口**的对账，现算现出；
+	// 这个读的是历次对账落下来的记录，回答"在变好还是变坏"。一次 97% 无所谓，
+	// 从 100% 掉到 97% 才是信号，而后者只能从历史里看出来。
+	//
+	// 允许为 nil：nil 表示"本部署不记录对账历史"，**不是**"这个集群没有历史"。
+	Reconciliations ReconciliationTrendReader
 	// GitVerifier 对 Git 绑定做只读校验。
 	//
 	// 允许为 nil：未配置 secrets 的部署（比如 demo）不做校验，结论一律是
@@ -332,6 +340,11 @@ func NewRouter(d Deps) http.Handler {
 			// 而一个要另外找地方看的可信度指标等于没有。
 			az.route(protected, http.MethodGet, "/clusters/{clusterID}/reconciliation",
 				accessViewer, handleReconciliation(d))
+			// 趋势与单窗口对账并列：一次 97% 无所谓，从 100% 掉到 97% 才是
+			// 信号，而后者只能从历史里看出来（design doc §9 第 3 条：
+			// "一致率每天可查"）。
+			az.route(protected, http.MethodGet, "/clusters/{clusterID}/reconciliation/trend",
+				accessViewer, handleReconciliationTrend(d))
 			az.route(protected, http.MethodGet, "/clusters/{clusterID}/security",
 				accessViewer, handleSecurity(d))
 			az.route(protected, http.MethodGet, "/clusters/{clusterID}/policy-preview",

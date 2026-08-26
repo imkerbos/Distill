@@ -4,7 +4,8 @@ import type {
   CurrentSession, Decision, Envelope, FlowFilter, FlowPage, GitBindingWrite, IssuedAgentToken,
   GitRepo, GitRepoWrite, Granularity, Identity, ImportRole, ImportSource, IngestSummary, OverrideDecision,
   PathVerifyStatus, PlatformSettingView, PlatformSettingWrite, PolicyImportItem, PolicyPreview,
-  Quality, ReconciliationReport, RegisteredCluster, RepoVerifyStatus, Role, SecurityReport,
+  Quality, ReconciliationReport, ReconciliationTrend,
+  RegisteredCluster, RepoVerifyStatus, Role, SecurityReport,
   Topology, TopologyLevel,
   WritebackPlanResult, WritebackPushResult,
   DriftStatus,
@@ -401,6 +402,16 @@ export const api = {
   reconciliation: (cluster: string) =>
     request<ReconciliationReport>(
       `/api/v1/clusters/${encodeURIComponent(cluster)}/reconciliation`),
+  /**
+   * 一致率的历史走向，最近的在前。
+   *
+   * 与 reconciliation 分成两个调用：那个算的是**一个窗口**的对账，现算现出；
+   * 这个读的是历次对账落下来的记录。一次 97% 无所谓，从 100% 掉到 97% 才是
+   * 信号，而后者只能从历史里看出来。
+   */
+  reconciliationTrend: (cluster: string) =>
+    request<ReconciliationTrend>(
+      `/api/v1/clusters/${encodeURIComponent(cluster)}/reconciliation/trend`),
   security: (cluster: string) =>
     request<SecurityReport>(`/api/v1/clusters/${encodeURIComponent(cluster)}/security`),
 

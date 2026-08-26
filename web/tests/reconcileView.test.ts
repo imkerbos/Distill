@@ -4,9 +4,12 @@ import test from 'node:test'
 
 import {
   DISAGREEMENT_HELP, MAX_UNDER_PERMISSIVE_RATE,
-  MAX_SAMPLES_PER_CLASS, reconcileView, sampleRows, SAMPLES_HELP, type ReconcileView,
+  MAX_SAMPLES_PER_CLASS, reconcileView, sampleRows, SAMPLES_HELP,
+  TREND_HELP, trendRows, type ReconcileView,
 } from '../src/pages/reconcileView.ts'
-import type { ReconciliationReport, ReconciliationSample } from '../src/api/types'
+import type {
+  ReconciliationReport, ReconciliationSample, TrendPoint,
+} from '../src/api/types'
 
 const PAGE_SOURCE = readFileSync(new URL('../src/pages/QualityPage.tsx', import.meta.url), 'utf8')
 
@@ -234,4 +237,83 @@ test('质量页渲染分歧证据，排在主体表之后', () => {
   const samples = PAGE_SOURCE.indexOf('rv.samples.map')
   assert.ok(samples > 0, '质量页没有渲染分歧证据')
   assert.ok(subjects < samples, '证据表要排在主体表之后：先看谁对不上，再看具体哪几条')
+})
+
+function point(opts: Partial<TrendPoint> = {}): TrendPoint {
+  return {
+    windowFrom: '2026-08-26T10:00:00Z',
+    windowTo: '2026-08-26T10:01:00Z',
+    computedAt: '2026-08-26T10:01:00Z',
+    rate: 0.97,
+    comparable: 100,
+    under: 2,
+    over: 1,
+    platformUnknown: 5,
+    sourceReports: true,
+    ...opts,
+  }
+}
+
+// **算不出一致率的那几轮必须画不出柱子，也不显示 0%。**
+//
+// 把"算不出"渲染成 0，那一行读起来是"那天全错了"，而事实是那天没有可比对
+// 的连接。一条会说谎的曲线比没有曲线更糟。
+test('算不出的一致率不渲染成零', () => {
+  const [row] = trendRows([point({ rate: null, comparable: 0, under: 0, over: 0 })])
+  assert.equal(row.rateText, '—')
+  assert.equal(row.bar, null, '算不出时不能给柱高，否则会画出一根贴地的柱子')
+  assert.notEqual(row.missingReason, '', '算不出必须说明为什么')
+})
+
+// 两种"算不出"的原因要分开：处置完全不同。
+test('区分来源不报判定与这一轮没有可比对连接', () => {
+  const [noSource] = trendRows([point({ rate: null, sourceReports: false })])
+  const [noData] = trendRows([point({ rate: null, sourceReports: true })])
+  assert.match(noSource.missingReason, /不报判定/)
+  assert.match(noData.missingReason, /没有既被平台判出结论/)
+  assert.notEqual(noSource.missingReason, noData.missingReason)
+})
+
+// 分母必须跟着走：基于 3 条的 100% 与基于 3 万条的 100% 不是一回事。
+test('每一轮带上分母', () => {
+  const [row] = trendRows([point({ rate: 1, comparable: 3, under: 0, over: 0 })])
+  assert.equal(row.rateText, '100.0%')
+  assert.equal(row.comparable, 3)
+})
+
+// 超过门禁阈值的那几轮要标出来，口径与主体表同一个常量。
+test('低估率超阈的轮次被标出', () => {
+  const [bad] = trendRows([point({ comparable: 100, under: 20 })])
+  const [ok] = trendRows([point({ comparable: 100, under: 1 })])
+  assert.equal(bad.blocked, true)
+  assert.equal(ok.blocked, false)
+})
+
+// 不补齐缺失的时段：补齐要凭空造点，而造出来的点在图上与真实观测长得一样。
+test('不补齐缺失时段', () => {
+  const rows = trendRows([
+    point({ windowFrom: '2026-08-26T10:00:00Z' }),
+    // 中间隔了很久 —— 采集断过，那一段就该是空的。
+    point({ windowFrom: '2026-08-01T10:00:00Z' }),
+  ])
+  assert.equal(rows.length, 2, '缺失的时段被凭空补上了点')
+})
+
+test('没有历史时是空清单', () => {
+  assert.deepEqual(trendRows(null), [])
+  assert.deepEqual(trendRows([]), [])
+})
+
+// 说明要写明"看走向不看绝对值"。
+test('趋势说明写明读法', () => {
+  assert.match(TREND_HELP, /走向/)
+  assert.match(TREND_HELP, /算不出/)
+})
+
+// 质量页必须真的渲染走向，且排在证据之后。
+test('质量页渲染一致率走向，排在证据之后', () => {
+  const samples = PAGE_SOURCE.indexOf('rv.samples.map')
+  const trend = PAGE_SOURCE.indexOf('trendData.map')
+  assert.ok(trend > 0, '质量页没有渲染一致率走向')
+  assert.ok(samples < trend, '走向要排在证据之后：先看这一轮，再看它在变好还是变坏')
 })

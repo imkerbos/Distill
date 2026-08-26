@@ -1,6 +1,6 @@
 import type {
   ReconcileCounts, ReconcileSubjectCounts,
-  ReconciliationReport, ReconciliationSample,
+  ReconciliationReport, ReconciliationSample, TrendPoint,
 } from '../api/types'
 
 /**
@@ -232,3 +232,81 @@ function subjectLabel(s: ReconcileSubjectCounts): string {
   }
   return `${s.subject.namespace}/${s.subject.workload}`
 }
+
+/** 趋势上的一个点在界面上要显示的东西。 */
+export interface TrendRow {
+  /** 窗口起点，本地时间。 */
+  atText: string
+  /** 一致率文本；算不出时是 '—'，**不是 0%**。 */
+  rateText: string
+  /**
+   * 归一化到 0..1 的柱高；算不出时为 null。
+   *
+   * 与 rateText 分开给：一条算不出的记录必须**画不出柱子**，而不是画一根
+   * 贴地的 —— 贴地的柱子读起来是"那天全错了"。
+   */
+  bar: number | null
+  /** 算不出时的原因；算得出时是空串。 */
+  missingReason: string
+  /** 参与计算的连接数。 */
+  comparable: number
+  under: number
+  over: number
+  /** true 表示这一点的低估分歧率超过门禁阈值。 */
+  blocked: boolean
+}
+
+/**
+ * trendRows 把趋势渲染成一张按时间倒序的表（最近的在前）。
+ *
+ * **不重排、不补齐缺失的时段**：补齐要凭空造点，而造出来的点在图上与真实
+ * 观测长得一样。采集断过的那段时间就该是空的 —— 那本身是要看的信息。
+ */
+export function trendRows(trend: TrendPoint[] | null | undefined): TrendRow[] {
+  return (trend ?? []).map(p => {
+    const blocked = p.comparable > 0
+      && p.under / p.comparable > MAX_UNDER_PERMISSIVE_RATE
+    return {
+      atText: trendTime(p.windowFrom),
+      rateText: p.rate === null ? '—' : `${(p.rate * 100).toFixed(1)}%`,
+      bar: p.rate,
+      missingReason: p.rate === null ? missingRateReason(p) : '',
+      comparable: p.comparable,
+      under: p.under,
+      over: p.over,
+      blocked,
+    }
+  })
+}
+
+/**
+ * missingRateReason 说明这一轮为什么算不出一致率。
+ *
+ * 两种原因的处置完全不同：来源不报判定要换流量来源，而"这一轮没有可比对的
+ * 连接"等下一轮就好。一句笼统的"无数据"会让人去做错的那件事。
+ */
+function missingRateReason(p: TrendPoint): string {
+  return p.sourceReports
+    ? '这一轮没有既被平台判出结论、又被执行平面报了判定的连接。'
+    : '这一轮的流量来源不报判定，对不了账。'
+}
+
+/** trendTime 渲染窗口起点；不合法时原样回显（同 sampleTime）。 */
+function trendTime(iso: string): string {
+  const t = new Date(iso)
+  return Number.isNaN(t.getTime()) ? iso : t.toLocaleString()
+}
+
+/**
+ * 趋势区块的说明。
+ *
+ * 必须说清**这条线的读法**：绝对值没有行动含义，走向才有。
+ */
+export const TREND_HELP =
+  '一次 97% 说明不了什么，从 100% 掉到 97% 才是信号 —— 看的是走向，不是某一个数。'
+  + '算不出一致率的那几轮是空的，不是 0：把"算不出"画成 0 会让它读起来像那天全错了。'
+  + '每一行的"可比对"是那一轮的分母 —— 基于 3 条连接的 100% 与基于 3 万条的 100% 不是一回事。'
+
+/** 一轮都没有时显示的话。 */
+export const TREND_NONE =
+  '这个集群还没有对账历史。对账在每次流量摄入之后自动跑，跑过一轮之后这里就会有记录。'

@@ -1068,6 +1068,49 @@ export interface ReconciliationSample {
   at: string
 }
 
+/**
+ * 一致率的历史走向，对应趋势端点。
+ *
+ * **回答的是「在变好还是变坏」**，那才是这个指标唯一有行动含义的读法。
+ */
+export interface ReconciliationTrend {
+  cluster: string
+  /** 最近的在前。 */
+  points: TrendPoint[]
+}
+
+/** 趋势上的一个点。 */
+export interface TrendPoint {
+  windowFrom: string
+  windowTo: string
+  computedAt: string
+  /**
+   * 这个窗口的一致率；**算不出时为 null，不是 0**。
+   *
+   * 把"算不出"画成 0，图上就会出现一个触底的点，读起来是"那天全错了"，
+   * 而事实是那天没有可比对的连接。一条会说谎的曲线比没有曲线更糟。
+   */
+  rate: number | null
+  /**
+   * 参与计算的连接数，一致率的分母。
+   *
+   * 必须跟着走：基于 3 条连接的 100% 与基于 3 万条的 100% 在图上是同一个点，
+   * 含义差着数量级。
+   */
+  comparable: number
+  under: number
+  over: number
+  /** 平台答不出的条数：**不是分歧**，是未覆盖。 */
+  platformUnknown: number
+  /**
+   * 那次对账的来源到底报不报判定。
+   *
+   * rate 为 null 时靠它区分两种原因：来源压根不报判定（这条接入方式对不了
+   * 账），还是报了但那个窗口没有可比对的连接。两者处置完全不同。
+   */
+  sourceReports: boolean
+}
+
 /** 一个多余文件的处置分类，对应 registry.DeletionClass。 */
 export type DeletionClass = 'DELETABLE' | 'NOT_APPLIED' | 'IMPACT_UNKNOWN' | 'UNPARSEABLE'
 
