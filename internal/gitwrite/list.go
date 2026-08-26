@@ -25,7 +25,10 @@ type RepoListing struct {
 	//
 	// 只列文件、不列目录：交人工处置的对象是文件，而一个目录名在写回报告里
 	// 读起来像一个可以删的东西。
-	Files []string
+	//
+	// 带内容而不只是路径（design doc 2026-08-24 §4.1）：删除影响要靠内容算，
+	// 一个只有路径的清单答不出「删掉它会断什么」。
+	Files []RepoFile
 	// Branches 是远端现存的 distill/* 分支，按字典序。
 	//
 	// 报的是「存在」，不是「未合并」：判断合并与否要在部署分支的历史里找它的
@@ -33,6 +36,26 @@ type RepoListing struct {
 	// 成本随仓库历史无上限增长（§12）。攒着几条分支这个信号仍然给得出，
 	// 而调用方必须照实说明合并状态没有被判断过。
 	Branches []string
+}
+
+// MaxListedFileBytes 是枚举时愿意读进内存的单个文件上限。
+//
+// 一份策略文件的量级是几十 KB；1 MiB 已经宽出两个数量级。超过它的东西不是
+// 策略，而平台读不全的文件也算不出删除影响 —— 那一类只报存在，不进删除流程
+// （design doc 2026-08-24 §4.2 的 UNPARSEABLE 同一处置）。
+const MaxListedFileBytes = 1 << 20
+
+// RepoFile 是策略路径下的一个文件。
+type RepoFile struct {
+	// Path 是仓库根起算的路径。
+	Path string
+	// Content 是文件内容；Oversize 为 true 时为空。
+	Content string
+	// Oversize 表示这个文件超过 MaxListedFileBytes，内容没有被读取。
+	//
+	// 用一个显式字段而不是「内容为空」：一个真的空文件与一个大到读不动的
+	// 文件在删除流程里的处置不同，而空字符串把两者混成同一件事。
+	Oversize bool
 }
 
 // List 只读地枚举策略仓库：policyPath 下已有的文件，与现存的 distill/* 分支。
@@ -103,7 +126,7 @@ func (w *Writer) cloneForListing(
 //
 // policyPath 不存在时返回空清单、不报错：绑定校验会把它报成 PATH_MISSING，
 // 而在这里它只意味着「这次写回将会新建这个目录」，没有多余文件可报。
-func filesUnder(repo *git.Repository, policyPath string) ([]string, error) {
+func filesUnder(repo *git.Repository, policyPath string) ([]RepoFile, error) {
 	root := strings.Trim(policyPath, "/")
 	if root == "" {
 		// 空 policyPath 会把边界拉回仓库根，整个仓库都会被列成「多余文件」。
@@ -132,14 +155,28 @@ func filesUnder(repo *git.Repository, policyPath string) ([]string, error) {
 		return nil, err
 	}
 
-	var files []string
+	var files []RepoFile
 	if err := sub.Files().ForEach(func(f *object.File) error {
-		files = append(files, root+"/"+f.Name)
+		file := RepoFile{Path: root + "/" + f.Name}
+		// 超过上限的一律只报存在。策略目录下可以有任何人放进去的任何东西，
+		// 无条件读进内存等于让仓库里一个几百兆的文件决定进程的内存占用，
+		// 而这条路径 admin 点一下就会走（规范 §24）。
+		if f.Size > MaxListedFileBytes {
+			file.Oversize = true
+			files = append(files, file)
+			return nil
+		}
+		content, err := f.Contents()
+		if err != nil {
+			return err
+		}
+		file.Content = content
+		files = append(files, file)
 		return nil
 	}); err != nil {
 		return nil, err
 	}
-	sort.Strings(files)
+	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 	return files, nil
 }
 

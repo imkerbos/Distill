@@ -133,7 +133,12 @@ func handlePolicyExport(d Deps) http.HandlerFunc {
 		w.WriteHeader(http.StatusOK)
 		// 头已发出，此处再无法改状态码；写失败留给日志中间件，
 		// 与 response.write 同一处置。
-		_, _ = w.Write(body)
+		//
+		// G705 是把这段响应体当成 HTML 看的误报：Content-Type 是
+		// text/yaml，且 SecurityHeaders 中间件挂了 X-Content-Type-Options:
+		// nosniff，浏览器不会把它当文档渲染；内容本身也已经过 headerSafe
+		// 剥掉控制字符（见 renderPolicyDocs）。
+		_, _ = w.Write(body) //nolint:gosec // G705: text/yaml + nosniff，不是 HTML 响应。
 	}
 }
 
@@ -159,6 +164,22 @@ func countEnabledRules(docs []networkingv1.NetworkPolicy) int {
 // 每一个取值要么是调用方本来就知道的（集群、命名空间、时间窗、他自己的
 // 账号名），要么是本次判定的产物（四类计数、条数、时刻）。
 func renderPolicyExport(pv store.PolicyPreview, exporter string, at time.Time) ([]byte, error) {
+	return renderPolicyDocs(pv, pv.Overridden.Enabled, "", exporter, at)
+}
+
+// renderPolicyDocs 渲染 docs 这一批策略，可选地声明本文件所属的命名空间。
+//
+// 导出与写回共用这一段（design doc 2026-08-14 §7）：写进 Git 的必须就是操作者
+// 能下载下来的那份内容。写回按命名空间切分文件（2026-08-24 design doc §3），
+// 因此这里收 docs 而不是自己从 pv 里取全量 —— 切分发生在调用方，渲染只有一份。
+//
+// fileNamespace 非空表示这是一份只含该命名空间策略的文件。此时注释头必须
+// 额外说明四类计数是**整集群**口径：按命名空间拆计数会漏掉跨命名空间的影响，
+// 而一个不说明口径的数字会被读成"本命名空间的影响"（design doc §3.4）。
+func renderPolicyDocs(
+	pv store.PolicyPreview, docs []networkingv1.NetworkPolicy,
+	fileNamespace, exporter string, at time.Time,
+) ([]byte, error) {
 	var buf bytes.Buffer
 
 	counts := pv.Overridden.Prediction.Counts
@@ -168,6 +189,9 @@ func renderPolicyExport(pv store.PolicyPreview, exporter string, at time.Time) (
 	line("Distill 已确认策略导出")
 	line("集群: %s", pv.Cluster)
 	line("命名空间筛选: %s", namespaceLabel(pv.Namespace))
+	if fileNamespace != "" {
+		line("本文件命名空间: %s", fileNamespace)
+	}
 	if pv.TrafficObserved {
 		line("时间窗: %s ~ %s",
 			pv.Window.From.UTC().Format(time.RFC3339), pv.Window.To.UTC().Format(time.RFC3339))
@@ -189,7 +213,12 @@ func renderPolicyExport(pv store.PolicyPreview, exporter string, at time.Time) (
 		line("下面的策略来自资产推导（Baseline），它们本身是真的；")
 		line("**但在有流量数据之前，不要把这份文件当作评估过的变更应用出去。**")
 	}
-	line("策略文档: %d 份，启用规则: %d 条", len(pv.Overridden.Enabled), countEnabledRules(pv.Overridden.Enabled))
+	line("策略文档: %d 份，启用规则: %d 条", len(docs), countEnabledRules(docs))
+	if fileNamespace != "" && pv.TrafficObserved {
+		// 数字给的是整集群口径，文件里就必须说出来。少了这一行，读者会把
+		// 它当成"本命名空间的影响"，而那是一句平台没有算过的话。
+		line("以上 dry-run 计数是整集群口径，不是本命名空间的影响。")
+	}
 	line("导出者: %s", exporter)
 	line("导出时刻: %s", at.UTC().Format(time.RFC3339))
 	if pv.TrafficObserved {
@@ -197,7 +226,7 @@ func renderPolicyExport(pv store.PolicyPreview, exporter string, at time.Time) (
 		line("集群在此之后发生的变化不在其中；应用前请重新导出并核对这几个数字。")
 	}
 
-	for _, p := range pv.Overridden.Enabled {
+	for _, p := range docs {
 		doc := p
 		doc.TypeMeta = metav1.TypeMeta{APIVersion: policyExportAPIVersion, Kind: policyExportKind}
 		raw, err := yaml.Marshal(doc)

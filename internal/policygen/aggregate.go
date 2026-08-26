@@ -45,6 +45,16 @@ var labelKeyRank = func() map[string]int {
 	return out
 }()
 
+// WorkloadOf 按优先级从 Pod 标签里选出 workload 归属键与取值。
+//
+// **导出它是为了让"主体是谁"只有一个定义。** 对账（internal/reconcile 的
+// 输入）必须按候选策略的同一个主体聚合：按 A 聚合、按 B 拦门禁，两者对不上时
+// 一个分歧率高的 workload 照样能把它的推荐推出去（design doc 2026-08-25 §3.4）。
+// 重抄一份判据必然漂移，而漂移的那天没有任何症状。
+func WorkloadOf(labels map[string]string) (key, value string, ok bool) {
+	return resolveWorkloadLabel(labels)
+}
+
 // resolveWorkloadLabel 按优先级从 Pod 标签里选出 workload 归属键与取值。
 //
 // 返回具体命中的键而非固定假设 app：podSelector 必须用实际命中的键

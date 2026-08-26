@@ -283,6 +283,9 @@ func buildTestRouterWithLog(
 	t *testing.T, reader store.Reader, reg registry.Store,
 	gv httpapi.GitVerifier, pw httpapi.PolicyWriter,
 	cr httpapi.CollectionReader, level string, logOut io.Writer,
+	// fi 可选：写回的学习期门禁要问「从什么时候开始观测」。不给的话
+	// 那条门禁答不出来，于是所有写回用例都会停在它上面。
+	fi ...httpapi.FlowIngestReader,
 ) (http.Handler, *auth.SessionStore, *http.Cookie) {
 	t.Helper()
 
@@ -311,6 +314,7 @@ func buildTestRouterWithLog(
 		// 进 cmd/distill-api），也是「没有读取端」与「这个集群没被采过」
 		// 必须分得开的那一侧。
 		Collection: cr,
+		FlowIngest: firstIngestReader(fi),
 		// 写回的持久化去处跟着注册表走：同一个替身同时满足两个接口，与
 		// mysqlregistry.Store 一样。断言不成立时留 nil —— 那正是"没有审计
 		// 去处"的形态，而写回在那种形态下必须拒绝。
@@ -541,4 +545,15 @@ func TestUnknownRouteReturns404(t *testing.T) {
 	if got := bodyOf(t, rec)["code"]; got != float64(20002) {
 		t.Errorf("code = %v, want 20002", got)
 	}
+}
+
+// firstIngestReader 取可选入参里的第一个；没给就返回 nil。
+//
+// nil 的含义是"本部署没有流量读取端"，学习期门禁据此拒绝 —— 与真实部署
+// 里那种形态一致，不是一个测试专用的放行开关。
+func firstIngestReader(in []httpapi.FlowIngestReader) httpapi.FlowIngestReader {
+	if len(in) == 0 {
+		return nil
+	}
+	return in[0]
 }

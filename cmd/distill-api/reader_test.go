@@ -8,6 +8,9 @@ import (
 	"sort"
 	"testing"
 
+	networkingv1 "k8s.io/api/networking/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"github.com/imkerbos/Distill/internal/collectstore"
 	"github.com/imkerbos/Distill/internal/fixture"
 	"github.com/imkerbos/Distill/internal/policygen"
@@ -321,6 +324,21 @@ func TestACollectedClusterNeverGetsTheFixtureReader(t *testing.T) {
 					policygen.GranularityNamespace)
 				return wantClusterNotFound(err)
 			}},
+		{method: "Reconciliation", name: "Reconciliation(collected cluster)", leak: func() string {
+			_, err := fr.Reconciliation(ctx, fixtureBackedID, window)
+			return wantClusterNotFound(err)
+		}},
+		{method: "LivePolicies", name: "LivePolicies(collected cluster)", leak: func() string {
+			_, err := fr.LivePolicies(ctx, fixtureBackedID)
+			return wantClusterNotFound(err)
+		}},
+		{method: "DeletionImpact", name: "DeletionImpact(collected cluster)", leak: func() string {
+			_, err := fr.DeletionImpact(ctx, fixtureBackedID, window,
+				[]networkingv1.NetworkPolicy{{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "payment", Name: "allow-gateway"},
+				}})
+			return wantClusterNotFound(err)
+		}},
 		{method: "EnsureRuleExists", name: "EnsureRuleExists(collected cluster)", leak: func() string {
 			err := fr.EnsureRuleExists(ctx, fixtureBackedID, "payment", "payment",
 				"deadbeef", policygen.DecisionDisable, window)

@@ -24,6 +24,84 @@ type WritebackFile struct {
 	Content string `json:"content"`
 }
 
+// DeletionClass 是一个多余文件的处置分类（design doc 2026-08-24 §4.2）。
+//
+// 封闭枚举，不用自由文本：界面按它决定给不给删除入口，而一个界面要靠字符串
+// 比较去猜的分类，迟早会出现一个谁也没定义过的取值被当成"可以删"。
+type DeletionClass string
+
+const (
+	// DeletionDeletable 表示能解析、删除影响也算得出来，可以被确认删除。
+	DeletionDeletable DeletionClass = "DELETABLE"
+	// DeletionNotApplied 表示仓库里有、集群里没有：删掉它对集群没有影响。
+	//
+	// 仍然要人确认，不自动删：平台判断"集群里没有"依据的是采集结果，而一次
+	// 采集故障与"这个对象真的不存在"在数据里长得一样。
+	DeletionNotApplied DeletionClass = "NOT_APPLIED"
+	// DeletionImpactUnknown 表示时间窗内没有观测能支撑一次删除影响预测。
+	//
+	// **不提供删除入口。** 一句"大概没事"不是一次评估，而删除恰恰是不能凭
+	// 大概去做的那一类。
+	DeletionImpactUnknown DeletionClass = "IMPACT_UNKNOWN"
+	// DeletionUnparseable 表示平台没能把它解析成 NetworkPolicy。
+	//
+	// 别人放的文件、模板、被手工改坏的策略都落在这里。**永不提供删除**：
+	// 一个平台看不懂的文件，它对集群的作用平台也算不出来。
+	DeletionUnparseable DeletionClass = "UNPARSEABLE"
+)
+
+// confirmable 报告这一类是否允许被确认删除。
+func (c DeletionClass) confirmable() bool {
+	return c == DeletionDeletable || c == DeletionNotApplied
+}
+
+// WritebackExclusion 是这一轮被排除出写回的一个主体，以及排除的依据
+// （design doc 2026-08-25-trust-engineering §3.4）。
+//
+// **排除而不是整次拒绝。** 平台判定与集群实际执行分歧超阈，说明这个主体的
+// 候选规则很可能缺了现在正通着的放行 —— 而 dry-run 看不出来，因为在平台的
+// 世界里那些连接本来就不通。把整个集群的写回卡住，实际后果是这个平台在任何
+// 带第二策略平面的集群上永远出不了计划，而那正是它要服务的集群；运营上这会
+// 逼人去调阈值绕过门禁。风险局部化、写下来、留在提交信息里，比一道会被绕过去
+// 的门更可靠。
+type WritebackExclusion struct {
+	// Namespace 与 Workload 是被排除的主体。
+	//
+	// namespace 粒度下 Workload 为空：那一层的候选是折叠过的，只排除其中
+	// 一个 workload 无从表达，因此整个 namespace 一起排除 —— 保守方向。
+	Namespace string `json:"namespace"`
+	Workload  string `json:"workload"`
+	// UnderPermissiveRate 是这个主体上"平台判 DENY、集群实际放行"的占比。
+	//
+	// 报出具体数字而不是一个布尔：0.06 与 0.9 都超阈，但前者值得去看明细、
+	// 后者说明平台在这个主体上基本不成立，两者的处置不是一回事。
+	UnderPermissiveRate float64 `json:"underPermissiveRate"`
+}
+
+// Label 返回这个主体在文案里的写法。
+func (e WritebackExclusion) Label() string {
+	if e.Workload == "" {
+		return e.Namespace
+	}
+	return e.Namespace + "/" + e.Workload
+}
+
+// WritebackDeletion 是策略路径下一个本次候选集不包含的文件，以及平台对它的
+// 处置结论（design doc 2026-08-24 §4）。
+type WritebackDeletion struct {
+	// Path 是仓库根起算的路径。
+	Path string `json:"path"`
+	// Class 是处置分类。
+	Class DeletionClass `json:"class"`
+	// Documents 是从这个文件里解析出的 NetworkPolicy 份数。
+	Documents int `json:"documents"`
+	// Counts 是删掉它之后的四类计数；只有 DELETABLE 有。
+	//
+	// NOT_APPLIED 不带计数，而不是带一份全零：全零读起来是"评估过、影响是零"，
+	// 而那一类的事实是"集群里根本没有这些对象"，两句话在界面上应当分开说。
+	Counts map[predict.ChangeKind]int `json:"counts,omitempty"`
+}
+
 // WritebackPlan 是一次写回的完整计划：将要写什么、写到哪、写之前重算出的
 // 数字，以及仓库里多余的文件（design doc 2026-08-14 §4）。
 //
@@ -59,11 +137,31 @@ type WritebackPlan struct {
 	// 写回请求不携带数字，这一份必须由平台重算：操作者确认规则的时刻与
 	// 写回的时刻之间，集群、流量窗口、别人的确认都可能变了。
 	Counts map[predict.ChangeKind]int `json:"counts"`
+	// Deletions 是仓库路径下已有、但本次候选集不包含的文件，带平台对每一个的
+	// 处置结论（design doc 2026-08-24 §4）。
+	//
+	// **不进指纹**，与 Extraneous 同一条理由：它描述的是仓库现状，不是这次要
+	// 写出去的内容。真正进指纹的是 Confirmed —— 操作者从这份清单里挑出来的
+	// 那几条。
+	Deletions []WritebackDeletion `json:"deletions"`
+	// Confirmed 是操作者确认要删除的路径，**进指纹**。
+	//
+	// 它是这份计划里唯一一项来自请求的内容，因此判据必须由平台这一刻重算出的
+	// Deletions 给出：路径必须出现在那份清单里、且那一类允许被删。少了这道
+	// 判断，一个构造出来的请求可以删掉策略目录下的任意文件。
+	Confirmed []string `json:"confirmed"`
 	// Extraneous 是仓库路径下已有、但本次候选集不包含的文件，交人工处置。
 	//
 	// 它必须来自平台真的枚举过一次仓库：留空在界面上读起来是"没有多余文件"，
 	// 而那是一句没有人算过的断言，且偏在让人放心的方向（§4）。
 	Extraneous []string `json:"extraneous"`
+	// Exclusions 是这一轮被排除出写回的主体，带排除依据。
+	//
+	// **不进指纹**，与 Extraneous 同一条理由：它描述的是"这次没写谁"，而
+	// 后果已经体现在 Files 里 —— 那些主体的文件根本不在其中，内容指纹已经
+	// 覆盖。但它**必须进提交信息**：一份少了三个 workload 的策略集，如果
+	// 不说明，评审人读到的就是"这个集群只有这些 workload"。
+	Exclusions []WritebackExclusion `json:"exclusions"`
 	// ExistingBranches 是仓库上现存的 distill/* 分支（§2）。
 	//
 	// 报的是"存在"，不是"未合并"：判断合并与否要在部署分支的历史里找它的
@@ -151,6 +249,10 @@ func NewWritebackPlan(b GitBinding, p WritebackPlan) (WritebackPlan, error) {
 		seen[f.Path] = struct{}{}
 	}
 
+	if err := validateConfirmedDeletions(root, p); err != nil {
+		return WritebackPlan{}, err
+	}
+
 	p.Fingerprint = FingerprintOf(p)
 	return p, nil
 }
@@ -198,6 +300,17 @@ func FingerprintOf(p WritebackPlan) string {
 	for _, k := range predict.AllChangeKinds() {
 		write(string(k))
 		write(strconv.Itoa(p.Counts[k]))
+	}
+
+	// 被确认的删除进指纹（design doc 2026-08-24 §4.4）：操作者批准的是
+	// "写这几个文件**并删掉那几个**"，少覆盖后半句，一次删除就能在确认与
+	// 推送之间被加进去或换掉。排序后写入 —— 与文件同理，次序不是内容。
+	confirmed := make([]string, len(p.Confirmed))
+	copy(confirmed, p.Confirmed)
+	sort.Strings(confirmed)
+	write(strconv.Itoa(len(confirmed)))
+	for _, path := range confirmed {
+		write(path)
 	}
 
 	files := make([]WritebackFile, len(p.Files))
@@ -387,4 +500,34 @@ func (d DriftResult) Valid() bool {
 	default:
 		return false
 	}
+}
+
+// validateConfirmedDeletions 判定每一条确认删除都出自本计划、且那一类允许被删。
+//
+// 判据取自平台这一刻重算出的 Deletions，不取请求：一条能自带"这个文件可以删"
+// 的请求，等于让调用方自己授权一次删除。同一条纪律让 Counts 也由平台重算
+// （2026-08-14 design doc §4）。
+func validateConfirmedDeletions(root string, p WritebackPlan) error {
+	offered := make(map[string]DeletionClass, len(p.Deletions))
+	for _, d := range p.Deletions {
+		offered[d.Path] = d.Class
+	}
+	seen := make(map[string]struct{}, len(p.Confirmed))
+	for i, path := range p.Confirmed {
+		if err := checkWithinPolicyPath(root, path); err != nil {
+			return err
+		}
+		if _, dup := seen[path]; dup {
+			return invalidf("confirmed[%d] 路径 %q 重复", i, path)
+		}
+		seen[path] = struct{}{}
+		class, ok := offered[path]
+		if !ok {
+			return invalidf("confirmed[%d] %q 不在本次计划的可处置清单里", i, path)
+		}
+		if !class.confirmable() {
+			return invalidf("confirmed[%d] %q 属于 %s，平台不提供删除", i, path, class)
+		}
+	}
+	return nil
 }

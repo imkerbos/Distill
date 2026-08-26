@@ -7,6 +7,9 @@ import (
 	"testing"
 	"time"
 
+	networkingv1 "k8s.io/api/networking/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"github.com/imkerbos/Distill/internal/baseline"
 	"github.com/imkerbos/Distill/internal/fixture"
 	"github.com/imkerbos/Distill/internal/flow"
@@ -355,5 +358,106 @@ func TestPolicyPreviewFixtureAssessesEveryBaselineKind(t *testing.T) {
 		t.Error("METRICS_SCRAPE is not reported missing anywhere in the fixture; here its evidence " +
 			"IS present and simply does not cover every namespace — that is a conclusion about the " +
 			"cluster, and it must not drift into the not-assessed column")
+	}
+}
+
+// 删除一份集群里根本没有的策略，影响必须是「什么都不变」，而不是一个
+// 算出来的数字（design doc 2026-08-24 §4.2 NOT_APPLIED）。
+//
+// 仓库里有、集群里没有的文件是真实存在的一类：从没被 apply 过、或已经被人
+// 手工删掉过。把它算成一次有影响的删除，会让操作者以为删掉它会打断东西，
+// 于是永远不敢清理仓库。
+func TestDeletionImpactOfAPolicyTheClusterNeverHad(t *testing.T) {
+	r := reader()
+	window := fullWindow(r)
+
+	impact, err := r.DeletionImpact(context.Background(), "prod-asia-1", window,
+		[]networkingv1.NetworkPolicy{{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "payment", Name: "not-in-this-cluster"},
+		}})
+	if err != nil {
+		t.Fatalf("DeletionImpact: %v", err)
+	}
+	if impact.Live != 0 {
+		t.Errorf("Live = %d, want 0 —— 这份策略集群里没有", impact.Live)
+	}
+	if impact.InWindow != 0 {
+		t.Errorf("InWindow = %d, want 0", impact.InWindow)
+	}
+	if impact.Removed != 1 {
+		t.Errorf("Removed = %d, want 1", impact.Removed)
+	}
+	for _, k := range predict.AllChangeKinds() {
+		if k == predict.ChangeWouldBreak || k == predict.ChangeWouldOpen {
+			if got := impact.Counts[k]; got != 0 {
+				t.Errorf("Counts[%s] = %d, want 0 —— 删掉一份不存在的策略不改变任何判定", k, got)
+			}
+		}
+	}
+}
+
+// 删除一份集群里真实存在的 default-deny，影响必须被算出来且落在 Counts 里。
+//
+// 这一条守的是「删除是一次被评估过的变更」：没有它，删除是这个平台唯一
+// 一类不被预测的写操作（2026-08-14 design doc §3 放开删除的前提之一）。
+func TestDeletionImpactOfARealPolicyIsPredicted(t *testing.T) {
+	r := reader()
+	window := fullWindow(r)
+	var cluster fixture.Cluster
+	for _, c := range fixture.Load().Clusters {
+		if c.ID == "prod-asia-1" {
+			cluster = c
+		}
+	}
+	if len(cluster.Policies) == 0 {
+		t.Fatal("fixture cluster has no policies —— 这条用例没有被测对象")
+	}
+
+	impact, err := r.DeletionImpact(context.Background(), "prod-asia-1", window, cluster.Policies)
+	if err != nil {
+		t.Fatalf("DeletionImpact: %v", err)
+	}
+	if impact.Live != len(cluster.Policies) {
+		t.Errorf("Live = %d, want %d —— 集群里就是这些策略",
+			impact.Live, len(cluster.Policies))
+	}
+	// 合成数据集只有一份静态快照，「现在」与「窗口那一刻」必然相等。
+	if impact.InWindow != impact.Live {
+		t.Errorf("InWindow = %d, Live = %d —— fixture 只有一份快照，两者应当相等",
+			impact.InWindow, impact.Live)
+	}
+	if !impact.TrafficObserved {
+		t.Error("TrafficObserved = false —— 合成数据集是带流量的，删除影响算得出来")
+	}
+	total := 0
+	for _, k := range predict.AllChangeKinds() {
+		total += impact.Counts[k]
+	}
+	if total == 0 {
+		t.Fatal("删除全部策略之后一条观测都没有被评估 —— 这不是一次预测")
+	}
+	// 把一个集群的策略全部删掉，等于把每一片从"有规则"变成默认放行 ——
+	// 原本被拦下的连接会被放开。这是删除唯一可能的方向，也是它必须被
+	// 预测出来的理由。
+	if impact.Counts[predict.ChangeWouldOpen] == 0 {
+		t.Errorf("删掉全部策略之后 WOULD_OPEN = 0，四类计数 = %v", impact.Counts)
+	}
+}
+
+// fixture 集群的证据是 nil，不是空 map。
+//
+// 两者含义不同：空 map 是"记过，暂时还没有证据"，nil 是"我们根本没在记"。
+// 演示集群没有采集，也就没有跨窗口的观测积累 —— 给一个空 map 会让界面把
+// 它渲染成"观察了 0 个窗口"，读起来像证据不足，而实际上那句话本身就不成立。
+// 与 TrafficObserved 那条纪律同源。
+func TestFixturePreviewDoesNotClaimZeroEvidence(t *testing.T) {
+	r := reader()
+	pv, err := r.PolicyPreview(context.Background(), "prod-asia-1", "", fullWindow(r))
+	if err != nil {
+		t.Fatalf("PolicyPreview() error = %v", err)
+	}
+	if pv.Evidence != nil {
+		t.Errorf("Evidence = %v, want nil: fixture 集群没有跨窗口证据，"+
+			"一个空 map 会被读成「观察了 0 个窗口」", pv.Evidence)
 	}
 }

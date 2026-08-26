@@ -12,6 +12,7 @@ import (
 	"github.com/imkerbos/Distill/internal/flow"
 	"github.com/imkerbos/Distill/internal/policygen"
 	"github.com/imkerbos/Distill/internal/predict"
+	"github.com/imkerbos/Distill/internal/reconcile"
 	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/replay"
 	"github.com/imkerbos/Distill/internal/snapshot"
@@ -102,6 +103,27 @@ func (r *Reader) PolicyPreviewAtGranularity(
 		overridden, widening = overridden.AtNamespaceGranularity()
 	}
 
+	// 证据读在生成之后、返回之前：它按指纹关联，与这一批候选算出来的
+	// 指纹必须来自同一次生成。
+	//
+	// **读不到就是读不到，不降级成空 map。** 空 map 的含义是「记过，还没有
+	// 证据」，而查询失败时真实情况是「不知道」—— 把两者压平会让一条其实
+	// 已经观察了三周的规则显示成刚出现，从而被当作不可信而搁置。
+	stored2, err := r.facts.RuleEvidenceOf(ctx, clusterID)
+	if err != nil {
+		return store.PolicyPreview{}, err
+	}
+	// 主体一并进键：指纹不含主体，两个 workload 上的同一条放行是两份证据
+	// （snapshotstore.EvidenceKey）。
+	evidence := make(map[string]store.RuleEvidence, len(stored2))
+	for k, e := range stored2 {
+		evidence[k] = store.RuleEvidence{
+			FirstSeen: e.FirstSeen, LastSeen: e.LastSeen,
+			Windows: e.Windows, CompleteWindows: e.CompleteWindows,
+			Observations: e.Observations,
+		}
+	}
+
 	report := cs.predictWith(gen.EnabledPolicies())
 	overriddenReport := cs.predictWith(overridden.EnabledPolicies())
 
@@ -119,6 +141,7 @@ func (r *Reader) PolicyPreviewAtGranularity(
 		// 完整度照实回显，不由调用方从 DegradedCount 推断（design doc §4）。
 		WindowCompleteness: cs.completeness,
 		Candidates:         store.FilterCandidates(gen.Policies, namespace),
+		Evidence:           evidence,
 		// 未评估的那几类**照旧留在缺失清单里**，不摘走（design doc §11）。
 		//
 		// 摘走会让只读 MissingBaselines 的消费方看见比实际更少的阻塞项，而
@@ -247,7 +270,7 @@ func (cs candidateSet) predictWith(policies []networkingv1.NetworkPolicy) predic
 		ClusterID:    cs.clusterID,
 		Policies:     policies,
 		Namespaces:   cs.namespaces,
-		CCNPPresent:  cs.registered.CCNPPresent,
+		ForeignPlane: cs.registered.EffectivePlanes().Degrades(),
 		Observations: cs.observations,
 		// 展示名复用流量列表那一套，两个界面必须用同一个名字指同一个 Pod。
 		Label: cs.previewLabel,
@@ -451,4 +474,110 @@ func effectiveGranularity(g policygen.Granularity) policygen.Granularity {
 		return policygen.GranularityNamespace
 	}
 	return policygen.GranularityWorkload
+}
+
+// DeletionImpact 预测把 removed 这批策略从集群里移除会发生什么
+// （design doc 2026-08-24 §4.3）。
+//
+// 策略集取的是**锚点那一刻集群里真实跑着的那一份**（traffic.policies）减去
+// removed，而不是候选集：删除说的是「Config Sync 会把这些对象从集群里拿掉」，
+// 拿掉的是集群现状里的那几条，不是平台建议里的那几条。
+//
+// 完整度照样传导（degradeByCompleteness）：一段漏过记录的窗口算出来的删除
+// 影响同样不可信，而删除恰恰是最不能凭一份不可信结论去做的那类变更。
+func (r *Reader) DeletionImpact(
+	ctx context.Context, clusterID string, window store.TimeWindow,
+	removed []networkingv1.NetworkPolicy,
+) (store.DeletionImpactReport, error) {
+	cs, err := r.generate(ctx, clusterID, window)
+	if err != nil {
+		return store.DeletionImpactReport{}, err
+	}
+	kept, inWindow := store.WithoutPolicies(cs.policies, removed)
+	report := cs.predictWith(kept)
+
+	// 「现在还在不在」必须用最近一次采集回答，不能用窗口锚点那一份
+	// （2026-08-24 实测发现）：一条在窗口之后才被 GitOps 下发的策略，用窗口
+	// 口径去看是「集群里没有」，据此会被标成「删掉没影响」—— 而它正在生效。
+	// 分类朝让人放心的方向错，是这个平台最不能犯的那一类。
+	live, err := r.livePolicyCount(ctx, clusterID, removed)
+	if err != nil {
+		return store.DeletionImpactReport{}, err
+	}
+	return store.DeletionImpactReport{
+		TrafficObserved: cs.trafficObserved,
+		Window:          window,
+		Counts:          report.Counts,
+		Removed:         len(removed),
+		Live:            live,
+		InWindow:        inWindow,
+	}, nil
+}
+
+// livePolicyCount 数 removed 里有几份仍然存在于**最近一次采集**看到的集群里。
+//
+// 与预测那一半走两条不同的锚点，是刻意的：预测要与观测流量同期（CLAUDE.md §4
+// 禁止用当前状态解释历史数据），而「现在还在不在」是一个关于此刻的问题。
+func (r *Reader) livePolicyCount(
+	ctx context.Context, clusterID string, removed []networkingv1.NetworkPolicy,
+) (int, error) {
+	parsed, err := r.LivePolicies(ctx, clusterID)
+	if err != nil {
+		return 0, err
+	}
+	_, live := store.WithoutPolicies(parsed, removed)
+	return live, nil
+}
+
+// LivePolicies 返回最近一次采集看到的、这个集群里真实存在的 NetworkPolicy。
+//
+// 锚点取**最近一次成功的采集**（describeAssets），不取某个观测窗口：三个
+// 消费方问的都是「现在有什么」—— 删除影响里的 Live、写回的冲突判定、
+// 真实漂移（design doc 2026-08-25 §4、§5）。
+func (r *Reader) LivePolicies(
+	ctx context.Context, clusterID string,
+) ([]networkingv1.NetworkPolicy, error) {
+	latest, err := r.describeAssets(ctx, clusterID)
+	if err != nil {
+		return nil, err
+	}
+	observed, err := r.readPoliciesAt(ctx, latest)
+	if err != nil {
+		return nil, err
+	}
+	return parsePolicies(observed)
+}
+
+// Reconciliation 把平台回放算出的判定与执行平面自己报的判定对账
+// （design doc 2026-08-25 §3）。
+//
+// 与 Flows 走同一条判定路径（readTraffic → attribute）：对账要有意义，
+// 比较的必须是**屏幕上那一份判定**，另起一次求值就等于在拿两个引擎互相验证。
+func (r *Reader) Reconciliation(
+	ctx context.Context, clusterID string, window store.TimeWindow,
+) (store.ReconciliationReport, error) {
+	t, err := r.readTraffic(ctx, clusterID, flow.Window{From: window.From, To: window.To})
+	if err != nil {
+		return store.ReconciliationReport{}, err
+	}
+
+	obs := make([]reconcile.Observation, 0, len(t.conns))
+	reported := false
+	for _, c := range t.conns {
+		a := t.attribute(c)
+		v, ok := c.Verdict()
+		if ok {
+			reported = true
+		}
+		obs = append(obs, reconcile.Observation{
+			Subject:  store.SubjectOfEndpoint(a.flow.Source),
+			Platform: a.decision.Verdict,
+			Observed: v, Reported: ok,
+		})
+	}
+	return store.ReconciliationReport{
+		Cluster: clusterID, Window: window,
+		SourceReportsVerdicts: reported,
+		Report:                reconcile.Run(obs),
+	}, nil
 }

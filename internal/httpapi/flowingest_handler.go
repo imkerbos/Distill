@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -21,6 +22,21 @@ import (
 // 记录" —— 后者是 ErrNoIngest，两者的处置完全不同。
 type FlowIngestReader interface {
 	LatestIngest(ctx context.Context, clusterID string) (snapshotstore.IngestSummary, error)
+	// ObservedCoverage 返回这个集群的观测跨度与实际覆盖
+	// （design doc 2026-08-25 §5）。
+	//
+	// 写回门禁拿**覆盖**与集群登记的业务周期比：观测还没覆盖一轮，就不该
+	// 下发一套 default-deny —— 窗口之外的流量不在候选集里，也不在 dry-run 里。
+	//
+	// **跨度不能用来做这个判断。** 一个集群 90 天前摄入过一次、之后采集器
+	// 坏了 89 天、今天恢复，跨度是 90 天而真正被观测到的只有两分钟；拿跨度
+	// 比会把它放行。跨度仍然返回，是因为"跨了 90 天却只看到 2 分钟"这句话
+	// 本身就是给操作者的结论。
+	//
+	// 第三个返回值为 false 表示这个集群一次都没成功摄入过。**不是零值** ——
+	// 零值会让"从没观测过"看起来像"观测了很久"。
+	ObservedCoverage(ctx context.Context, clusterID string) (
+		span, covered time.Duration, ok bool, err error)
 }
 
 // ingestErrorReasons 是允许出现在响应里的摄入失败原因，封闭枚举。

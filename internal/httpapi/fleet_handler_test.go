@@ -1,6 +1,8 @@
 package httpapi_test
 
 import (
+	networkingv1 "k8s.io/api/networking/v1"
+
 	"context"
 	"encoding/json"
 	"errors"
@@ -52,6 +54,26 @@ func (brokenReader) PolicyPreviewAtGranularity(
 
 func (brokenReader) PolicyPreview(context.Context, string, string, store.TimeWindow) (store.PolicyPreview, error) {
 	return store.PolicyPreview{}, errors.New("bigquery: connection refused at 10.0.0.5:9050")
+}
+
+func (brokenReader) Reconciliation(
+	_ context.Context, clusterID string, _ store.TimeWindow,
+) (store.ReconciliationReport, error) {
+	// 与本替身的其它读方法同一处置：这一条不该被这组用例走到。
+	return store.ReconciliationReport{}, fmt.Errorf("%w: %s", store.ErrClusterNotFound, clusterID)
+}
+
+func (brokenReader) LivePolicies(
+	_ context.Context, clusterID string,
+) ([]networkingv1.NetworkPolicy, error) {
+	// 与本替身的其它读方法同一处置：这一条不该被这组用例走到。
+	return nil, fmt.Errorf("%w: %s", store.ErrClusterNotFound, clusterID)
+}
+
+func (brokenReader) DeletionImpact(
+	context.Context, string, store.TimeWindow, []networkingv1.NetworkPolicy,
+) (store.DeletionImpactReport, error) {
+	return store.DeletionImpactReport{}, errors.New("bigquery: connection refused at 10.0.0.5:9050")
 }
 
 func (brokenReader) EnsureRuleExists(

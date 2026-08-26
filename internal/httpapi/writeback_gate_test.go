@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/imkerbos/Distill/internal/baseline"
 	"github.com/imkerbos/Distill/internal/collectstore"
@@ -44,7 +45,9 @@ func newEUWritebackFixture(t *testing.T) *writebackFixture {
 	gv := &stubGitVerifier{result: registry.BindingVerifyOK}
 	writer := &fakePolicyWriter{listing: gitwrite.RepoListing{}}
 	var logs bytes.Buffer
-	h, _, cookie := buildTestRouterWithLog(t, reader, reg, gv, writer, nil, "ERROR", &logs)
+	h, _, cookie := buildTestRouterWithLog(t, reader, reg, gv, writer, nil, "ERROR", &logs,
+		// 观测早就覆盖了周期：这些用例测的不是学习期门禁。
+		&stubObservedSince{observedSince: time.Now().Add(-365 * 24 * time.Hour)})
 
 	return &writebackFixture{
 		h: h, cookie: cookie, reg: reg, reader: reader,
@@ -171,7 +174,9 @@ func TestACompleteClusterStillPlansAndPushes(t *testing.T) {
 func TestPlanIsRefusedWhenABaselineWasNeverAssessed(t *testing.T) {
 	f := newWritebackFixture(t)
 	f.reader = notAssessedReader{Reader: f.reader}
-	h, _, cookie := buildTestRouterWithLog(t, f.reader, f.reg, f.verifier, f.writer, nil, "ERROR", f.logs)
+	h, _, cookie := buildTestRouterWithLog(t, f.reader, f.reg, f.verifier, f.writer, nil, "ERROR", f.logs,
+		// 观测早就覆盖了周期：这些用例测的不是学习期门禁。
+		&stubObservedSince{observedSince: time.Now().Add(-365 * 24 * time.Hour)})
 
 	rec := authedPostJSON(t, h, cookie, writebackPlanPath, map[string]any{})
 	code, msg := refusal(t, rec.Body.String())
@@ -212,7 +217,9 @@ func TestAMissingBaselineOutsideTheFileDoesNotBlockThePush(t *testing.T) {
 	f := newWritebackFixture(t)
 	// quarantine 不在候选策略里 —— 这份文件不会给它下发任何东西。
 	reader := injectMissingReader{Reader: f.reader, namespace: "quarantine"}
-	h, _, cookie := buildTestRouterWithLog(t, reader, f.reg, f.verifier, f.writer, nil, "ERROR", f.logs)
+	h, _, cookie := buildTestRouterWithLog(t, reader, f.reg, f.verifier, f.writer, nil, "ERROR", f.logs,
+		// 观测早就覆盖了周期：这些用例测的不是学习期门禁。
+		&stubObservedSince{observedSince: time.Now().Add(-365 * 24 * time.Hour)})
 
 	rec := authedPostJSON(t, h, cookie, writebackPlanPath, map[string]any{})
 	code, msg := refusal(t, rec.Body.String())
@@ -226,7 +233,9 @@ func TestAMissingBaselineOutsideTheFileDoesNotBlockThePush(t *testing.T) {
 func TestAnEmptySelectionReportsNothingToWriteNotAGateFailure(t *testing.T) {
 	f := newEUWritebackFixture(t)
 	reader := emptyEnabledReader{Reader: f.reader}
-	h, _, cookie := buildTestRouterWithLog(t, reader, f.reg, f.verifier, f.writer, nil, "ERROR", f.logs)
+	h, _, cookie := buildTestRouterWithLog(t, reader, f.reg, f.verifier, f.writer, nil, "ERROR", f.logs,
+		// 观测早就覆盖了周期：这些用例测的不是学习期门禁。
+		&stubObservedSince{observedSince: time.Now().Add(-365 * 24 * time.Hour)})
 
 	rec := authedPostJSON(t, h, cookie, euPlanPath, map[string]any{})
 	code, msg := refusal(t, rec.Body.String())
@@ -269,7 +278,9 @@ func (r emptyEnabledReader) PolicyPreviewAtGranularity(
 func TestAClusterWithoutTrafficReachesTheGateNotAParameterError(t *testing.T) {
 	f := newWritebackFixture(t)
 	f.reader = noWindowReader{Reader: f.reader}
-	h, _, cookie := buildTestRouterWithLog(t, f.reader, f.reg, f.verifier, f.writer, nil, "ERROR", f.logs)
+	h, _, cookie := buildTestRouterWithLog(t, f.reader, f.reg, f.verifier, f.writer, nil, "ERROR", f.logs,
+		// 观测早就覆盖了周期：这些用例测的不是学习期门禁。
+		&stubObservedSince{observedSince: time.Now().Add(-365 * 24 * time.Hour)})
 
 	rec := authedPostJSON(t, h, cookie, writebackPlanPath, map[string]any{})
 	code, msg := refusal(t, rec.Body.String())

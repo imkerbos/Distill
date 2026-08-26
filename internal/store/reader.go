@@ -2,6 +2,8 @@
 package store
 
 import (
+	networkingv1 "k8s.io/api/networking/v1"
+
 	"context"
 	"time"
 
@@ -278,4 +280,42 @@ type Reader interface {
 		ctx context.Context, clusterID, namespace, workload, fingerprint string,
 		decision policygen.OverrideDecision, window TimeWindow,
 	) error
+	// DeletionImpact 预测把 removed 这批 NetworkPolicy 从集群里移除的影响
+	// （design doc 2026-08-24 §4.3）。
+	//
+	// **删除必须与新增走同一条求值路径。** 在这个方法之前，删除是平台唯一
+	// 一类不被预测的变更 —— 而它恰恰是伤害最大的那一类：撤掉一条策略，
+	// 那一片要么从「有规则」变回默认放行，要么反过来失去唯一那条放行。
+	// 因此写回里的删除只在这个方法答得出影响时才被允许（2026-08-14
+	// design doc §3 放开删除的两个前提之一）。
+	DeletionImpact(
+		ctx context.Context, clusterID string, window TimeWindow,
+		removed []networkingv1.NetworkPolicy,
+	) (DeletionImpactReport, error)
+	// LivePolicies 返回**最近一次采集**看到的、这个集群里真实存在的
+	// NetworkPolicy（design doc 2026-08-25 §4、§5）。
+	//
+	// 回答的是「集群里现在有什么」，两个消费方：
+	//
+	//   写回冲突判定 —— 平台要写的对象名已经被别人占了，就不能写
+	//   （`candidate-` 是约定不是保留字，覆盖掉的是别人的放行规则）。
+	//
+	//   真实漂移 —— 仓库声明的对象到底有没有被 GitOps controller 落下去。
+	//   既有的 driftResult 比的是「仓库 vs 平台最后写过的」，答不了这个。
+	//
+	// 用最近一次采集而不是某个窗口锚点：这两个问题都是关于**此刻**的，
+	// 与 DeletionImpact 里 Live 那一半同源。
+	LivePolicies(ctx context.Context, clusterID string) ([]networkingv1.NetworkPolicy, error)
+	// Reconciliation 把平台回放算出的判定与执行平面自己报的判定对账
+	// （design doc 2026-08-25 §3）。
+	//
+	// **这是平台唯一一个能在生产流量上度量的可信度指标。** 求值正确性可以被
+	// golden test 与一致性测试证明，但那是一组手写用例；一致率量的是同一个
+	// 引擎在真实集群、真实流量上与执行平面差了多少。
+	//
+	// 只有报判定的来源才对得起来（Hubble 报，NODE_CONNTRACK 不报）：来源没报
+	// 的连接落进 SOURCE_SILENT，不进一致率的分母。
+	Reconciliation(
+		ctx context.Context, clusterID string, window TimeWindow,
+	) (ReconciliationReport, error)
 }

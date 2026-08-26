@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -53,6 +54,12 @@ type clusterPayload struct {
 	// 收下理由而不是一个布尔：判错的方向是监控在下发之后静默中断，事后要
 	// 答得出「当初凭什么说不需要」（design doc 2026-08-18-node-agent-applicability §3）。
 	NoNodeAgentsReason string `json:"noNodeAgentsReason"`
+	// BusinessCycleSeconds 是这个集群看全一轮流量需要多久
+	// （design doc 2026-08-25 §5）。0 表示还没有人回答过这个问题 ——
+	// 写回门禁据此拒绝出计划。
+	BusinessCycleSeconds int `json:"businessCycleSeconds"`
+	// BusinessCycleReason 是凭什么这么定。与时长必须同时给出。
+	BusinessCycleReason string `json:"businessCycleReason"`
 }
 
 // toCluster 把请求体转成领域对象。
@@ -67,18 +74,20 @@ type clusterPayload struct {
 // BIND_GIT_REPO 审计的写路径。
 func (p clusterPayload) toCluster() registry.Cluster {
 	return registry.Cluster{
-		State:              registry.StateRegistered,
-		ID:                 p.ID,
-		DisplayName:        p.DisplayName,
-		PodCIDR:            p.PodCIDR,
-		NodeCIDR:           p.NodeCIDR,
-		CCNPPresent:        p.CCNPPresent,
-		KubeconfigRef:      p.KubeconfigRef,
-		APIServers:         p.APIServers,
-		HealthCheckSources: p.HealthCheckSources,
-		MetricsScrapers:    p.MetricsScrapers,
-		NodeAgents:         p.NodeAgents,
-		NoNodeAgentsReason: p.NoNodeAgentsReason,
+		State:               registry.StateRegistered,
+		ID:                  p.ID,
+		DisplayName:         p.DisplayName,
+		PodCIDR:             p.PodCIDR,
+		NodeCIDR:            p.NodeCIDR,
+		CCNPPresent:         p.CCNPPresent,
+		KubeconfigRef:       p.KubeconfigRef,
+		APIServers:          p.APIServers,
+		HealthCheckSources:  p.HealthCheckSources,
+		MetricsScrapers:     p.MetricsScrapers,
+		NodeAgents:          p.NodeAgents,
+		NoNodeAgentsReason:  p.NoNodeAgentsReason,
+		BusinessCycle:       time.Duration(p.BusinessCycleSeconds) * time.Second,
+		BusinessCycleReason: p.BusinessCycleReason,
 	}
 }
 

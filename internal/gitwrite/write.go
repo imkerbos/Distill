@@ -137,7 +137,10 @@ func (w *Writer) Push(ctx context.Context, repo registry.GitRepo, plan registry.
 	if err != nil {
 		return "", err
 	}
-	if len(changed) == 0 {
+	// 确认过的删除同样算一次变化：漏掉它，一次"只删不改"的写回会被报成
+	// 无变更，而操作者以为删掉了 —— 仓库里那个文件还在，Config Sync 也
+	// 还在 apply 它（design doc 2026-08-24 §4）。
+	if len(changed) == 0 && len(plan.Confirmed) == 0 {
 		return "", ErrNothingToPush
 	}
 
@@ -149,6 +152,12 @@ func (w *Writer) Push(ctx context.Context, repo registry.GitRepo, plan registry.
 		return "", err
 	}
 	if err := writeFiles(tree, changed); err != nil {
+		return "", err
+	}
+	// 删除排在写入之后：两者互不重叠（NewWritebackPlan 保证确认项来自
+	// Deletions，而 Deletions 里不含本次要写的文件），次序因此不影响结果 ——
+	// 放在后面只是让"这次写回删了什么"在代码里读得出来。
+	if err := deleteFiles(tree, plan.Confirmed); err != nil {
 		return "", err
 	}
 
@@ -283,4 +292,25 @@ func writeFile(tree *git.Worktree, f registry.WritebackFile) (err error) {
 // platformSignature 是提交的作者与提交者身份。
 func platformSignature(when time.Time) *object.Signature {
 	return &object.Signature{Name: platformName, Email: platformEmail, When: when}
+}
+
+// deleteFiles 从工作区里删掉已确认的那几个文件。
+//
+// **只删 plan.Confirmed 里的路径**，一个不多。判据由 registry.NewWritebackPlan
+// 把过关：每一条都出自平台这一刻重算出的可处置清单，且落在 policyPath 之内。
+// 这里不再做第二次判断，也不做任何"顺手清理"—— 平台从不删除它没被明确确认
+// 要删的东西（2026-08-14 design doc §3，2026-08-24 修订）。
+//
+// 文件已经不在时不报错：分支上没有它，意味着这次删除想要的结果已经成立。
+// 报错会让一次并发的人工清理把整次写回打回，而那次写回本身没有任何问题。
+func deleteFiles(tree *git.Worktree, paths []string) error {
+	for _, path := range paths {
+		if _, err := tree.Filesystem.Stat(path); err != nil {
+			continue
+		}
+		if _, err := tree.Remove(path); err != nil {
+			return err
+		}
+	}
+	return nil
 }

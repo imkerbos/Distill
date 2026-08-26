@@ -2,10 +2,12 @@ package collectstore_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
 
+	"github.com/imkerbos/Distill/internal/collectstore"
 	"github.com/imkerbos/Distill/internal/flow"
 	"github.com/imkerbos/Distill/internal/snapshot"
 	"github.com/imkerbos/Distill/internal/snapshotstore"
@@ -685,4 +687,97 @@ func TestTheSecurityReportKeepsWhatItCouldNotAttribute(t *testing.T) {
 	if len(rep.RiskPortCatalog) == 0 {
 		t.Error("RiskPortCatalog is empty; the report must say what it was looking for")
 	}
+}
+
+// 一次**策略没采回来**的采集，不得被当成"这个集群没有策略"
+// （design doc 2026-08-25 §7；同日在真集群上实测复现）。
+//
+// 真集群复现：摘掉只读凭据对 networkpolicies 的 list 权限，采集照常跑完并落成
+// PARTIAL；读路径挑锚点时只排除 FAILED，于是把那份缺策略的快照当成事实 ——
+// 所有 DENY 判定消失（ALLOW 80/DENY 52 → ALLOW 30/DENY 0），而置信度**不降级**：
+// 没有任何一处把「策略没采回来」传导进 confidence。数据干净的集群上，那份错判
+// 会是 TRUSTED。
+//
+// 正确行为是回退到更早一次完整采集，没有就答不出来 —— 方向必须是「用旧的
+// 完整快照、或者答不出」，不是「用新的残缺快照」。
+func TestAPolicylessCollectionIsNotUsedAsFact(t *testing.T) {
+	r, s := newTestReader(t)
+	ctx := context.Background()
+	seedFourSituations(t, s)
+	saveIngest(t, s, []flow.Connection{
+		conn(recycledIP, peerIP, portResolved),
+		conn(peerIP, recycledIP, portDenied),
+	})
+
+	page, err := r.Flows(ctx, store.FlowFilter{Cluster: collectedID, Window: describedWindow()})
+	if err != nil {
+		t.Fatalf("Flows() 第一次 = %v", err)
+	}
+	if got := countVerdict(page.Items, "DENY"); got == 0 {
+		t.Fatal("完整采集下一条 DENY 都没有 —— 这条用例没有支点")
+	}
+
+	// 更晚的一次采集：策略被拒。资产照采（Pod、Namespace 都在），只有
+	// NETWORKPOLICY 这一类失败 —— 这正是权限被摘掉时的形状。
+	// **落在窗口起点之前一秒**：锚点取的是「不晚于窗口起点的最近一次采集」，
+	// 落在起点之后的运行根本不会被选中，那样这条用例就什么都没测到。
+	savePolicylessRun(t, s, describedWindow().From.Add(-time.Second))
+
+	page, err = r.Flows(ctx, store.FlowFilter{Cluster: collectedID, Window: describedWindow()})
+	if errors.Is(err, collectstore.ErrNoCollection) {
+		return // 没有可回退的完整采集时，答不出来是对的。
+	}
+	if err != nil {
+		t.Fatalf("Flows() 第二次 = %v", err)
+	}
+	if got := countVerdict(page.Items, "DENY"); got == 0 {
+		t.Error("策略没采回来之后 DENY 判定全部消失 —— " +
+			"平台把一次采集失败读成了「这个集群没有策略」")
+	}
+}
+
+// savePolicylessRun 落一次「策略被拒、其余资产照采」的采集运行。
+func savePolicylessRun(t *testing.T, s *snapshotstore.Store, at time.Time) {
+	t.Helper()
+	failures := []snapshot.Failure{{
+		Resource: snapshot.ResourceNetworkPolicy, Reason: snapshot.FailureForbidden,
+	}}
+	attempted := []snapshot.ResourceKind{
+		snapshot.ResourceNamespace, snapshot.ResourcePod, snapshot.ResourceNetworkPolicy,
+	}
+	run := snapshot.Run{
+		Status:     snapshot.DeriveRunStatus(attempted, failures),
+		Failures:   failures,
+		StartedAt:  at.Add(-30 * time.Second),
+		FinishedAt: at.Add(5 * time.Second),
+		Observation: snapshot.Observation{
+			ClusterID:  collectedID,
+			RunID:      "run-policyless",
+			ObservedAt: at,
+			Namespaces: []snapshot.Namespace{
+				{ClusterID: collectedID, Name: "payment"},
+				{ClusterID: collectedID, Name: "shop"},
+				{ClusterID: collectedID, Name: "batch"},
+			},
+			Pods: stablePods(),
+			// Policies 为空 —— 这一类没采回来。
+		},
+	}
+	if err := s.Save(context.Background(), run); err != nil {
+		t.Fatalf("Save(policyless) error = %v", err)
+	}
+	if err := s.DeriveIdentityIntervals(context.Background(), collectedID, "run-policyless"); err != nil {
+		t.Fatalf("DeriveIdentityIntervals(policyless) error = %v", err)
+	}
+}
+
+// countVerdict 数一份流量列表里某个判定的条数。
+func countVerdict(rows []store.FlowRecord, verdict string) int {
+	n := 0
+	for _, r := range rows {
+		if string(r.Verdict) == verdict {
+			n++
+		}
+	}
+	return n
 }

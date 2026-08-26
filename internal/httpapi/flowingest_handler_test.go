@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/imkerbos/Distill/internal/httpapi"
 	"github.com/imkerbos/Distill/internal/response"
@@ -16,6 +17,18 @@ const flowIngestURL = "/api/v1/clusters/prod-asia-1/flow-ingest"
 type stubIngestReader struct {
 	summary snapshotstore.IngestSummary
 	err     error
+}
+
+func (s stubIngestReader) ObservedCoverage(
+	_ context.Context, _ string,
+) (time.Duration, time.Duration, bool, error) {
+	// 替身里放一段"看了很久"：这一组用例测的不是学习期门禁，而
+	// 学习期门禁排在写回的最前面，答不出就整条路走不下去。
+	//
+	// 跨度与覆盖给成同一个值：这里没有断采集要表达，两者相等才是
+	// 一条连续观测的样子。
+	const year = 365 * 24 * time.Hour
+	return year, year, true, nil
 }
 
 func (s stubIngestReader) LatestIngest(context.Context, string) (snapshotstore.IngestSummary, error) {

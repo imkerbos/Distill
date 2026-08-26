@@ -366,3 +366,104 @@ func TestFingerprintOfMatchesTheConstructedPlan(t *testing.T) {
 			registry.FingerprintOf(got), got.Fingerprint)
 	}
 }
+
+// 被确认的删除项进指纹（design doc 2026-08-24 §4.4）。
+//
+// 不进的话，操作者确认的是"写这几个文件"，推出去的却可能连带删掉几个 ——
+// 而删除是这个平台伤害最大的那一类变更。
+func TestConfirmedDeletionsChangeTheFingerprint(t *testing.T) {
+	binding := registry.GitBinding{RepoID: "np", PolicyPath: "clusters/c1"}
+	base := registry.WritebackPlan{
+		Files:         []registry.WritebackFile{{Path: "clusters/c1/distill/payment.yaml", Content: "a"}},
+		Branch:        "distill/c1-20260824T000000Z",
+		CommitMessage: "policy: x",
+		Counts:        zeroCounts(),
+	}
+	withoutDeletion, err := registry.NewWritebackPlan(binding, base)
+	if err != nil {
+		t.Fatalf("NewWritebackPlan: %v", err)
+	}
+
+	withDeletion := base
+	withDeletion.Deletions = []registry.WritebackDeletion{{
+		Path: "clusters/c1/distill-policy.yaml", Class: registry.DeletionDeletable,
+	}}
+	withDeletion.Confirmed = []string{"clusters/c1/distill-policy.yaml"}
+	confirmed, err := registry.NewWritebackPlan(binding, withDeletion)
+	if err != nil {
+		t.Fatalf("NewWritebackPlan with a confirmed deletion: %v", err)
+	}
+	if confirmed.Fingerprint == withoutDeletion.Fingerprint {
+		t.Error("确认一次删除之后指纹没变 —— 那份确认没有被钉住")
+	}
+}
+
+// 只有被列为可删的那几类才能被确认（design doc 2026-08-24 §4.2、§4.3）。
+//
+// 平台看不懂的文件（UNPARSEABLE）与算不出影响的文件（IMPACT_UNKNOWN）一律
+// 不给删：读都没读懂就删掉，等于把那一片的策略在无人评估的情况下撤掉。
+func TestAConfirmedDeletionMustBeOneThePlanOffered(t *testing.T) {
+	binding := registry.GitBinding{RepoID: "np", PolicyPath: "clusters/c1"}
+	base := registry.WritebackPlan{
+		Files:         []registry.WritebackFile{{Path: "clusters/c1/distill/payment.yaml", Content: "a"}},
+		Branch:        "distill/c1-20260824T000000Z",
+		CommitMessage: "policy: x",
+		Counts:        zeroCounts(),
+	}
+
+	for _, tc := range []struct {
+		name  string
+		class registry.DeletionClass
+		want  bool
+	}{
+		{"可删的", registry.DeletionDeletable, true},
+		{"仓库有集群没有的", registry.DeletionNotApplied, true},
+		{"影响算不出来的", registry.DeletionImpactUnknown, false},
+		{"平台看不懂的", registry.DeletionUnparseable, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := base
+			p.Deletions = []registry.WritebackDeletion{{Path: "clusters/c1/x.yaml", Class: tc.class}}
+			p.Confirmed = []string{"clusters/c1/x.yaml"}
+			_, err := registry.NewWritebackPlan(binding, p)
+			if tc.want && err != nil {
+				t.Errorf("NewWritebackPlan = %v, want it accepted", err)
+			}
+			if !tc.want && err == nil {
+				t.Error("平台接受了一次它自己没有提供删除入口的确认")
+			}
+		})
+	}
+}
+
+// 确认一条计划里根本没出现过的路径，一律拒绝。
+//
+// 这是「请求体不是输入」那条纪律在删除上的形态：路径由请求带来，但它能不能
+// 被删由平台这一刻重算出的清单说了算。少了这道判断，一个构造出来的请求可以
+// 删掉策略目录下任意文件。
+func TestAConfirmedDeletionOutsideThePlanIsRefused(t *testing.T) {
+	binding := registry.GitBinding{RepoID: "np", PolicyPath: "clusters/c1"}
+	_, err := registry.NewWritebackPlan(binding, registry.WritebackPlan{
+		Files:         []registry.WritebackFile{{Path: "clusters/c1/distill/payment.yaml", Content: "a"}},
+		Branch:        "distill/c1-20260824T000000Z",
+		CommitMessage: "policy: x",
+		Counts:        zeroCounts(),
+		Deletions:     []registry.WritebackDeletion{{Path: "clusters/c1/a.yaml", Class: registry.DeletionDeletable}},
+		Confirmed:     []string{"clusters/c1/b.yaml"},
+	})
+	if err == nil {
+		t.Error("平台接受了一次针对计划外路径的删除确认")
+	}
+}
+
+// zeroCounts 给出四类齐全、全为零的一份计数。
+//
+// 四类必须齐全：NewWritebackPlan 要求的正是这件事，"缺一类"不是"那一类为零"，
+// 而是"没算过那一类"。
+func zeroCounts() map[predict.ChangeKind]int {
+	out := map[predict.ChangeKind]int{}
+	for _, k := range predict.AllChangeKinds() {
+		out[k] = 0
+	}
+	return out
+}

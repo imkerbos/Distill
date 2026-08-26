@@ -328,6 +328,10 @@ func NewRouter(d Deps) http.Handler {
 				accessViewer, handleTopology(d))
 			az.route(protected, http.MethodGet, "/clusters/{clusterID}/quality",
 				accessViewer, handleQuality(d))
+			// 一致率与判定同屏可达：它回答的是"这些判定有多可信"，
+			// 而一个要另外找地方看的可信度指标等于没有。
+			az.route(protected, http.MethodGet, "/clusters/{clusterID}/reconciliation",
+				accessViewer, handleReconciliation(d))
 			az.route(protected, http.MethodGet, "/clusters/{clusterID}/security",
 				accessViewer, handleSecurity(d))
 			az.route(protected, http.MethodGet, "/clusters/{clusterID}/policy-preview",

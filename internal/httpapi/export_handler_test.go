@@ -197,9 +197,18 @@ func assertDocsMatchCandidates(
 
 	fromPreview := make([]shape, 0, len(candidates))
 	for _, c := range candidates {
-		s := shape{
-			namespace: c.Namespace, name: "candidate-" + c.Workload,
-			selector: fmt.Sprint(map[string]string{c.WorkloadLabelKey: c.Workload}),
+		// 一个候选现在渲染成两个对象：入站一个、出站一个
+		// （design doc 2026-08-24 §3.6）。**两个都要出现，包括规则为空的
+		// 那个** —— 一个 policyTypes:[Ingress] 且没有规则的对象含义是
+		// 「拒绝全部入站」，少了它那个方向就变成全部放行。
+		selector := fmt.Sprint(map[string]string{c.WorkloadLabelKey: c.Workload})
+		in := shape{
+			namespace: c.Namespace, name: "candidate-" + c.Workload + policygen.IngressSuffix,
+			selector: selector,
+		}
+		eg := shape{
+			namespace: c.Namespace, name: "candidate-" + c.Workload + policygen.EgressSuffix,
+			selector: selector,
 		}
 		for _, r := range c.Rules {
 			// 被否决的规则不出现在文件里，也不以注释形式出现（§4）。
@@ -208,15 +217,15 @@ func assertDocsMatchCandidates(
 			}
 			switch r.Direction {
 			case "INGRESS":
-				s.ingress++
+				in.ingress++
 			case "EGRESS":
-				s.egress++
+				eg.egress++
 			default:
 				t.Fatalf("candidate %s/%s has a rule with an unexpected direction %q",
 					c.Namespace, c.Workload, r.Direction)
 			}
 		}
-		fromPreview = append(fromPreview, s)
+		fromPreview = append(fromPreview, in, eg)
 	}
 
 	sortShapes := func(in []shape) {
@@ -346,13 +355,23 @@ func enabledRuleCount(candidates []policygen.CandidatePolicy, ns, wl string) int
 // 一份少了整份文档的文件，与一份少了一条规则的文件是同一类问题。
 func docRuleCount(t *testing.T, docs []networkingv1.NetworkPolicy, ns, wl string) int {
 	t.Helper()
+	// 一个 workload 现在是两个文档（§3.6），规则条数是两半之和。
+	found, total := false, 0
 	for _, d := range docs {
-		if d.Namespace == ns && d.Name == "candidate-"+wl {
-			return len(d.Spec.Ingress) + len(d.Spec.Egress)
+		if d.Namespace != ns {
+			continue
 		}
+		if d.Name != "candidate-"+wl+policygen.IngressSuffix &&
+			d.Name != "candidate-"+wl+policygen.EgressSuffix {
+			continue
+		}
+		found = true
+		total += len(d.Spec.Ingress) + len(d.Spec.Egress)
 	}
-	t.Fatalf("exported file has no document for %s/candidate-%s", ns, wl)
-	return 0
+	if !found {
+		t.Fatalf("exported file has no document for %s/candidate-%s", ns, wl)
+	}
+	return total
 }
 
 // 注释头必须自述，且**只**有这几行：文件会脱离平台独自存在，那段话是

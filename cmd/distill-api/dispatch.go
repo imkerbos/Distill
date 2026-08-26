@@ -1,6 +1,8 @@
 package main
 
 import (
+	networkingv1 "k8s.io/api/networking/v1"
+
 	"context"
 	"database/sql"
 	"fmt"
@@ -158,6 +160,44 @@ func (d *dispatchReader) EnsureRuleExists(
 		return err
 	}
 	return r.EnsureRuleExists(ctx, clusterID, namespace, workload, fingerprint, decision, window)
+}
+
+// Reconciliation 按集群登记的来源转发一次对账。
+func (d *dispatchReader) Reconciliation(
+	ctx context.Context, clusterID string, window store.TimeWindow,
+) (store.ReconciliationReport, error) {
+	r, err := d.readerOf(ctx, clusterID)
+	if err != nil {
+		return store.ReconciliationReport{}, err
+	}
+	return r.Reconciliation(ctx, clusterID, window)
+}
+
+// LivePolicies 按集群登记的来源转发一次「集群里现在有什么策略」的查询。
+func (d *dispatchReader) LivePolicies(
+	ctx context.Context, clusterID string,
+) ([]networkingv1.NetworkPolicy, error) {
+	r, err := d.readerOf(ctx, clusterID)
+	if err != nil {
+		return nil, err
+	}
+	return r.LivePolicies(ctx, clusterID)
+}
+
+// DeletionImpact 按集群登记的来源转发一次删除影响预测。
+//
+// 与其余读方法同一条路：一个登记为 FIXTURE 的集群拿到的是合成数据集的答案，
+// 一个 COLLECTED 集群拿到的是它自己的观测算出来的答案。分派在这里做一次，
+// 不在调用方 —— 写回端点不该知道这个集群的数据来自哪儿。
+func (d *dispatchReader) DeletionImpact(
+	ctx context.Context, clusterID string, window store.TimeWindow,
+	removed []networkingv1.NetworkPolicy,
+) (store.DeletionImpactReport, error) {
+	r, err := d.readerOf(ctx, clusterID)
+	if err != nil {
+		return store.DeletionImpactReport{}, err
+	}
+	return r.DeletionImpact(ctx, clusterID, window, removed)
 }
 
 // Flows 要求调用方点名集群，随后按那个集群登记的来源转发。

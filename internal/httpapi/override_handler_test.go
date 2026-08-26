@@ -1,6 +1,8 @@
 package httpapi_test
 
 import (
+	networkingv1 "k8s.io/api/networking/v1"
+
 	"context"
 	"fmt"
 	"net/http"
@@ -463,6 +465,26 @@ func TestCreateOverrideReaderFailureIsInternalErrorAndLeaksNothing(t *testing.T)
 // handler 的全部前置步骤（集群解析、请求体、字段校验、窗口解析），才谈得上
 // 到达那次前置校验。用一个全都失败的桩会在更早的地方被拒，测不到目标那一格。
 type notWiredReader struct{ store.Reader }
+
+func (notWiredReader) Reconciliation(
+	_ context.Context, clusterID string, _ store.TimeWindow,
+) (store.ReconciliationReport, error) {
+	// 与本替身的其它读方法同一处置：这一条不该被这组用例走到。
+	return store.ReconciliationReport{}, fmt.Errorf("%w: %s", store.ErrClusterNotFound, clusterID)
+}
+
+func (notWiredReader) LivePolicies(
+	_ context.Context, clusterID string,
+) ([]networkingv1.NetworkPolicy, error) {
+	// 与本替身的其它读方法同一处置：这一条不该被这组用例走到。
+	return nil, fmt.Errorf("%w: %s", store.ErrClusterNotFound, clusterID)
+}
+
+func (notWiredReader) DeletionImpact(
+	_ context.Context, clusterID string, _ store.TimeWindow, _ []networkingv1.NetworkPolicy,
+) (store.DeletionImpactReport, error) {
+	return store.DeletionImpactReport{}, fmt.Errorf("%w: %s", store.ErrClusterNotFound, clusterID)
+}
 
 func (notWiredReader) EnsureRuleExists(
 	_ context.Context, clusterID, namespace, workload, _ string,

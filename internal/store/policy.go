@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"time"
 
 	networkingv1 "k8s.io/api/networking/v1"
 
@@ -11,9 +12,34 @@ import (
 	"github.com/imkerbos/Distill/internal/flow"
 	"github.com/imkerbos/Distill/internal/policygen"
 	"github.com/imkerbos/Distill/internal/predict"
+	"github.com/imkerbos/Distill/internal/reconcile"
 	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/replay"
 )
+
+// RuleEvidence 是一条规则跨窗口累积下来的观测证据。
+//
+// 与 policygen.Rule.FlowCount 是两件事：那个数是**这一个窗口**里的条数，
+// 每次重新生成都会变；这里的数只增不减，描述的是"我们看这条规则看了多久"。
+type RuleEvidence struct {
+	// FirstSeen / LastSeen 取自**窗口边界**，不是记录写入的时刻：
+	// 补采一段历史应当把首次观测往前推，而不是标成"刚刚才看到"。
+	FirstSeen time.Time `json:"firstSeen"`
+	LastSeen  time.Time `json:"lastSeen"`
+	// CompleteWindows 是其中完整度为 COMPLETE 的窗口数。
+	//
+	// **与 Windows 必须同时呈现。** 一条规则在二十个"证明不了看全"的窗口里
+	// 出现过，说明的是"我们看了很多次"，不是"我们看全了"；只给总数会让前者
+	// 被读成后者（spec 2026-08-25-trust-engineering §4 的 completeness 一项）。
+	CompleteWindows int `json:"completeWindows"`
+	// Windows 是这条规则出现过的采集窗口数。
+	//
+	// 与 Observations 分开保留：一个窗口里刷了十万条的规则，与十个窗口里
+	// 每次都出现几条的规则，前者证据更弱 —— 一次压测就能造出前者。
+	Windows int `json:"windows"`
+	// Observations 是累计观测到的流量条数。
+	Observations int64 `json:"observations"`
+}
 
 // PolicyPreview 是一次候选策略预览的完整产物。
 //
@@ -138,6 +164,22 @@ type PolicyPreview struct {
 	// 单独报出而不是静默丢弃：只说「已失效」等于告诉人「你上周的
 	// 工作没了，自己去查」。
 	StaleOverrides []policygen.StaleOverride `json:"staleOverrides"`
+	// Evidence 是每条候选规则跨窗口累积的观测证据，按规则指纹索引。
+	//
+	// **候选集是现算的，它只描述当前这一个窗口。** 一条规则在屏幕上写着
+	// 「12 条流量」，读的人无从知道这是「观察了三周，一直如此」还是
+	// 「刚才那一个小时里第一次出现」—— 而这两者能不能下发，结论相反。
+	//
+	// **为 nil 表示没有记录过证据**（fixture 集群、或这个集群从未跑过采集），
+	// 不是「证据为零」。空 map 才是后者。界面必须把两者分开渲染，理由与
+	// TrafficObserved 相同：一个读起来像「证据不足」的空白，实际含义是
+	// 「我们没在记」。
+	//
+	// **证据不解锁任何门禁。** 它只回答「看了多久」，不回答「看全了没有」——
+	// 一条规则在一个始终不完整的窗口里被观测一百次，仍然可能漏掉真正会被
+	// 拦断的那条连接。放行与否照旧由学习窗与一致率两道门决定
+	// （design doc 2026-08-25-trust-engineering §P1）。
+	Evidence map[string]RuleEvidence `json:"evidence"`
 	// Overridden 是应用人工决定之后的版本。
 	//
 	// 嵌套而非平铺同名字段：前端拿到两个结构相同的块，并列视图用
@@ -293,7 +335,7 @@ func (r *FixtureReader) PolicyPreviewAtGranularity(
 		ClusterID:    clusterID,
 		Policies:     gen.EnabledPolicies(),
 		Namespaces:   c.Namespaces,
-		CCNPPresent:  c.CCNPPresent,
+		ForeignPlane: c.CCNPPresent,
 		Observations: cs.observations,
 		// 展示名复用流量列表那一套，两个界面必须用同一个名字指同一个 Pod。
 		Label: endpointLabel,
@@ -302,7 +344,7 @@ func (r *FixtureReader) PolicyPreviewAtGranularity(
 		ClusterID:    clusterID,
 		Policies:     overridden.EnabledPolicies(),
 		Namespaces:   c.Namespaces,
-		CCNPPresent:  c.CCNPPresent,
+		ForeignPlane: c.CCNPPresent,
 		Observations: cs.observations,
 		Label:        func(ep replay.Endpoint) string { return endpointLabel(ep) },
 	})
@@ -456,4 +498,202 @@ func effectiveGranularity(g policygen.Granularity) policygen.Granularity {
 		return policygen.GranularityNamespace
 	}
 	return policygen.GranularityWorkload
+}
+
+// DeletionImpactReport 是「把某几份 NetworkPolicy 从集群里移除」的预测结论
+// （design doc 2026-08-24 §4.3）。
+//
+// 删除是这个平台能造成的最大伤害的那一类变更：删掉一条策略，那一片从「有规则」
+// 变回默认放行，或者反过来把一条 default-deny 撤掉之后再没有东西拦。因此它
+// 必须和新增走同一条求值路径、产出同一套四类计数，而不是一句「删了应该没事」。
+type DeletionImpactReport struct {
+	// TrafficObserved 表示这段窗口里到底有没有观测。
+	//
+	// 为 false 时 Counts 全是 0，而那个 0 不是评估结果，是没有评估过 ——
+	// 调用方据此**不提供删除入口**，不是显示一个让人放心的零。
+	TrafficObserved bool `json:"trafficObserved"`
+	// Window 是实际生效的窗口，必须回显。
+	Window TimeWindow `json:"window"`
+	// Counts 是移除之后的四类计数。
+	Counts map[predict.ChangeKind]int `json:"counts"`
+	// Removed 是被问到的策略份数。
+	Removed int `json:"removed"`
+	// Live 是其中在**最近一次采集**里仍然存在于集群的份数。
+	//
+	// 回答的是「现在还在不在」。删除是一个此刻要做的决定，因此这一问必须用
+	// 现状回答，而不是用观测窗口那一刻的快照 —— 一条在窗口之后才被下发的
+	// 策略，用窗口口径去看是「集群里没有」，据此标成「删掉没影响」，
+	// 而它其实正在生效（2026-08-24 实测发现）。
+	Live int `json:"live"`
+	// InWindow 是其中出现在**观测窗口锚点**策略集里的份数。
+	//
+	// 回答的是「算不算得出删除影响」。Counts 是拿窗口内的观测流量重放出来的，
+	// 只有当这些策略在那一刻就已经存在，删掉它们的影响才有意义；否则重放的
+	// 是一次「删掉一个当时并不存在的东西」，结果恒为「无变化」。
+	//
+	// **与 Live 分开两个字段，不合并**：它们回答两个不同的问题，合并之后
+	// 「现在有、但那时没有」这种情形只能落到其中一边，而它恰恰是唯一需要
+	// 平台说「我算不出来」的情形。
+	InWindow int `json:"inWindow"`
+}
+
+// DeletionImpact 预测把 removed 这批策略从集群里移除会发生什么。
+//
+// 与候选集预测走同一条路径（predict.Run），只是策略集取的是「集群当前策略集
+// 减去 removed」：删除是策略集的一次变更，另写一套判定就又多了一个两份结论
+// 可以分歧的位置。
+func (r *FixtureReader) DeletionImpact(
+	ctx context.Context, clusterID string, window TimeWindow,
+	removed []networkingv1.NetworkPolicy,
+) (DeletionImpactReport, error) {
+	cs, err := r.generate(ctx, clusterID, window)
+	if err != nil {
+		return DeletionImpactReport{}, err
+	}
+	// 合成数据集只有一份静态快照，「现在」与「窗口那一刻」是同一份 ——
+	// 因此两个计数取同一个值。这不是偷懒：fixture 集群本来就没有时间维度，
+	// 把它伪造出两个不同的值才是编造。
+	kept, present := WithoutPolicies(cs.cluster.Policies, removed)
+	report := predict.Run(predict.Input{
+		ClusterID:    clusterID,
+		Policies:     kept,
+		Namespaces:   cs.cluster.Namespaces,
+		ForeignPlane: cs.cluster.CCNPPresent,
+		Observations: cs.observations,
+		Label:        endpointLabel,
+	})
+	return DeletionImpactReport{
+		// 合成数据集自带流量，与 PolicyPreview 里那条注释同源。
+		TrafficObserved: true,
+		Window:          window,
+		Counts:          report.Counts,
+		Removed:         len(removed),
+		Live:            present,
+		InWindow:        present,
+	}, nil
+}
+
+// WithoutPolicies 返回 base 去掉 removed 之后的策略集，以及 removed 里确实
+// 出现在 base 中的份数。
+//
+// 导出而不是各 Reader 各写一份：两个来源的删除影响必须按同一条匹配规则算，
+// 各写一次就给了「一边比内容、一边比名字」一个位置，而那会让同一次删除在
+// 两种集群上得出不同的结论。
+//
+// 按 (namespace, name) 匹配，不比内容：Config Sync 删掉的是那个对象，
+// 而仓库里那份与集群里那份可能已经不同 —— 比内容会让一份被人手工改过的
+// 策略变成「集群里没有」，于是删除影响被算成零。
+func WithoutPolicies(
+	base, removed []networkingv1.NetworkPolicy,
+) ([]networkingv1.NetworkPolicy, int) {
+	drop := make(map[[2]string]struct{}, len(removed))
+	for _, p := range removed {
+		drop[[2]string{p.Namespace, p.Name}] = struct{}{}
+	}
+	kept := make([]networkingv1.NetworkPolicy, 0, len(base))
+	hit := map[[2]string]struct{}{}
+	for _, p := range base {
+		key := [2]string{p.Namespace, p.Name}
+		if _, gone := drop[key]; gone {
+			hit[key] = struct{}{}
+			continue
+		}
+		kept = append(kept, p)
+	}
+	return kept, len(hit)
+}
+
+// LivePolicies 返回合成数据集里这个集群的策略。
+//
+// fixture 只有一份静态快照，"最近一次采集"与"任何时刻"是同一份 ——
+// 与 DeletionImpact 里两个计数取同一个值同源。
+func (r *FixtureReader) LivePolicies(
+	ctx context.Context, clusterID string,
+) ([]networkingv1.NetworkPolicy, error) {
+	// 门禁与其它读方法一致：集群必须既在 fleet 里、也在注册表里 ——
+	// 一个没登记的集群 ID 的正确答案是「没有这个集群」，不是一份空清单。
+	c, ok := r.fleet.Cluster(clusterID)
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", ErrClusterNotFound, clusterID)
+	}
+	if _, ok, err := r.registeredCluster(ctx, clusterID); err != nil {
+		return nil, err
+	} else if !ok {
+		return nil, fmt.Errorf("%w: %s", ErrClusterNotFound, clusterID)
+	}
+	out := make([]networkingv1.NetworkPolicy, len(c.Policies))
+	copy(out, c.Policies)
+	return out, nil
+}
+
+// ReconciliationReport 是一次对账的结论，连同它的口径。
+//
+// Window 与 SourceReportsVerdicts 必须回显：一个 0.98 的一致率，在"来源根本
+// 不报判定、只有 3 条可比对连接"的情况下毫无意义。指标与它的口径必须一起走，
+// 否则它会被单独截图放进汇报里。
+type ReconciliationReport struct {
+	// Cluster 是目标集群。
+	Cluster string `json:"cluster"`
+	// Window 是实际生效的查询时间窗。
+	Window TimeWindow `json:"window"`
+	// SourceReportsVerdicts 表示这段观测的来源到底报不报判定。
+	//
+	// 为 false 时整份报告只有 SOURCE_SILENT —— 那不是"平台全错"，是
+	// "这条接入方式对不了账"（NODE_CONNTRACK 恒为此）。
+	SourceReportsVerdicts bool `json:"sourceReportsVerdicts"`
+	// Report 是分类计数与按 workload 的聚合。
+	Report reconcile.Report `json:"report"`
+}
+
+// Reconciliation 对合成数据集答「对不了账」。
+//
+// **合成数据集没有执行平面。** 没有独立的第二方报判定，就没有可以对账的
+// ground truth —— 拿引擎自己的输出与自己比，一致率恒为 1，那是一个纯粹
+// 编出来的数字，而且是朝让人放心的方向编。
+//
+// 因此这里把每条观测记成 SOURCE_SILENT，与 NODE_CONNTRACK 接入同一处置：
+// 不是"平台全错"，是"这条接入方式对不了账"。
+func (r *FixtureReader) Reconciliation(
+	ctx context.Context, clusterID string, window TimeWindow,
+) (ReconciliationReport, error) {
+	cs, err := r.generate(ctx, clusterID, window)
+	if err != nil {
+		return ReconciliationReport{}, err
+	}
+	obs := make([]reconcile.Observation, 0, len(cs.observations))
+	for _, o := range cs.observations {
+		obs = append(obs, reconcile.Observation{
+			Subject:  SubjectOfEndpoint(o.Flow.Source),
+			Platform: o.Decision.Verdict,
+			Reported: false,
+		})
+	}
+	return ReconciliationReport{
+		Cluster: clusterID, Window: window,
+		SourceReportsVerdicts: false,
+		Report:                reconcile.Run(obs),
+	}, nil
+}
+
+// SubjectOfEndpoint 取一条连接的源端主体。
+//
+// 导出而不是各 Reader 各写一份：两个来源必须按同一个主体聚合，否则
+// 「一致率按 A 分组、门禁按 B 拦」这件事会在某天悄悄成立。
+//
+// 取源端而不是目的端：候选规则按源端 workload 生成，门禁也按它拦
+// （design doc 2026-08-25 §3.4）。两处主体不一致时，一个分歧率高的 workload
+// 照样能把它的推荐推出去。
+//
+// 解不出主体（Pod 为空、或标签里没有任何一个归属键）时落到空主体上 ——
+// 它仍然进整集群计数，只是不挂在任何 workload 名下。丢掉它会让整集群的
+// 一致率与各 workload 之和对不上，而对不上的数字没有人会信。
+func SubjectOfEndpoint(ep replay.Endpoint) reconcile.Subject {
+	if ep.Pod == nil {
+		return reconcile.Subject{}
+	}
+	_, workload, ok := policygen.WorkloadOf(ep.Pod.Labels)
+	if !ok {
+		return reconcile.Subject{Namespace: ep.Pod.Namespace}
+	}
+	return reconcile.Subject{Namespace: ep.Pod.Namespace, Workload: workload}
 }

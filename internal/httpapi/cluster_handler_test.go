@@ -142,6 +142,22 @@ func newMemRegistry() *memRegistry {
 	}
 }
 
+// SetOtherPlanes 记下策略平面探测的结论。
+//
+// 替身里真的记下来而不是丢掉：有用例要断言"写下的是 UNKNOWN 而不是 NONE"，
+// 而一个把它吞掉的替身会让那条断言永远通过。
+func (m *memRegistry) SetOtherPlanes(
+	_ context.Context, clusterID string, planes registry.PolicyPlanes,
+) error {
+	c, ok := m.clusters[clusterID]
+	if !ok {
+		return registry.ErrNotFound
+	}
+	c.OtherPlanes = planes
+	m.clusters[clusterID] = c
+	return nil
+}
+
 func (m *memRegistry) Clusters(context.Context) ([]registry.Cluster, error) {
 	if m.failWith != nil {
 		return nil, m.failWith

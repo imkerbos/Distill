@@ -500,8 +500,12 @@ func TestListReportsTheRepositoryWithoutTouchingIt(t *testing.T) {
 
 	// 策略路径下的两个文件都在；仓库根上那个 README.md 不在 —— 边界落在
 	// policyPath 上，不是整个仓库。
-	if want := []string{apiPath, keepPath}; !slices.Equal(got.Files, want) {
-		t.Errorf("List() files = %v, want %v", got.Files, want)
+	var paths []string
+	for _, f := range got.Files {
+		paths = append(paths, f.Path)
+	}
+	if want := []string{apiPath, keepPath}; !slices.Equal(paths, want) {
+		t.Errorf("List() files = %v, want %v", paths, want)
 	}
 	// newPolicyRepo 里那条 distill/live 是现存的 distill 分支；部署分支不是。
 	if want := []string{"distill/live"}; !slices.Equal(got.Branches, want) {
@@ -526,8 +530,8 @@ func TestListDoesNotReachOutsideThePolicyPath(t *testing.T) {
 		t.Fatalf("List() = %v", err)
 	}
 	for _, f := range got.Files {
-		if !strings.HasPrefix(f, policyPath+"/") {
-			t.Errorf("List() reported %q, which is outside the policy path %q", f, policyPath)
+		if !strings.HasPrefix(f.Path, policyPath+"/") {
+			t.Errorf("List() reported %q, which is outside the policy path %q", f.Path, policyPath)
 		}
 	}
 }
@@ -965,4 +969,142 @@ func fileInTree(t *testing.T, tree *object.Tree, p string) (string, bool) {
 		t.Fatalf("contents of %s: %v", p, err)
 	}
 	return content, true
+}
+
+// 枚举必须带回文件**内容**，不只是路径（design doc 2026-08-24 §4.1）。
+//
+// 删除影响要靠内容算：一个只有路径的清单答不出「删掉它会断什么」，
+// 而删除是这个平台伤害最大的那类变更，不允许在没有预测的情况下发生。
+func TestListBringsBackFileContents(t *testing.T) {
+	url, _ := newPolicyRepo(t)
+
+	got, err := newWriter(t, newResolver(t)).List(
+		context.Background(), testRepo(url, deployBranch), policyPath)
+	if err != nil {
+		t.Fatalf("List() = %v", err)
+	}
+	if len(got.Files) == 0 {
+		t.Fatal("List() returned no files —— 这条用例没有被测对象")
+	}
+	for _, f := range got.Files {
+		if f.Oversize {
+			continue
+		}
+		if f.Content == "" {
+			t.Errorf("file %q came back with no content", f.Path)
+		}
+	}
+}
+
+// 超过上限的文件只报存在、不带内容（design doc 2026-08-24 §4.1）。
+//
+// 策略目录下可以有任何人放进去的任何东西。把它们无条件读进内存，等于让
+// 仓库里一个几百兆的文件决定平台进程的内存占用 —— 而这条路径是 admin
+// 点一下就会走的（规范 §24）。上限之外的那些一律进不了删除流程：
+// 平台读都没读全的文件，它对集群的作用也算不出来。
+func TestListRefusesToReadAnOversizeFile(t *testing.T) {
+	url, _ := newPolicyRepo(t)
+	big := strings.Repeat("x", gitwrite.MaxListedFileBytes+1)
+	seedFileOnDeployBranch(t, url, policyPath+"/huge.yaml", big)
+
+	got, err := newWriter(t, newResolver(t)).List(
+		context.Background(), testRepo(url, deployBranch), policyPath)
+	if err != nil {
+		t.Fatalf("List() = %v", err)
+	}
+	var found bool
+	for _, f := range got.Files {
+		if f.Path != policyPath+"/huge.yaml" {
+			continue
+		}
+		found = true
+		if !f.Oversize {
+			t.Error("an oversize file was not marked as such")
+		}
+		if f.Content != "" {
+			t.Errorf("an oversize file came back with %d bytes of content", len(f.Content))
+		}
+	}
+	if !found {
+		t.Error("the oversize file was not listed at all —— 它仍然是一个多余文件，必须报出来")
+	}
+}
+
+// 被确认的删除必须真的从分支上消失，其余文件一个都不许少
+// （design doc 2026-08-24 §4）。
+//
+// 这条同时钉住两个方向：删掉的确实删掉了，以及**没被确认的没有被顺手删掉**。
+// 后者是这条路径最坏的失败形态 —— 一次写回把策略目录清空，那一片全部从
+// "有规则"变回默认放行，而 Config Sync 会忠实地照做。
+func TestPushDeletesOnlyTheConfirmedFiles(t *testing.T) {
+	url, dir := newPolicyRepo(t)
+	newPath := policyPath + "/distill/payment.yaml"
+	plan := planWithDeletion(t, targetBranch, newPath, "kind: NetworkPolicy\nname: new\n", keepPath)
+
+	sha, err := newWriter(t, newResolver(t)).Push(context.Background(), testRepo(url, deployBranch), plan)
+	if err != nil {
+		t.Fatalf("Push() = %v", err)
+	}
+
+	pushed := treeOf(t, dir, targetBranch, sha)
+	if _, still := fileInTree(t, pushed, keepPath); still {
+		t.Errorf("确认删除的 %q 仍然在分支上", keepPath)
+	}
+	// 平台这次要写的那个文件在。
+	if _, ok := fileInTree(t, pushed, newPath); !ok {
+		t.Errorf("本次写回的文件 %q 不在分支上", newPath)
+	}
+	// 没被确认的那些一个都不许少。
+	if _, ok := fileInTree(t, pushed, apiPath); !ok {
+		t.Errorf("没有被确认删除的 %q 也从分支上消失了", apiPath)
+	}
+	// 策略目录之外的文件同样不许被碰。
+	if _, ok := fileInTree(t, pushed, readmePath); !ok {
+		t.Error("策略目录之外的文件被这次写回删掉了")
+	}
+}
+
+// planWithDeletion 是 planWith 的带删除版本。
+func planWithDeletion(
+	t *testing.T, branch, filePath, content, deleted string,
+) registry.WritebackPlan {
+	t.Helper()
+	base := planWith(t, branch, filePath, content)
+	base.Deletions = []registry.WritebackDeletion{{
+		Path: deleted, Class: registry.DeletionDeletable,
+	}}
+	base.Confirmed = []string{deleted}
+	p, err := registry.NewWritebackPlan(
+		registry.GitBinding{RepoID: testRepoID, PolicyPath: policyPath}, base)
+	if err != nil {
+		t.Fatalf("NewWritebackPlan: %v", err)
+	}
+	return p
+}
+
+// 只有删除、没有内容变化时，仍然是一次要推的写回。
+//
+// 幂等判的是"这次写回什么都没改"，而删掉一个文件显然改了东西。把删除漏出
+// 幂等判断，操作者确认的删除会被静默丢弃并报"无变更" —— 他以为删掉了，
+// 而仓库里那个文件还在，Config Sync 也还在 apply 它。
+func TestPushWithOnlyDeletionsIsStillAChange(t *testing.T) {
+	url, dir := newPolicyRepo(t)
+
+	// 一份与分支上现有内容逐字节相同的计划是"无变更"。
+	same := planWith(t, targetBranch, apiPath, apiContent)
+	if _, err := newWriter(t, newResolver(t)).Push(
+		context.Background(), testRepo(url, deployBranch), same); !errors.Is(err, gitwrite.ErrNothingToPush) {
+		t.Fatalf("推同一份内容 = %v, want ErrNothingToPush", err)
+	}
+
+	// 内容仍然一样，但这次带一个确认删除 —— 必须推得出去。
+	withDeletion := planWithDeletion(t, targetBranch+"-delete", apiPath, apiContent, keepPath)
+	sha, err := newWriter(t, newResolver(t)).Push(
+		context.Background(), testRepo(url, deployBranch), withDeletion)
+	if err != nil {
+		t.Fatalf("只含删除的写回 = %v, want 推得出去", err)
+	}
+	if _, still := fileInTree(t, treeOf(t, dir, targetBranch+"-delete", sha), keepPath); still {
+		t.Errorf("%q 没有被删掉", keepPath)
+	}
 }

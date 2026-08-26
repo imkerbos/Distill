@@ -47,6 +47,35 @@ func handleQuality(d Deps) http.HandlerFunc {
 	}
 }
 
+// handleReconciliation 报告平台判定与执行平面判定的一致率
+// （design doc 2026-08-25 §3）。
+//
+// **GET 且只读**：它不落库、不改任何结论 —— 一份"此刻问一次"的答案。
+// 落库的是后续的门禁决定，那条本来就有审计。
+//
+// 时间窗按集群现解，与其余带窗口的读方法同一条路：拿一个跨集群共用的常量
+// 窗口去问，一致率会算在一段与这个集群无关的时间上。
+func handleReconciliation(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		clusterID := chi.URLParam(r, "clusterID")
+		window, ok, err := parseWindow(r.Context(), r.URL.Query(), d.Reader, clusterID)
+		if err != nil {
+			writeReaderError(w, r, d, err)
+			return
+		}
+		if !ok {
+			response.WriteBusiness(w, response.CodeInvalidParam)
+			return
+		}
+		got, err := d.Reader.Reconciliation(r.Context(), clusterID, window)
+		if err != nil {
+			writeReaderError(w, r, d, err)
+			return
+		}
+		response.WriteOK(w, got)
+	}
+}
+
 // writeReaderError 把数据层错误映射成响应。
 //
 // 资源不存在是业务级失败，返回 HTTP 200 + 20002 —— 查询一个不存在的

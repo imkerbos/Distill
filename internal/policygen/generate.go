@@ -452,15 +452,34 @@ func dedupeGaps(in []UngeneratableItem) []UngeneratableItem {
 	return out
 }
 
+// IngressSuffix 与 EgressSuffix 是拆分后两个对象名的后缀
+// （design doc 2026-08-24 §3.6）。
+//
+// 导出成常量而不是各处写字面量：写回的文件名由对象名推出，前端也要按方向
+// 分组，三处各写一遍就给了「其中一处改了后缀」一个位置，而那时文件与对象
+// 对不上，症状是 GitOps 侧凭空多出一份策略、少删一份。
+const (
+	IngressSuffix = "-ingress"
+	EgressSuffix  = "-egress"
+)
+
 // EnabledPolicies 把启用的规则渲染成可供回放的 NetworkPolicy 列表。
 //
 // 只吐启用规则：待确认的风险规则不进入生效策略集，否则 dry-run 预测
 // 出的就不是"默认推荐上线后会怎样"，而是"把所有敞口都放开后会怎样"。
 //
-// 每条策略固定 policyTypes 为 Ingress + Egress：规则为空即 default-deny，
-// 不另造一条独立的 default-deny 策略。
+// **一个主体拆成两个对象：入站一个、出站一个**（design doc 2026-08-24 §3.6）。
+// NetworkPolicy 是 additive 的，两个对象合起来与一个带两个方向的对象逐条等价；
+// 拆开是为了让评审落到方向上 —— egress 收错的症状是隐蔽的超时，ingress 收错
+// 是立刻连不上，两者该看的人和该问的问题都不一样。
+//
+// **没有规则的那一半照样生成，不能省。** 一个 policyTypes:[Ingress] 且 ingress
+// 为空的对象，含义是「拒绝全部入站」，不是「无操作」。少生成它，那个主体的
+// 入站就从默认拒绝变成全部放行 —— 方向朝不安全，且不报错。这也是拆分前
+// 「固定 policyTypes 为 Ingress+Egress、规则为空即 default-deny」那条约定的
+// 延续，不是对它的放宽。
 func (r Result) EnabledPolicies() []networkingv1.NetworkPolicy {
-	out := make([]networkingv1.NetworkPolicy, 0, len(r.Policies))
+	out := make([]networkingv1.NetworkPolicy, 0, 2*len(r.Policies))
 	for _, p := range r.Policies {
 		// 名字与 podSelector 按粒度分支。未登记的取值按 WORKLOAD 处理：
 		// 那是现状、也是更精确的那一侧，失败方向朝窄（安全规范 §49）。
@@ -475,13 +494,22 @@ func (r Result) EnabledPolicies() []networkingv1.NetworkPolicy {
 			// namespace 的全部 Pod —— 那正是这个粒度的定义。
 			name, selector = "candidate-namespace", metav1.LabelSelector{}
 		}
-		np := networkingv1.NetworkPolicy{
-			ObjectMeta: metav1.ObjectMeta{Namespace: p.Namespace, Name: name},
+		in := networkingv1.NetworkPolicy{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: p.Namespace, Name: name + IngressSuffix,
+			},
 			Spec: networkingv1.NetworkPolicySpec{
 				PodSelector: selector,
-				PolicyTypes: []networkingv1.PolicyType{
-					networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress,
-				},
+				PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+			},
+		}
+		eg := networkingv1.NetworkPolicy{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: p.Namespace, Name: name + EgressSuffix,
+			},
+			Spec: networkingv1.NetworkPolicySpec{
+				PodSelector: selector,
+				PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeEgress},
 			},
 		}
 		for _, rule := range p.Rules {
@@ -489,13 +517,14 @@ func (r Result) EnabledPolicies() []networkingv1.NetworkPolicy {
 				continue
 			}
 			if rule.Ingress != nil {
-				np.Spec.Ingress = append(np.Spec.Ingress, *rule.Ingress)
+				in.Spec.Ingress = append(in.Spec.Ingress, *rule.Ingress)
 			}
 			if rule.Egress != nil {
-				np.Spec.Egress = append(np.Spec.Egress, *rule.Egress)
+				eg.Spec.Egress = append(eg.Spec.Egress, *rule.Egress)
 			}
 		}
-		out = append(out, np)
+		// 两个都进，包括规则为空的那个 —— 见函数注释。
+		out = append(out, in, eg)
 	}
 	return out
 }

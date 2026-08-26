@@ -1,6 +1,10 @@
 package httpapi_test
 
 import (
+	"github.com/imkerbos/Distill/internal/predict"
+	networkingv1 "k8s.io/api/networking/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"context"
 	"hash/fnv"
 	"io"
@@ -14,6 +18,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/imkerbos/Distill/internal/gitwrite"
 	"github.com/imkerbos/Distill/internal/policygen"
 	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/response"
@@ -108,7 +113,51 @@ func (p *windowProbeReader) PolicyPreviewAtGranularity(
 ) (store.PolicyPreview, error) {
 	p.calls = append(p.calls,
 		windowCall{method: "PolicyPreviewAtGranularity", cluster: clusterID, window: w})
-	return store.PolicyPreview{Window: w}, nil
+	// 交出一条启用规则：写回端点在"一条都推不出去"时会提前拒绝，而那会让
+	// 它后面那些同样吃时间窗的调用（删除影响预测）永远走不到 —— 覆盖面
+	// 那条断言于是变成"这条路走不通"，而不是"这条路解错了窗口"。
+	return store.PolicyPreview{
+		Window:          w,
+		TrafficObserved: true,
+		Overridden: store.OverriddenView{
+			Enabled: []networkingv1.NetworkPolicy{{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "payment", Name: "probe"},
+				Spec: networkingv1.NetworkPolicySpec{
+					PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+					// 带一条真的规则：写回在"启用规则为零"时同样提前拒绝，
+					// 一个只有 policyTypes 的空壳过不了那道门。
+					Ingress: []networkingv1.NetworkPolicyIngressRule{{}},
+				},
+			}},
+			Prediction: predict.Report{Counts: map[predict.ChangeKind]int{}},
+		},
+	}, nil
+}
+
+func (p *windowProbeReader) Reconciliation(
+	_ context.Context, clusterID string, w store.TimeWindow,
+) (store.ReconciliationReport, error) {
+	// 记下调用：对账吃时间窗，因此它必须与其它带窗口的读方法一样，
+	// 被证明拿的是**这个集群**解出来的窗口。
+	p.calls = append(p.calls, windowCall{method: "Reconciliation", cluster: clusterID, window: w})
+	return store.ReconciliationReport{}, nil
+}
+
+func (p *windowProbeReader) LivePolicies(
+	_ context.Context, clusterID string,
+) ([]networkingv1.NetworkPolicy, error) {
+	// **答一份空清单，不报错。** 写回路径在出计划前会问一次"集群里现在有
+	// 什么"（冲突判定），读不出来就整次拒绝 —— 那会让这组用例走不到它真正
+	// 要走的那几个带时间窗的调用。
+	_ = clusterID
+	return nil, nil
+}
+
+func (p *windowProbeReader) DeletionImpact(
+	_ context.Context, clusterID string, w store.TimeWindow, _ []networkingv1.NetworkPolicy,
+) (store.DeletionImpactReport, error) {
+	p.calls = append(p.calls, windowCall{method: "DeletionImpact", cluster: clusterID, window: w})
+	return store.DeletionImpactReport{}, nil
 }
 
 func (p *windowProbeReader) EnsureRuleExists(
@@ -156,11 +205,26 @@ func newWindowProbeRouter(t *testing.T, reader store.Reader) (http.Handler, *htt
 		RepoID: gitRepoID, PolicyPath: writebackPolicyPath,
 		VerifyResult: registry.BindingVerifyNotVerified,
 	}
+	// 登记业务周期：写回的学习期门禁排在最前，没有它这组遍历走不到后面
+	// 那几个吃时间窗的调用。
+	c.BusinessCycle = time.Hour
+	c.BusinessCycleReason = "窗口探针用"
 	reg.clusters[probeCluster] = c
 
+	// 仓库现状里放一个多余文件：删除影响预测只在有多余文件时才会被调到，
+	// 空仓库会让这条路径走不到，而本测试正是要证明它也按集群解窗口。
+	writer := &fakePolicyWriter{listing: gitwrite.RepoListing{
+		Files: []gitwrite.RepoFile{{
+			Path: writebackPolicyPath + "/legacy.yaml",
+			Content: "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\n" +
+				"metadata:\n  name: legacy\n  namespace: payment\nspec:\n  podSelector: {}\n",
+		}},
+	}}
 	h, _, cookie := buildTestRouterWithLog(t, reader, reg,
-		&stubGitVerifier{result: registry.BindingVerifyOK}, &fakePolicyWriter{},
-		nil, "ERROR", io.Discard)
+		&stubGitVerifier{result: registry.BindingVerifyOK}, writer,
+		nil, "ERROR", io.Discard,
+		// 观测早就覆盖了周期：这些用例测的不是学习期门禁。
+		&stubObservedSince{observedSince: time.Now().Add(-365 * 24 * time.Hour)})
 	return h, cookie
 }
 

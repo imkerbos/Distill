@@ -2,6 +2,7 @@ package policygen_test
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	networkingv1 "k8s.io/api/networking/v1"
@@ -294,10 +295,23 @@ func TestNamespaceGranularityRendersAnEmptyPodSelector(t *testing.T) {
 			t.Errorf("%s collides with another policy in the same namespace", key)
 		}
 		names[key] = true
-		if want := []networkingv1.PolicyType{
-			networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress,
-		}; !reflect.DeepEqual(np.Spec.PolicyTypes, want) {
-			t.Errorf("%s: policyTypes = %v, want both", key, np.Spec.PolicyTypes)
+		// 一个对象一个方向（design doc 2026-08-24 §3.6）。名字的后缀与
+		// policyTypes 必须一致 —— 对不上就意味着文件名说的方向与对象实际
+		// 管的方向不同，而写回的文件名正是由对象名推出来的。
+		if len(np.Spec.PolicyTypes) != 1 {
+			t.Errorf("%s: policyTypes = %v，拆分后一个对象只该管一个方向",
+				key, np.Spec.PolicyTypes)
+			continue
+		}
+		switch np.Spec.PolicyTypes[0] {
+		case networkingv1.PolicyTypeIngress:
+			if !strings.HasSuffix(np.Name, policygen.IngressSuffix) {
+				t.Errorf("%s: 入站对象的名字没有 %s 后缀", key, policygen.IngressSuffix)
+			}
+		case networkingv1.PolicyTypeEgress:
+			if !strings.HasSuffix(np.Name, policygen.EgressSuffix) {
+				t.Errorf("%s: 出站对象的名字没有 %s 后缀", key, policygen.EgressSuffix)
+			}
 		}
 	}
 }

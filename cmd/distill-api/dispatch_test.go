@@ -9,6 +9,9 @@ import (
 	"testing"
 	"time"
 
+	networkingv1 "k8s.io/api/networking/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"github.com/imkerbos/Distill/internal/collectstore"
 	"github.com/imkerbos/Distill/internal/fixture"
 	"github.com/imkerbos/Distill/internal/policygen"
@@ -77,6 +80,20 @@ func dispatchCasesFor(ctx context.Context, clusterID string, window store.TimeWi
 					policygen.GranularityNamespace)
 				return err
 			}},
+		{method: "Reconciliation", name: "Reconciliation", call: func(d *dispatchReader) error {
+			_, err := d.Reconciliation(ctx, clusterID, window)
+			return err
+		}},
+		{method: "LivePolicies", name: "LivePolicies", call: func(d *dispatchReader) error {
+			_, err := d.LivePolicies(ctx, clusterID)
+			return err
+		}},
+		{method: "DeletionImpact", name: "DeletionImpact", call: func(d *dispatchReader) error {
+			_, err := d.DeletionImpact(ctx, clusterID, window, []networkingv1.NetworkPolicy{{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "payment", Name: "allow-gateway"},
+			}})
+			return err
+		}},
 		{method: "EnsureRuleExists", name: "EnsureRuleExists", call: func(d *dispatchReader) error {
 			return d.EnsureRuleExists(ctx, clusterID, "payment", "payment",
 				"deadbeef", policygen.DecisionDisable, window)

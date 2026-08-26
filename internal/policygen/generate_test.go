@@ -2,6 +2,8 @@ package policygen_test
 
 import (
 	"encoding/json"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -29,7 +31,7 @@ func observe(t *testing.T, clusterID string) policygen.Input {
 		nss = append(nss, cl.Namespaces...)
 	}
 	ev := replay.NewEvaluator(clusterID, c.Policies, nss,
-		replay.WithCCNPPresent(c.CCNPPresent))
+		replay.WithForeignPlane(c.CCNPPresent))
 	var obs []policygen.Observation
 	for _, fl := range f.Flows {
 		d := ev.Evaluate(fl.Flow)
@@ -284,12 +286,33 @@ func TestEnabledPoliciesExcludeDisabledRules(t *testing.T) {
 		bySubject[[2]string{p.Namespace, p.Workload}] = p
 	}
 
-	sawDisabledRule := false
+	// 一个主体现在是两个对象（design doc 2026-08-24 §3.6）。先按主体把两半
+	// 合回去再比：这条用例守的是「禁用规则不会漏进生效策略集」，那条性质与
+	// 规则装在一个对象还是两个无关，而逐个对象去比只会把它变成一条在比
+	// 形状的用例。
+	merged := map[[2]string]networkingv1.NetworkPolicy{}
 	for _, p := range policies {
-		if len(p.Spec.PolicyTypes) != 2 {
-			t.Errorf("%s/%s: policyTypes = %v, want both Ingress and Egress",
+		if len(p.Spec.PolicyTypes) != 1 {
+			t.Errorf("%s/%s: policyTypes = %v，拆分后一个对象只该管一个方向",
 				p.Namespace, p.Name, p.Spec.PolicyTypes)
+			continue
 		}
+		key := [2]string{p.Namespace, strings.TrimSuffix(
+			strings.TrimSuffix(p.Name, policygen.IngressSuffix), policygen.EgressSuffix)}
+		m, ok := merged[key]
+		if !ok {
+			m = networkingv1.NetworkPolicy{
+				ObjectMeta: p.ObjectMeta,
+				Spec:       networkingv1.NetworkPolicySpec{PodSelector: p.Spec.PodSelector},
+			}
+		}
+		m.Spec.Ingress = append(m.Spec.Ingress, p.Spec.Ingress...)
+		m.Spec.Egress = append(m.Spec.Egress, p.Spec.Egress...)
+		merged[key] = m
+	}
+
+	sawDisabledRule := false
+	for _, p := range merged {
 		// 不假定固定的 app 键：真实集群里 workload 归属键因 Pod 而异
 		// （coredns 用 k8s-app 等），生成的 podSelector 恒为单键
 		// matchLabels，直接取这唯一的值。
@@ -809,5 +832,91 @@ func TestPeersAndPortsMatchTheRuleBody(t *testing.T) {
 		if !checked[form] {
 			t.Errorf("no %s peer exercised; the fixture no longer covers this shape", form)
 		}
+	}
+}
+
+// 每份候选策略拆成 ingress 与 egress 两个对象（design doc 2026-08-24 §3.6）。
+//
+// 这两个方向的风险性质不同：egress 收错的症状是隐蔽的超时，ingress 收错是
+// 立刻连不上。拆开之后评审人不打开文件就知道这一条改的是谁的哪个方向。
+func TestEnabledPoliciesSplitByDirection(t *testing.T) {
+	policies := policygen.Generate(observe(t, "prod-asia-1")).EnabledPolicies()
+	if len(policies) == 0 {
+		t.Fatal("EnabledPolicies() empty")
+	}
+
+	subjects := map[[2]string][]string{}
+	for _, p := range policies {
+		if len(p.Spec.PolicyTypes) != 1 {
+			t.Errorf("%s/%s: policyTypes = %v，一个对象只该管一个方向",
+				p.Namespace, p.Name, p.Spec.PolicyTypes)
+			continue
+		}
+		switch p.Spec.PolicyTypes[0] {
+		case networkingv1.PolicyTypeIngress:
+			if !strings.HasSuffix(p.Name, "-ingress") {
+				t.Errorf("%s/%s: 入站对象的名字没有 -ingress 后缀", p.Namespace, p.Name)
+			}
+			if len(p.Spec.Egress) != 0 {
+				t.Errorf("%s/%s: 入站对象里带着出站规则", p.Namespace, p.Name)
+			}
+		case networkingv1.PolicyTypeEgress:
+			if !strings.HasSuffix(p.Name, "-egress") {
+				t.Errorf("%s/%s: 出站对象的名字没有 -egress 后缀", p.Namespace, p.Name)
+			}
+			if len(p.Spec.Ingress) != 0 {
+				t.Errorf("%s/%s: 出站对象里带着入站规则", p.Namespace, p.Name)
+			}
+		}
+		key := [2]string{p.Namespace, strings.TrimSuffix(
+			strings.TrimSuffix(p.Name, "-ingress"), "-egress")}
+		subjects[key] = append(subjects[key], string(p.Spec.PolicyTypes[0]))
+	}
+
+	// **两半永远成对出现，包括空的那一半。**
+	//
+	// 一个 policyTypes:[Ingress] 且没有 ingress 规则的对象，含义是「拒绝全部
+	// 入站」，不是「无操作」。少生成它，这个 workload 的入站就从默认拒绝变成
+	// 全部放行 —— 方向朝不安全，且不报错（design doc §3.6）。
+	for subject, dirs := range subjects {
+		sort.Strings(dirs)
+		if !reflect.DeepEqual(dirs, []string{"Egress", "Ingress"}) {
+			t.Errorf("%s/%s 只生成了 %v —— 缺的那一半意味着那个方向从默认拒绝变成全部放行",
+				subject[0], subject[1], dirs)
+		}
+	}
+}
+
+// 拆分后的两个对象合起来，与拆分前那一个逐条等价。
+//
+// 等价性是这次改动的全部前提：拆的是表达形式，不是策略本身。任何一条规则
+// 在拆分中丢失或换了方向，都是一次静默的语义变更。
+func TestSplitPoliciesCarryEveryRule(t *testing.T) {
+	res := policygen.Generate(observe(t, "prod-asia-1"))
+	policies := res.EnabledPolicies()
+
+	gotIngress, gotEgress := 0, 0
+	for _, p := range policies {
+		gotIngress += len(p.Spec.Ingress)
+		gotEgress += len(p.Spec.Egress)
+	}
+
+	wantIngress, wantEgress := 0, 0
+	for _, c := range res.Policies {
+		for _, r := range c.Rules {
+			if !r.Enabled {
+				continue
+			}
+			if r.Ingress != nil {
+				wantIngress++
+			}
+			if r.Egress != nil {
+				wantEgress++
+			}
+		}
+	}
+	if gotIngress != wantIngress || gotEgress != wantEgress {
+		t.Errorf("拆分后规则条数 ingress=%d egress=%d，拆分前 ingress=%d egress=%d",
+			gotIngress, gotEgress, wantIngress, wantEgress)
 	}
 }
