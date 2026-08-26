@@ -312,6 +312,13 @@ type Reader interface {
 	// 用最近一次采集而不是某个窗口锚点：这两个问题都是关于**此刻**的，
 	// 与 DeletionImpact 里 Live 那一半同源。
 	LivePolicies(ctx context.Context, clusterID string) ([]networkingv1.NetworkPolicy, error)
+	// Retirement 逐条评估集群现有策略能不能退休
+	// （design doc 2026-08-25-existing-policies §6：接管模式）。
+	//
+	// **平台只报告，不删**：它对被管集群没有策略写权限（CLAUDE.md §3）。
+	// 每一条的结论只描述"单独退休它"，不描述一次退休多条 —— 两条策略可能
+	// 互相兜底，各自单删都没影响，一起删就断了。
+	Retirement(ctx context.Context, clusterID string, window TimeWindow) (RetirementReport, error)
 	// Reconciliation 把平台回放算出的判定与执行平面自己报的判定对账
 	// （design doc 2026-08-25 §3）。
 	//

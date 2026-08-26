@@ -340,6 +340,11 @@ func NewRouter(d Deps) http.Handler {
 			// 而一个要另外找地方看的可信度指标等于没有。
 			az.route(protected, http.MethodGet, "/clusters/{clusterID}/reconciliation",
 				accessViewer, handleReconciliation(d))
+			// 退休评估按管理员算，与导出同一条理由：它逐条点名集群里现有的
+			// 策略，等同于一份"这个集群的网络管控现状还剩多少"的说明书，
+			// 而 viewer 不该看得到那一层。
+			az.route(protected, http.MethodGet, "/clusters/{clusterID}/retirement",
+				accessAdmin, handleRetirement(d))
 			// 趋势与单窗口对账并列：一次 97% 无所谓，从 100% 掉到 97% 才是
 			// 信号，而后者只能从历史里看出来（design doc §9 第 3 条：
 			// "一致率每天可查"）。

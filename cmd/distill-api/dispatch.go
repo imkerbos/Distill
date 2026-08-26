@@ -184,6 +184,17 @@ func (d *dispatchReader) LivePolicies(
 	return r.LivePolicies(ctx, clusterID)
 }
 
+// Retirement 按集群登记的来源转发一次退休评估。
+func (d *dispatchReader) Retirement(
+	ctx context.Context, clusterID string, window store.TimeWindow,
+) (store.RetirementReport, error) {
+	r, err := d.readerOf(ctx, clusterID)
+	if err != nil {
+		return store.RetirementReport{}, err
+	}
+	return r.Retirement(ctx, clusterID, window)
+}
+
 // DeletionImpact 按集群登记的来源转发一次删除影响预测。
 //
 // 与其余读方法同一条路：一个登记为 FIXTURE 的集群拿到的是合成数据集的答案，

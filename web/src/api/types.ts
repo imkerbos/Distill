@@ -1177,6 +1177,54 @@ export interface TrendPoint {
   sourceReports: boolean
 }
 
+/**
+ * 集群现有策略的退休评估，对应 store.RetirementReport
+ * （design doc 2026-08-25-existing-policies §6：接管模式）。
+ *
+ * **平台只报告，不删。** 它对被管集群没有策略写权限，退休一条策略要么由人做、
+ * 要么走 GitOps。这份报告给的是判断依据，不是一个可以点下去的动作。
+ */
+export interface RetirementReport {
+  cluster: string
+  window: TimeWindow
+  /**
+   * 这份报告能不能给出退休建议。
+   *
+   * **为 false 时 candidates 恒为空**，而不是一份"看起来都能退休"的清单：
+   * 观测不足时算出来的"删掉没影响"只说明那段时间没看见，不说明没有。
+   */
+  eligible: boolean
+  /** 给不出建议的原因；eligible 为 true 时是空串。 */
+  ineligibleReason: string
+  candidates: RetirementCandidate[]
+  /** 集群里的策略数超过上限，这份清单不完整。不得被读成完整的。 */
+  truncated: boolean
+}
+
+/** 一条集群现有策略的退休判断。 */
+export interface RetirementCandidate {
+  namespace: string
+  name: string
+  /**
+   * 删掉它不会让任何**观测到的**连接从通变成不通。
+   *
+   * **不等于"删掉是安全的"**：dry-run 只评估见过的连接，一条只在月结那天走的
+   * 放行在这个窗口里看不见。eligible 那道学习期门槛把这个风险与一个有人签字的
+   * 判断绑在一起，而不是消除它。
+   */
+  retirable: boolean
+  /** 删掉它之后会断的连接数；retirable 为 true 时为 0。 */
+  wouldBreak: number
+  /**
+   * 同 namespace 下进了候选集的主体数。
+   *
+   * 它是个**粗略**的正面信号：说明这个 namespace 有主体被候选集覆盖，
+   * 不是"这条策略管的那些主体都被覆盖了"。为 0 时，即使 wouldBreak 是 0，
+   * 也只说明那些主体在这个窗口里没有流量。
+   */
+  coveredBy: number
+}
+
 /** 一个多余文件的处置分类，对应 registry.DeletionClass。 */
 export type DeletionClass = 'DELETABLE' | 'NOT_APPLIED' | 'IMPACT_UNKNOWN' | 'UNPARSEABLE'
 

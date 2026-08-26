@@ -70,6 +70,13 @@ func (brokenReader) LivePolicies(
 	return nil, fmt.Errorf("%w: %s", store.ErrClusterNotFound, clusterID)
 }
 
+func (brokenReader) Retirement(
+	_ context.Context, clusterID string, _ store.TimeWindow,
+) (store.RetirementReport, error) {
+	// 与本替身的其它读方法同一处置：这一条不该被这组用例走到。
+	return store.RetirementReport{}, fmt.Errorf("%w: %s", store.ErrClusterNotFound, clusterID)
+}
+
 func (brokenReader) DeletionImpact(
 	context.Context, string, store.TimeWindow, []networkingv1.NetworkPolicy,
 ) (store.DeletionImpactReport, error) {

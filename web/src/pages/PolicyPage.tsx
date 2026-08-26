@@ -1,6 +1,7 @@
 import { useState, type CSSProperties, type ReactNode } from 'react'
 import { EVIDENCE_LABEL, evidenceNote } from './evidenceView.ts'
 import { previewEvidenceNote, ruleEvidenceView, type RuleEvidenceView } from './ruleEvidenceView.ts'
+import { RETIREMENT_HELP, retirementView } from './retirementView.ts'
 import {
   IMPORTED_BASIS, isImported, UNATTACHED_HELP, UNATTACHED_NONE, unattachedRows,
 } from './importedView.ts'
@@ -172,6 +173,9 @@ export default function PolicyPage({ cluster }: { cluster: string }) {
           不成规则"，前者说的是"这条人写下来的规则没挂上任何主体"。两者的
           处置完全不同 —— 前者要改导入的 YAML，后者要改平台或改集群。 */}
       <UnattachedImportSection items={pv.unattachedImports ?? []} />
+      {/* 接管排在候选策略之后：先看"平台推荐加什么"，再看"集群里旧的还需
+          不需要"。反过来读，操作者会在还不知道新策略长什么样的时候就去删旧的。 */}
+      <RetirementSection cluster={cluster} />
       <UngeneratableSection items={pv.ungeneratable} />
     </div>
   )
@@ -1817,6 +1821,55 @@ function UnattachedImportSection({ items }: { items: UnattachedImport[] }) {
             ))}
           </tbody>
         </TableCard>
+      )}
+    </Section>
+  )
+}
+
+
+/**
+ * 集群现有策略的退休评估（接管模式）。
+ *
+ * **单独一次请求、失败不拖垮这一屏**：这个端点按管理员鉴权，而 viewer 同样
+ * 要能看候选策略与 dry-run。取不到时整节不渲染 —— 一个写着"加载失败"的
+ * 空区块会让 viewer 以为平台坏了，而事实是这一层不对他开放。
+ */
+function RetirementSection({ cluster }: { cluster: string }) {
+  const { data, error } = useResource(cluster, () => api.retirement(cluster))
+  if (error !== null || data == null) return null
+
+  const view = retirementView(data)
+  return (
+    <Section
+      title="集群现有策略：还需不需要"
+      description={RETIREMENT_HELP}
+      meta={view.available ? `${view.rows.length} 条` : ''}
+    >
+      {!view.available ? (
+        <EmptyState message="给不出退休建议。" detail={view.unavailableReason} />
+      ) : view.rows.length === 0 ? (
+        <EmptyState message={view.emptyNote} detail="" />
+      ) : (
+        <>
+          {view.truncationNote !== '' && <Notice>{view.truncationNote}</Notice>}
+          <TableCard>
+            <thead>
+              <tr><th>策略</th><th>结论</th><th>依据</th></tr>
+            </thead>
+            <tbody>
+              {view.rows.map((row) => (
+                <tr
+                  key={row.label}
+                  style={{ color: row.holding ? 'var(--verdict-deny)' : undefined }}
+                >
+                  <td className="mono">{row.label}</td>
+                  <td>{row.verdict}</td>
+                  <td className="text-ink-2">{row.detail}</td>
+                </tr>
+              ))}
+            </tbody>
+          </TableCard>
+        </>
       )}
     </Section>
   )

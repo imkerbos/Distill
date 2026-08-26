@@ -134,6 +134,15 @@ func (p *windowProbeReader) PolicyPreviewAtGranularity(
 	}, nil
 }
 
+func (p *windowProbeReader) Retirement(
+	_ context.Context, clusterID string, w store.TimeWindow,
+) (store.RetirementReport, error) {
+	// 记下调用：退休评估同样吃时间窗，它的全部说服力都建立在那段观测上，
+	// 因此必须被证明拿的是**这个集群**解出来的窗口。
+	p.calls = append(p.calls, windowCall{method: "Retirement", cluster: clusterID, window: w})
+	return store.RetirementReport{}, nil
+}
+
 func (p *windowProbeReader) Reconciliation(
 	_ context.Context, clusterID string, w store.TimeWindow,
 ) (store.ReconciliationReport, error) {

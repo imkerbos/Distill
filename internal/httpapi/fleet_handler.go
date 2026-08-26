@@ -51,6 +51,36 @@ func handleQuality(d Deps) http.HandlerFunc {
 	}
 }
 
+// handleRetirement 逐条评估集群现有策略能不能退休
+// （design doc 2026-08-25-existing-policies §6：接管模式）。
+//
+// **GET 且只读，而且平台从不执行退休**：它对被管集群没有策略写权限
+// （CLAUDE.md §3）。这个端点给出的是判断依据，删除由人做或走 GitOps。
+//
+// 时间窗按集群现解，与其余带窗口的读方法同一条路：这份报告的全部说服力都
+// 建立在那段观测上，拿一个跨集群共用的常量窗口去问，算出来的"删掉没影响"
+// 描述的是一段与这个集群无关的时间。
+func handleRetirement(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		clusterID := chi.URLParam(r, "clusterID")
+		window, ok, err := parseWindow(r.Context(), r.URL.Query(), d.Reader, clusterID)
+		if err != nil {
+			writeReaderError(w, r, d, err)
+			return
+		}
+		if !ok {
+			response.WriteBusiness(w, response.CodeInvalidParam)
+			return
+		}
+		got, err := d.Reader.Retirement(r.Context(), clusterID, window)
+		if err != nil {
+			writeReaderError(w, r, d, err)
+			return
+		}
+		response.WriteOK(w, got)
+	}
+}
+
 // handleReconciliation 报告平台判定与执行平面判定的一致率
 // （design doc 2026-08-25 §3）。
 //

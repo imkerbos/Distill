@@ -332,6 +332,10 @@ func TestACollectedClusterNeverGetsTheFixtureReader(t *testing.T) {
 			_, err := fr.Reconciliation(ctx, fixtureBackedID, window)
 			return wantClusterNotFound(err)
 		}},
+		{method: "Retirement", name: "Retirement(collected cluster)", leak: func() string {
+			_, err := fr.Retirement(ctx, fixtureBackedID, window)
+			return wantClusterNotFound(err)
+		}},
 		{method: "LivePolicies", name: "LivePolicies(collected cluster)", leak: func() string {
 			_, err := fr.LivePolicies(ctx, fixtureBackedID)
 			return wantClusterNotFound(err)

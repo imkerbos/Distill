@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	networkingv1 "k8s.io/api/networking/v1"
 
@@ -650,4 +651,126 @@ func (r *Reader) candidateImports(
 		})
 	}
 	return out, nil
+}
+
+// maxRetirementSubjects 是一次退休报告允许逐条评估的策略数上限。
+//
+// 每一条都要跑一次全量重放，成本随策略数与连接数相乘。超过即截断并在报告上
+// 标注，**不悄悄少算**：漏掉的那几条会显得像平台认为它们不存在。
+const maxRetirementSubjects = 200
+
+// candidatePolicyPrefix 是平台生成的对象名前缀。
+//
+// 与写回那一侧同一个常量含义（writebackFileName 剥的正是它）：这里用它把
+// "平台自己写的"从"别人留下的"里择出去。
+const candidatePolicyPrefix = "candidate-"
+
+// Retirement 逐条评估集群现有策略能不能退休
+// （design doc 2026-08-25-existing-policies §6：接管模式）。
+//
+// **平台只报告，不删。** 它对被管集群没有策略写权限（CLAUDE.md §3），
+// 退休一条策略要么由人做、要么走 GitOps。这里给出的是判断依据。
+//
+// 算法与写回的删除影响同源（DeletionImpact）：把那一条从锚点那一刻的策略集里
+// 摘掉，拿同一批观测流量重放，看有没有连接从通变成不通。逐条施加，因此每一条
+// 的结论都只描述"单独退休它"，**不描述一次退休多条** —— 两条策略可能互相
+// 兜底，各自单独删都没影响，一起删就断了。界面必须写明这一点。
+func (r *Reader) Retirement(
+	ctx context.Context, clusterID string, window store.TimeWindow,
+) (store.RetirementReport, error) {
+	c, err := r.collectedCluster(ctx, clusterID)
+	if err != nil {
+		return store.RetirementReport{}, err
+	}
+	cs, err := r.generate(ctx, clusterID, window)
+	if err != nil {
+		return store.RetirementReport{}, err
+	}
+
+	out := store.RetirementReport{Cluster: clusterID, Window: window, Candidates: []store.RetirementCandidate{}}
+
+	// 三道前提，任何一条不成立都不给建议。**顺序是从"最根本"往下**：
+	// 没有观测就什么都算不出，其次才轮到"观测够不够长"。
+	switch {
+	case !cs.trafficObserved:
+		out.IneligibleReason = store.RetirementNotObserved
+		return out, nil
+	case c.BusinessCycle <= 0:
+		out.IneligibleReason = store.RetirementNoBusinessCycle
+		return out, nil
+	}
+	_, covered, ok, err := r.facts.ObservedCoverage(ctx, clusterID)
+	if err != nil {
+		return store.RetirementReport{}, err
+	}
+	if !ok || !store.ObservedLongEnough(covered, c.BusinessCycle) {
+		out.IneligibleReason = store.RetirementCycleNotCovered
+		return out, nil
+	}
+
+	// 平台自己写的那些不进这份清单：退休它们是写回删除清单的事
+	// （那条路带确认、带指纹、带审计），而这份报告说的是"集群里那些**别人**
+	// 留下的策略还需不需要"。混在一起会让操作者以为该在这里删平台的对象。
+	var subjects []networkingv1.NetworkPolicy
+	for _, p := range cs.policies {
+		if strings.HasPrefix(p.Name, candidatePolicyPrefix) {
+			continue
+		}
+		subjects = append(subjects, p)
+	}
+	if len(subjects) > maxRetirementSubjects {
+		subjects = subjects[:maxRetirementSubjects]
+		out.Truncated = true
+	}
+
+	// 基线是**候选集已经生效之后**的世界，不是当前策略集。
+	//
+	// NetworkPolicy 是 additive-allow：单纯删掉一条策略只会让放行变多，
+	// 被它选中的 Pod 若没有别的策略选中就退回完全放行 —— 拿"当前策略集减
+	// 一条"去算，任何一条的删除影响都恒为 0，于是每条旧策略都显示成
+	// 可以退休。**那正是这个平台最不能给出的错觉**，而它指向的动作是删掉
+	// 正在生效的策略。
+	//
+	// 接管要问的是另一件事：候选集下发之后，每个 workload 都有了 default-deny，
+	// 这时再删掉这条旧策略，它撑着的那些连接会不会被新策略拦下。因此两次
+	// 重放都跑在"已有 ∪ 候选"上，只差这一条策略在不在
+	// （design doc 2026-08-25-existing-policies §3、§6）。
+	enabled := cs.result.EnabledPolicies()
+	base := cs.predictWith(predict.WithExisting(cs.policies, enabled)).
+		Counts[predict.ChangeWouldBreak]
+	coverage := candidateSubjects(cs.result)
+
+	out.Eligible = true
+	for _, p := range subjects {
+		kept, _ := store.WithoutPolicies(cs.policies, []networkingv1.NetworkPolicy{p})
+		delta := cs.predictWith(predict.WithExisting(kept, enabled)).
+			Counts[predict.ChangeWouldBreak] - base
+		if delta < 0 {
+			// 摘掉一条策略之后拦断**变少**：additive-allow 下少一条只可能
+			// 让放行变多，拦断不该减少。出现负数说明两次重放跑在了不同的
+			// 输入上，那是一个 bug。报 0 而不是负数 —— 一个负的"会断几条"
+			// 在界面上读不出任何意思，而它会被当成"删了更安全"。
+			delta = 0
+		}
+		out.Candidates = append(out.Candidates, store.RetirementCandidate{
+			Namespace: p.Namespace, Name: p.Name,
+			Retirable:  delta == 0,
+			WouldBreak: delta,
+			CoveredBy:  coverage[p.Namespace],
+		})
+	}
+	return out, nil
+}
+
+// candidateSubjects 数每个 namespace 下有多少个主体进了候选集。
+//
+// 用来给"可以退休"一个正面理由：不是"删了看起来没事"，而是"这些主体的
+// 候选规则已经覆盖了它管的范围"。为 0 时说明那条策略管的主体根本不在候选集里
+// —— 那时即使删除影响是 0，也只是因为它们在这个窗口里没有流量。
+func candidateSubjects(res policygen.Result) map[string]int {
+	out := map[string]int{}
+	for _, c := range res.Policies {
+		out[c.Namespace]++
+	}
+	return out
 }

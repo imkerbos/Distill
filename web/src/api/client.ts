@@ -4,7 +4,7 @@ import type {
   CurrentSession, Decision, Envelope, FlowFilter, FlowPage, GitBindingWrite, IssuedAgentToken,
   GitRepo, GitRepoWrite, Granularity, Identity, ImportRole, ImportSource, IngestSummary, OverrideDecision,
   PathVerifyStatus, PlatformSettingView, PlatformSettingWrite, PolicyImportItem, PolicyPreview,
-  Quality, ReconciliationReport, ReconciliationTrend,
+  Quality, ReconciliationReport, ReconciliationTrend, RetirementReport,
   RegisteredCluster, RepoVerifyStatus, Role, SecurityReport,
   Topology, TopologyLevel,
   WritebackPlanResult, WritebackPushResult,
@@ -412,6 +412,15 @@ export const api = {
   reconciliationTrend: (cluster: string) =>
     request<ReconciliationTrend>(
       `/api/v1/clusters/${encodeURIComponent(cluster)}/reconciliation/trend`),
+  /**
+   * 集群现有策略的退休评估（接管模式）。
+   *
+   * 服务端按管理员鉴权：它逐条点名集群里现有的策略，等同于一份"这个集群的
+   * 网络管控现状还剩多少"的说明书。
+   */
+  retirement: (cluster: string) =>
+    request<RetirementReport>(
+      `/api/v1/clusters/${encodeURIComponent(cluster)}/retirement`),
   security: (cluster: string) =>
     request<SecurityReport>(`/api/v1/clusters/${encodeURIComponent(cluster)}/security`),
 

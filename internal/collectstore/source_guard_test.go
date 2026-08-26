@@ -136,6 +136,15 @@ func sourceGuardCases(ctx context.Context, window store.TimeWindow) []sourceGuar
 			}
 			return ""
 		}},
+		{method: "Retirement", name: "Retirement", refusal: func(r *collectstore.Reader, id string) string {
+			// 退休建议指向的动作是**删掉集群里正在生效的策略**。一个登记为
+			// FIXTURE 的集群在这里答得出清单，等于拿合成数据给出一份删除
+			// 建议 —— 这条路径上答错的代价是最高的那一个。
+			if _, err := r.Retirement(ctx, id, window); err == nil {
+				return "answered a retirement report for a cluster declared FIXTURE"
+			}
+			return ""
+		}},
 		{method: "LivePolicies", name: "LivePolicies", refusal: func(r *collectstore.Reader, id string) string {
 			// 「集群里现在有什么策略」同样是一句关于这个集群的断言。一个
 			// 登记为 FIXTURE 的集群在这里答得出东西，就等于拿合成数据回答

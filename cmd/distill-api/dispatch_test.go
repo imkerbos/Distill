@@ -84,6 +84,10 @@ func dispatchCasesFor(ctx context.Context, clusterID string, window store.TimeWi
 			_, err := d.Reconciliation(ctx, clusterID, window)
 			return err
 		}},
+		{method: "Retirement", name: "Retirement", call: func(d *dispatchReader) error {
+			_, err := d.Retirement(ctx, clusterID, window)
+			return err
+		}},
 		{method: "LivePolicies", name: "LivePolicies", call: func(d *dispatchReader) error {
 			_, err := d.LivePolicies(ctx, clusterID)
 			return err
