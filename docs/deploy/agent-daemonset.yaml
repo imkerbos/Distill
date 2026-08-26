@@ -1,0 +1,183 @@
+# distill-agent —— 一个 DaemonSet，两件事。
+#
+#   每个 Pod        轮询本节点 conntrack，推流量
+#   抢到 Lease 的   额外采一次整集群资产，推资产
+#
+# 每节点都采资产会让 650 Pod × N 节点的 API 压力落到 apiserver 上，且 N 份
+# 数据撞 observed_at 主键；只在一个 Pod 上采 conntrack 则其余节点全是盲区。
+# 这是「一个 workload」唯一正确的形状。
+#
+# 这是一份**示例**清单：platform-url 是占位符，token 由 Secret 提供。
+# 真实集群标识、地址与 token 一律不进仓库、不进 PR 描述。
+#
+# 三个前提：
+#   1. hostNetwork: true —— nf_conntrack 按 network namespace 隔离，
+#      不共享 host netns 读到的是容器自己那张（几乎是空的）
+#   2. platform-url 必须是 https —— 明文会让 token 在集群网络里裸奔，
+#      agent 会直接拒绝启动
+#   3. token 从 Secret 文件读，不走环境变量
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: distill-agent
+  namespace: distill
+---
+# 只读整个集群 + 一把锁。
+#
+# leases 那三个动词是本 agent 唯一的写权限，换来的是单一 workload。
+# 范围是**一个 namespace 内的一个 Lease 对象** —— 碰不到任何工作负载、
+# 任何策略、任何 Secret。
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: distill-agent-read
+rules:
+  - apiGroups: [""]
+    resources: [namespaces, pods, services, endpoints, nodes]
+    verbs: [get, list]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: [endpointslices]
+    verbs: [get, list]
+  - apiGroups: ["networking.k8s.io"]
+    resources: [networkpolicies, ingresses]
+    verbs: [get, list]
+  - apiGroups: ["apps"]
+    # 只读 ReplicaSet，且只为把 Pod 解析到它的 Deployment：Pod 的
+    # ownerReference 指到 ReplicaSet，再顺着 RS 自己的 ownerReference 到
+    # Deployment（不必 list Deployment）。StatefulSet / DaemonSet / Job 直接
+    # 拥有 Pod，Pod 上那一跳就够，不在这里。
+    #
+    # 少了这一条，采集 status 是 PARTIAL、WORKLOAD_UNRESOLVED 一片，而对账
+    # 要求「用 workload 不用 pod」（CLAUDE.md §4）—— 到不了那个粒度。实测：
+    # kind 上缺它，30 个 Pod 里 16 个归属不明。
+    resources: [replicasets]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: distill-agent-read
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: distill-agent-read}
+subjects:
+  - {kind: ServiceAccount, name: distill-agent, namespace: distill}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: distill-agent-lease
+  namespace: distill
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: [leases]
+    verbs: [get, create, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: distill-agent-lease
+  namespace: distill
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: distill-agent-lease}
+subjects:
+  - {kind: ServiceAccount, name: distill-agent, namespace: distill}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: distill-agent
+  namespace: distill
+spec:
+  selector:
+    matchLabels: {app: distill-agent}
+  template:
+    metadata:
+      labels: {app: distill-agent}
+    spec:
+      serviceAccountName: distill-agent
+      # 共享 host netns：读得到宿主机 conntrack 表的唯一条件。
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      # **只上 Linux 节点。** conntrack 是 Linux 内核的东西，Windows 节点上
+      # 根本没有 /proc/net/nf_conntrack —— 混合节点池里，不加这一条会把 Pod
+      # 调到 Windows 节点上、镜像拉不起来或起来即崩，表现为 CrashLoopBackOff。
+      # kubernetes.io/os 由 kubelet 无条件打，不是「忘了配」会缺的标签。
+      nodeSelector:
+        kubernetes.io/os: linux
+      # 容忍所有污点：一个采不到的 Linux 节点就是一个盲区，而盲区在界面上与
+      # 「这段时间没有流量」长得一样。**容忍污点与 nodeSelector 各管一件事**：
+      # 前者让它能上被专用污点挡住的节点，后者把它挡在非 Linux 节点之外 ——
+      # tolerations: Exists 会连 Windows 节点的污点一起容忍，正是 nodeSelector
+      # 要补上的那道。
+      tolerations:
+        - operator: Exists
+      # 让出 Lease 需要一点时间；SIGTERM 之后跑完当前轮再退。
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: agent
+          image: REPLACE_ME/distill-agent:REPLACE_TAG
+          args:
+            - -platform-url=https://REPLACE_ME     # 必须 https
+            - -token-file=/var/run/distill/token
+            # 平台证书由内部 CA 签发时**必填**：镜像里只有公共 CA，系统根里没有
+            # 内部 CA，agent 每一次请求都会以证书校验失败结束、且没有别的出口。
+            # 把 CA bundle 做成 ConfigMap 挂进来，指向它。公共 CA（如 Let's
+            # Encrypt / 云厂商托管证书）签的平台证书不需要这一行。
+            #- -ca-file=/var/run/distill-ca/ca.pem
+            - -heartbeat-file=/run/distill-agent/heartbeat   # 存活探针读它
+            - -flow-every=1m                       # 每个 Pod
+            - -assets-every=30m                    # 只有 leader
+            - -conntrack-polls=12
+            - -conntrack-interval=5s
+            - -timeout=5m                          # 单轮上限，不是进程上限
+          # 存活探针探的是「flow 循环卡没卡死」，不是「上报成不成功」——
+          # conntrack 读不到时 agent 故意持续推 FAILED（那是「数据面绕开
+          # netfilter」的信号），若探针挂在成功上会把它反复重启，把信号变成
+          # CrashLoop。stale-after 必须宽于 flow-every + timeout（这里 1m+5m）。
+          #
+          # exec 而不是 httpGet：镜像是 scratch，没有 shell，也不开监听端口
+          # （hostNetwork 下占端口要走端口分配表）；再跑一次二进制自己最省。
+          livenessProbe:
+            exec:
+              command:
+                - /distill-agent
+                - -healthcheck
+                - -heartbeat-file=/run/distill-agent/heartbeat
+                - -stale-after=10m
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+          securityContext:
+            runAsNonRoot: false          # /proc/net/nf_conntrack 需要 root 读
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests: {cpu: 20m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          volumeMounts:
+            - name: token
+              mountPath: /var/run/distill
+              readOnly: true
+            # 心跳文件要写在**可写**卷上：根文件系统是只读的（上面
+            # readOnlyRootFilesystem: true）。emptyDir 随 Pod 生命周期，正合适。
+            - name: run
+              mountPath: /run/distill-agent
+            # 内部 CA 时一并放开这一段与下面的 volume。CA 证书不是秘密（它是
+            # 公开的信任锚），用 ConfigMap 而不是 Secret。
+            #- name: ca
+            #  mountPath: /var/run/distill-ca
+            #  readOnly: true
+      volumes:
+        - name: token
+          secret:
+            secretName: distill-agent-token
+            items:
+              - {key: token, path: token}
+        - name: run
+          emptyDir: {}
+        #- name: ca
+        #  configMap:
+        #    name: distill-platform-ca
+        #    items:
+        #      - {key: ca.pem, path: ca.pem}
