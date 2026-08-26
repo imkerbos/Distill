@@ -1,0 +1,29 @@
+# **示例。** Ingress 的形态强依赖这套集群用的 controller 与证书方案。
+#
+# 一条硬要求：**必须是 https**。集群 agent 会拒绝以明文地址启动 ——
+# 明文让 agent token 在网络里裸奔，而那把 token 能往平台写这个集群的全部观测。
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: distill
+  namespace: distill
+  annotations:
+    # 一次流量摄入的请求体是 1–2 MB。controller 的默认体积上限（nginx 默认 1m）
+    # 会把摄入拦在到达平台之前，而 agent 那边看到的是 413，很容易被读成
+    # "平台挂了"。
+    nginx.ingress.kubernetes.io/proxy-body-size: 8m
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [REPLACE_ME]
+      secretName: distill-tls
+  rules:
+    - host: REPLACE_ME
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: distill-api
+                port: {name: http}

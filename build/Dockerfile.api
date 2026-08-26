@@ -1,0 +1,41 @@
+# distill-api 的生产镜像。
+#
+# 与 Dockerfile.dev 是两回事，不是它的变体：那个装的是完整 Go 工具链与 air，
+# 因为热更新要在容器内重新编译。这个只需要跑一个已经编译好的进程。
+FROM golang:1.25 AS build
+WORKDIR /src
+
+# 先只拷 go.mod/go.sum：依赖没变时这一层命中缓存，不必每次重拉 k8s.io。
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+# CGO_ENABLED=0 是必需的，不是习惯：运行阶段是 distroless static，里面没有 libc。
+# -trimpath 去掉构建机的绝对路径，那是部署布局信息。
+ARG VERSION=dev
+ARG TARGETOS=linux
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath \
+    -ldflags="-s -w -X github.com/imkerbos/Distill/internal/buildinfo.version=${VERSION}" \
+    -o /out/distill-api ./cmd/distill-api
+
+# static:nonroot 自带公共 CA 根证书与一个非 root 用户（65532），没有 shell、
+# 没有包管理器。进程只需要监听一个端口、连 MySQL、发 HTTPS。
+FROM gcr.io/distroless/static-debian12:nonroot
+WORKDIR /app
+
+# **迁移目录必须进镜像。** distill-api 启动时自己跑迁移，读的是相对路径
+# "migrations"（cmd/distill-api/main.go）—— 不是 embed。少了这一行，进程在
+# 启动的第一秒就以 "read migrations" 失败退出，而症状看起来像数据库连不上。
+# 同理 WORKDIR 必须是 /app：换一个工作目录，相对路径就指不到这里。
+COPY --from=build /src/migrations /app/migrations
+COPY --from=build /out/distill-api /app/distill-api
+
+# 配置由 ConfigMap 挂进来，凭据由环境变量从 Secret 注入
+# （DISTILL_DATABASE__DSN 等，见 docs/configuration.md）。
+EXPOSE 10100
+USER 65532:65532
+ENTRYPOINT ["/app/distill-api"]
+CMD ["-config", "/etc/distill/config.yaml"]

@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: distill-api-config
+  namespace: distill
+data:
+  # 只放启动必需项。会话 TTL、HTTP 超时、凭据后端、Git 校验参数在
+  # platform_setting 表里，从设置页改、立即生效（docs/configuration.md）。
+  #
+  # **凭据不在这里**：DSN 与引导账号的 bcrypt hash 由环境变量从 Secret 注入。
+  # ConfigMap 在集群里是明文可读的，任何拿到 get configmap 的人都能读走。
+  config.yaml: |
+    server:
+      addr: ":10100"
+    log:
+      level: INFO

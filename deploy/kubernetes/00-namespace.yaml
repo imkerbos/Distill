@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: distill
+  labels:
+    # 平台自己也该受 Pod Security 约束。restricted 与下面 Deployment 里的
+    # securityContext 是同一件事的两面：一个由集群强制，一个写在负载里。
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest

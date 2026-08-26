@@ -1,0 +1,31 @@
+# distill-collector 的生产镜像。
+#
+# 与 api 分开的镜像，因为它是分开的进程，而进程隔离正是那条约束的载体：
+# kubeconfig 只在这个进程里被解析成凭据，主服务存引用、显示引用，但没有
+# 任何一条把它变成凭据的路径（见 docs/security-model.md）。
+#
+# 它**不含** migrations：schema 由 distill-api 在启动时推进。两个进程都跑
+# 迁移会让"谁把 schema 推到了哪一版"有两个答案，而并发跑 golang-migrate
+# 的第二个会拿不到锁然后失败退出 —— 一次本该成功的采集就此报错。
+FROM golang:1.25 AS build
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+ARG VERSION=dev
+ARG TARGETOS=linux
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath \
+    -ldflags="-s -w -X github.com/imkerbos/Distill/internal/buildinfo.version=${VERSION}" \
+    -o /out/distill-collector ./cmd/distill-collector
+
+FROM gcr.io/distroless/static-debian12:nonroot
+WORKDIR /app
+COPY --from=build /out/distill-collector /app/distill-collector
+
+USER 65532:65532
+ENTRYPOINT ["/app/distill-collector"]

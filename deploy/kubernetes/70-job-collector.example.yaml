@@ -1,0 +1,50 @@
+# 拉取式采集：跑一次、采一个集群、落一次库，然后退出。
+#
+# **刻意是 Job 而不是 CronJob。** 当前触发方式是手动（spec §3）——
+# 没有调度器、没有常驻循环。要定时跑，先想清楚失败重试与并发两件事：
+# 同一个集群的两次采集同时落库会撞 observed_at 主键。
+#
+# 用法：改 REPLACE_ME，改 -cluster 的集群 ID，然后
+#   kubectl -n distill create -f 70-job-collector.example.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: distill-collect-
+  namespace: distill
+spec:
+  backoffLimit: 0        # 失败就失败，别自动重试 —— 先看清楚为什么
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: distill-collector
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: distill-collector
+          image: REPLACE_ME/distill-collector:REPLACE_TAG
+          args:
+            - -config=/etc/distill/config.yaml
+            - -cluster=REPLACE_ME          # 已在平台登记的集群 ID
+            - -timeout=10m
+            # 有 Hubble 时才加这两个；没有就整段去掉，采集只落资产不落流量。
+            # - -flow-relay=hubble-relay.kube-system:4245
+            # - -flow-window=1h
+          envFrom:
+            - secretRef: {name: distill-api-secrets}   # 复用 DSN
+          volumeMounts:
+            - {name: config, mountPath: /etc/distill, readOnly: true}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {memory: 1Gi}
+      volumes:
+        - name: config
+          configMap: {name: distill-api-config}

@@ -1,0 +1,53 @@
+# 这个平台的产出就是 NetworkPolicy。它自己不带一份，说不过去。
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: distill
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: distill-api
+  namespace: distill
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: distill-api}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # 只从 Ingress Controller 进来。**改成这套部署里 controller 实际所在的
+    # namespace 标签** —— 下面这个是 ingress-nginx 的默认写法，不一定对。
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: ingress-nginx}
+      ports:
+        - {protocol: TCP, port: 10100}
+  egress:
+    # DNS
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: kube-system}
+          podSelector:
+            matchLabels: {k8s-app: kube-dns}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    # MySQL。**按实际数据库位置改**：库在集群外（Cloud SQL、托管实例）时
+    # 这条要写成对应的 ipBlock，而不是这里的同 namespace 选择器。
+    - to:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: mysql}
+      ports:
+        - {protocol: TCP, port: 3306}
+    # 出站 HTTPS 与 SSH：Git 绑定校验、写回推分支、GCP Secret Manager。
+    #
+    # 这里没有把目的地收窄成具体网段 —— Git 托管方的地址会变。收窄是对的
+    # 方向，但要基于这套部署实际用的托管方，凭空写一段只会在某天悄悄断掉
+    # 写回，而症状是"推不上去"，排查方向会先落到凭据上。
+    - ports:
+        - {protocol: TCP, port: 443}
+        - {protocol: TCP, port: 22}

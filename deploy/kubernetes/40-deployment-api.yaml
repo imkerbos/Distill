@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: distill-api
+  namespace: distill
+  labels: {app.kubernetes.io/name: distill-api}
+spec:
+  # **replicas 必须是 1，不要往上调。**
+  #
+  # 会话存在进程内存里（auth.SessionStore），登录限流的计数也是进程内的。
+  # 两个副本的后果不是"性能翻倍"：一半请求会带着另一个副本不认识的 cookie，
+  # 表现为随机掉登录；限流阈值同时也变成两倍。要横向扩，先把会话搬进共享存储
+  # —— 那是一次改动，不是一个副本数。
+  replicas: 1
+  strategy:
+    # Recreate 而不是 RollingUpdate：滚动更新会让新旧两个进程同时在线，
+    # 于是短暂地出现上面那个"两个副本"的局面。代价是几秒不可用，换掉的是
+    # 一段所有人随机掉登录的时间。
+    type: Recreate
+  selector:
+    matchLabels: {app.kubernetes.io/name: distill-api}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: distill-api}
+    spec:
+      serviceAccountName: distill-api
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: distill-api
+          image: REPLACE_ME/distill-api:REPLACE_TAG
+          args: ["-config", "/etc/distill/config.yaml"]
+          ports:
+            - {name: http, containerPort: 10100}
+          envFrom:
+            - secretRef: {name: distill-api-secrets}
+          volumeMounts:
+            - {name: config, mountPath: /etc/distill, readOnly: true}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          # 根文件系统只读是成立的：进程不写任何本地文件。Git 写回把仓库
+          # 克隆进内存（go-git 的 memory storage + memfs），不落盘 ——
+          # 代价记在内存上，见下面的 limits。
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            # 内存上限要覆盖两件事：一次 Git 写回会把整个策略仓库克隆进内存，
+            # 以及一次流量摄入的请求体（1–2 MB）。仓库大的话往上调。
+            limits: {memory: 1Gi}
+          startupProbe:
+            # 启动时要跑迁移，第一次可能要几十秒。用 startupProbe 兜住，
+            # 就不必把 liveness 的阈值放宽到失去意义。
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 5
+            failureThreshold: 24
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 10
+          readinessProbe:
+            # /healthz 只回答"进程活着"，**不检查数据库**。数据库断了这个探针
+            # 仍然是绿的 —— 这是已知的空缺，不要据此认为链路健康。
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap: {name: distill-api-config}
