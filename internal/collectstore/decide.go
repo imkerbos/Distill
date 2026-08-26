@@ -10,6 +10,7 @@ import (
 	"github.com/imkerbos/Distill/internal/cluster"
 	"github.com/imkerbos/Distill/internal/flow"
 	"github.com/imkerbos/Distill/internal/identity"
+	"github.com/imkerbos/Distill/internal/predict"
 	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/replay"
 	"github.com/imkerbos/Distill/internal/snapshot"
@@ -114,6 +115,24 @@ func (r *Reader) trafficOf(
 	if err != nil {
 		return traffic{}, err
 	}
+	// 人工导入的"现状"策略并进当前策略集
+	// （registry.RoleBaselineCurrent；design doc 2026-08-25-existing-policies §3）。
+	//
+	// **它补的是平台采不到的那部分**：某个 namespace 没有 list 权限、或者策略
+	// 由别的系统管着。不并进来，平台会以为那些连接没有任何策略约束，于是判
+	// ALLOW —— 而集群里它们其实是被拦着的。
+	//
+	// **风险的另一面由对账兜住**：如果这条导入是填错的（集群里根本没有那条
+	// 策略），平台会判 DENY 而执行平面报 ALLOWED，对账把它记成
+	// DISAGREE_UNDER_PERMISSIVE，超阈之后那个 workload 被排除出写回
+	// （trust-engineering §3.4）。人填错不会静默变成一次生产阻断。
+	imported, err := r.currentImports(ctx, d)
+	if err != nil {
+		return traffic{}, err
+	}
+	// 同名时**采集到的赢**：平台亲眼看到的那一份才是集群里真正跑着的，
+	// 导入只是一次人工声明。反过来会让一条过期的导入盖住真实策略。
+	parsed = predict.WithExisting(imported, parsed)
 	namespaces, err := r.readNamespacesAt(ctx, d)
 	if err != nil {
 		return traffic{}, err
@@ -441,4 +460,37 @@ func foreignScopesOf(in []snapshot.ForeignScope) []replay.ForeignScope {
 		})
 	}
 	return out
+}
+
+// currentImports 读出要并进当前策略集的人工导入（RoleBaselineCurrent）。
+//
+// **只取导入时刻早于窗口起点的那些。** 一次导入能证明的只是"我在这个时刻
+// 告诉你集群里有这条策略"，它没有说过那条策略更早就存在。拿它去解释更早的
+// 窗口，等于替人补上一句他没说过的话（CLAUDE.md §4：禁止用当前状态解释
+// 历史数据）。代价是刚导入时最近那一个窗口看不到效果，下一个窗口就有了。
+//
+// 解析失败跳过那一条并继续，与 candidateImports 同一处置：导入在写入时已经
+// 过 registry.ParseImport 校验，走到这里还解析不了说明那条记录本身坏了。
+func (r *Reader) currentImports(
+	ctx context.Context, d described,
+) ([]networkingv1.NetworkPolicy, error) {
+	stored, err := r.src.PolicyImports(ctx, d.clusterID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]networkingv1.NetworkPolicy, 0, len(stored))
+	for _, imp := range stored {
+		if imp.Role != registry.RoleBaselineCurrent {
+			continue
+		}
+		if imp.ImportedAt.After(d.at) {
+			continue
+		}
+		parsed, err := registry.ParseImport(imp.YAML)
+		if err != nil {
+			continue
+		}
+		out = append(out, parsed.Policy)
+	}
+	return out, nil
 }
