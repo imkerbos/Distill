@@ -48,3 +48,26 @@ conformance:
 
 conformance-down:
 	test/conformance/setup.sh down
+
+# 镜像构建。VERSION 进 ldflags —— 平台会把策略下发到生产集群，事故回溯时
+# 必须能确定当时跑的是哪个版本，而 "dev" 回答不了这个问题。
+IMAGE_REGISTRY ?= REPLACE_ME
+VERSION ?= $(shell git rev-parse --short HEAD)
+
+.PHONY: image-api image-collector image-agent images
+
+image-api:
+	docker build -f build/Dockerfile.api --build-arg VERSION=$(VERSION) \
+	  -t $(IMAGE_REGISTRY)/distill-api:$(VERSION) .
+
+image-collector:
+	docker build -f build/Dockerfile.collector --build-arg VERSION=$(VERSION) \
+	  -t $(IMAGE_REGISTRY)/distill-collector:$(VERSION) .
+
+# agent 装进别人的集群，与上面两个不是同一类东西：它的镜像是 scratch，
+# 且有一条门禁守着它不得链接平台状态库（make purity）。
+image-agent: purity
+	docker build -f build/Dockerfile.agent --build-arg VERSION=$(VERSION) \
+	  -t $(IMAGE_REGISTRY)/distill-agent:$(VERSION) .
+
+images: image-api image-collector image-agent

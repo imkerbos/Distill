@@ -1,0 +1,18 @@
+# 默认所有者
+*                        @imkerbos
+
+# 求值引擎是全平台正确性的根，改动一律需要 owner review。
+/internal/replay/        @imkerbos
+/test/conformance/       @imkerbos
+
+# 权限边界与凭据处置
+/internal/auth/          @imkerbos
+/internal/agentauth/     @imkerbos
+/internal/secrets/       @imkerbos
+/internal/gitssh/        @imkerbos
+/internal/httpapi/authz.go @imkerbos
+
+# 门禁与发布路径
+/scripts/                @imkerbos
+/.github/workflows/      @imkerbos
+/migrations/             @imkerbos

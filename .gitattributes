@@ -1,0 +1,13 @@
+* text=auto eol=lf
+
+*.go       text diff=golang
+*.sql      text
+*.md       text diff=markdown
+*.sh       text eol=lf
+*.png      binary
+*.jpg      binary
+*.ico      binary
+
+# 语言统计里不该把前端锁文件与迁移脚本算成"项目代码"。
+web/package-lock.json linguist-generated=true
+migrations/*.sql      linguist-language=SQL

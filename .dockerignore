@@ -1,0 +1,21 @@
+# build/Dockerfile.agent 的构建上下文是仓库根。默认全传会把 web/node_modules、
+# 35MB 的本机二进制、以及 docs/internal 下的内部资料一起塞进构建上下文 ——
+# 后者还会进镜像层。
+.git
+.github
+.claude
+.superpowers
+.secrets-local
+
+docs
+deploy
+web/node_modules
+web/dist
+tmp
+
+distill-api
+distill-agent
+distill-collector
+
+*.md
+!README.md

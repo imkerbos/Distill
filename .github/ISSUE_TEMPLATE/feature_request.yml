@@ -1,0 +1,30 @@
+name: 功能建议
+description: 建议一项新能力或改动
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 要解决的问题
+      description: 描述场景，不要直接描述方案。
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 设想的做法
+  - type: dropdown
+    id: writes
+    attributes:
+      label: 是否涉及写集群或写 Git 的路径
+      description: 涉及的话，dry-run 必须存在且是默认值。
+      options:
+        - 否
+        - 是
+    validations:
+      required: true
+  - type: textarea
+    id: cost
+    attributes:
+      label: 成本影响
+      description: 是否新增日志采集或查询路径？给出量级估算。

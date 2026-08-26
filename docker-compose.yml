@@ -17,7 +17,7 @@ services:
   distill-api:
     build:
       context: .
-      dockerfile: Dockerfile.dev
+      dockerfile: build/Dockerfile.dev
     ports:
       - "10100:10100"
     volumes:

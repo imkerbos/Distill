@@ -8,4 +8,4 @@ RUN go install github.com/air-verse/air@v1.61.5
 
 EXPOSE 10100
 
-CMD ["air", "-c", ".air.toml"]
+CMD ["air", "-c", "build/.air.toml"]
