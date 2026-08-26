@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/imkerbos/Distill/internal/policygen"
 	"github.com/imkerbos/Distill/internal/secrets"
 )
 
@@ -94,6 +95,21 @@ func ValidateCluster(c Cluster) error {
 	}
 	if !c.State.Valid() {
 		return invalidf("接入状态 %q 不在已登记的取值范围内", c.State)
+	}
+	// 纳入系统命名空间必须带理由：这是一次会改变爆炸半径的决定
+	// （一份下发到 kube-dns 的 default-deny 会让全集群失去 DNS），
+	// 而没有理由的决定在事后复盘时与"手滑填上去的"分不开。
+	if len(c.ManagedSystemNamespaces) > 0 &&
+		strings.TrimSpace(c.ManagedSystemNamespacesReason) == "" {
+		return invalid("把系统命名空间交给平台管理必须写明理由：" +
+			"平台会为其中的每个 workload 生成 default-deny 候选策略，" +
+			"而一份下发到 kube-dns 的 default-deny 会让整个集群失去 DNS")
+	}
+	for _, ns := range c.ManagedSystemNamespaces {
+		if !policygen.IsSystemNamespace(ns) {
+			return invalidf("%q 不是 Kubernetes 内置系统命名空间，"+
+				"不需要在这里声明 —— 平台本来就会为它生成候选策略", ns)
+		}
 	}
 	if err := checkCIDR("podCIDR", c.PodCIDR); err != nil {
 		return err

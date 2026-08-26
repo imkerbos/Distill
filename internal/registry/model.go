@@ -343,6 +343,19 @@ type Cluster struct {
 	// 序列化成**秒**，不直接序列化 time.Duration：后者的 JSON 形态是纳秒，
 	// 界面上会显示成一串十几位的数字，而没有人会想到那是纳秒。
 	BusinessCycle time.Duration `json:"-"`
+	// ManagedSystemNamespaces 是操作者明示"由平台管"的系统命名空间。
+	//
+	// **默认为空，也就是平台不碰 kube-system 一类**（policygen.systemNamespaces）。
+	// 候选集是给每个 workload 装上 default-deny 再把观测到的连接放回去，
+	// 而观测证明不了完整时学出来的规则默认不启用 —— 一份下发到 kube-dns 的
+	// default-deny 会让全集群失去 DNS。对最容易搞挂集群的那部分，默认不碰。
+	//
+	// 要纳入必须显式列出来，且**必须带理由**（与 NoNodeAgentsReason、
+	// BusinessCycleReason 同一形状）：这是一次会改变爆炸半径的决定，
+	// 它应该留下一句写下来的话与一行审计。
+	ManagedSystemNamespaces []string `json:"managedSystemNamespaces,omitempty"`
+	// ManagedSystemNamespacesReason 是纳入它们的依据。
+	ManagedSystemNamespacesReason string `json:"managedSystemNamespacesReason,omitempty"`
 	// BusinessCycleReason 是凭什么这么定。
 	//
 	// 存理由而不是只存一个时长：这是一次有后果的判断 —— 定短了，平台会在

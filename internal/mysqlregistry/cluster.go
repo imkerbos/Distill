@@ -16,6 +16,7 @@ func (s *Store) Clusters(ctx context.Context) ([]registry.Cluster, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT cluster_id, display_name, pod_cidr, node_cidr, ccnp_present, other_planes,
 		        business_cycle_seconds, business_cycle_reason,
+		        managed_system_namespaces, managed_system_namespaces_reason,
 		        onboard_state, kubeconfig_ref, data_source, no_node_agents_reason
 		   FROM cluster WHERE deleted_at IS NULL ORDER BY cluster_id`)
 	if err != nil {
@@ -27,11 +28,19 @@ func (s *Store) Clusters(ctx context.Context) ([]registry.Cluster, error) {
 	for rows.Next() {
 		var c registry.Cluster
 		var cycleSeconds uint32
+		var managedNS []byte
 		if err := rows.Scan(&c.ID, &c.DisplayName, &c.PodCIDR, &c.NodeCIDR,
 			&c.CCNPPresent, &c.OtherPlanes, &cycleSeconds, &c.BusinessCycleReason,
+			&managedNS, &c.ManagedSystemNamespacesReason,
 			&c.State, &c.KubeconfigRef, &c.DataSource,
 			&c.NoNodeAgentsReason); err != nil {
 			return nil, fmt.Errorf("scan cluster: %w", err)
+		}
+		if err := json.Unmarshal(managedNS, &c.ManagedSystemNamespaces); err != nil {
+			// **解不开就整次失败，不降级成"没有纳入"。** 后者会让一个明示
+			// 要平台管 kube-system 的集群安静地退回默认，而症状是那一片的
+			// 候选策略突然消失 —— 从症状反推不到成因。
+			return nil, fmt.Errorf("decode managed system namespaces for %s: %w", c.ID, err)
 		}
 		c.BusinessCycle = time.Duration(cycleSeconds) * time.Second
 		out = append(out, c)
@@ -52,20 +61,27 @@ func (s *Store) Cluster(ctx context.Context, id string) (registry.Cluster, bool,
 	var (
 		c            registry.Cluster
 		cycleSeconds uint32
+		managedNS    []byte
 	)
 	err := s.db.QueryRowContext(ctx,
 		`SELECT cluster_id, display_name, pod_cidr, node_cidr, ccnp_present, other_planes,
 		        business_cycle_seconds, business_cycle_reason,
+		        managed_system_namespaces, managed_system_namespaces_reason,
 		        onboard_state, kubeconfig_ref, data_source, no_node_agents_reason
 		   FROM cluster WHERE cluster_id = ? AND deleted_at IS NULL`, id).
 		Scan(&c.ID, &c.DisplayName, &c.PodCIDR, &c.NodeCIDR, &c.CCNPPresent, &c.OtherPlanes,
 			&cycleSeconds, &c.BusinessCycleReason,
+			&managedNS, &c.ManagedSystemNamespacesReason,
 			&c.State, &c.KubeconfigRef, &c.DataSource, &c.NoNodeAgentsReason)
 	if errors.Is(err, sql.ErrNoRows) {
 		return registry.Cluster{}, false, nil
 	}
 	if err != nil {
 		return registry.Cluster{}, false, fmt.Errorf("query cluster: %w", err)
+	}
+	if err := json.Unmarshal(managedNS, &c.ManagedSystemNamespaces); err != nil {
+		return registry.Cluster{}, false, fmt.Errorf(
+			"decode managed system namespaces for %s: %w", id, err)
 	}
 	c.BusinessCycle = time.Duration(cycleSeconds) * time.Second
 	if err := s.loadChildren(ctx, &c); err != nil {
@@ -201,11 +217,13 @@ func (s *Store) CreateCluster(ctx context.Context, actor registry.Actor, c regis
 				`INSERT INTO cluster
 				   (cluster_id, display_name, pod_cidr, node_cidr, ccnp_present,
 				    business_cycle_seconds, business_cycle_reason,
+				    managed_system_namespaces, managed_system_namespaces_reason,
 				    no_node_agents_reason, onboard_state, kubeconfig_ref,
 				    created_at, updated_at)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				c.ID, c.DisplayName, c.PodCIDR, c.NodeCIDR, c.CCNPPresent,
 				uint32(c.BusinessCycle.Seconds()), c.BusinessCycleReason,
+				managedNamespacesJSON(c), c.ManagedSystemNamespacesReason,
 				c.NoNodeAgentsReason, string(c.State), c.KubeconfigRef, now, now,
 			); err != nil {
 				return writeFailure("insert cluster",
@@ -239,11 +257,13 @@ func (s *Store) UpdateCluster(ctx context.Context, actor registry.Actor, c regis
 			res, err := tx.ExecContext(ctx,
 				`UPDATE cluster SET display_name = ?, pod_cidr = ?, node_cidr = ?,
 				        ccnp_present = ?, business_cycle_seconds = ?, business_cycle_reason = ?,
+				        managed_system_namespaces = ?, managed_system_namespaces_reason = ?,
 				        no_node_agents_reason = ?,
 				        onboard_state = ?, kubeconfig_ref = ?, updated_at = ?
 				  WHERE cluster_id = ? AND deleted_at IS NULL`,
 				c.DisplayName, c.PodCIDR, c.NodeCIDR, c.CCNPPresent,
 				uint32(c.BusinessCycle.Seconds()), c.BusinessCycleReason,
+				managedNamespacesJSON(c), c.ManagedSystemNamespacesReason,
 				c.NoNodeAgentsReason, string(c.State), c.KubeconfigRef, s.now(), c.ID,
 			)
 			if err != nil {
@@ -428,4 +448,23 @@ func (s *Store) SetOtherPlanes(
 		return fmt.Errorf("set other planes: %w", err)
 	}
 	return nil
+}
+
+// managedNamespacesJSON 把纳入清单编码成落库形状。
+//
+// **nil 编成 []，不是 null**：那一列声明为 NOT NULL，而 null 与 [] 在读回时
+// 分不出"没人声明过"与"这一行坏了"。空清单在这里的含义是明确的 ——
+// 没有人声明要平台管系统命名空间，那就是默认的"不碰"。
+//
+// 编码失败不可能发生（[]string 恒可序列化），真发生了也只能落一个空数组：
+// 那是**更保守**的方向，平台会退回"不碰系统命名空间"。
+func managedNamespacesJSON(c registry.Cluster) string {
+	if len(c.ManagedSystemNamespaces) == 0 {
+		return "[]"
+	}
+	b, err := json.Marshal(c.ManagedSystemNamespaces)
+	if err != nil {
+		return "[]"
+	}
+	return string(b)
 }

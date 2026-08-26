@@ -100,6 +100,10 @@ func Apply(base Result, overrides []Override) (Result, []StaleOverride) {
 		// 改不了"这条导入挂没挂上主体"。丢掉它，覆盖之后那一份预览会显示
 		// 成"全部导入都挂上了"—— 一份凭空好看起来的清单。
 		UnattachedImports: base.UnattachedImports,
+		// 与上面几栏同理：人工覆盖改的是"哪几条规则算启用"，改不了
+		// "哪一片命名空间平台默认不碰"。丢掉它，覆盖之后那一份预览会显示成
+		// "全部命名空间都在候选集里"——一份凭空完整起来的清单。
+		ExcludedNamespaces: base.ExcludedNamespaces,
 	}
 	// 深拷贝规则切片：Result 里的 Policies 与 Rules 都是切片，
 	// 直接复用底层数组会让对 out 的写入穿透回 base。

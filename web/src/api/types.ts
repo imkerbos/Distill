@@ -302,6 +302,16 @@ export interface SecurityReport {
 /** 规则来源。BASELINE 由基础设施事实推导，LEARNED 由观测到的流量学习。 */
 export type RuleOrigin = 'BASELINE' | 'LEARNED' | 'IMPORTED'
 
+/** 一个整片没有生成候选策略的命名空间。 */
+export interface ExcludedNamespace {
+  namespace: string
+  /** 封闭枚举，不是自由文本。 */
+  reason: NamespaceExclusionReason
+}
+
+/** 命名空间未进候选集的原因。对应 policygen.NamespaceExclusionReason。 */
+export type NamespaceExclusionReason = 'SYSTEM_NAMESPACE'
+
 /** 一条挂不到任何主体上、因而没有进候选集的人工导入。 */
 export interface UnattachedImport {
   importId: string
@@ -914,6 +924,17 @@ export interface PolicyPreview {
    * 它只评估见过的连接。
    */
   unattachedImports: UnattachedImport[] | null
+  /**
+   * **整片**没有生成候选策略的命名空间。
+   *
+   * 今天唯一的原因是"这是 Kubernetes 内置系统命名空间"：候选集会给每个
+   * workload 装上 default-deny，而一份下发到 kube-dns 的 default-deny 会让
+   * 全集群失去 DNS。对最容易搞挂集群的那部分，平台默认不碰。
+   *
+   * **必须显示**：一个悄悄不见的命名空间，在界面上与"它没有 workload"长得
+   * 一样，而操作者据此以为覆盖是完整的。
+   */
+  excludedNamespaces: ExcludedNamespace[] | null
   /**
    * 每条候选规则的跨窗口证据，键是 `namespace/workload/fingerprint`。
    *

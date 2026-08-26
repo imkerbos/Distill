@@ -177,6 +177,7 @@ func (r *Reader) PolicyPreviewAtGranularity(
 		NotApplicableBaselines: store.FilterMissing(gen.NotApplicableBaselines, namespace),
 		Ungeneratable:          gen.Ungeneratable,
 		UnattachedImports:      gen.UnattachedImports,
+		ExcludedNamespaces:     gen.ExcludedNamespaces,
 		ExcludedWorkloads:      gen.ExcludedWorkloads,
 		Prediction:             report,
 		PredictionWithExisting: reportWithExisting,
@@ -283,6 +284,10 @@ func (r *Reader) generate(
 			Observations:        obs,
 			UnassessedBaselines: notAssessed,
 			Imports:             imports,
+			// 系统命名空间默认整片不生成（policygen.systemNamespaces）：
+			// 一份下发到 kube-dns 的 default-deny 会让全集群失去 DNS。
+			// 要纳入必须在集群登记里显式声明并写下理由。
+			ManagedSystemNamespaces: c.ManagedSystemNamespaces,
 		}),
 		notAssessed:  notAssessed,
 		inapplicable: inapplicableBaselines(c),

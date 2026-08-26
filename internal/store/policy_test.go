@@ -128,12 +128,15 @@ func TestPolicyPreviewMissingBaselinesContent(t *testing.T) {
 		for _, m := range pv.NotApplicableBaselines {
 			na[m.Namespace] = m.Kinds
 		}
+		// **kube-system 不在这里**：系统命名空间整片不生成候选策略
+		// （policygen.systemNamespaces），因此也不为它推导 Baseline ——
+		// 那些缺口是给"要下发策略"准备的，而这一片平台默认不下发。
+		// 它出现在 ExcludedNamespaces 里，不是悄悄消失。
 		wantNA := map[string][]baseline.Kind{
-			"batch":       {baseline.KindLBHealth, baseline.KindMetrics},
-			"checkout":    {baseline.KindLBHealth, baseline.KindMetrics},
-			"kube-system": {baseline.KindLBHealth, baseline.KindMetrics},
-			"legacy":      {baseline.KindLBHealth, baseline.KindMetrics},
-			"payment":     {baseline.KindLBHealth},
+			"batch":    {baseline.KindLBHealth, baseline.KindMetrics},
+			"checkout": {baseline.KindLBHealth, baseline.KindMetrics},
+			"legacy":   {baseline.KindLBHealth, baseline.KindMetrics},
+			"payment":  {baseline.KindLBHealth},
 		}
 		if !reflect.DeepEqual(na, wantNA) {
 			t.Errorf("%s: NotApplicableBaselines = %v, want %v", cluster, na, wantNA)

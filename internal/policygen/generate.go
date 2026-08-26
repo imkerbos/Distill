@@ -46,6 +46,12 @@ type Input struct {
 	// 链路，不在窗口里就学不出规则，而 dry-run 也报不出来（它只评估见过的
 	// 连接）。这是操作者补上那条规则的入口。
 	Imports []ImportedPolicy
+	// ManagedSystemNamespaces 是操作者明示"由平台管"的系统命名空间。
+	//
+	// 默认平台不为 kube-system 一类生成候选策略（systemNamespaces）：那份
+	// default-deny 一旦下发，全集群的 DNS 就可能断。要纳入必须显式列出来，
+	// 而那是一次有记录的人工判断。
+	ManagedSystemNamespaces []string
 }
 
 // Result 是一次生成的全部产物。
@@ -71,6 +77,12 @@ type Result struct {
 	Ungeneratable []UngeneratableItem `json:"ungeneratable"`
 	// ExcludedWorkloads 是从未进入候选策略花名册的 Pod，按 (namespace, pod) 确定排序。
 	ExcludedWorkloads []ExcludedWorkload `json:"excludedWorkloads"`
+	// ExcludedNamespaces 是**整体**未进候选集的命名空间。
+	//
+	// 与 ExcludedWorkloads 分列：那一栏说的是"这个 Pod 表达不成 selector"，
+	// 这一栏说的是"这一整片平台默认不碰"。前者要去修 Pod 的标签，后者是一个
+	// 有意的保护 —— 处置完全不同。
+	ExcludedNamespaces []ExcludedNamespace `json:"excludedNamespaces"`
 	// UnattachedImports 是挂不到任何主体上、因而没有进候选集的导入。
 	//
 	// **必须与候选集一起返回**：一条导入进来了却没出现在候选集里，操作者会
@@ -127,8 +139,26 @@ func Generate(in Input) Result {
 	// 报不出这个缺口——一个不存在的候选策略不会"缺"任何东西。
 	workloads := map[subject]bool{}
 	var excluded []ExcludedWorkload
+	// 系统命名空间默认整片不生成（systemNamespaces）。**排除只影响生成，
+	// 不影响判定**：这些 Pod 照常参与流量归属与回放，否则对账与 dry-run
+	// 会跟着一起错。
+	gate := namespaceGate(in.ManagedSystemNamespaces)
+	excludedNS := map[string]ExcludedNamespace{}
 	for _, p := range in.Pods {
 		if p.ClusterID != in.ClusterID {
+			continue
+		}
+		if ex, blocked := gate(p.Namespace); blocked {
+			excludedNS[p.Namespace] = ex
+		}
+	}
+	for _, p := range in.Pods {
+		if p.ClusterID != in.ClusterID {
+			continue
+		}
+		if _, blocked := excludedNS[p.Namespace]; blocked {
+			// 整片排除，连 Baseline 也不注入：注入了就意味着要下发，
+			// 而这道保护存在的理由正是"这一片不下发"。
 			continue
 		}
 		if replay.IsUnmanaged(p) {
@@ -169,6 +199,15 @@ func Generate(in Input) Result {
 	byWorkload := map[subject][]Rule{}
 	for k, n := range counts {
 		s := subject{namespace: k.SubjectNS, workload: k.Subject, labelKey: k.SubjectKey}
+		// **整片排除的命名空间在这里也要挡住。**
+		//
+		// 下面那句 workloads[s] = true 会把主体加回名册，因此只在 Pod 名册
+		// 那一处跳过是不够的：kube-system 里有流量的 workload 会从这条路
+		// 绕回候选集，而排除清单照样报着它 —— 一个"报了却没生效"的保护，
+		// 比没有保护更危险（真集群实测发现，2026-08-26）。
+		if _, blocked := excludedNS[k.SubjectNS]; blocked {
+			continue
+		}
 		// 名册之外仍学到规则理论上不会发生——subjectOf 已经把 hostNetwork
 		// 与无标签 Pod 挡在外面——但稳妥起见仍然按学习结果建一条策略，
 		// 而不是静默丢弃这批规则。
@@ -203,7 +242,8 @@ func Generate(in Input) Result {
 
 	res := Result{
 		Ungeneratable: dedupeGaps(bad), ExcludedWorkloads: excluded,
-		UnattachedImports: unattached,
+		UnattachedImports:  unattached,
+		ExcludedNamespaces: sortedExcludedNamespaces(excludedNS),
 	}
 	for s := range workloads {
 		rules := append([]Rule{}, byWorkload[s]...)

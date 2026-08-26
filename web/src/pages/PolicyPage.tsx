@@ -3,6 +3,9 @@ import { EVIDENCE_LABEL, evidenceNote } from './evidenceView.ts'
 import { previewEvidenceNote, ruleEvidenceView, type RuleEvidenceView } from './ruleEvidenceView.ts'
 import { RETIREMENT_HELP, retirementView } from './retirementView.ts'
 import {
+  EXCLUDED_NS_HELP, EXCLUDED_NS_NONE, excludedNamespaceRows,
+} from './excludedNamespaceView.ts'
+import {
   IMPORTED_BASIS, isImported, UNATTACHED_HELP, UNATTACHED_NONE, unattachedRows,
 } from './importedView.ts'
 import { api, ApiError } from '../api/client'
@@ -11,7 +14,7 @@ import {
   type CandidatePolicy, type CandidateRule, type ChangeKind, type ExcludedWorkload,
   type Granularity, type Kind, type MissingBaseline, type OverrideDecision, type Widening,
   type RuleEvidence, type RuleOrigin, type RuleOverride, type StaleOverride,
-  type UnattachedImport,
+  type ExcludedNamespace, type UnattachedImport,
   type UngeneratableItem, type UngeneratableReason, type WorkloadExclusionReason,
   type WritebackPlanResult, type WritebackPushResult,
 } from '../api/types'
@@ -168,6 +171,10 @@ export default function PolicyPage({ cluster }: { cluster: string }) {
         notAssessed={pv.notAssessedBaselines}
         notApplicable={pv.notApplicableBaselines}
       />
+      {/* 整片排除排在逐个 Pod 排除之前：先说"这一片平台不碰"，再说
+          "这一片里哪几个 Pod 表达不成 selector"。反过来读，操作者会以为
+          那几个 Pod 是全部缺口。 */}
+      <ExcludedNamespaceSection items={pv.excludedNamespaces ?? []} />
       <ExcludedWorkloadSection items={pv.excludedWorkloads ?? []} />
       {/* 挂不上的导入与"不可生成"并列成节，不合并：后者说的是"这条流量表达
           不成规则"，前者说的是"这条人写下来的规则没挂上任何主体"。两者的
@@ -1870,6 +1877,42 @@ function RetirementSection({ cluster }: { cluster: string }) {
             </tbody>
           </TableCard>
         </>
+      )}
+    </Section>
+  )
+}
+
+
+/**
+ * 整片没有生成候选策略的命名空间。
+ *
+ * **零条时也要出现。** 一个不显示的区块与"平台碰了所有命名空间"在屏幕上
+ * 长得一样，而这道保护的价值恰恰在于它是可被看见、可被审计的。
+ */
+function ExcludedNamespaceSection({ items }: { items: ExcludedNamespace[] }) {
+  const rows = excludedNamespaceRows(items)
+  return (
+    <Section
+      title="平台不碰的命名空间"
+      description={EXCLUDED_NS_HELP}
+      meta={`${rows.length} 个`}
+    >
+      {rows.length === 0 ? (
+        <EmptyState message={EXCLUDED_NS_NONE} detail="" />
+      ) : (
+        <TableCard>
+          <thead>
+            <tr><th>命名空间</th><th>为什么</th></tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.namespace}>
+                <td className="mono">{row.namespace}</td>
+                <td className="text-ink-2">{row.reason}</td>
+              </tr>
+            ))}
+          </tbody>
+        </TableCard>
       )}
     </Section>
   )

@@ -150,6 +150,15 @@ type PolicyPreview struct {
 	// 灾备链路），"以为补上了"比"知道没补上"危险得多，因为 dry-run 报不出
 	// 这个缺口：它只评估见过的连接。
 	UnattachedImports []policygen.UnattachedImport `json:"unattachedImports"`
+	// ExcludedNamespaces 是**整片**没有生成候选策略的命名空间。
+	//
+	// 今天唯一的原因是"这是 Kubernetes 内置系统命名空间"：候选集会给每个
+	// workload 装上 default-deny，而一份下发到 kube-dns 的 default-deny 会让
+	// 全集群失去 DNS。对最容易搞挂集群的那部分，平台默认不碰。
+	//
+	// **必须报出来**：一个悄悄不见的命名空间，在界面上与"它没有 workload"
+	// 长得一样，而操作者据此以为覆盖是完整的。
+	ExcludedNamespaces []policygen.ExcludedNamespace `json:"excludedNamespaces"`
 	// Ungeneratable 是无法表达为规则的流量。
 	Ungeneratable []policygen.UngeneratableItem `json:"ungeneratable"`
 	// ExcludedWorkloads 是从未进入候选策略花名册的 Pod（hostNetwork、

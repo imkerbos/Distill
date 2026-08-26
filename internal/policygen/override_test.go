@@ -349,7 +349,8 @@ func deepCopyResult(r policygen.Result) policygen.Result {
 		ExcludedWorkloads: cloneExcludedWorkloads(r.ExcludedWorkloads),
 		// nil 与"非 nil 但长度为 0"在 DeepEqual 下不相等，而 Generate 恒给
 		// 出一个空切片（那是"算过、没有"）—— 照抄原件的形状，不改写。
-		UnattachedImports: append([]policygen.UnattachedImport{}, r.UnattachedImports...),
+		UnattachedImports:  append([]policygen.UnattachedImport{}, r.UnattachedImports...),
+		ExcludedNamespaces: append([]policygen.ExcludedNamespace{}, r.ExcludedNamespaces...),
 	}
 	out.MissingBaselines = cloneMissing(r.MissingBaselines)
 	out.NotApplicableBaselines = cloneMissing(r.NotApplicableBaselines)

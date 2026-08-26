@@ -36,7 +36,13 @@ func wideningOf(t *testing.T, list []policygen.Widening, namespace string) polic
 //
 // 303 份平铺在一屏里没人 review 得完，而一份 review 不完的推荐等于没有推荐。
 func TestCollapsingGivesOnePolicyPerNamespace(t *testing.T) {
-	base := policygen.Generate(observe(t, "prod-asia-1"))
+	// 显式纳入 kube-system：它是 fixture 里唯一一个带两个 workload 的
+	// 命名空间，也就是"折叠"这件事唯一的对照。系统命名空间默认整片不生成
+	// （systemNamespaces），不纳入的话每个 ns 只剩一个 workload，
+	// 折叠前后一样多，这条用例就什么都证明不了。
+	in := observe(t, "prod-asia-1")
+	in.ManagedSystemNamespaces = []string{"kube-system"}
+	base := policygen.Generate(in)
 	collapsed, _ := base.AtNamespaceGranularity()
 
 	seen := map[string]int{}
@@ -66,7 +72,13 @@ func TestCollapsingGivesOnePolicyPerNamespace(t *testing.T) {
 // 对端粗化（只写 namespaceSelector）会把「放行 kube-system」变成「放行它
 // 里面每一个 Pod」，那是另一个数量级的放宽，不该顺手混进来。
 func TestCollapsingLeavesThePeersUntouched(t *testing.T) {
-	base := policygen.Generate(observe(t, "prod-asia-1"))
+	// 显式纳入 kube-system：它是 fixture 里唯一一个带两个 workload 的
+	// 命名空间，也就是"折叠"这件事唯一的对照。系统命名空间默认整片不生成
+	// （systemNamespaces），不纳入的话每个 ns 只剩一个 workload，
+	// 折叠前后一样多，这条用例就什么都证明不了。
+	in := observe(t, "prod-asia-1")
+	in.ManagedSystemNamespaces = []string{"kube-system"}
+	base := policygen.Generate(in)
 	collapsed, _ := base.AtNamespaceGranularity()
 
 	// 原始规则按指纹建索引，折叠后逐条比对端。
@@ -102,7 +114,13 @@ func TestCollapsingLeavesThePeersUntouched(t *testing.T) {
 // 折叠后只留 1 条 —— 不去重会灌出 N 条一模一样的规则（同
 // ScrapeTargetSnapshots 那次 506 条只有 20 个指纹）。
 func TestCollapsedRulesAreDedupedByFingerprint(t *testing.T) {
-	base := policygen.Generate(observe(t, "prod-asia-1"))
+	// 显式纳入 kube-system：它是 fixture 里唯一一个带两个 workload 的
+	// 命名空间，也就是"折叠"这件事唯一的对照。系统命名空间默认整片不生成
+	// （systemNamespaces），不纳入的话每个 ns 只剩一个 workload，
+	// 折叠前后一样多，这条用例就什么都证明不了。
+	in := observe(t, "prod-asia-1")
+	in.ManagedSystemNamespaces = []string{"kube-system"}
+	base := policygen.Generate(in)
 	collapsed, _ := base.AtNamespaceGranularity()
 
 	for _, p := range collapsed.Policies {
@@ -181,7 +199,13 @@ func TestCollapsingReportsHowMuchWiderItGot(t *testing.T) {
 // 少了这条，一个"恒报一个正数"的实现照样通过上一条 —— 而那会让操作者
 // 分不出哪几个 namespace 真的值得回到 workload 粒度去看。
 func TestALosslessCollapseReportsZeroExtraGrants(t *testing.T) {
-	base := policygen.Generate(observe(t, "prod-asia-1"))
+	// 显式纳入 kube-system：它是 fixture 里唯一一个带两个 workload 的
+	// 命名空间，也就是"折叠"这件事唯一的对照。系统命名空间默认整片不生成
+	// （systemNamespaces），不纳入的话每个 ns 只剩一个 workload，
+	// 折叠前后一样多，这条用例就什么都证明不了。
+	in := observe(t, "prod-asia-1")
+	in.ManagedSystemNamespaces = []string{"kube-system"}
+	base := policygen.Generate(in)
 	_, widening := base.AtNamespaceGranularity()
 
 	var lossless int
@@ -198,7 +222,13 @@ func TestALosslessCollapseReportsZeroExtraGrants(t *testing.T) {
 
 // 单个 workload 的 namespace 折叠必然无损：没有别的 Pod 能多拿到东西。
 func TestASingleWorkloadNamespaceCannotWiden(t *testing.T) {
-	base := policygen.Generate(observe(t, "prod-asia-1"))
+	// 显式纳入 kube-system：它是 fixture 里唯一一个带两个 workload 的
+	// 命名空间，也就是"折叠"这件事唯一的对照。系统命名空间默认整片不生成
+	// （systemNamespaces），不纳入的话每个 ns 只剩一个 workload，
+	// 折叠前后一样多，这条用例就什么都证明不了。
+	in := observe(t, "prod-asia-1")
+	in.ManagedSystemNamespaces = []string{"kube-system"}
+	base := policygen.Generate(in)
 	_, widening := base.AtNamespaceGranularity()
 
 	for _, w := range widening {
@@ -216,7 +246,13 @@ func TestASingleWorkloadNamespaceCannotWiden(t *testing.T) {
 // namespace 禁用」这个动作 —— 它的爆炸半径与 workload 粒度的同名动作
 // 完全不同，合用一个键会让两者互相污染。
 func TestCollapsingTakesTheUnionOfWhatSurvivedTheOverrides(t *testing.T) {
-	base := policygen.Generate(observe(t, "prod-asia-1"))
+	// 显式纳入 kube-system：它是 fixture 里唯一一个带两个 workload 的
+	// 命名空间，也就是"折叠"这件事唯一的对照。系统命名空间默认整片不生成
+	// （systemNamespaces），不纳入的话每个 ns 只剩一个 workload，
+	// 折叠前后一样多，这条用例就什么都证明不了。
+	in := observe(t, "prod-asia-1")
+	in.ManagedSystemNamespaces = []string{"kube-system"}
+	base := policygen.Generate(in)
 
 	// 找一个 namespace 里两个 workload 共有的规则，把其中一个禁掉。
 	shared := ""
@@ -277,7 +313,13 @@ func TestCollapsingTakesTheUnionOfWhatSurvivedTheOverrides(t *testing.T) {
 
 // 渲染：namespace 粒度的 podSelector 为空、名字是该 ns 内的常量。
 func TestNamespaceGranularityRendersAnEmptyPodSelector(t *testing.T) {
-	base := policygen.Generate(observe(t, "prod-asia-1"))
+	// 显式纳入 kube-system：它是 fixture 里唯一一个带两个 workload 的
+	// 命名空间，也就是"折叠"这件事唯一的对照。系统命名空间默认整片不生成
+	// （systemNamespaces），不纳入的话每个 ns 只剩一个 workload，
+	// 折叠前后一样多，这条用例就什么都证明不了。
+	in := observe(t, "prod-asia-1")
+	in.ManagedSystemNamespaces = []string{"kube-system"}
+	base := policygen.Generate(in)
 	collapsed, _ := base.AtNamespaceGranularity()
 
 	policies := collapsed.EnabledPolicies()
@@ -318,7 +360,13 @@ func TestNamespaceGranularityRendersAnEmptyPodSelector(t *testing.T) {
 
 // **本轮不得改动 workload 粒度的产物。** 缺省那一套逐字段不变。
 func TestWorkloadGranularityIsUnchanged(t *testing.T) {
-	base := policygen.Generate(observe(t, "prod-asia-1"))
+	// 显式纳入 kube-system：它是 fixture 里唯一一个带两个 workload 的
+	// 命名空间，也就是"折叠"这件事唯一的对照。系统命名空间默认整片不生成
+	// （systemNamespaces），不纳入的话每个 ns 只剩一个 workload，
+	// 折叠前后一样多，这条用例就什么都证明不了。
+	in := observe(t, "prod-asia-1")
+	in.ManagedSystemNamespaces = []string{"kube-system"}
+	base := policygen.Generate(in)
 	for _, p := range base.Policies {
 		if p.Granularity != policygen.GranularityWorkload {
 			t.Errorf("%s/%s: Granularity = %q, want WORKLOAD as the default",

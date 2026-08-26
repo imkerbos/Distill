@@ -503,6 +503,11 @@ func TestK8sAppLabelledPodProducesMatchingPodSelector(t *testing.T) {
 			Decision:        replay.Decision{Verdict: replay.VerdictAllow, Confidence: replay.ConfidenceTrusted},
 			IdentityTrusted: true,
 		}},
+		// 显式纳入 kube-system：这条用例守的是"k8s-app 这个标签键要产出
+		// 正确的 podSelector"，而 coredns 只是它最典型的例子。系统命名空间
+		// 默认整片不生成（systemNamespaces），不纳入的话这里没有候选可查 ——
+		// 那道保护与这条纪律无关，不该让它把用例的前提抽掉。
+		ManagedSystemNamespaces: []string{"kube-system"},
 	})
 
 	var found *policygen.CandidatePolicy
@@ -540,21 +545,54 @@ func TestK8sAppLabelledPodProducesMatchingPodSelector(t *testing.T) {
 func TestFixtureExcludedWorkloadsNameHostNetworkAndUnlabelledPods(t *testing.T) {
 	res := policygen.Generate(observe(t, "prod-asia-1"))
 
-	var gotHostNetwork, gotNoLabel *policygen.ExcludedWorkload
+	var gotNoLabel *policygen.ExcludedWorkload
 	for i := range res.ExcludedWorkloads {
 		w := &res.ExcludedWorkloads[i]
-		if w.Namespace == "kube-system" && w.Pod == "kube-proxy-1" {
-			gotHostNetwork = w
-		}
 		if w.Namespace == "legacy" && w.Pod == "legacy-unlabelled" {
 			gotNoLabel = w
 		}
 	}
+
+	// **hostNetwork 那一半单独构造，不再依赖 fixture。**
+	//
+	// fixture 里唯一的 hostNetwork Pod 在 kube-system，而系统命名空间现在
+	// 整片不生成候选策略（systemNamespaces），那个 Pod 因此走不到 hostNetwork
+	// 这一支。它的排除原因变成了"整片不管"，由 ExcludedNamespaces 报 ——
+	// 两件事分开说，逐个重复报会让"这个 Pod 有标签问题"淹没在"这一片不管"里。
+	//
+	// 那条纪律本身没变，因此用一个最小构造继续守住它：一个业务命名空间里的
+	// hostNetwork Pod 必须被点名，否则它会以"0 不可生成"的面貌被悄悄吞掉。
+	host := policygen.Generate(policygen.Input{
+		ClusterID: "c1",
+		Pods: []replay.PodRef{{
+			ClusterID: "c1", Namespace: "payment", Name: "node-agent-1",
+			Labels: map[string]string{"app": "node-agent"}, HostNetwork: true,
+		}},
+	})
+	var gotHostNetwork *policygen.ExcludedWorkload
+	for i := range host.ExcludedWorkloads {
+		if host.ExcludedWorkloads[i].Pod == "node-agent-1" {
+			gotHostNetwork = &host.ExcludedWorkloads[i]
+		}
+	}
 	if gotHostNetwork == nil {
-		t.Fatal("kube-system/kube-proxy-1 not present in ExcludedWorkloads")
+		t.Fatal("业务命名空间里的 hostNetwork Pod 没有出现在 ExcludedWorkloads")
 	}
 	if gotHostNetwork.Reason != policygen.ExclusionHostNetwork {
-		t.Errorf("kube-proxy-1 reason = %q, want %q", gotHostNetwork.Reason, policygen.ExclusionHostNetwork)
+		t.Errorf("node-agent-1 reason = %q, want %q",
+			gotHostNetwork.Reason, policygen.ExclusionHostNetwork)
+	}
+
+	// 新行为：kube-system 整片进排除清单，不再逐个 Pod 报。
+	var sawSystemNS bool
+	for _, ns := range res.ExcludedNamespaces {
+		if ns.Namespace == "kube-system" {
+			sawSystemNS = true
+		}
+	}
+	if !sawSystemNS {
+		t.Error("kube-system 没有出现在 ExcludedNamespaces —— " +
+			"一个悄悄不见的命名空间与「它没有 workload」长得一样")
 	}
 	if gotNoLabel == nil {
 		t.Fatal("legacy/legacy-unlabelled not present in ExcludedWorkloads")
@@ -743,8 +781,11 @@ func TestSameWorkloadUnderTwoLabelKeysYieldsOneCandidatePolicy(t *testing.T) {
 // 钉死成一个可验证的事实：必须恰好一条排除记录，原因是 hostNetwork，
 // 不是 NO_WORKLOAD_LABEL。
 func TestHostNetworkTakesPrecedenceOverMissingLabel(t *testing.T) {
+	// 刻意放在业务命名空间：系统命名空间整片不生成候选策略
+	// （systemNamespaces），那时这个 Pod 走不到排除判定这一支，
+	// 而这条用例要钉的是**两个排除原因谁优先**，与那道保护无关。
 	privileged := replay.PodRef{
-		ClusterID: "c1", Namespace: "kube-system", Name: "cni-agent-1", IP: "10.0.0.9",
+		ClusterID: "c1", Namespace: "payment", Name: "cni-agent-1", IP: "10.0.0.9",
 		HostNetwork: true, Labels: map[string]string{"env": "prod"}, // 无任何可识别 workload 标签
 	}
 	res := policygen.Generate(policygen.Input{
@@ -754,7 +795,7 @@ func TestHostNetworkTakesPrecedenceOverMissingLabel(t *testing.T) {
 
 	var matches []policygen.ExcludedWorkload
 	for _, w := range res.ExcludedWorkloads {
-		if w.Namespace == "kube-system" && w.Pod == "cni-agent-1" {
+		if w.Namespace == "payment" && w.Pod == "cni-agent-1" {
 			matches = append(matches, w)
 		}
 	}
@@ -774,7 +815,13 @@ func TestHostNetworkTakesPrecedenceOverMissingLabel(t *testing.T) {
 // 只在人手工跑一次 docker compose 时成立，下一次改动就可能悄悄回退
 // 而没有任何测试报错。
 func TestFixtureKubeDNSGetsCandidateWithK8sAppKey(t *testing.T) {
-	res := policygen.Generate(observe(t, "prod-asia-1"))
+	// **显式纳入 kube-system**：系统命名空间默认整片不生成候选策略，
+	// 而这条用例守的是"k8s-app 这个标签键要被认出来"——那条纪律与那道
+	// 保护无关，kube-dns 只是它最典型的例子。纳入之后照常生成，正好也
+	// 验证了那条出口是通的。
+	in := observe(t, "prod-asia-1")
+	in.ManagedSystemNamespaces = []string{"kube-system"}
+	res := policygen.Generate(in)
 
 	var found *policygen.CandidatePolicy
 	for i := range res.Policies {

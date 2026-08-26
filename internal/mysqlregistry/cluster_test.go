@@ -303,6 +303,11 @@ func TestClusterSurvivesAFullRoundTripThroughMySQL(t *testing.T) {
 	// 这一行是这条纪律在落库层的落点：一个新集群的判定从第一天起就是
 	// DEGRADED，直到采集真的探测过一次（design doc 2026-08-25 §2.2）。
 	want.OtherPlanes = registry.PlanesUnknown
+	// 纳入清单同理：那一列的默认值是 JSON 的 []，读回来是一个**空切片**，
+	// 而写进去的是 nil。两者在 DeepEqual 下不相等，而这个差别是刻意的 ——
+	// 落库层恒写数组、恒读出数组，让"没人声明过"只有一种形状
+	// （managedNamespacesJSON 与 000028 那句 UPDATE 是同一条纪律）。
+	want.ManagedSystemNamespaces = []string{}
 
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("round-tripped cluster =\n%+v\nwant\n%+v", got, want)
