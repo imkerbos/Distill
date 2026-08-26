@@ -127,10 +127,11 @@ func (r *Reader) trafficOf(
 	}
 
 	var opts []replay.Option
-	if c.CCNPPresent {
-		// CCNP 有 deny 语义，标准 NetworkPolicy 的结论可能是"看起来对"的错。
-		// 平台不管控 CCNP，但必须把这类结论降级 —— 登记里说有，就得传下去。
-		opts = append(opts, replay.WithCCNPPresent(true))
+	// **经由 EffectivePlanes 取值，不读那个 bool**（design doc 2026-08-25 §2）：
+	// 「没查过」与「确认不存在」在一个布尔里长得一样，而前者必须降级。
+	// 只有平台确认过的 NONE 才配得上满置信度。
+	if c.EffectivePlanes().Degrades() {
+		opts = append(opts, replay.WithForeignPlane(true))
 	}
 	return traffic{
 		described:  d,

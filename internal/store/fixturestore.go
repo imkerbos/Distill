@@ -86,7 +86,7 @@ func NewFixtureReader(f fixture.Fleet, src ClusterSource) *FixtureReader {
 	for _, c := range f.Clusters {
 		var opts []replay.Option
 		if c.CCNPPresent {
-			opts = append(opts, replay.WithCCNPPresent(true))
+			opts = append(opts, replay.WithForeignPlane(true))
 		}
 		evals[c.ID] = replay.NewEvaluator(c.ID, c.Policies, c.Namespaces, opts...)
 	}

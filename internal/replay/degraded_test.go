@@ -45,7 +45,7 @@ func TestEvaluateMeshDestinationIsDegraded(t *testing.T) {
 // CCNP 有 deny 语义，与标准 NetworkPolicy 的 additive-allow 不同：
 // 存在 CCNP 时，仅基于标准策略的结论不可靠。
 func TestEvaluateCCNPPresentDegradesWholeCluster(t *testing.T) {
-	e := replay.NewEvaluator(testCluster, nil, namespaces(), replay.WithCCNPPresent(true))
+	e := replay.NewEvaluator(testCluster, nil, namespaces(), replay.WithForeignPlane(true))
 
 	src := pod("gateway", "gw-1", "10.4.0.9", map[string]string{"app": "gateway"})
 	dst := pod("payment", "api-1", "10.4.0.1", map[string]string{"app": "api"})

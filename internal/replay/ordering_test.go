@@ -290,7 +290,7 @@ func TestEvaluateUnresolvedLocalEndpointKeepsConnectionFlags(t *testing.T) {
 	remote := ep(remotePod("gateway", "gw-1", "172.16.0.9"))
 
 	e := replay.NewEvaluator(testCluster, []networkingv1.NetworkPolicy{denyAllIngress("payment")},
-		namespaces(), replay.WithCCNPPresent(true))
+		namespaces(), replay.WithForeignPlane(true))
 
 	got := e.Evaluate(replay.Flow{
 		Source: remote, Dest: unresolved, Protocol: replay.ProtocolTCP, Port: 8080,

@@ -113,8 +113,9 @@ type Input struct {
 	Policies []networkingv1.NetworkPolicy
 	// Namespaces 是该集群的命名空间快照。
 	Namespaces []replay.NamespaceRef
-	// CCNPPresent 表示该集群存在 Cilium 策略，预测结论需降级。
-	CCNPPresent bool
+	// ForeignPlane 表示该集群可能存在平台不解释的其它策略平面、或平台没能
+	// 确认有没有；两者都让预测结论降级（design doc 2026-08-25 §2）。
+	ForeignPlane bool
 	// Observations 是带当前判定的观测流量。
 	Observations []policygen.Observation
 	// Label 把端点渲染成展示名；为空时用 IP。
@@ -127,7 +128,7 @@ type Input struct {
 // Run 回放候选策略并给出变化预测。纯函数。
 func Run(in Input) Report {
 	ev := replay.NewEvaluator(in.ClusterID, in.Policies, in.Namespaces,
-		replay.WithCCNPPresent(in.CCNPPresent))
+		replay.WithForeignPlane(in.ForeignPlane))
 
 	rep := Report{
 		Changes:            map[ChangeKind][]ChangedFlow{},

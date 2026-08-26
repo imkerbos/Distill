@@ -255,7 +255,7 @@ func TestGoldenEvaluationSemantics(t *testing.T) {
 			name:     "ccnp presence degrades the verdict",
 			policies: nil,
 			flow:     flowBetween(gw, api, 8080),
-			opts:     []replay.Option{replay.WithCCNPPresent(true)},
+			opts:     []replay.Option{replay.WithForeignPlane(true)},
 
 			wantVerdict:        replay.VerdictAllow,
 			wantConf:           replay.ConfidenceDegraded,
@@ -500,7 +500,7 @@ func TestDecisionUnknownReasonInvariant(t *testing.T) {
 			name:     "ccnp present stays a verdict",
 			policies: []networkingv1.NetworkPolicy{denyAllIngress("payment")},
 			flow:     flowBetween(gw, api, 8080),
-			opts:     []replay.Option{replay.WithCCNPPresent(true)},
+			opts:     []replay.Option{replay.WithForeignPlane(true)},
 		},
 		{
 			name:     "cross cluster deny",

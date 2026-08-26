@@ -11,22 +11,26 @@ import (
 // 每个集群一个实例：NetworkPolicy 是集群本地对象，跨集群策略集混用
 // 会让本集群策略"选中"其他集群的 Pod。
 type Evaluator struct {
-	clusterID   string
-	policies    []networkingv1.NetworkPolicy
-	namespaces  map[string]NamespaceRef
-	ccnpPresent bool
+	clusterID    string
+	policies     []networkingv1.NetworkPolicy
+	namespaces   map[string]NamespaceRef
+	foreignPlane bool
 }
 
 // Option 调整求值器的行为。
 type Option func(*Evaluator)
 
-// WithCCNPPresent 声明集群中存在 Cilium 策略。
+// WithForeignPlane 声明「这个集群里可能有平台不解释的其它策略平面，
+// 或者平台没能确认有没有」（design doc 2026-08-25 §2）。
 //
-// CCNP 具有 deny 语义，与标准 NetworkPolicy 的 additive-allow 不同：
-// 存在 CCNP 时，仅基于标准策略的判定可能是错的，且是"看起来对"的错。
-// 平台不管控 CCNP，但必须把这类结论降级。
-func WithCCNPPresent(present bool) Option {
-	return func(e *Evaluator) { e.ccnpPresent = present }
+// CCNP 具有 deny 语义，AdminNetworkPolicy 的优先级高于 NetworkPolicy ——
+// 两者都能让仅基于标准策略的判定变成"看起来对"的错。平台不管控它们，
+// 但必须把这类结论降级。
+//
+// **「没查过」同样要降级**：那是"我不知道有没有东西在覆盖我的结论"，
+// 与"我知道有"在可信度上是同一档（design doc 2026-08-25 §2.2）。
+func WithForeignPlane(present bool) Option {
+	return func(e *Evaluator) { e.foreignPlane = present }
 }
 
 // NewEvaluator 构造针对指定集群的求值器。
@@ -53,7 +57,7 @@ func NewEvaluator(
 //
 // 降级不改变结论本身：DENY 仍然是 DENY，只是不得作为策略推荐的依据。
 func (e *Evaluator) confidenceFor(f Flow) Confidence {
-	if e.ccnpPresent {
+	if e.foreignPlane {
 		return ConfidenceDegraded
 	}
 	for _, endpoint := range []Endpoint{f.Source, f.Dest} {

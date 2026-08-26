@@ -226,7 +226,7 @@ func TestUnknownCompositionIsReported(t *testing.T) {
 func TestConfidenceDistributionIsReported(t *testing.T) {
 	f := flow(pod("gateway", "gateway-1", "gateway"), pod("payment", "payment-1", "api"), 8080)
 	rep := predict.Run(predict.Input{
-		ClusterID: "c1", CCNPPresent: true,
+		ClusterID: "c1", ForeignPlane: true,
 		Policies:   []networkingv1.NetworkPolicy{denyAllFor("payment")},
 		Namespaces: nss(),
 		Observations: []policygen.Observation{{
