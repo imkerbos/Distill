@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/netip"
 	"regexp"
+	"strings"
 
 	"github.com/imkerbos/Distill/internal/secrets"
 )
@@ -313,11 +314,24 @@ func isSSHRepoURL(u string) bool {
 // 带字段名而非只说「非法网段」：一个集群有四类网段，
 // 只报「非法」会让操作者逐个试。
 func checkCIDR(field, value string) error {
-	if value == "" {
+	if strings.TrimSpace(value) == "" {
 		return invalidf("%s 不能为空", field)
 	}
-	if _, err := netip.ParsePrefix(value); err != nil {
-		return invalidf("%s %q 不是合法网段", field, value)
+	// 支持逗号分隔的多段：双栈集群的每个 Pod 有两个地址，一个 IPv4、
+	// 一个 IPv6。只登记得下一个的话，走另一个协议族的连接会落进 EXTERNAL，
+	// 平台据此生成 ipBlock 规则而不是 selector 规则，放行面宽得多
+	// （fleet.parsePrefixes 是同一套解析）。
+	//
+	// **这里的判据必须与 fleet.parsePrefixes 一致**：一条这里放行、那边
+	// 却解析不出来的登记，会安静地落进「网段登记坏掉」而不是在提交时被拒。
+	for _, part := range strings.Split(value, ",") {
+		seg := strings.TrimSpace(part)
+		if seg == "" {
+			return invalidf("%s %q 里有空段（多半是多余的逗号）", field, value)
+		}
+		if _, err := netip.ParsePrefix(seg); err != nil {
+			return invalidf("%s 里的 %q 不是合法网段", field, seg)
+		}
 	}
 	return nil
 }

@@ -723,3 +723,12 @@ test('页面把节点 agent 与不适用声明都渲染出来了', () => {
       `ClustersPage 没有渲染 ${field}：那一类 Baseline 要么永远缺失，要么永远无法声明不适用`)
   }
 })
+
+// 表单要说明网段字段收多段。
+//
+// 双栈集群的每个 Pod 有两个地址，而表单上看不出这个字段能填两段 ——
+// 只填一段的后果是走另一个协议族的连接被当成出公网，生成的规则宽得多。
+test('网段输入提示双栈写法', () => {
+  const page = readFileSync(new URL('../src/pages/ClustersPage.tsx', import.meta.url), 'utf8')
+  assert.match(page, /双栈用逗号分隔：10\.4\.0\.0\/14, fd00:10:4::\/56/)
+})

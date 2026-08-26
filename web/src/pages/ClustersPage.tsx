@@ -615,8 +615,20 @@ function ClusterFields({ values, patch, mode }: {
           mono
         />
         <TextField label="显示名" value={values.displayName} onChange={(v) => patch({ displayName: v })} required />
-        <TextField label="Pod CIDR" value={values.podCidr} onChange={(v) => patch({ podCidr: v })} required mono />
-        <TextField label="Node CIDR" value={values.nodeCidr} onChange={(v) => patch({ nodeCidr: v })} required mono />
+        {/* 双栈集群的每个 Pod 有两个地址。只登记得下一个的话，走另一个
+            协议族的连接会落进 EXTERNAL —— 平台把它当成出公网，于是生成一条
+            ipBlock 规则而不是 selector 规则，放行面比实际需要的宽得多。
+            placeholder 把这件事说出来，因为表单上看不出这个字段收多段。 */}
+        <TextField
+          label="Pod CIDR" value={values.podCidr}
+          onChange={(v) => patch({ podCidr: v })} required mono
+          placeholder="10.4.0.0/14  —— 双栈用逗号分隔：10.4.0.0/14, fd00:10:4::/56"
+        />
+        <TextField
+          label="Node CIDR" value={values.nodeCidr}
+          onChange={(v) => patch({ nodeCidr: v })} required mono
+          placeholder="10.128.0.0/20  —— 双栈用逗号分隔"
+        />
         {/*
           凭据引用只是一个**名字**：界面与主服务都不解析它，也永远不持有它
           指向的 kubeconfig —— 采集器是全平台唯一解析它的地方。这里能填的

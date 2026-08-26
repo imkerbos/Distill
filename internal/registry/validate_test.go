@@ -380,3 +380,40 @@ func TestValidateGitRepoAcceptsTheSSHFormsThePlatformDials(t *testing.T) {
 		}
 	}
 }
+
+// 双栈登记：逗号分隔的多段必须被接受。
+//
+// **校验与 fleet.parsePrefixes 必须同一套判据**：一条这里放行、那边却解析
+// 不出来的登记，会安静地落进「网段登记坏掉」而不是在提交时被拒 —— 而那时
+// 症状是那个集群的 IP 归属全部退化成 UNKNOWN，成因在几天前的一次提交里。
+func TestValidateClusterAcceptsDualStackCIDRs(t *testing.T) {
+	c := validCluster()
+	c.PodCIDR = "10.4.0.0/14, fd00:10:4::/56"
+	c.NodeCIDR = "10.128.0.0/20,fd00:10:128::/64"
+	if err := registry.ValidateCluster(c); err != nil {
+		t.Errorf("ValidateCluster() = %v，双栈登记被拒了", err)
+	}
+}
+
+// 一段写错就整条拒绝，且错误要点名是哪一段。
+func TestValidateClusterRejectsABadSegment(t *testing.T) {
+	c := validCluster()
+	c.PodCIDR = "10.4.0.0/14, not-a-cidr"
+	err := registry.ValidateCluster(c)
+	if err == nil {
+		t.Fatal("一段写错的网段被接受了")
+	}
+	if !strings.Contains(err.Error(), "not-a-cidr") {
+		t.Errorf("错误没点名是哪一段：%v", err)
+	}
+}
+
+// 多余逗号留下的空段同样拒绝：静默忽略会让人以为填对了，
+// 而他少填的那一段正是双栈里的另一半。
+func TestValidateClusterRejectsAnEmptySegment(t *testing.T) {
+	c := validCluster()
+	c.PodCIDR = "10.4.0.0/14,"
+	if err := registry.ValidateCluster(c); err == nil {
+		t.Error("多余逗号留下的空段被静默接受了")
+	}
+}

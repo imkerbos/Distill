@@ -8,6 +8,7 @@ package fleet
 
 import (
 	"net/netip"
+	"strings"
 
 	"github.com/imkerbos/Distill/internal/cluster"
 	"github.com/imkerbos/Distill/internal/registry"
@@ -30,8 +31,8 @@ import (
 func FromRegistry(clusters []registry.Cluster) (reg *cluster.Registry, unusable []string) {
 	out := make([]cluster.Cluster, 0, len(clusters))
 	for _, c := range clusters {
-		pods, podOK := singlePrefix(c.PodCIDR)
-		nodes, nodeOK := singlePrefix(c.NodeCIDR)
+		pods, podOK := parsePrefixes(c.PodCIDR)
+		nodes, nodeOK := parsePrefixes(c.NodeCIDR)
 		if !podOK || !nodeOK {
 			unusable = append(unusable, c.ID)
 		}
@@ -44,15 +45,38 @@ func FromRegistry(clusters []registry.Cluster) (reg *cluster.Registry, unusable 
 	return cluster.NewRegistry(out), unusable
 }
 
-// singlePrefix 把一个 CIDR 字符串包成单元素切片；ok 为 false 表示这个
-// 登记用不了（空或不是合法网段）。
-func singlePrefix(cidr string) (prefixes []netip.Prefix, ok bool) {
-	if cidr == "" {
+// parsePrefixes 解析登记里的网段，支持逗号分隔的多段。
+//
+// **双栈集群的每个 Pod 有两个地址**，一个 IPv4、一个 IPv6。只登记得下一个的
+// 话，走另一个协议族的连接会落进 EXTERNAL —— 平台把它当成出公网，于是生成
+// 一条 ipBlock 规则而不是 selector 规则，放行面比实际需要的宽得多。
+//
+// 用逗号分隔而不是加一个新字段：单段登记原样继续工作，绝大多数集群是单栈，
+// 不该因为支持多段就要求他们改写已有登记。
+//
+// **一段解析不出就整条作废**，不是"能用几段算几段"：部分可用的登记会让一部分
+// 地址落进 UNKNOWN，而运维看到的是"大部分都对"，那条写错的网段要等到某条
+// 流量归属错了才暴露。整条作废会立刻出现在「网段登记坏掉」的告警里。
+//
+// ok 为 false 表示这个登记用不了（空、有空段、或任一段不是合法网段）。
+func parsePrefixes(cidrs string) (prefixes []netip.Prefix, ok bool) {
+	if strings.TrimSpace(cidrs) == "" {
 		return nil, false
 	}
-	p, err := netip.ParsePrefix(cidr)
-	if err != nil {
-		return nil, false
+	parts := strings.Split(cidrs, ",")
+	out := make([]netip.Prefix, 0, len(parts))
+	for _, part := range parts {
+		// 空段多半是手滑留下的多余逗号。静默忽略会让人以为填对了，
+		// 而他少填的那一段正是双栈里的另一半。
+		seg := strings.TrimSpace(part)
+		if seg == "" {
+			return nil, false
+		}
+		p, err := netip.ParsePrefix(seg)
+		if err != nil {
+			return nil, false
+		}
+		out = append(out, p)
 	}
-	return []netip.Prefix{p}, true
+	return out, true
 }
