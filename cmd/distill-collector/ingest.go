@@ -41,6 +41,8 @@ type collectorStore interface {
 	runStore
 	ingestStore
 	deriveStore
+	reconcileStore
+	evidenceStore
 }
 
 // flowSource 把一个摄入器与它的来源种类绑在一起。
@@ -162,6 +164,9 @@ func collectAndIngest(
 	store collectorStore,
 	src *flowSource,
 	window flow.Window,
+	// rec 算一次一致率。允许为 nil —— 没有读栈的调用方（测试）不做这一步，
+	// 而 nil 表示"这一轮不对账"，**不是**"对账结果是好的"。
+	rec reconciler,
 	logger *slog.Logger,
 ) error {
 	result, err := collectOnce(ctx, clusterID, client, fleet, store, logger)
@@ -200,6 +205,19 @@ func collectAndIngest(
 	if deriveErr == nil {
 		logger.Info("identity intervals derived",
 			"cluster", clusterID, "runId", result.Observation.RunID)
+	}
+
+	// 对账排在身份推导之后：判定要靠区间表把地址解成主体，推导没跑完就
+	// 对账，算出来的会是一屏 PLATFORM_UNKNOWN —— 一个看起来"平台什么都
+	// 答不出"的假象。
+	//
+	// 只在摄入与推导都成功时做：拿一份残缺的窗口去算一致率，得到的数字
+	// 会被记进趋势，而趋势里一个没有来由的凹陷比没有数据更糟。
+	if ingestErr == nil && deriveErr == nil && rec != nil {
+		reconcileOnce(ctx, clusterID, window.From, window.To, rec, store, logger)
+		// 证据与对账同一批前提：两者都要求这一轮的观测是完整的。
+		// 拿一份残缺窗口去记证据，会把"这条规则观察了 N 个窗口"算多。
+		recordEvidenceOnce(ctx, clusterID, window.From, window.To, rec, store, logger)
 	}
 
 	return errors.Join(ingestErr, deriveErr)

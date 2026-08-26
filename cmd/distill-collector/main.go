@@ -24,6 +24,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/imkerbos/Distill/internal/buildinfo"
+	"github.com/imkerbos/Distill/internal/collectstore"
 	"github.com/imkerbos/Distill/internal/config"
 	"github.com/imkerbos/Distill/internal/flow"
 	"github.com/imkerbos/Distill/internal/kubeclient"
@@ -143,13 +144,36 @@ func run(configPath, clusterID string, timeout time.Duration, ingest ingestOptio
 	startedAt := time.Now()
 	store := snapshotstore.New(db)
 
-	client, reason, err := newClusterClient(ctx, reg, target)
+	client, probe, reason, err := newClusterClient(ctx, reg, target)
 	if err != nil {
 		// 凭据解析不出来、或客户端构造不出来，都是"这一轮根本没开始"。
 		// 不落这一行，界面会把一次配置错误显示成"这个集群还没有被采集过"，
 		// 于是操作者去等一次永远不会成功的采集。
 		recordAbortedRun(ctx, store, clusterID, startedAt, reason, logger)
 		return err
+	}
+
+	// 探测结论落库。**探测没查成时写 UNKNOWN，不是不写** ——不写会让上一次
+	// 的结论留在那里，而那一次可能是在集群装 Cilium 之前做的
+	// （design doc 2026-08-25 §2.3）。
+	var planes registry.PolicyPlanes
+	switch {
+	case !probe.Checked:
+		planes = registry.PlanesUnknown
+	case probe.Present:
+		planes = registry.PlanesPresent
+	default:
+		planes = registry.PlanesNone
+	}
+	if err := reg.SetOtherPlanes(ctx, clusterID, planes); err != nil {
+		// 落不下去不中断采集：资产本身是有价值的，而判定会因为读到的仍是
+		// 旧结论而**偏保守或偏乐观** —— 因此必须留下一条日志，不能静默。
+		logger.Warn("could not record the policy-plane probe; the stored verdict may be stale",
+			"cluster", clusterID, "planes", planes)
+	} else if planes != registry.PlanesNone {
+		logger.Info("this cluster carries policy planes the platform does not evaluate; "+
+			"verdicts for it are DEGRADED",
+			"cluster", clusterID, "planes", planes, "detail", probe.Detail)
 	}
 
 	// 判定依据取全 fleet 而不只是被采的这个集群：判断一个 Pod IP 是否落在
@@ -179,7 +203,10 @@ func run(configPath, clusterID string, timeout time.Duration, ingest ingestOptio
 	now := time.Now()
 	window := flow.Window{From: now.Add(-ingest.window), To: now}
 
-	return collectAndIngest(ctx, clusterID, client, fleet, store, src, window, logger)
+	// 对账器与读栈同源：它必须与 /flows 那一屏走同一条判定路径，否则
+	// 一致率量的是另一个引擎（design doc 2026-08-25 §3.1）。
+	return collectAndIngest(ctx, clusterID, client, fleet, store, src, window,
+		collectstore.New(db, reg), logger)
 }
 
 // newClusterClient 把集群登记里的 kubeconfig 引用变成一个受守卫的客户端。
@@ -192,16 +219,16 @@ func run(configPath, clusterID string, timeout time.Duration, ingest ingestOptio
 // 刻意不带底层细节，从它反推原因只能靠字符串匹配。
 func newClusterClient(
 	ctx context.Context, reg registry.Store, target registry.Cluster,
-) (kubernetes.Interface, snapshot.RunErrorReason, error) {
+) (kubernetes.Interface, kubeclient.PlaneProbe, snapshot.RunErrorReason, error) {
 	ref := target.KubeconfigRef
 	if ref == "" {
-		return nil, snapshot.RunErrorCredentialUnavailable,
+		return nil, kubeclient.PlaneProbe{}, snapshot.RunErrorCredentialUnavailable,
 			fmt.Errorf("cluster %q has no kubeconfig reference registered", target.ID)
 	}
 	// 引用来自数据库里操作者填的值，先过短名校验再交给解析器：
 	// 短名会被拼进后端的资源路径，能表达的字符越多，能表达的越权路径越多。
 	if err := secrets.ValidateRef(ref); err != nil {
-		return nil, snapshot.RunErrorCredentialUnavailable,
+		return nil, kubeclient.PlaneProbe{}, snapshot.RunErrorCredentialUnavailable,
 			fmt.Errorf("cluster %q has an invalid kubeconfig reference: %w", target.ID, err)
 	}
 
@@ -209,30 +236,30 @@ func newClusterClient(
 	// 的问题 —— 那条禁止启动快照的规则针对的是常驻服务。
 	setting, err := settings.New(reg).Current(ctx)
 	if err != nil {
-		return nil, snapshot.RunErrorCredentialUnavailable,
+		return nil, kubeclient.PlaneProbe{}, snapshot.RunErrorCredentialUnavailable,
 			fmt.Errorf("read the platform setting: %w", err)
 	}
 	resolver, err := newSecretResolver(ctx, setting)
 	if err != nil {
-		return nil, snapshot.RunErrorCredentialUnavailable, err
+		return nil, kubeclient.PlaneProbe{}, snapshot.RunErrorCredentialUnavailable, err
 	}
 	if resolver == nil {
 		// 后端是 NONE：操作者明确选了"不解析凭据"，于是也就没有采集。
 		// 静默跳过会让这次运行看起来只是"什么都没采到"。
-		return nil, snapshot.RunErrorCredentialUnavailable,
+		return nil, kubeclient.PlaneProbe{}, snapshot.RunErrorCredentialUnavailable,
 			errors.New("the secrets backend is NONE: the collector cannot resolve a kubeconfig")
 	}
 
 	kubeconfig, err := resolver.Resolve(ctx, ref)
 	if err != nil {
 		if errors.Is(err, secrets.ErrNotFound) {
-			return nil, snapshot.RunErrorCredentialUnavailable,
+			return nil, kubeclient.PlaneProbe{}, snapshot.RunErrorCredentialUnavailable,
 				fmt.Errorf("the kubeconfig reference %q resolves to nothing", ref)
 		}
 		// 底层错误不外传：目录后端的错误里带文件系统路径，Secret Manager
 		// 的错误里带项目与资源名（规范 §22）。引用本身不是机密，说得出
 		// 是哪一个引用就够操作者定位了。
-		return nil, snapshot.RunErrorCredentialUnavailable,
+		return nil, kubeclient.PlaneProbe{}, snapshot.RunErrorCredentialUnavailable,
 			fmt.Errorf("cannot resolve the kubeconfig reference %q", ref)
 	}
 	// 解析出来的字节用完即清。清的是这一份原始副本 —— 客户端内部仍然
@@ -246,10 +273,18 @@ func newClusterClient(
 		// apiserver 地址一起带出来，而这个进程的输出终点是集群日志。
 		// 凭据本身拿到了，构造不出客户端 —— 包括 apiserver 地址被出站守卫
 		// 拒绝。与凭据不可用分开：两者的处置一个是改凭据，一个是改地址。
-		return nil, snapshot.RunErrorClientUnavailable,
+		return nil, kubeclient.PlaneProbe{}, snapshot.RunErrorClientUnavailable,
 			fmt.Errorf("cannot build a Kubernetes client from the kubeconfig behind %q", ref)
 	}
-	return client, snapshot.RunErrorNone, nil
+	// 平面探测与客户端构造放在一起：**它要用的正是这份马上就要被清掉的
+	// kubeconfig 字节**，挪到别处就得让凭据多活一段，或者多解析一次。
+	// 探测失败不影响采集 —— 它的失败方向是把结论标成"没查成"，那正是
+	// 下游要的（design doc 2026-08-25 §2.3）。
+	probe, err := kubeclient.ProbePlanes(ctx, kubeconfig)
+	if err != nil {
+		probe = kubeclient.PlaneProbe{}
+	}
+	return client, probe, snapshot.RunErrorNone, nil
 }
 
 // newSecretResolver 按设置选出的后端装配凭据解析器。

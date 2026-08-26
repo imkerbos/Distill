@@ -129,7 +129,7 @@ func TestACollectionHandsTheRunToIdentityDerivation(t *testing.T) {
 	store := newCollectorStore()
 
 	if err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testFleet(),
-		store, nil, testWindow(), quietLogger()); err != nil {
+		store, nil, testWindow(), nil, quietLogger()); err != nil {
 		t.Fatalf("collectAndIngest() error = %v", err)
 	}
 
@@ -157,7 +157,7 @@ func TestDerivationIsSerialisedPerCluster(t *testing.T) {
 	store := newCollectorStore()
 
 	if err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testFleet(),
-		store, nil, testWindow(), quietLogger()); err != nil {
+		store, nil, testWindow(), nil, quietLogger()); err != nil {
 		t.Fatalf("collectAndIngest() error = %v", err)
 	}
 
@@ -184,7 +184,7 @@ func TestAContendedDerivationFailsAndIsRecorded(t *testing.T) {
 	store.lockErr = contended()
 
 	err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testFleet(),
-		store, nil, testWindow(), quietLogger())
+		store, nil, testWindow(), nil, quietLogger())
 	if !errors.Is(err, snapshotstore.ErrDeriveInProgress) {
 		t.Fatalf("collectAndIngest() error = %v, want it to wrap %v — a swallowed contention "+
 			"makes a run with no identities exit zero", err, snapshotstore.ErrDeriveInProgress)
@@ -220,7 +220,7 @@ func TestDerivationAndCollectionAreRecordedApart(t *testing.T) {
 	store.deriveErr = errors.New("the observation carries two subjects at one instant")
 
 	err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testFleet(),
-		store, nil, testWindow(), quietLogger())
+		store, nil, testWindow(), nil, quietLogger())
 	if !errors.Is(err, store.deriveErr) {
 		t.Fatalf("collectAndIngest() error = %v, want it to wrap the derivation failure %v",
 			err, store.deriveErr)
@@ -267,7 +267,7 @@ func TestAnIncompleteCollectionIsStillHandedToDerivation(t *testing.T) {
 	store := newCollectorStore()
 
 	if err := collectAndIngest(t.Context(), testClusterID, cs, testFleet(),
-		store, nil, testWindow(), quietLogger()); err != nil {
+		store, nil, testWindow(), nil, quietLogger()); err != nil {
 		t.Fatalf("collectAndIngest() error = %v", err)
 	}
 
@@ -292,7 +292,7 @@ func TestAFailedCollectionDerivesNothing(t *testing.T) {
 	store := newCollectorStore()
 
 	err := collectAndIngest(t.Context(), testClusterID, cs, testFleet(),
-		store, nil, testWindow(), quietLogger())
+		store, nil, testWindow(), nil, quietLogger())
 	if !errors.Is(err, ErrNotProvenReadOnly) {
 		t.Fatalf("collectAndIngest() error = %v, want %v", err, ErrNotProvenReadOnly)
 	}
@@ -324,7 +324,7 @@ func TestADerivationFailureDoesNotCostTheFlowWindow(t *testing.T) {
 	src := hubbleSource(hubbleResult(t, testWindow(), oneConnection()), nil)
 
 	err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testFleet(),
-		store, src, testWindow(), quietLogger())
+		store, src, testWindow(), nil, quietLogger())
 
 	got := store.onlyIngest(t)
 	if got.Status != snapshotstore.IngestOK {
@@ -380,7 +380,7 @@ func TestFlowIngestionIsRecordedBeforeDerivationRuns(t *testing.T) {
 	src := hubbleSource(hubbleResult(t, testWindow(), oneConnection()), nil)
 
 	if err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testFleet(),
-		store, src, testWindow(), quietLogger()); err != nil {
+		store, src, testWindow(), nil, quietLogger()); err != nil {
 		t.Fatalf("collectAndIngest() error = %v", err)
 	}
 
@@ -413,7 +413,7 @@ func TestDerivationCannotBurnTheContextTheIngestionNeeds(t *testing.T) {
 	store.deriveErr = context.DeadlineExceeded
 
 	err := collectAndIngest(ctx, testClusterID, readOnlyCluster(), testFleet(),
-		store, &flowSource{source: probe, kind: flow.SourceHubble}, testWindow(), quietLogger())
+		store, &flowSource{source: probe, kind: flow.SourceHubble}, testWindow(), nil, quietLogger())
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("collectAndIngest() error = %v, want it to carry the derivation timeout", err)
 	}
@@ -445,7 +445,7 @@ func TestBothIngestionAndDerivationFailuresSurface(t *testing.T) {
 	src := hubbleSource(flow.IngestResult{}, hubble.ErrRelayUnavailable)
 
 	err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testFleet(),
-		store, src, testWindow(), quietLogger())
+		store, src, testWindow(), nil, quietLogger())
 	if !errors.Is(err, hubble.ErrRelayUnavailable) {
 		t.Errorf("collectAndIngest() error = %v, want it to still carry the ingest failure %v",
 			err, hubble.ErrRelayUnavailable)
@@ -475,7 +475,7 @@ func TestAFailedDeriveRecordIsReported(t *testing.T) {
 	store.deriveRunErr = want
 
 	err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testFleet(),
-		store, nil, testWindow(), quietLogger())
+		store, nil, testWindow(), nil, quietLogger())
 	if !errors.Is(err, want) {
 		t.Fatalf("collectAndIngest() error = %v, want it to wrap %v", err, want)
 	}

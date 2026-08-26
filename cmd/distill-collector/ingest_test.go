@@ -19,6 +19,10 @@ import (
 // 两侧分开存放，是这一组用例的全部前提：把摄入结果塞进采集那张表之后，
 // 一个只数"落了几行"的断言依旧是绿的。
 type recordingCollectorStore struct {
+	// reconciliations 是落下的对账结果。
+	reconciliations []snapshotstore.ReconciliationRun
+	// evidence 是落下的规则证据。
+	evidence []snapshotstore.RuleEvidence
 	*recordingStore
 	*recordingDeriveStore
 	// trace 与 recordingDeriveStore 里那条是同一个，见 newCollectorStore。
@@ -35,6 +39,29 @@ func newCollectorStore() *recordingCollectorStore {
 		recordingDeriveStore: &recordingDeriveStore{trace: trace},
 		trace:                trace,
 	}
+}
+
+// SaveReconciliation 记下一次对账落库。
+//
+// 替身里真的记下来而不是丢掉：有用例要断言"对账没跑时不落任何行"，
+// 而一个把它吞掉的替身会让那条断言永远通过。
+// RecordRuleEvidence 记下一次证据落库。
+//
+// 真的记下来而不是丢掉：有用例要断言"对账/证据没跑时不落任何行"，
+// 一个把它吞掉的替身会让那条断言永远通过。
+func (s *recordingCollectorStore) RecordRuleEvidence(
+	_ context.Context, _ string, _, _ time.Time, _ bool,
+	rules []snapshotstore.RuleEvidence,
+) error {
+	s.evidence = append(s.evidence, rules...)
+	return nil
+}
+
+func (s *recordingCollectorStore) SaveReconciliation(
+	_ context.Context, run snapshotstore.ReconciliationRun,
+) error {
+	s.reconciliations = append(s.reconciliations, run)
+	return nil
 }
 
 func (s *recordingCollectorStore) SaveIngest(_ context.Context, run snapshotstore.IngestRun) error {
@@ -112,7 +139,7 @@ func TestAFailedIngestionFailsTheRunButKeepsTheAssets(t *testing.T) {
 	src := hubbleSource(flow.IngestResult{}, hubble.ErrRelayUnavailable)
 
 	err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testFleet(),
-		store, src, testWindow(), quietLogger())
+		store, src, testWindow(), nil, quietLogger())
 	if !errors.Is(err, hubble.ErrRelayUnavailable) {
 		t.Fatalf("collectAndIngest() error = %v, want it to wrap %v — "+
 			"a swallowed ingest failure makes an incomplete picture exit zero", err, hubble.ErrRelayUnavailable)
@@ -149,7 +176,7 @@ func TestAFailedCollectionRecordsNoIngestion(t *testing.T) {
 	src := hubbleSource(hubbleResult(t, testWindow(), oneConnection()), nil)
 
 	err := collectAndIngest(t.Context(), testClusterID, cs, testFleet(),
-		store, src, testWindow(), quietLogger())
+		store, src, testWindow(), nil, quietLogger())
 	if !errors.Is(err, ErrNotProvenReadOnly) {
 		t.Fatalf("collectAndIngest() error = %v, want %v", err, ErrNotProvenReadOnly)
 	}
@@ -170,7 +197,7 @@ func TestIngestionAndCollectionAreRecordedApart(t *testing.T) {
 	src := hubbleSource(hubbleResult(t, testWindow(), oneConnection()), nil)
 
 	if err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testFleet(),
-		store, src, testWindow(), quietLogger()); err != nil {
+		store, src, testWindow(), nil, quietLogger()); err != nil {
 		t.Fatalf("collectAndIngest() error = %v", err)
 	}
 
@@ -224,7 +251,7 @@ func TestIngestionStatusFollowsTheEvidence(t *testing.T) {
 			src := hubbleSource(hubbleResult(t, tc.covered, oneConnection()), nil)
 
 			if err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testFleet(),
-				store, src, window, quietLogger()); err != nil {
+				store, src, window, nil, quietLogger()); err != nil {
 				t.Fatalf("collectAndIngest() error = %v", err)
 			}
 			got := store.onlyIngest(t)
@@ -250,7 +277,7 @@ func TestTheSourceIsAskedForThisClusterAndWindow(t *testing.T) {
 	window := testWindow()
 
 	if err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testFleet(),
-		store, src, window, quietLogger()); err != nil {
+		store, src, window, nil, quietLogger()); err != nil {
 		t.Fatalf("collectAndIngest() error = %v", err)
 	}
 	if len(stub.clusterIDs) != 1 || stub.clusterIDs[0] != testClusterID {
@@ -269,7 +296,7 @@ func TestNoRelayMeansNoIngestRecord(t *testing.T) {
 	store := newCollectorStore()
 
 	if err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testFleet(),
-		store, nil, testWindow(), quietLogger()); err != nil {
+		store, nil, testWindow(), nil, quietLogger()); err != nil {
 		t.Fatalf("collectAndIngest() error = %v", err)
 	}
 	store.only(t)
@@ -286,7 +313,7 @@ func TestAFailedIngestStoreIsReported(t *testing.T) {
 	src := hubbleSource(hubbleResult(t, testWindow(), oneConnection()), nil)
 
 	err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testFleet(),
-		store, src, testWindow(), quietLogger())
+		store, src, testWindow(), nil, quietLogger())
 	if !errors.Is(err, want) {
 		t.Fatalf("collectAndIngest() error = %v, want it to wrap %v", err, want)
 	}

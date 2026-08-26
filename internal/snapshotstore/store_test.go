@@ -47,6 +47,12 @@ func testDSN(t *testing.T) string {
 // 写成完整语句而非表名再拼接：拼接 SQL 需要一条 //nolint 才能过 gosec，
 // 而那条注释在后来的人眼里与"这里的拼接是安全的"无法区分。
 var cleanupStatements = []string{
+	// 对账两张表排在最前：reconciliation_subject 有指向 reconciliation_run
+	// 的外键，父表先删会撞外键；而留下来的行会让下一轮同名 run_id 撞主键 ——
+	// 表现是"第一次跑绿、第二次跑红"，最难查的那一类。
+	"DELETE FROM rule_evidence",
+	"DELETE FROM reconciliation_subject",
+	"DELETE FROM reconciliation_run",
 	"DELETE FROM identity_derive_run",
 	"DELETE FROM observed_connection",
 	"DELETE FROM flow_ingest_run",
