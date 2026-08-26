@@ -17,7 +17,7 @@ import {
 import { useResource } from '../api/useResource'
 import DataSourceNotice from '../components/DataSourceNotice'
 import { DryRunDetail } from './DryRunDetail'
-import { dryRunView, type DryRunView } from './dryRunView'
+import { dryRunView, existingReliefView, type DryRunView, type ExistingReliefView } from './dryRunView'
 import { policyExportView, type PolicyExportView } from './policyExportView'
 import { baselineGapViews, notApplicableNote, notAssessedNote, wouldBreakQualifierFor } from './preconditionsView'
 import { ALL_GRANULARITIES, granularityView, wideningNote } from './granularityView'
@@ -120,9 +120,18 @@ export default function PolicyPage({ cluster }: { cluster: string }) {
 
       {/* 两套预测在整个前端只在这一处同时出现：dryRunView 收下它们，
           往下传的是一个已经选定的视图。哪一套该被强调、哪一套该出现在
-          明细里，从这一行之后就不再是一个可以答错的问题。 */}
+          明细里，从这一行之后就不再是一个可以答错的问题。
+
+          **喂进去的是并入已有策略的那一对**（design doc
+          2026-08-25-existing-policies §3）：平台只加不删，合并之后集群里是
+          "已有 ∪ 候选"，那才是操作者点下去会发生的事。只跑候选集的那一对
+          会把旧策略额外放行的部分算成"会被拦断"—— 一次实际无害的写回看起来
+          要断几十条连接，而反复出现的假警报最终会让真的那次也没人看。
+          两者的差额单独成一句（existingReliefView）。 */}
       <DryRunSection
-        view={dryRunView(pv.prediction, pv.overridden.prediction, overrides.length)}
+        view={dryRunView(
+          pv.predictionWithExisting, pv.overridden.predictionWithExisting, overrides.length)}
+        relief={existingReliefView(pv.prediction, pv.predictionWithExisting)}
         overrideCount={overrides.length}
         // 窗口完整度是后端说出来的事实，页面不再拿 degradedCount ===
         // totalEvaluated 反推——把推断换成事实正是这个字段存在的理由
@@ -132,11 +141,11 @@ export default function PolicyPage({ cluster }: { cluster: string }) {
         // 时间窗与上面那四个数字来自同一次预览响应（design doc §2、§6）。
         exportView={policyExportView(pv)}
         writeback={writebackView(pv)}
-        // 比对写回计划里那套重算后的计数时，页面这一侧必须是 overridden——
-        // 服务端算计划用的正是它（writebackCounts 取 Overridden.Prediction）。
-        // 拿默认推荐那一套去比，会在"人工决定改变了预测"时报出一个与集群
-        // 无关的假差异，而假差异重复几次之后，真的那次也不会有人看。
-        pageCounts={pv.overridden.prediction.counts}
+        // 比对写回计划里那套重算后的计数时，页面这一侧必须与服务端同口径：
+        // overridden **且并入已有策略**（writebackCounts 取的正是
+        // Overridden.PredictionWithExisting）。任一维取错，都会报出一个与
+        // 集群无关的假差异，而假差异重复几次之后，真的那次也不会有人看。
+        pageCounts={pv.overridden.predictionWithExisting.counts}
       />
       {/* 访问关系摆在候选策略之前：那 728 条规则本身就是一张「谁访问谁」，
           而逐条读表格读不出这件事。 */}
@@ -194,8 +203,12 @@ function NoTrafficBanner() {
   )
 }
 
-function DryRunSection({ view, overrideCount, breakQualifier, exportView, writeback, pageCounts }: {
+function DryRunSection({
+  view, relief, overrideCount, breakQualifier, exportView, writeback, pageCounts,
+}: {
   view: DryRunView
+  /** 旧策略额外放行了多少：两份预测的差额，为空时不显示。 */
+  relief: ExistingReliefView
   overrideCount: number
   /** 窗口非 COMPLETE 时对 WOULD_BREAK 的限定语；完整时为空串。 */
   breakQualifier: string
@@ -226,6 +239,15 @@ function DryRunSection({ view, overrideCount, breakQualifier, exportView, writeb
           「上线会打断多少条」。读完数字才读到限定语，等于没有限定语
           （design doc 2026-08-17 §5）。 */}
       {breakQualifier !== '' && <Notice>{breakQualifier}</Notice>}
+      {/* 差额紧跟在计数下面：上面那几个数算的是合并之后，而"如果把旧策略
+          也清理掉会多断多少"是另一个问题 —— 两句话挨着，读的人才不会把
+          其中一个当成另一个。 */}
+      {relief.present && (
+        <Notice>
+          <strong>{relief.text}</strong>
+          <div className="mt-[2px] text-xs text-ink-2">{relief.note}</div>
+        </Notice>
+      )}
 
       {showDelta && !allZero && (
         <Notice>{summarizeDeltas(breakDelta, openDelta, overrideCount)}</Notice>

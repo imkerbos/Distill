@@ -1,8 +1,9 @@
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { dryRunView, wouldOpenEmptyDetail } from '../src/pages/dryRunView.ts'
-import type { ChangedFlow, PredictionReport } from '../src/api/types.ts'
+import { dryRunView, existingReliefView, wouldOpenEmptyDetail } from '../src/pages/dryRunView.ts'
+import type { ChangedFlow, ChangeKind, PredictionReport } from '../src/api/types.ts'
 
 function flow(id: string): ChangedFlow {
   return {
@@ -108,4 +109,54 @@ test('无人工决定时用默认推荐', () => {
   assert.equal(view.detail.report, prediction)
   assert.match(wouldOpenEmptyDetail(view.detail), /WOULD_OPEN 为 0 是一个真实的 0。$/)
   assert.doesNotMatch(view.detail.emptyDetail, /人工决定/)
+})
+
+// countsOnly 只关心四类计数，与上面那个按流量清单构造的 report 分开：
+// 差额算的是计数，不需要造出真实的连接明细。
+function countsOnly(counts: Partial<Record<ChangeKind, number>>): PredictionReport {
+  return {
+    changes: { WOULD_BREAK: [], WOULD_OPEN: [], UNCHANGED: [], UNKNOWN: [] },
+    counts: { WOULD_BREAK: 0, WOULD_OPEN: 0, UNCHANGED: 0, UNKNOWN: 0, ...counts },
+    unknownComposition: {},
+    trustedCount: 0, degradedCount: 0, unratedCount: 0,
+    crossClusterCount: 0, unmanagedCount: 0, totalEvaluated: 0,
+  } as PredictionReport
+}
+
+// 差额 = 只跑候选集会拦断的 − 合并之后会拦断的。
+//
+// 这个数字本身就是结论：差额大说明旧策略比新候选集宽得多，那些放行现在靠
+// 旧策略撑着 —— 一旦有人清理旧策略，这些连接就会断。
+test('差额算的是旧策略额外放行了多少', () => {
+  const v = existingReliefView(countsOnly({ WOULD_BREAK: 30 }), countsOnly({ WOULD_BREAK: 18 }))
+  assert.equal(v.present, true)
+  assert.match(v.text, /12 条/)
+  assert.match(v.note, /合并之后/)
+})
+
+// 两份相同时不显示：没有差额就没有结论，一句"额外放行了 0 条"是噪声。
+test('两份预测相同时不显示差额', () => {
+  const v = existingReliefView(countsOnly({ WOULD_BREAK: 7 }), countsOnly({ WOULD_BREAK: 7 }))
+  assert.equal(v.present, false)
+  assert.equal(v.text, '')
+})
+
+// **负差额不显示。**
+//
+// 平台只加不删，合并之后不可能拦断得更多；出现负数说明两份预测跑在了不同的
+// 输入上，那是一个 bug，不是一条该展示给操作者的结论。
+test('负差额不渲染成结论', () => {
+  const v = existingReliefView(countsOnly({ WOULD_BREAK: 3 }), countsOnly({ WOULD_BREAK: 9 }))
+  assert.equal(v.present, false)
+})
+
+// 页面必须把并入已有策略的那一对喂给 dry-run，且写回比对同口径。
+test('页面默认用合并之后那一份', () => {
+  const page = readFileSync(new URL('../src/pages/PolicyPage.tsx', import.meta.url), 'utf8')
+  assert.match(page, /pv\.predictionWithExisting, pv\.overridden\.predictionWithExisting/)
+  assert.match(page, /pageCounts=\{pv\.overridden\.predictionWithExisting\.counts\}/)
+  assert.doesNotMatch(
+    page, /pageCounts=\{pv\.overridden\.prediction\.counts\}/,
+    '写回比对用了只跑候选集那一份，会报出与集群无关的假差异',
+  )
 })

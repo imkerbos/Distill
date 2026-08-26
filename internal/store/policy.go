@@ -157,8 +157,24 @@ type PolicyPreview struct {
 	// 过滤影响：一个从未进入名册的 Pod 在哪个 namespace 视图下都同样
 	// 缺失，按视图裁剪会让这个缺口随筛选条件时隐时现。
 	ExcludedWorkloads []policygen.ExcludedWorkload `json:"excludedWorkloads"`
-	// Prediction 是 dry-run 预测结果。
+	// Prediction 是 dry-run 预测结果，**只跑候选集、不含集群已有策略**。
+	//
+	// 它回答的是"如果把旧策略也清理掉会怎样"，那是接管路线的终点。
+	// 要看合并之后的真实影响，读 PredictionWithExisting。
 	Prediction predict.Report `json:"prediction"`
+	// PredictionWithExisting 是**集群已有策略 ∪ 候选集**的预测，也就是
+	// "合并这个 PR 之后实际会拦断什么"（design doc
+	// 2026-08-25-existing-policies §3）。
+	//
+	// **这一份才是操作者点下去会发生的事。** 平台的下发方式是只加不删：
+	// 写回把候选写进仓库，GitOps 把它们 apply 进集群，而集群里原有的策略
+	// 一条都不会因此消失。只跑候选集那一份会把旧策略额外放行的部分算成
+	// "会被拦断"，于是一份实际无害的写回看起来要打断几十条连接 —— 而反复
+	// 出现的假警报，最终会让真的那次也没人看。
+	//
+	// 两份并列而不是替换：两者的差额就是"旧策略额外放行了多少"，
+	// 差额大说明旧策略比新候选集宽得多，值得进入清理流程。
+	PredictionWithExisting predict.Report `json:"predictionWithExisting"`
 	// Kinds 是必备 Baseline 的全集，随报告返回。
 	//
 	// 与 RiskPortCatalog 同理：缺失清单为空时，使用者必须能看到
@@ -198,8 +214,15 @@ type PolicyPreview struct {
 type OverriddenView struct {
 	// Candidates 是应用覆盖后的候选策略。
 	Candidates []policygen.CandidatePolicy `json:"candidates"`
-	// Prediction 是应用覆盖后的四类变化。
+	// Prediction 是应用覆盖后的四类变化，**只跑候选集**。
 	Prediction predict.Report `json:"prediction"`
+	// PredictionWithExisting 是应用覆盖后、并入集群已有策略的四类变化。
+	//
+	// **写回的提交信息与文件注释头取这一份**：它是合并之后的真实影响，
+	// 而评审人读到的就是那几个数字。取只跑候选集的那一份，会把旧策略额外
+	// 放行的部分算成"会被拦断"，让一次实际无害的写回看起来要断几十条连接
+	// —— 而反复出现的假警报，最终会让真的那次也没人看。
+	PredictionWithExisting predict.Report `json:"predictionWithExisting"`
 	// Enabled 是 Candidates 里启用规则渲染成的 NetworkPolicy，供导出使用。
 	//
 	// 挂在这里而不是让导出端点自己再生成一次，是导出这件事唯一真正的风险
@@ -347,23 +370,28 @@ func (r *FixtureReader) PolicyPreviewAtGranularity(
 		overridden, widening = overridden.AtNamespaceGranularity()
 	}
 
-	report := predict.Run(predict.Input{
-		ClusterID:    clusterID,
-		Policies:     gen.EnabledPolicies(),
-		Namespaces:   c.Namespaces,
-		ForeignPlane: c.CCNPPresent,
-		Observations: cs.observations,
-		// 展示名复用流量列表那一套，两个界面必须用同一个名字指同一个 Pod。
-		Label: endpointLabel,
-	})
-	overriddenReport := predict.Run(predict.Input{
-		ClusterID:    clusterID,
-		Policies:     overridden.EnabledPolicies(),
-		Namespaces:   c.Namespaces,
-		ForeignPlane: c.CCNPPresent,
-		Observations: cs.observations,
-		Label:        func(ep replay.Endpoint) string { return endpointLabel(ep) },
-	})
+	// 一处装配，四次调用：四份预测只在策略集这一维上不同，其余每一项都
+	// 必须逐字相同 —— 差在别处的话，两份报告之间的差额就不再是"策略集不同"
+	// 造成的，而那正是这几个数字唯一要表达的东西。
+	run := func(policies []networkingv1.NetworkPolicy) predict.Report {
+		return predict.Run(predict.Input{
+			ClusterID:    clusterID,
+			Policies:     policies,
+			Namespaces:   c.Namespaces,
+			ForeignPlane: c.CCNPPresent,
+			Observations: cs.observations,
+			// 展示名复用流量列表那一套，两个界面必须用同一个名字指同一个 Pod。
+			Label: endpointLabel,
+		})
+	}
+	enabled := gen.EnabledPolicies()
+	overriddenEnabled := overridden.EnabledPolicies()
+	report := run(enabled)
+	overriddenReport := run(overriddenEnabled)
+	// 合成数据集的"集群已有策略"就是它自己那份 Policies —— 与判定用的是
+	// 同一批（decide 走的正是 c.Policies 构造的求值器）。
+	reportWithExisting := run(predict.WithExisting(c.Policies, enabled))
+	overriddenWithExisting := run(predict.WithExisting(c.Policies, overriddenEnabled))
 
 	// 一份裁剪结果，两处使用：屏幕上的候选集与导出的文件必须是同一个
 	// 切片渲染出来的，各裁一次就又有了两个可以互相分歧的选择点。
@@ -391,17 +419,19 @@ func (r *FixtureReader) PolicyPreviewAtGranularity(
 		// ScrapeTargets / NodeAgents 都在 fixture.Cluster.Assets 里），因此
 		// 这里恒为空。**非 nil**：空清单要读作"五类都检查过、都在"，而不是
 		// 读作"这个 Reader 没回答"（见字段说明）。
-		NotAssessedBaselines: []baseline.Kind{},
-		Ungeneratable:        gen.Ungeneratable,
-		UnattachedImports:    gen.UnattachedImports,
-		ExcludedWorkloads:    gen.ExcludedWorkloads,
-		Prediction:           report,
-		Kinds:                baseline.AllKinds(),
-		Overrides:            stored,
-		StaleOverrides:       stale,
+		NotAssessedBaselines:   []baseline.Kind{},
+		Ungeneratable:          gen.Ungeneratable,
+		UnattachedImports:      gen.UnattachedImports,
+		ExcludedWorkloads:      gen.ExcludedWorkloads,
+		Prediction:             report,
+		PredictionWithExisting: reportWithExisting,
+		Kinds:                  baseline.AllKinds(),
+		Overrides:              stored,
+		StaleOverrides:         stale,
 		Overridden: OverriddenView{
-			Candidates: overriddenCandidates,
-			Prediction: overriddenReport,
+			Candidates:             overriddenCandidates,
+			Prediction:             overriddenReport,
+			PredictionWithExisting: overriddenWithExisting,
 			// 复用 EnabledPolicies 而不是另写一段渲染：「哪些规则算启用」
 			// 只能有一个定义，预测跑的正是这个函数的输出。
 			Enabled: policygen.Result{Policies: overriddenCandidates}.EnabledPolicies(),

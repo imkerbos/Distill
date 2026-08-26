@@ -182,7 +182,11 @@ func renderPolicyDocs(
 ) ([]byte, error) {
 	var buf bytes.Buffer
 
-	counts := pv.Overridden.Prediction.Counts
+	// 与写回同一份口径：并入集群已有策略之后的那一套
+	// （design doc 2026-08-25-existing-policies §3）。文件注释头与提交信息
+	// 是同一批数字的两处呈现，取不同的两份会让下载下来的那份与 PR 上写的
+	// 对不上，而屏幕上没有任何迹象。
+	counts := pv.Overridden.PredictionWithExisting.Counts
 	line := func(format string, args ...any) {
 		buf.WriteString("# " + headerSafe(fmt.Sprintf(format, args...)) + "\n")
 	}
@@ -197,6 +201,9 @@ func renderPolicyDocs(
 			pv.Window.From.UTC().Format(time.RFC3339), pv.Window.To.UTC().Format(time.RFC3339))
 		// 四类计数取应用人工决定之后的那一套，与文档同源：文件渲染的正是
 		// Overridden 那一份候选集，配上默认推荐的数字就又是轮 3 那条缺陷。
+		//
+		// 口径写明是"合并之后"：读这份文件的人要据此判断 apply 的影响，
+		// 而只跑候选集的那一份描述的是另一件事（把旧策略也清理掉）。
 		for _, k := range predict.AllChangeKinds() {
 			line("dry-run %s: %d", k, counts[k])
 		}

@@ -402,6 +402,14 @@ export interface StaleOverride {
 export interface OverriddenView {
   candidates: CandidatePolicy[]
   prediction: PredictionReport
+  /**
+   * 应用人工决定后、并入集群已有策略的四类变化。
+   *
+   * **服务端的写回计数取的正是这一份**（writebackCounts），因此页面拿它去
+   * 比对计划里那套重算后的数字；取只跑候选集的那一份会报出一个与集群无关
+   * 的假差异。
+   */
+  predictionWithExisting: PredictionReport
 }
 
 /**
@@ -979,7 +987,23 @@ export interface PolicyPreview {
    * 收集，零条时是 nil 切片，`encoding/json` 序列化成 `null` 而不是 `[]`。
    */
   excludedWorkloads: ExcludedWorkload[] | null
+  /**
+   * dry-run 预测，**只跑候选集、不含集群已有策略**。
+   *
+   * 它回答的是"如果把旧策略也清理掉会怎样"，那是接管路线的终点。
+   * 合并之后的真实影响读 predictionWithExisting。
+   */
   prediction: PredictionReport
+  /**
+   * **集群已有策略 ∪ 候选集**的预测 —— "合并这个 PR 之后实际会拦断什么"。
+   *
+   * 平台的下发方式是只加不删：写回把候选写进仓库，GitOps apply 进集群，
+   * 而集群里原有的策略一条都不会因此消失。**屏幕上默认要显示这一份**：
+   * 只跑候选集那一份会把旧策略额外放行的部分算成"会被拦断"，于是一次实际
+   * 无害的写回看起来要断几十条连接 —— 而反复出现的假警报，最终会让真的
+   * 那次也没人看。
+   */
+  predictionWithExisting: PredictionReport
   /** 全量 baseline 类型清单，用于把 missingBaselines 的"没缺"与"没查"区分开。 */
   baselineKinds: Kind[]
   /**

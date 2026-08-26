@@ -112,3 +112,44 @@ function detailView(
 export function wouldOpenEmptyDetail(view: DryRunDetailView): string {
   return `${view.emptyDetail}WOULD_OPEN 为 0 是一个真实的 0。`
 }
+
+/** 旧策略额外放行了多少 —— 两份预测的差额。 */
+export interface ExistingReliefView {
+  /** 差额是否有意义：两份预测相同时为 false，那时不显示任何东西。 */
+  present: boolean
+  /** 形如 `旧策略额外放行了 12 条连接`。 */
+  text: string
+  /** 该怎么读这个数字。 */
+  note: string
+}
+
+/**
+ * existingReliefView 算出"旧策略额外放行了多少"。
+ *
+ * 差额 = 只跑候选集会拦断的条数 − 合并之后会拦断的条数
+ * （design doc 2026-08-25-existing-policies §3）。
+ *
+ * **这个数字本身就是一个结论**：差额大说明集群里的旧策略比新候选集宽得多，
+ * 那些放行现在靠旧策略撑着，而候选集没有覆盖它们 —— 一旦有人清理旧策略，
+ * 这些连接就会断。它是接管路线的入口指标。
+ *
+ * 差额为负时不显示：平台只加不删，合并之后不可能拦断得更多，出现负数说明
+ * 两份预测跑在了不同的输入上，那是一个 bug 而不是一条要展示给操作者的结论。
+ */
+export function existingReliefView(
+  candidatesOnly: PredictionReport, withExisting: PredictionReport,
+): ExistingReliefView {
+  const delta = (candidatesOnly.counts.WOULD_BREAK ?? 0) - (withExisting.counts.WOULD_BREAK ?? 0)
+  if (delta <= 0) {
+    return { present: false, text: '', note: '' }
+  }
+  return {
+    present: true,
+    text: `旧策略额外放行了 ${delta} 条连接`,
+    note:
+      '上面那几个数字算的是**合并之后**：集群里原有的策略不会因为这次写回消失，'
+      + `因此真实影响按"已有 ∪ 候选"计。如果把旧策略也一并清理掉，会多拦断 ${delta} 条 —— `
+      + '这些放行现在靠旧策略撑着，而候选集没有覆盖它们。这个数越大，'
+      + '说明旧策略比新候选集宽得越多。',
+  }
+}

@@ -338,9 +338,20 @@ test('计数不一致时渲染 drift.warning', () => {
  * 比对的页面侧必须是 overridden 那一套：服务端算计划用的正是它。拿默认
  * 推荐去比，会在"人工决定改变了预测"时报出与集群无关的假差异。
  */
-test('页面侧的计数取 overridden 那一套', () => {
-  assert.match(PAGE_SOURCE, /pageCounts=\{pv\.overridden\.prediction\.counts\}/,
-    '比对用的页面侧计数不是 overridden：假差异会把真差异淹掉')
+// 页面侧的计数必须与服务端 writebackCounts **两维都同口径**：
+// overridden（人工决定那一套）**且** withExisting（并入集群已有策略）。
+//
+// 任一维取错都会报出一个与集群无关的假差异，而假差异重复几次之后，
+// 真的那次也不会有人看。
+test('页面侧的计数与服务端写回口径一致', () => {
+  assert.match(PAGE_SOURCE, /pageCounts=\{pv\.overridden\.predictionWithExisting\.counts\}/,
+    '比对用的页面侧计数不是 overridden + withExisting：假差异会把真差异淹掉')
+
+  // 与服务端那一行对齐：两处各写各的，迟早只有一处被改。
+  const handler = readFileSync(
+    new URL('../../internal/httpapi/writeback_handler.go', import.meta.url), 'utf8')
+  assert.match(handler, /pv\.Overridden\.PredictionWithExisting\.Counts\[k\]/,
+    '服务端的写回计数换了口径而页面没跟上')
 })
 
 test('写回入口在 dry-run 一屏内、紧挨导出控件', () => {

@@ -681,7 +681,14 @@ func stripYAMLComments(doc string) string {
 func writebackCounts(pv store.PolicyPreview) map[predict.ChangeKind]int {
 	counts := make(map[predict.ChangeKind]int, len(predict.AllChangeKinds()))
 	for _, k := range predict.AllChangeKinds() {
-		counts[k] = pv.Overridden.Prediction.Counts[k]
+		// **取并入已有策略的那一份**（design doc 2026-08-25-existing-policies §3）。
+		//
+		// 这几个数字会进提交信息，而那是合并请求上的评审人唯一会读的一段
+		// 文字。平台的下发方式是只加不删：合并之后集群里是"已有 ∪ 候选"，
+		// 因此真实影响必须按那一份算。只跑候选集的那一份会把旧策略额外
+		// 放行的部分算成"会被拦断"，让一次实际无害的写回看起来要断几十条
+		// 连接 —— 而反复出现的假警报，最终会让真的那次也没人看。
+		counts[k] = pv.Overridden.PredictionWithExisting.Counts[k]
 	}
 	return counts
 }

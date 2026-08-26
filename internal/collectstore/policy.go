@@ -124,8 +124,22 @@ func (r *Reader) PolicyPreviewAtGranularity(
 		}
 	}
 
-	report := cs.predictWith(gen.EnabledPolicies())
-	overriddenReport := cs.predictWith(overridden.EnabledPolicies())
+	// 两份预测，同一批输入（design doc 2026-08-25-existing-policies §3）：
+	//
+	//   只跑候选集    —— 如果把旧策略也清理掉会怎样（接管路线的终点）
+	//   并上已有策略  —— 合并这个 PR 之后实际会拦断什么
+	//
+	// **已有策略取的是 cs.policies，也就是窗口锚点那一刻的那一批**，不是
+	// LivePolicies（最近一次采集）。当前判定用的就是锚点那一批，两份预测
+	// 必须与它可比 —— 混进另一个时刻的策略，差异会来自"策略换了"而不是
+	// "候选集加了规则"，而那正是这两个数字要区分的东西（CLAUDE.md §4：
+	// 禁止用当前状态解释历史数据）。
+	enabled := gen.EnabledPolicies()
+	overriddenEnabled := overridden.EnabledPolicies()
+	report := cs.predictWith(enabled)
+	overriddenReport := cs.predictWith(overriddenEnabled)
+	reportWithExisting := cs.predictWith(predict.WithExisting(cs.policies, enabled))
+	overriddenWithExisting := cs.predictWith(predict.WithExisting(cs.policies, overriddenEnabled))
 
 	// 一份裁剪结果，两处使用：屏幕上的候选集与导出的文件必须是同一个切片
 	// 渲染出来的，各裁一次就又有了两个可以互相分歧的选择点。
@@ -164,12 +178,14 @@ func (r *Reader) PolicyPreviewAtGranularity(
 		UnattachedImports:      gen.UnattachedImports,
 		ExcludedWorkloads:      gen.ExcludedWorkloads,
 		Prediction:             report,
+		PredictionWithExisting: reportWithExisting,
 		Kinds:                  baseline.AllKinds(),
 		Overrides:              stored,
 		StaleOverrides:         stale,
 		Overridden: store.OverriddenView{
-			Candidates: overriddenCandidates,
-			Prediction: overriddenReport,
+			Candidates:             overriddenCandidates,
+			Prediction:             overriddenReport,
+			PredictionWithExisting: overriddenWithExisting,
 			// 复用 EnabledPolicies 而不是另写一段渲染：「哪些规则算启用」
 			// 只能有一个定义，预测跑的正是这个函数的输出。
 			Enabled: policygen.Result{Policies: overriddenCandidates}.EnabledPolicies(),
