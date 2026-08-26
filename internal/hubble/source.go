@@ -25,6 +25,7 @@ import (
 
 	"github.com/cilium/cilium/api/v1/observer"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
@@ -198,6 +199,17 @@ func (s *Source) Ingest(ctx context.Context, clusterID string, window flow.Windo
 func (s *Source) streamError(ctx context.Context, err error) error {
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return fmt.Errorf("hubble: ingest gave up before the window was read: %w", ctxErr)
+	}
+	// **不能只看 ctx.Err()。** 我们自己给这次调用设了 deadline，gRPC 可能先
+	// 带着 DeadlineExceeded 状态码返回，而客户端 context 还没被标记过期 ——
+	// 两者之间有一段真实存在的窗口，机器一忙就会命中（本条判断补上之前，
+	// 那条用例在全量并行跑时随机变红，单跑必过）。
+	//
+	// 落进通用分支的后果不只是测试红：调用方据此分不清"我们等不下去了"与
+	// "relay 拒绝了我们"，而那正是这个函数存在的理由。
+	if status.Code(err) == codes.DeadlineExceeded {
+		return fmt.Errorf("hubble: ingest gave up before the window was read: %w",
+			context.DeadlineExceeded)
 	}
 	return fmt.Errorf("%w (grpc code %s)", ErrRelayStream, status.Code(err))
 }

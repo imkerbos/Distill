@@ -139,8 +139,11 @@ func Once(
 			return snapshot.Run{}, ErrBlockedAPIServer
 		}
 
+		// 原因必须进日志：这一条同时覆盖两件完全不同的事 —— 「凭据确实
+		// 能写策略」与「自证这次没做成」（守卫失败关闭）。前者要去撤权限，
+		// 后者要去查连通性，只报结论会把人送去审计一份其实正常的 RBAC。
 		logger.Error("the collector could not prove it holds no policy write access; not reading the cluster",
-			"cluster", clusterID)
+			"cluster", clusterID, "err", err)
 		// 一个资源都没读，但这一轮必须在历史里留下痕迹：不留的话界面显示
 		// "这个集群还没有过任何一次资产采集"，与一个采集器压根没被拉起来
 		// 过的集群一模一样，操作者会去等一次永远不会成功的采集。
