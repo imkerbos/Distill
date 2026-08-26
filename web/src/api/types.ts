@@ -698,12 +698,27 @@ export interface PathVerifyStatus {
  * apiServers/healthCheckSources 为空时后端落库为 null，因此这两项与
  * git 均标为可选，不能假设它们总是数组/对象。
  */
+/** 集群的网络插件。对应 cluster.CNI，封闭枚举。 */
+export type CNI = 'UNKNOWN' | 'CILIUM' | 'CALICO'
+
 export interface RegisteredCluster {
   id: string
   displayName: string
   podCidr: string
   nodeCidr: string
   ccnpPresent: boolean
+  /**
+   * 这个集群实际跑着的网络插件，由采集从 kube-system 的 Pod 认出。
+   *
+   * **它是一个事实，平台从不拿它做判断。** 第二策略平面（CNP / ANP /
+   * Calico 私有策略）是否真的生效取决于 CNI —— 实测：原生 Calico 执行 ANP，
+   * Cilium 完全不实现它 —— 但平台照旧走保守路线：探测到第二平面就降级，
+   * 不管 CNI 是什么。这一项供人读，让他判断得了那些对象是不是活的。
+   *
+   * 可选：老响应里没有这个键。**缺席显示成「未认出」，不是猜一个** ——
+   * 猜错的方向是把一个真的在执行的平面当成死的。
+   */
+  cni?: CNI
   /**
    * 这个集群的 kubeconfig 在凭据后端里的短名，未登记时为空串。
    *

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/imkerbos/Distill/internal/cluster"
 )
 
 // ErrNotFound 表示目标不存在。
@@ -99,6 +101,11 @@ type Store interface {
 	// 由采集层调用，**不在集群 CRUD 的写路径里**：它是一个关于集群的事实，
 	// 不是一项人填的配置。人能拨的那一份是 CCNPPresent，且只能往降级方向拨。
 	SetOtherPlanes(ctx context.Context, clusterID string, planes PolicyPlanes) error
+	// SetCNI 记下采集认出来的网络插件。
+	//
+	// **认不出时写 UNKNOWN，不是不写** —— 与 SetOtherPlanes 同一条理由：
+	// 不写会让上一次的结论留在那里，而集群的 CNI 是会换的（迁移）。
+	SetCNI(ctx context.Context, clusterID string, cni cluster.CNI) error
 	// PolicyImports 返回一个集群下未删除的导入策略。
 	PolicyImports(ctx context.Context, clusterID string) ([]PolicyImport, error)
 	// CreatePolicyImport 记录一条导入，同事务写审计。

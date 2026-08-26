@@ -732,3 +732,14 @@ test('网段输入提示双栈写法', () => {
   const page = readFileSync(new URL('../src/pages/ClustersPage.tsx', import.meta.url), 'utf8')
   assert.match(page, /双栈用逗号分隔：10\.4\.0\.0\/14, fd00:10:4::\/56/)
 })
+
+// **CNI 缺席或未知都显示「未认出」，不猜。**
+//
+// 老响应里没有这个键。一个猜出来的 CNI 会让人据此判断"那些第二平面对象是
+// 死的、不用管" —— 而猜错的方向是把一个真的在执行的平面当成死的。
+test('CNI 未认出时不猜一个', () => {
+  const page = readFileSync(new URL('../src/pages/ClustersPage.tsx', import.meta.url), 'utf8')
+  // 默认分支必须落到「未认出」，而不是任何一个具体 CNI。
+  assert.match(page, /default:\s*\n\s*return '未认出'/)
+  assert.match(page, /<td>\{cniLabel\(c\.cni\)\}<\/td>/)
+})

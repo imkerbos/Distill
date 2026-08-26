@@ -17,6 +17,7 @@ import (
 	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/secrets"
 	"github.com/imkerbos/Distill/internal/settings"
+	"github.com/imkerbos/Distill/internal/snapshot"
 	"github.com/imkerbos/Distill/internal/snapshotstore"
 )
 
@@ -168,6 +169,9 @@ func collectAndIngest(
 	// rec 算一次一致率。允许为 nil —— 没有读栈的调用方（测试）不做这一步，
 	// 而 nil 表示"这一轮不对账"，**不是**"对账结果是好的"。
 	rec reconciler,
+	// cni 记下这一轮认出来的网络插件。允许为 nil —— 没有注册表的调用方
+	// （测试）不做这一步，而 nil 表示"这一轮不记"，**不是**"认不出来"。
+	cni cniRecorder,
 	// planes 是第二平面的覆盖范围，随这一次快照落库。零值即"范围不完整"，
 	// 下游据此整片降级 —— 没填过这个参数的调用路径不该悄悄拿到精确降级。
 	planes collectrun.ForeignPlanes,
@@ -177,6 +181,21 @@ func collectAndIngest(
 	if err != nil {
 		return err
 	}
+	// CNI 从这一轮采到的 Pod 认出来 —— **零新增权限、零新增出站**：
+	// kube-system 的 Pod 本来就在快照里。
+	//
+	// 它是一个事实，平台从不拿它做判断：第二策略平面是否真的生效取决于
+	// CNI（实测：原生 Calico 执行 ANP，Cilium 完全不实现它），但平台照旧
+	// 走保守路线 —— 探测到就降级。这一项供人读。
+	if cni != nil {
+		if err := cni.SetCNI(ctx, clusterID, cluster.DetectCNI(cniPodsOf(result))); err != nil {
+			// 与平面探测同一处置：落不下去不中断采集，但要留下日志 ——
+			// 静默会让界面上那个 CNI 一直停在上一次的值。
+			logger.Warn("could not record the detected CNI; the stored value may be stale",
+				"cluster", clusterID)
+		}
+	}
+
 	logger.Info("collection stored",
 		"cluster", clusterID,
 		"runId", result.Observation.RunID,
@@ -334,4 +353,25 @@ func ingestedConnections(run snapshotstore.IngestRun) int {
 func ingestedCompleteness(run snapshotstore.IngestRun) flow.Completeness {
 	_, completeness := run.Result.Connections()
 	return completeness
+}
+
+// cniRecorder 记下一次 CNI 认定。
+//
+// 窄成一个方法而不是把整个注册表传进来：这条路只需要"记下认出来的 CNI"，
+// 而 registry.Store 还带着集群、账号、绑定的全部写方法（同 FlowIngestReader
+// 那条理由）。
+type cniRecorder interface {
+	SetCNI(ctx context.Context, clusterID string, cni cluster.CNI) error
+}
+
+// cniPodsOf 从一次采集里取出认 CNI 要用的那一点点信息。
+//
+// 收窄成 (namespace, labels) 而不是把整个快照传进纯函数：那一步只看
+// kube-system 里的标签，传完整的 Pod 会让它跟着快照结构一起演进。
+func cniPodsOf(run snapshot.Run) []cluster.CNIPod {
+	out := make([]cluster.CNIPod, 0, len(run.Observation.Pods))
+	for _, p := range run.Observation.Pods {
+		out = append(out, cluster.CNIPod{Namespace: p.Namespace, Labels: p.Labels})
+	}
+	return out
 }

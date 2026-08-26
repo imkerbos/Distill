@@ -4,7 +4,7 @@ import { api, ApiError } from '../api/client'
 import {
   IMPORT_ROLE_LABEL, IMPORT_SOURCE_LABEL, ONBOARD_STATE_LABEL,
   type APIServer, type ClusterDriftResult, type DriftResult, type GitBinding, type GitRepo, type ImportRole, type ImportSource,
-  type PolicyImportItem, type RegisteredCluster,
+  type CNI, type PolicyImportItem, type RegisteredCluster,
 } from '../api/types'
 import { Checkbox, Disclosure } from '../components/radix'
 import { useResource } from '../api/useResource'
@@ -128,6 +128,7 @@ function ClusterListSection({ clusters, repos, reposError, error, loading, onCha
               <th>Node 网段</th>
               <th>apiserver</th>
               <th>接入状态</th>
+              <th>CNI</th>
               <th>CCNP</th>
               <th>Git 绑定</th>
               <th>操作</th>
@@ -151,6 +152,11 @@ function ClusterListSection({ clusters, repos, reposError, error, loading, onCha
                     的降级理由，等于操作者无法解释他看到的判定，也无法察觉
                     一次编辑把它清掉了。
                   */}
+                  {/* CNI 是一个事实，不是判断：平台从不拿它决定要不要降级
+                      （探测到第二平面就降级，不管 CNI 是什么）。它在这里
+                      是为了让读的人判断得了那些第二平面对象是不是活的 ——
+                      实测 Cilium 根本不实现 ANP，那种集群上的 ANP 是死的。 */}
+                  <td>{cniLabel(c.cni)}</td>
                   <td><CCNPMark present={c.ccnpPresent} /></td>
                   <td>
                     {c.git
@@ -1442,3 +1448,22 @@ function TextField({ label, value, onChange, required, mono, placeholder, readOn
 
 
 
+
+
+/**
+ * cniLabel 渲染集群的网络插件。
+ *
+ * **缺席与 UNKNOWN 都显示成「未认出」，不猜。** 老响应里没有这个键，
+ * 而一个猜出来的 CNI 会让人据此判断"那些第二平面对象是死的、不用管"——
+ * 猜错的方向是把一个真的在执行的平面当成死的。
+ */
+function cniLabel(cni: CNI | undefined): string {
+  switch (cni) {
+    case 'CILIUM':
+      return 'Cilium'
+    case 'CALICO':
+      return 'Calico'
+    default:
+      return '未认出'
+  }
+}

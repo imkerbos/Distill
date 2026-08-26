@@ -16,6 +16,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/imkerbos/Distill/internal/cluster"
 	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/response"
 )
@@ -154,6 +155,20 @@ func (m *memRegistry) SetOtherPlanes(
 		return registry.ErrNotFound
 	}
 	c.OtherPlanes = planes
+	m.clusters[clusterID] = c
+	return nil
+}
+
+// SetCNI 真的记下来，不吞掉：有用例断言"采集之后界面上能看到 CNI"，
+// 而一个把它丢掉的替身会让那条断言永远失败在一个与被测行为无关的地方。
+func (m *memRegistry) SetCNI(
+	_ context.Context, clusterID string, cni cluster.CNI,
+) error {
+	c, ok := m.clusters[clusterID]
+	if !ok {
+		return registry.ErrNotFound
+	}
+	c.CNI = cni
 	m.clusters[clusterID] = c
 	return nil
 }

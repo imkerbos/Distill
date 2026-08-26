@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/imkerbos/Distill/internal/cluster"
 	"github.com/imkerbos/Distill/internal/snapshot"
 )
 
@@ -343,6 +344,15 @@ type Cluster struct {
 	// 序列化成**秒**，不直接序列化 time.Duration：后者的 JSON 形态是纳秒，
 	// 界面上会显示成一串十几位的数字，而没有人会想到那是纳秒。
 	BusinessCycle time.Duration `json:"-"`
+	// CNI 是这个集群实际跑着的网络插件，由采集从 kube-system 的 Pod 认出。
+	//
+	// **它是一个事实，平台从不拿它做判断。** 第二策略平面是否真的生效取决于
+	// CNI（实测：原生 Calico 执行 ANP，Cilium 完全不实现它），但平台自己照旧
+	// 走保守路线 —— 探测到第二平面就降级，不管 CNI 是什么。这一项供人读，
+	// 让他判断得了那些对象是不是活的。
+	//
+	// 内置一张"谁执行谁"的表会随版本过时，而过时的那天没有任何东西会报错。
+	CNI cluster.CNI `json:"cni"`
 	// ManagedSystemNamespaces 是操作者明示"由平台管"的系统命名空间。
 	//
 	// **默认为空，也就是平台不碰 kube-system 一类**（policygen.systemNamespaces）。

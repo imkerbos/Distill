@@ -207,7 +207,7 @@ func run(configPath, clusterID string, timeout time.Duration, ingest ingestOptio
 	// 对账器与读栈同源：它必须与 /flows 那一屏走同一条判定路径，否则
 	// 一致率量的是另一个引擎（design doc 2026-08-25 §3.1）。
 	return collectAndIngest(ctx, clusterID, client, fleet, store, src, window,
-		collectstore.New(db, reg), foreignPlanesOf(probe), logger)
+		collectstore.New(db, reg), reg, foreignPlanesOf(probe), logger)
 }
 
 // foreignPlanesOf 把探测结果翻成随快照落库的那一份覆盖范围。

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/imkerbos/Distill/internal/cluster"
 	"github.com/imkerbos/Distill/internal/registry"
 )
 
@@ -16,7 +17,7 @@ func (s *Store) Clusters(ctx context.Context) ([]registry.Cluster, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT cluster_id, display_name, pod_cidr, node_cidr, ccnp_present, other_planes,
 		        business_cycle_seconds, business_cycle_reason,
-		        managed_system_namespaces, managed_system_namespaces_reason,
+		        managed_system_namespaces, managed_system_namespaces_reason, cni,
 		        onboard_state, kubeconfig_ref, data_source, no_node_agents_reason
 		   FROM cluster WHERE deleted_at IS NULL ORDER BY cluster_id`)
 	if err != nil {
@@ -31,7 +32,7 @@ func (s *Store) Clusters(ctx context.Context) ([]registry.Cluster, error) {
 		var managedNS []byte
 		if err := rows.Scan(&c.ID, &c.DisplayName, &c.PodCIDR, &c.NodeCIDR,
 			&c.CCNPPresent, &c.OtherPlanes, &cycleSeconds, &c.BusinessCycleReason,
-			&managedNS, &c.ManagedSystemNamespacesReason,
+			&managedNS, &c.ManagedSystemNamespacesReason, &c.CNI,
 			&c.State, &c.KubeconfigRef, &c.DataSource,
 			&c.NoNodeAgentsReason); err != nil {
 			return nil, fmt.Errorf("scan cluster: %w", err)
@@ -66,12 +67,12 @@ func (s *Store) Cluster(ctx context.Context, id string) (registry.Cluster, bool,
 	err := s.db.QueryRowContext(ctx,
 		`SELECT cluster_id, display_name, pod_cidr, node_cidr, ccnp_present, other_planes,
 		        business_cycle_seconds, business_cycle_reason,
-		        managed_system_namespaces, managed_system_namespaces_reason,
+		        managed_system_namespaces, managed_system_namespaces_reason, cni,
 		        onboard_state, kubeconfig_ref, data_source, no_node_agents_reason
 		   FROM cluster WHERE cluster_id = ? AND deleted_at IS NULL`, id).
 		Scan(&c.ID, &c.DisplayName, &c.PodCIDR, &c.NodeCIDR, &c.CCNPPresent, &c.OtherPlanes,
 			&cycleSeconds, &c.BusinessCycleReason,
-			&managedNS, &c.ManagedSystemNamespacesReason,
+			&managedNS, &c.ManagedSystemNamespacesReason, &c.CNI,
 			&c.State, &c.KubeconfigRef, &c.DataSource, &c.NoNodeAgentsReason)
 	if errors.Is(err, sql.ErrNoRows) {
 		return registry.Cluster{}, false, nil
@@ -446,6 +447,40 @@ func (s *Store) SetOtherPlanes(
 			return registry.ErrNotFound
 		}
 		return fmt.Errorf("set other planes: %w", err)
+	}
+	return nil
+}
+
+// SetCNI 记下采集认出来的网络插件。
+//
+// **认不出时写 UNKNOWN，不是不写**：不写会让上一次的结论留在那里，
+// 而集群的 CNI 是会换的（迁移）。与 SetOtherPlanes 同一条理由。
+//
+// 幂等写入的 RowsAffected 陷阱同样适用（见 SetOtherPlanes 那段）：
+// CNI 连续两轮相同是常态，把 0 行当成 ErrNotFound 会让每一轮采集都记一条
+// 假告警。这里复用同一个存在性再查。
+func (s *Store) SetCNI(ctx context.Context, clusterID string, cni cluster.CNI) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE cluster SET cni = ? WHERE cluster_id = ? AND deleted_at IS NULL`,
+		string(cni), clusterID)
+	if err != nil {
+		return fmt.Errorf("set cni: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set cni: %w", err)
+	}
+	if n > 0 {
+		return nil
+	}
+	var exists bool
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM cluster WHERE cluster_id = ? AND deleted_at IS NULL`, clusterID,
+	).Scan(&exists); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return registry.ErrNotFound
+		}
+		return fmt.Errorf("set cni: %w", err)
 	}
 	return nil
 }

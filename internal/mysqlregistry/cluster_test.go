@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/imkerbos/Distill/internal/cluster"
 	"github.com/imkerbos/Distill/internal/config"
 	"github.com/imkerbos/Distill/internal/mysqlregistry"
 	"github.com/imkerbos/Distill/internal/registry"
@@ -308,6 +309,10 @@ func TestClusterSurvivesAFullRoundTripThroughMySQL(t *testing.T) {
 	// 落库层恒写数组、恒读出数组，让"没人声明过"只有一种形状
 	// （managedNamespacesJSON 与 000028 那句 UPDATE 是同一条纪律）。
 	want.ManagedSystemNamespaces = []string{}
+	// CNI 同理，且理由与 OtherPlanes 一样：CreateCluster 不落这一列，
+	// 新注册的集群停在列默认值 **UNKNOWN** 上 ——「还没认过」而不是
+	// 「没有 CNI」。每个集群都有 CNI，认不出只说明还没采过一轮。
+	want.CNI = cluster.CNIUnknown
 
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("round-tripped cluster =\n%+v\nwant\n%+v", got, want)
