@@ -1,5 +1,5 @@
 import type {
-  APIServer, ClusterWrite, GitBinding, GitBindingWrite, PathVerifyResult,
+  APIServer, ClusterWrite, EnforcedPlane, GitBinding, GitBindingWrite, PathVerifyResult,
   PathVerifyStatus, RegisteredCluster,
 } from '../api/types'
 import {
@@ -103,6 +103,93 @@ export interface ClusterFormValues {
    * 与 nodeAgents 互斥，服务端会拒绝两者并存。
    */
   noNodeAgentsReason: string
+  /**
+   * 这个集群看全一轮流量需要多久，秒。保持字符串交给用户编辑，提交时才转数字。
+   *
+   * 与 apiserver 的 port 同一取舍：空串表示"没填"，而 0 是一个有含义的值
+   * （还没有人回答过这个问题）。用 number 就无法表达"这一格没被碰过"。
+   */
+  businessCycleSeconds: string
+  /** 凭什么这么定。服务端要求与时长同时给出，或两者都不给。 */
+  businessCycleReason: string
+  /** 明示交给平台管的系统命名空间，每行一个。 */
+  managedSystemNamespaces: string
+  /** 纳入它们的理由。服务端要求与清单同时给出。 */
+  managedSystemNamespacesReason: string
+  /** 声明这个集群的 CNI 真的会执行的第二策略平面。 */
+  enforcedPlanes: EnforcedPlane[]
+  /** 这个声明的理由。服务端要求与清单同时给出。 */
+  enforcedPlanesReason: string
+}
+
+/**
+ * 界面上可勾选的第二策略平面，连同它被勾上之后会发生什么。
+ *
+ * 从这份表推导出勾选项，而不是在组件里写死一组 checkbox：新增一个平面时
+ * 漏改组件的后果不是"少一个勾选框"，而是一个已经在库里的声明在界面上
+ * 根本显示不出来 —— 操作者看到的是「未声明」，与从未声明过完全一样。
+ */
+export const ENFORCED_PLANE_CHOICES: ReadonlyArray<{
+  value: EnforcedPlane
+  label: string
+  /** 表格那一格里用的短名。整名在一行里放不下，而那一列本来就已经在溢出。 */
+  short: string
+  detail: string
+}> = [
+  {
+    value: 'ADMIN_NETWORK_POLICY',
+    label: 'AdminNetworkPolicy（ANP / BANP）',
+    short: 'ANP',
+    detail: '带 Deny 与优先级，在标准 NetworkPolicy 之前求值；BANP 在其之后兜底。'
+      + '实测原生 Calico 执行它，Cilium 1.19 完全不实现 —— 两者都可能装着 CRD。',
+  },
+  {
+    value: 'CILIUM_NETWORK_POLICY',
+    label: 'CiliumNetworkPolicy（CNP / CCNP）',
+    short: 'CNP',
+    detail: '带 egressDeny / ingressDeny 与 L7 规则。只有装了 Cilium 的集群才执行。',
+  },
+  {
+    value: 'CALICO_NETWORK_POLICY',
+    label: 'Calico 私有策略（GlobalNetworkPolicy / NetworkPolicy）',
+    short: 'Calico',
+    detail: '带 order 与 tier 分层的 deny。只有装了原生 Calico 的集群才执行 —— '
+      + '托管版（如 GKE 自带的）通常裁掉了这部分。',
+  },
+]
+
+/**
+ * 把一个集群的第二平面声明折算成表格里那一格。
+ *
+ * 空与非空必须在界面上分得开，而且**空的那一句不能读成"这个集群很干净"**：
+ * 它说的是平台不解释任何第二平面，探测到就整片降级 —— 一个保守的姿态，
+ * 不是一份体检结论。读成后者的人会以为集群里没有别的策略在生效。
+ *
+ * 与 CNI 那一格分工不同：CNI 是探测到的事实（跑着什么插件），这一格是
+ * 操作者的断言（那个插件真的执行这些平面）。两格都在，是因为它们会不一致 ——
+ * 而不一致正是要被看见的东西：声明了 ANP 却跑着 Cilium，那个声明是错的。
+ */
+export function describeEnforcedPlanes(
+  c: Pick<RegisteredCluster, 'enforcedPlanes'>,
+): { text: string; detail: string } {
+  const planes = c.enforcedPlanes ?? []
+  if (planes.length === 0) {
+    return {
+      text: '未声明',
+      detail: '平台不按任何第二策略平面求值。探测到这类对象就整片降级 —— '
+        + '保守且正确。这一格为空不等于集群里没有别的策略在生效。',
+    }
+  }
+  const found = planes.map((p) => ENFORCED_PLANE_CHOICES.find((c) => c.value === p))
+  // 认不出的取值照原样显示，不丢弃：少显示一个已声明的平面，会让操作者
+  // 以为自己没声明过，而平台其实正在按它求值。
+  const short = found.map((c, i) => c?.short ?? planes[i])
+  const full = found.map((c, i) => c?.label ?? planes[i])
+  return {
+    text: short.join('、'),
+    detail: `${full.join('、')} —— 操作者声明这个集群的 CNI 真的会执行这些平面，`
+      + '平台据此按它们的语义求值。',
+  }
 }
 
 /** 绑定表单的初始值：全空，对应"这个集群还没有绑定"。 */
@@ -115,6 +202,9 @@ export function blankFormValues(): ClusterFormValues {
     kubeconfigRef: '',
     apiServerRows: [emptyApiServerRow()], healthChecks: '', metricsScrapers: '',
     nodeAgents: '', noNodeAgentsReason: '',
+    businessCycleSeconds: '', businessCycleReason: '',
+    managedSystemNamespaces: '', managedSystemNamespacesReason: '',
+    enforcedPlanes: [], enforcedPlanesReason: '',
   }
 }
 
@@ -147,6 +237,16 @@ export function formValuesOf(c: RegisteredCluster): ClusterFormValues {
     metricsScrapers: (c.metricsScrapers ?? []).map(scraperToLine).join('\n'),
     nodeAgents: (c.nodeAgents ?? []).map(nodeAgentToLine).join('\n'),
     noNodeAgentsReason: c.noNodeAgentsReason ?? '',
+    // 0 与缺席都落成空串："还没有人回答过"要与"回答了 0 秒"在界面上
+    // 是同一件事 —— 服务端也是这么定的（0 表示未回答）。
+    businessCycleSeconds: c.businessCycleSeconds ? String(c.businessCycleSeconds) : '',
+    businessCycleReason: c.businessCycleReason ?? '',
+    managedSystemNamespaces: (c.managedSystemNamespaces ?? []).join('\n'),
+    managedSystemNamespacesReason: c.managedSystemNamespacesReason ?? '',
+    // 复制一份而不是直接引用响应里的数组：表单状态被就地改写会让
+    // "取消编辑"回不到原值。
+    enforcedPlanes: [...(c.enforcedPlanes ?? [])],
+    enforcedPlanesReason: c.enforcedPlanesReason ?? '',
   }
 }
 
@@ -334,6 +434,30 @@ export function buildClusterWrite(values: ClusterFormValues): BuildResult {
   const servers = resolveApiServers(values.apiServerRows)
   if (!servers.ok) return { ok: false, error: servers.error }
 
+  const cycle = resolveBusinessCycle(values)
+  if (!cycle.ok) return { ok: false, error: cycle.error }
+
+  // 两条「清单与理由必须同时给出」的规则在这里先拦一次，而不是等服务端拒。
+  // 服务端那一道是权威的，这一道是为了让拒绝落在操作者刚刚填的那一格旁边 ——
+  // 一次在整份表单提交之后才回来的拒绝，指不回是哪一项出的问题。
+  const systemNamespaces = values.managedSystemNamespaces
+    .split('\n').map((s) => s.trim()).filter(Boolean)
+  if (systemNamespaces.length > 0 && values.managedSystemNamespacesReason.trim() === '') {
+    return {
+      ok: false,
+      error: '把系统命名空间交给平台管理必须写明理由：平台会为其中的每个 workload 生成 '
+        + 'default-deny 候选策略，而一份下发到 kube-dns 的 default-deny 会让整个集群失去 DNS。',
+    }
+  }
+  if (values.enforcedPlanes.length > 0 && values.enforcedPlanesReason.trim() === '') {
+    return {
+      ok: false,
+      error: '声明 CNI 执行哪些策略平面必须写明理由：平台会据此按那个平面的语义求值，'
+        + '而一个并不生效的平面会让它把通着的连接判成不通。'
+        + '理由要写你怎么验证的，不是写你装了什么 —— 装了不等于执行。',
+    }
+  }
+
   return {
     ok: true,
     summary: `提交后：整体替换 ${values.id.trim()} 的登记信息（不含 Git 绑定）`,
@@ -349,8 +473,56 @@ export function buildClusterWrite(values: ClusterFormValues): BuildResult {
       metricsScrapers: parseScraperLines(values.metricsScrapers),
       nodeAgents: parseNodeAgentLines(values.nodeAgents),
       noNodeAgentsReason: values.noNodeAgentsReason.trim(),
+      businessCycleSeconds: cycle.seconds,
+      businessCycleReason: values.businessCycleReason.trim(),
+      managedSystemNamespaces: systemNamespaces,
+      managedSystemNamespacesReason: values.managedSystemNamespacesReason.trim(),
+      // 原样带上，一项都不能省：PUT 是整体替换。漏带的方向"看起来安全"
+      // （平台退回整片降级），但它无声推翻了一个带理由的声明，而操作者
+      // 下次打开页面看到的是「未声明」—— 与从未声明过完全一样。
+      enforcedPlanes: [...values.enforcedPlanes],
+      enforcedPlanesReason: values.enforcedPlanesReason.trim(),
     },
   }
+}
+
+type CycleResolution = { ok: true; seconds: number } | { ok: false; error: string }
+
+/**
+ * 把业务周期那一格折算成秒。
+ *
+ * 空串折算成 0，含义是"还没有人回答过"—— 与服务端一致。**不接受无法解析的
+ * 输入而悄悄回落成 0**：回落之后界面显示保存成功，写回门禁却继续拒绝出计划，
+ * 而没有任何东西指向那一格里的错字。
+ */
+function resolveBusinessCycle(values: ClusterFormValues): CycleResolution {
+  const raw = values.businessCycleSeconds.trim()
+  const reason = values.businessCycleReason.trim()
+  if (raw === '') {
+    if (reason !== '') {
+      return {
+        ok: false,
+        error: '业务周期只填了理由没填时长。两者必须同时给出：只给理由，写回门禁拿不到可比的数。',
+      }
+    }
+    return { ok: true, seconds: 0 }
+  }
+
+  const seconds = Number(raw)
+  if (!Number.isInteger(seconds) || seconds <= 0) {
+    return {
+      ok: false,
+      error: `业务周期「${raw}」不是一个正整数秒。这一格要填的是"这个集群看全一轮流量需要多久"，`
+        + '例如一天填 86400。留空表示还没有人回答过这个问题。',
+    }
+  }
+  if (reason === '') {
+    return {
+      ok: false,
+      error: '业务周期填了时长没填理由。两者必须同时给出：只给时长，事后答不出当初凭什么这么定。',
+    }
+  }
+  return { ok: true, seconds }
 }
 
 /* ---------------------------------------------------------------------- */

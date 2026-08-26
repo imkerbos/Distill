@@ -1,0 +1,39 @@
+{
+  "$comment": [
+    "集群写入体（POST /clusters、PUT /clusters/{id}）的字段清单。",
+    "",
+    "前后端各自断言自己与这份清单一致：",
+    "  - Go   internal/httpapi/contract_internal_test.go",
+    "  - TS   web/tests/clusterForm.test.ts",
+    "",
+    "存在的理由是一次真实事故。服务端的 clusterPayload 长出了 businessCycle*、",
+    "managedSystemNamespaces* 与 enforcedPlanes*，前端的 ClusterWrite 没跟上。",
+    "PUT 是整体替换，于是用界面编辑任何一个集群都会把这六项静默清空 —— 一个",
+    "带着理由做出的声明就此消失，而操作者下次打开页面看到的是「未声明」，与从未",
+    "声明过完全一样。两侧当时各自都有守卫，也都是绿的：谁都没有在比对方。",
+    "",
+    "加一个可写字段要三处一起动：clusterPayload、这份清单、前端 ClusterWrite。",
+    "只动前两处，界面提交时会把新字段清空。",
+    "",
+    "只列写路径。读路径多出字段是安全的（前端忽略即可），少一个字段的方向才危险。"
+  ],
+  "keys": [
+    "apiServers",
+    "businessCycleReason",
+    "businessCycleSeconds",
+    "ccnpPresent",
+    "displayName",
+    "enforcedPlanes",
+    "enforcedPlanesReason",
+    "healthCheckSources",
+    "id",
+    "kubeconfigRef",
+    "managedSystemNamespaces",
+    "managedSystemNamespacesReason",
+    "metricsScrapers",
+    "nodeAgents",
+    "nodeCidr",
+    "noNodeAgentsReason",
+    "podCidr"
+  ]
+}

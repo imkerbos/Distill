@@ -36,8 +36,11 @@ type clusterPayload struct {
 	// 与 git 那条相反，这个字段**必须**在这里：集群没有别的路由能说出
 	// 自己的凭据引用，漏掉它的后果是采集器永远拿不到凭据，
 	// 而这件事要到第一次真采集才暴露。
-	KubeconfigRef      string               `json:"kubeconfigRef"`
-	State              string               `json:"state"`
+	KubeconfigRef string `json:"kubeconfigRef"`
+	// 接入状态**不在这里**：它由服务端根据实际采到的数据推进，toCluster
+	// 一律写 StateRegistered。收下一个永远不会被采纳的字段，只会让下一个
+	// 调用方以为它有用 —— 而它想推进的那件事，请求会返回成功、界面会显示
+	// 保存生效、状态原封不动。
 	APIServers         []registry.APIServer `json:"apiServers"`
 	HealthCheckSources []string             `json:"healthCheckSources"`
 	// MetricsScrapers 是 metrics 抓取端登记。

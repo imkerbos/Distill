@@ -74,6 +74,9 @@ export const RESOURCE_LABEL: Record<string, string> = {
   ENDPOINTSLICE: 'EndpointSlice',
   NETWORKPOLICY: 'NetworkPolicy',
   INGRESS: 'Ingress',
+  // ANP 与 BANP 共用一行：它们由同一次采集动作产出，一次失败必然同时
+  // 影响两者。分成两行会在界面上说同一件事两遍。
+  ADMINNETWORKPOLICY: 'AdminNetworkPolicy / BaselineAdminNetworkPolicy',
 }
 
 /**

@@ -701,6 +701,17 @@ export interface PathVerifyStatus {
 /** 集群的网络插件。对应 cluster.CNI，封闭枚举。 */
 export type CNI = 'UNKNOWN' | 'CILIUM' | 'CALICO'
 
+/**
+ * 平台可以被声明去解释的第二策略平面。对应 registry.EnforcedPlane，封闭枚举。
+ *
+ * 标准 NetworkPolicy 不在其中：它是 Kubernetes 的地板，每个集群都执行，
+ * 无需声明。这张表里的每一项都**只在被声明之后**才被解释。
+ */
+export type EnforcedPlane =
+  | 'ADMIN_NETWORK_POLICY'
+  | 'CILIUM_NETWORK_POLICY'
+  | 'CALICO_NETWORK_POLICY'
+
 export interface RegisteredCluster {
   id: string
   displayName: string
@@ -740,6 +751,36 @@ export interface RegisteredCluster {
   dataSource?: DataSource
   apiServers?: APIServer[] | null
   healthCheckSources?: string[]
+  /**
+   * 这个集群看全一轮流量需要多久（秒）。0 或缺席表示还没有人回答过。
+   *
+   * 写回门禁据此拒绝出计划：不知道一轮有多长，就不知道观测窗口够不够长，
+   * 而"窗口没覆盖到的那一段流量"与"这条连接不存在"在数据里长得一样。
+   */
+  businessCycleSeconds?: number
+  /** 凭什么这么定。与时长必须同时给出。 */
+  businessCycleReason?: string
+  /**
+   * 操作者明示"由平台管"的系统命名空间。
+   *
+   * 缺席或为空 = 平台不为 kube-system 一类生成候选策略。这是默认，
+   * 也是安全的那一侧：一条把 kube-dns 拦掉的候选策略会让整个集群解析不了域名。
+   */
+  managedSystemNamespaces?: string[]
+  /** 纳入它们的依据。与清单必须同时给出。 */
+  managedSystemNamespacesReason?: string
+  /**
+   * 操作者声明的、这个集群的 CNI **真的会执行**的第二策略平面。
+   *
+   * 与 cni 分得开：cni 是探测到的事实（跑着什么插件），这一项是操作者的
+   * 断言（那个插件真的执行这个平面）。探测答得出前者，答不出后者 ——
+   * 实测原生 Calico 执行 ANP，Cilium 完全不实现它，而两者的 CRD 都可能装着。
+   *
+   * 缺席或为空 = 平台不按任何第二平面的语义求值，即当前行为。
+   */
+  enforcedPlanes?: EnforcedPlane[]
+  /** 这个声明的依据。与清单必须同时给出。 */
+  enforcedPlanesReason?: string
   /**
    * metrics 抓取端登记。
    *
@@ -823,6 +864,35 @@ export interface ClusterWrite {
    * 「当初凭什么说不需要」。
    */
   noNodeAgentsReason: string
+  /**
+   * 这个集群看全一轮流量需要多久（秒）。0 表示还没有人回答过。
+   *
+   * 与 kubeconfigRef 同一条纪律：PUT 是整体替换，漏带一次就把它清成 0，
+   * 而症状是写回门禁开始拒绝出计划，没有任何东西指向这次编辑。
+   */
+  businessCycleSeconds: number
+  /** 凭什么这么定。服务端要求与时长同时给出。 */
+  businessCycleReason: string
+  /**
+   * 明示由平台管的系统命名空间。空数组 = 不管，这是默认也是安全的那一侧。
+   *
+   * 必须每次原样带上：漏带的方向虽然是"更保护"，但它悄悄推翻了一个
+   * 操作者写着理由做出的决定 —— 而下一次采集之后，那个命名空间的候选策略
+   * 会无声消失。
+   */
+  managedSystemNamespaces: string[]
+  /** 纳入它们的依据。服务端要求与清单同时给出。 */
+  managedSystemNamespacesReason: string
+  /**
+   * 声明这个集群的 CNI 真的会执行的第二策略平面。空数组 = 一个都不解释。
+   *
+   * 漏带的方向同样"看起来安全"：平台退回整片降级。但它一样是无声推翻
+   * 一个带理由的声明，而操作者下次打开页面时看到的是「未声明」——
+   * 与从未声明过完全一样，无从分辨自己是不是被清掉了。
+   */
+  enforcedPlanes: EnforcedPlane[]
+  /** 这个声明的依据。服务端要求与清单同时给出。 */
+  enforcedPlanesReason: string
 }
 
 /** 一个 metrics 抓取端的登记。 */

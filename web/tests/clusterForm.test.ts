@@ -5,7 +5,8 @@ import assert from 'node:assert/strict'
 
 import {
   ALL_PATH_VERIFY_RESULTS, blankFormValues, blankGitValues, buildClusterWrite,
-  describePathVerifyOutcome, describePathVerifyStatus, formValuesOf, gitFormValuesOf,
+  describeEnforcedPlanes, describePathVerifyOutcome, describePathVerifyStatus,
+  formValuesOf, gitFormValuesOf,
   resolveGitBinding, parseScraperLines, scraperToLine, parseNodeAgentLines, nodeAgentToLine,
 } from '../src/pages/clusterForm.ts'
 import { formatUtcTime } from '../src/pages/verifyView.ts'
@@ -44,12 +45,23 @@ function unbound(): RegisteredCluster {
   }
 }
 
-const CLUSTER_WRITE_KEYS = [
-  // metricsScrapers 2026-08-18 加入：它与 healthCheckSources 同类 —— 一份
-  // 观测不出来、只能由人登记的 Baseline 依据。
-  'apiServers', 'ccnpPresent', 'displayName', 'healthCheckSources', 'id', 'kubeconfigRef',
-  'metricsScrapers', 'noNodeAgentsReason', 'nodeAgents', 'nodeCidr', 'podCidr',
-]
+/**
+ * 集群写入体的字段清单，**从与服务端共读的那份契约里读出来**，不在这里抄一遍。
+ *
+ * 抄一遍正是上一次出事的形状：服务端的 clusterPayload 长出了 businessCycle*、
+ * managedSystemNamespaces* 与 enforcedPlanes*，这份字面量没跟上，于是这条断言
+ * 一直是绿的 —— 它比的是前端自己抄的那份。而 PUT 是整体替换，用界面编辑任何
+ * 一个集群都会把那六项静默清空：一个带着理由做出的声明就此消失，操作者下次
+ * 打开页面看到的是「未声明」，与从未声明过完全一样。
+ *
+ * 服务端那一侧读同一个文件（internal/httpapi/contract_internal_test.go）。
+ * 加一个可写字段要三处一起动，而任何一处没动，两条用例里至少有一条会红。
+ */
+const CLUSTER_WRITE_KEYS: string[] = (
+  JSON.parse(readFileSync(join(import.meta.dirname, '../../contracts/cluster-write.json'), 'utf8')) as {
+    keys: string[]
+  }
+).keys.slice().sort()
 
 /* ---------------------------------------------------------------------- */
 /* 1. 两个资源，两份提交体                                                    */
@@ -742,4 +754,148 @@ test('CNI 未认出时不猜一个', () => {
   // 默认分支必须落到「未认出」，而不是任何一个具体 CNI。
   assert.match(page, /default:\s*\n\s*return '未认出'/)
   assert.match(page, /<td>\{cniLabel\(c\.cni\)\}<\/td>/)
+})
+
+/* ---------------------------------------------------------------------- */
+/* 6. 声明类字段必须原样往返                                                  */
+/* ---------------------------------------------------------------------- */
+
+/** 一个把三组声明类字段都填满了的集群。 */
+function declared(): RegisteredCluster {
+  return {
+    id: 'prod-calico-1', displayName: 'Calico 生产', podCidr: '10.20.0.0/14',
+    nodeCidr: '10.140.0.0/20', ccnpPresent: false, state: 'READY',
+    businessCycleSeconds: 604800,
+    businessCycleReason: '结算任务每周日跑一次，七天才看得全一轮',
+    managedSystemNamespaces: ['kube-system'],
+    managedSystemNamespacesReason: '本集群 kube-system 里跑着业务组件，kube-dns 已单独放行',
+    enforcedPlanes: ['ADMIN_NETWORK_POLICY'],
+    enforcedPlanesReason: '实测加一条 ANP Deny 后连接立刻断、删除后恢复',
+  }
+}
+
+/**
+ * 这是那次事故的回归用例。
+ *
+ * 服务端长出 businessCycle*、managedSystemNamespaces* 与 enforcedPlanes* 之后，
+ * 前端表单没有携带它们。PUT 是整体替换，于是**用界面编辑任何一个集群，都会把
+ * 这六项静默清空**：一个写着理由做出的声明就此消失，而操作者下次打开页面看到
+ * 的是「未声明」，与从未声明过完全一样，无从分辨自己是不是被清掉了。
+ *
+ * 断言的是「播种再折算回去，值不变」——也就是"打开编辑面板、什么都不改、
+ * 直接保存"这条最常见的路径。上一次出事时，正是这条路径在清空数据。
+ */
+test('打开编辑什么都不改再保存，声明类字段原样往返', () => {
+  const c = declared()
+  const built = buildClusterWrite(formValuesOf(c))
+  assert.equal(built.ok, true)
+  if (!built.ok) return
+
+  assert.equal(built.body.businessCycleSeconds, c.businessCycleSeconds)
+  assert.equal(built.body.businessCycleReason, c.businessCycleReason)
+  assert.deepEqual(built.body.managedSystemNamespaces, c.managedSystemNamespaces)
+  assert.equal(built.body.managedSystemNamespacesReason, c.managedSystemNamespacesReason)
+  assert.deepEqual(built.body.enforcedPlanes, c.enforcedPlanes)
+  assert.equal(built.body.enforcedPlanesReason, c.enforcedPlanesReason)
+})
+
+/** 表单状态不得与响应共享数组：就地改写会让「取消编辑」回不到原值。 */
+test('勾选平面不会改到响应里那份数组', () => {
+  const c = declared()
+  const values = formValuesOf(c)
+  values.enforcedPlanes.push('CILIUM_NETWORK_POLICY')
+  assert.deepEqual(c.enforcedPlanes, ['ADMIN_NETWORK_POLICY'],
+    '表单直接引用了响应里的数组，改表单会改到源数据')
+})
+
+/**
+ * 清单与理由必须同时给出，与服务端同一条规则。
+ *
+ * 在客户端先拦一次不是重复：服务端那一道是权威的，这一道让拒绝落在操作者
+ * 刚填的那一格旁边。一次在整份表单提交之后才回来的拒绝，指不回是哪一项。
+ */
+test('声明第二平面没写理由会被拒', () => {
+  const values = formValuesOf(declared())
+  values.enforcedPlanesReason = '   '
+  const built = buildClusterWrite(values)
+  assert.equal(built.ok, false)
+  if (built.ok) return
+  assert.match(built.error, /理由/)
+})
+
+test('纳入系统命名空间没写理由会被拒', () => {
+  const values = formValuesOf(declared())
+  values.managedSystemNamespacesReason = ''
+  const built = buildClusterWrite(values)
+  assert.equal(built.ok, false)
+  if (built.ok) return
+  assert.match(built.error, /kube-dns|DNS/,
+    '拒绝理由没说出后果：一份下发到 kube-dns 的 default-deny 会让整个集群失去域名解析')
+})
+
+/**
+ * 业务周期两格必须同时填或同时留空。
+ *
+ * 无法解析的输入**不回落成 0**：回落之后界面显示保存成功，写回门禁却继续
+ * 拒绝出计划，而没有任何东西指向那一格里的错字。
+ */
+test('业务周期只填一格会被拒，填不出数也会被拒', () => {
+  for (const [seconds, reason, why] of [
+    ['604800', '', '只给时长'],
+    ['', '每周一轮', '只给理由'],
+    ['一周', '每周一轮', '填的不是数'],
+    ['0', '每周一轮', '0 表示没回答过，不能与理由并存'],
+    ['-1', '每周一轮', '负数'],
+    ['604800.5', '每周一轮', '不是整数'],
+  ] as const) {
+    const values = formValuesOf(declared())
+    values.businessCycleSeconds = seconds
+    values.businessCycleReason = reason
+    const built = buildClusterWrite(values)
+    assert.equal(built.ok, false, `${why}：应当被拒，实际通过了`)
+  }
+})
+
+test('业务周期两格都留空表示还没有人回答过', () => {
+  const values = formValuesOf(declared())
+  values.businessCycleSeconds = ''
+  values.businessCycleReason = ''
+  const built = buildClusterWrite(values)
+  assert.equal(built.ok, true)
+  if (!built.ok) return
+  assert.equal(built.body.businessCycleSeconds, 0)
+  assert.equal(built.body.businessCycleReason, '')
+})
+
+/* ---------------------------------------------------------------------- */
+/* 7. 表格里那一格                                                          */
+/* ---------------------------------------------------------------------- */
+
+/**
+ * 空的那一句不能读成「这个集群很干净」。
+ *
+ * 它说的是平台不解释任何第二平面、探测到就整片降级 —— 一个保守的姿态，
+ * 不是一份体检结论。读成后者的人会以为集群里没有别的策略在生效。
+ */
+test('未声明第二平面时不说成集群干净', () => {
+  const view = describeEnforcedPlanes({ enforcedPlanes: [] })
+  assert.equal(view.text, '未声明')
+  assert.match(view.detail, /降级/)
+  for (const forbidden of ['没有别的策略', '干净', '安全']) {
+    assert.ok(!view.text.includes(forbidden) || view.detail.includes('不等于'),
+      `「未声明」被说成了「${forbidden}」`)
+  }
+})
+
+test('已声明的平面逐个显示，认不出的取值照原样显示', () => {
+  const anp = describeEnforcedPlanes({ enforcedPlanes: ['ADMIN_NETWORK_POLICY'] })
+  // 格子里放短名（那一列本来就在溢出），整名进 title —— 两者都必须有：
+  // 只有短名，读的人认不出它指哪一个平面。
+  assert.equal(anp.text, 'ANP')
+  assert.match(anp.detail, /AdminNetworkPolicy/)
+  assert.match(
+    // @ts-expect-error 故意传一个不在枚举里的取值：库里可能有更早写进去的值，
+    // 丢弃它会让操作者以为自己没声明过，而平台其实正在按它求值。
+    describeEnforcedPlanes({ enforcedPlanes: ['SOMETHING_NEW'] }).text,
+    /SOMETHING_NEW/)
 })

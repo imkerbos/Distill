@@ -10,7 +10,9 @@ import { Checkbox, Disclosure } from '../components/radix'
 import { useResource } from '../api/useResource'
 import {
   blankFormValues, blankGitValues, buildClusterWrite, describePathVerifyOutcome,
-  describePathVerifyStatus, emptyApiServerRow, formValuesOf, gitFormValuesOf, resolveGitBinding,
+  describeEnforcedPlanes, describePathVerifyStatus, emptyApiServerRow,
+  ENFORCED_PLANE_CHOICES, formValuesOf,
+  gitFormValuesOf, resolveGitBinding,
   type ApiServerRow, type ClusterFormValues, type GitFormValues,
 } from './clusterForm'
 import { formatUtcTime, type VerifyOutcomeView } from './verifyView'
@@ -116,7 +118,7 @@ function ClusterListSection({ clusters, repos, reposError, error, loading, onCha
             才看得到数据。摘要说结论，展开的是理由。 */}
         <div className="mb-3">
           <Disclosure summary={<span className="text-xs">这张表里的几格为什么这么写</span>}>
-            <span className="text-sm leading-relaxed">Git 绑定为空时显式写「未绑定」——空单元格会被读成「加载中」或「未知」，两者都不是这里想表达的事实；同一条理由，没校验过的路径写「路径未校验」而不是留白。这一格展示的是**路径级**结论：policyPath 在不在。仓库那一层能不能连上是仓库页的事，两层各有各的结论，不合成一个。校验只做只读查询，它从不向仓库提交任何内容，因此证明不了平台能往那个路径提交——那要等真正提交一次才知道。「编辑」在行内展开成两份各自提交的表单：登记信息一份、Git 绑定一份。绑定是一个有自己生命周期的资源，改集群不会碰它，改绑定也不会重写集群，更不会改动仓库。</span>
+            <span className="text-sm leading-relaxed">Git 绑定为空时显式写「未绑定」——空单元格会被读成「加载中」或「未知」，两者都不是这里想表达的事实；同一条理由，没校验过的路径写「路径未校验」而不是留白。这一格展示的是「路径级」结论：policyPath 在不在。仓库那一层能不能连上是仓库页的事，两层各有各的结论，不合成一个。校验只做只读查询，它从不向仓库提交任何内容，因此证明不了平台能往那个路径提交——那要等真正提交一次才知道。「编辑」在行内展开成两份各自提交的表单：登记信息一份、Git 绑定一份。绑定是一个有自己生命周期的资源，改集群不会碰它，改绑定也不会重写集群，更不会改动仓库。</span>
           </Disclosure>
         </div>
         <TableCard>
@@ -130,6 +132,7 @@ function ClusterListSection({ clusters, repos, reposError, error, loading, onCha
               <th>接入状态</th>
               <th>CNI</th>
               <th>CCNP</th>
+              <th>已声明生效的平面</th>
               <th>Git 绑定</th>
               <th>操作</th>
             </tr>
@@ -158,6 +161,18 @@ function ClusterListSection({ clusters, repos, reposError, error, loading, onCha
                       实测 Cilium 根本不实现 ANP，那种集群上的 ANP 是死的。 */}
                   <td>{cniLabel(c.cni)}</td>
                   <td><CCNPMark present={c.ccnpPresent} /></td>
+                  {/*
+                    与左边那一格 CNI 并排，因为它们会不一致，而不一致正是
+                    要被看见的东西：声明了 ANP 却跑着 Cilium —— 实测 Cilium
+                    1.19 完全不实现 ANP —— 那个声明是错的，平台会按一个
+                    根本不生效的平面求值，把通着的连接判成不通。
+                  */}
+                  <td>
+                    <span title={describeEnforcedPlanes(c).detail}
+                      className={c.enforcedPlanes?.length ? undefined : 'text-ink-muted'}>
+                      {describeEnforcedPlanes(c).text}
+                    </span>
+                  </td>
                   <td>
                     {c.git
                       ? (
@@ -751,7 +766,7 @@ function ClusterFields({ values, patch, mode }: {
         <p className="mt-0 mb-[6px] text-xs text-ink-muted">
           格式 <code>命名空间&nbsp;&nbsp;app&nbsp;&nbsp;host|pod&nbsp;&nbsp;端口</code>，例如{' '}
           <code>logging&nbsp;&nbsp;filebeat&nbsp;&nbsp;host&nbsp;&nbsp;9200</code>。
-          只填**会向工作负载建连接**的那些 —— 读文件的日志 agent（filebeat、promtail）
+          只填「会向工作负载建连接」的那些 —— 读文件的日志 agent（filebeat、promtail）
           不需要放行。端口只有你知道，平台不猜。
         </p>
         <textarea
@@ -768,7 +783,7 @@ function ClusterFields({ values, patch, mode }: {
         <p className="mt-0 mb-[6px] text-xs text-ink-muted">
           填了理由，NODE_AGENT 这一类会标为「不适用」而不再报缺失。
           它是一次会被记进审计的判断：判错的方向是监控在下发之后静默中断，
-          而那要到事故发生时才显现。**与上面那一栏互斥。**
+          而那要到事故发生时才显现。与上面那一栏互斥。
         </p>
         <input
           className="ctl w-full"
@@ -776,6 +791,121 @@ function ClusterFields({ values, patch, mode }: {
           value={values.noNodeAgentsReason}
           onChange={(e) => patch({ noNodeAgentsReason: e.target.value })}
           placeholder="例如：本集群的 agent 只读文件，不向工作负载建连接"
+        />
+      </div>
+
+      {/*
+        业务周期。写回门禁拿它判断观测窗口够不够长 —— 不知道一轮有多长，
+        "窗口没覆盖到的那一段流量"与"这条连接不存在"在数据里长得一模一样。
+
+        两格必须同时填或同时留空，与服务端同一条规则。留空不是缺陷，是
+        "还没有人回答过"，门禁据此拒绝出计划 —— 那正是它该做的。
+      */}
+      <div className="mt-3">
+        <SubHeading>业务周期</SubHeading>
+        <p className="mt-0 mb-[6px] text-xs text-ink-muted">
+          这个集群看全一轮流量需要多久。写回门禁拿它判断观测窗口够不够长：
+          一条每月月末才跑一次的连接，在一个七天的窗口里与「不存在」无法区分。
+          时长与理由必须同时给出，或者都留空（表示还没有人回答过）。
+        </p>
+        <div className="flex gap-3 items-end">
+          <div className="w-[180px]">
+            <TextField
+              label="秒"
+              value={values.businessCycleSeconds}
+              onChange={(v) => patch({ businessCycleSeconds: v })}
+              mono
+            />
+          </div>
+          <div className="flex-1">
+            <TextField
+              label="凭什么这么定"
+              value={values.businessCycleReason}
+              onChange={(v) => patch({ businessCycleReason: v })}
+            />
+          </div>
+        </div>
+      </div>
+
+      {/*
+        系统命名空间。默认不管 —— 一份下发到 kube-dns 的 default-deny 会让
+        整个集群失去 DNS，这道保护的默认值必须是"不碰"。
+
+        但它必须有一个入口：没有入口的保护是一堵没有门的墙，真正需要管控
+        kube-system 的集群只能改库，而改库这件事不会留下理由。
+      */}
+      <div className="mt-3">
+        <SubHeading>交给平台管理的系统命名空间（默认：一个都不管）</SubHeading>
+        <p className="mt-0 mb-[6px] text-xs text-ink-muted">
+          留空时，平台不为 kube-system / kube-public / kube-node-lease 生成任何候选策略。
+          每行一个命名空间。列进来之后，平台会为其中每个 workload 生成 default-deny 候选 ——
+          一份下发到 kube-dns 的 default-deny 会让整个集群失去域名解析，
+          所以这一栏要求写明理由。
+        </p>
+        <textarea
+          className="ctl w-full font-mono"
+          aria-label="交给平台管理的系统命名空间"
+          value={values.managedSystemNamespaces}
+          onChange={(e) => patch({ managedSystemNamespaces: e.target.value })}
+          rows={2}
+          // 占位符不写成一个真的命名空间名。深色主题下灰字读起来像已填的值，
+          // 而这一格的整个安全性建立在"空 = 不碰系统命名空间"上 —— 一个看起来
+          // 已经填了 kube-system 的空输入框，方向恰好错在最危险的那一侧。
+          placeholder="留空 = 一个都不管（默认）"
+        />
+        <input
+          className="ctl w-full mt-2"
+          aria-label="纳入系统命名空间的理由"
+          value={values.managedSystemNamespacesReason}
+          onChange={(e) => patch({ managedSystemNamespacesReason: e.target.value })}
+          placeholder="例如：本集群的 kube-system 里跑着业务组件，已确认 kube-dns 有独立放行"
+        />
+      </div>
+
+      {/*
+        CNI 执行哪些第二平面。这是操作者的**事实声明**，不是开关 ——
+        与上面那个 ccnpPresent 方向相反：那一项勾上是让平台更保守（降级），
+        这一项勾上是让平台**开始按那个平面的语义求值**。
+
+        声明错的方向因此是危险的：一个并不生效的平面被声明之后，平台会以为
+        某条连接被它拦着，于是不生成放行规则 —— 下发之后那条连接才真的断。
+        文案要说的是这个后果，理由那一格问的是"你怎么验证的"。
+      */}
+      <div className="mt-3">
+        <SubHeading>CNI 真的会执行的第二策略平面（默认：一个都不解释）</SubHeading>
+        <p className="mt-0 mb-[6px] text-xs text-ink-muted">
+          留空时平台不按任何第二平面求值，探测到就整片降级 —— 保守且正确。
+          勾上之后平台会按那个平面的语义求值，因此这是一句必须为真的断言：
+          装了 CRD 不等于执行。声明一个并不生效的平面，平台会以为某条连接被它拦着、
+          于是不生成放行规则，而那条连接会在下发之后才真的断。
+        </p>
+        {ENFORCED_PLANE_CHOICES.map((choice) => (
+          <label
+            key={choice.value}
+            className="flex items-start gap-2 text-sm mb-2"
+          >
+            <Checkbox
+              checked={values.enforcedPlanes.includes(choice.value)}
+              onChange={(on) => patch({
+                enforcedPlanes: on
+                  ? [...values.enforcedPlanes, choice.value]
+                  : values.enforcedPlanes.filter((p) => p !== choice.value),
+              })}
+              ariaLabel={`该集群的 CNI 执行 ${choice.label}`}
+              className="mt-[3px]"
+            />
+            <span>
+              {choice.label}
+              <span className="block text-ink-muted text-xs">{choice.detail}</span>
+            </span>
+          </label>
+        ))}
+        <input
+          className="ctl w-full mt-1"
+          aria-label="声明这些策略平面生效的理由"
+          value={values.enforcedPlanesReason}
+          onChange={(e) => patch({ enforcedPlanesReason: e.target.value })}
+          placeholder="例如：加一条 ANP Deny 后连接立刻断、删除后恢复，在本集群实测过"
         />
       </div>
 

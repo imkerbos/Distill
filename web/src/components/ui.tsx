@@ -95,11 +95,21 @@ export function Section({
   )
 }
 
-/** 表格外壳。表格是本产品的主要信息载体，样式集中在这里，不由各页面各写一份。 */
+/**
+ * 表格外壳。表格是本产品的主要信息载体，样式集中在这里，不由各页面各写一份。
+ *
+ * 卡片保持 overflow-hidden（圆角要靠它裁），但表格另包一层可横向滚动的容器。
+ * 少了这一层，宽表格会被卡片**静默裁掉**：没有滚动条，右边的列在页面上根本
+ * 不存在。实测集群表在 1440 宽的窗口下有 763px 不可达，被裁掉的里面包括
+ * 「操作」那一列 —— 也就是编辑与删除按钮。一张列数会随功能增长的表，
+ * 不能靠"显示器够宽"来保证它的最后一列点得到。
+ */
 export function TableCard({ children }: { children: ReactNode }) {
   return (
     <Card className="overflow-hidden">
-      <table className="dt">{children}</table>
+      <div className="overflow-x-auto">
+        <table className="dt">{children}</table>
+      </div>
     </Card>
   )
 }
