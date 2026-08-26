@@ -3,6 +3,7 @@ package snapshotstore
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -182,7 +183,8 @@ func readObservedPods(
 	observedAt time.Time,
 ) ([]identity.ObservedPod, error) {
 	rows, err := tx.QueryContext(ctx,
-		`SELECT ip, namespace, name, uid, workload_kind, workload_name, host_network, in_mesh
+		`SELECT ip, extra_ips, namespace, name, uid,
+		        workload_kind, workload_name, host_network, in_mesh
 		   FROM observed_pod
 		  WHERE cluster_id = ? AND observed_at = ? AND run_id = ?`,
 		clusterID, observedAt, runID)
@@ -193,13 +195,31 @@ func readObservedPods(
 
 	var out []identity.ObservedPod
 	for rows.Next() {
-		var p identity.ObservedPod
-		if err := rows.Scan(&p.PodIP, &p.Identity.Namespace, &p.Identity.PodName,
+		var (
+			p     identity.ObservedPod
+			extra []byte
+		)
+		if err := rows.Scan(&p.PodIP, &extra, &p.Identity.Namespace, &p.Identity.PodName,
 			&p.Identity.PodUID, &p.Identity.WorkloadKind, &p.Identity.WorkloadName,
 			&p.Identity.HostNetwork, &p.Identity.InMesh); err != nil {
 			return nil, fmt.Errorf("snapshotstore: scan observed pod: %w", err)
 		}
 		out = append(out, p)
+
+		// **每个额外地址各成一条观测。** identity.Derive 按 (地址, 主体) 建
+		// 区间，因此双栈 Pod 的第二个地址只有在这里被展开成独立的一条，
+		// 区间表里才会有它 —— 否则走那个地址的连接解不出主体、判 UNKNOWN，
+		// 覆盖它的规则于是缺席，下发 default-deny 之后会被拦断。
+		addrs, err := extraAddressesOf(extra)
+		if err != nil {
+			return nil, fmt.Errorf("snapshotstore: pod %s/%s: %w",
+				p.Identity.Namespace, p.Identity.PodName, err)
+		}
+		for _, a := range addrs {
+			alt := p
+			alt.PodIP = a
+			out = append(out, alt)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("snapshotstore: iterate observed pods: %w", err)
@@ -427,4 +447,27 @@ func validTo(iv identity.Interval) any {
 		return nil
 	}
 	return iv.ValidTo
+}
+
+// extraAddressesOf 解出额外地址列里的地址。
+//
+// **解不开就整次失败，不静默当成"没有额外地址"。** 后者会让一个双栈 Pod 的
+// 第二个地址悄悄消失在区间表里，而症状要到某条连接解不出主体时才出现，
+// 那时已经追不回成因。这一列由本包自己写入，解不开说明那一行坏了。
+func extraAddressesOf(raw []byte) ([]string, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var rows []podAddressRow
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return nil, fmt.Errorf("decode extra ips: %w", err)
+	}
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		if r.IP == "" {
+			continue
+		}
+		out = append(out, r.IP)
+	}
+	return out, nil
 }

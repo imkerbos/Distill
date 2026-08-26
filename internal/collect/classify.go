@@ -41,6 +41,18 @@ func Classify(run snapshot.Run, reg *cluster.Registry) snapshot.Run {
 		pods[i].IPScope = got.Scope
 		pods[i].IPScopeReason = got.Reason
 		warnings = append(warnings, ws...)
+
+		// 双栈 Pod 的第二个地址各自分类：两个地址可能落在不同的登记网段里
+		// （甚至一个在登记内、一个在登记外），共用主地址那一个结论会让其中
+		// 一个被另一个覆盖。告警同样按地址给 —— "这个 Pod 的 IPv6 落在登记
+		// 网段外"与 IPv4 那条是两件要分别去修的事。
+		for j := range pods[i].ExtraIPs {
+			extra, ws := classifyPodIP(reg, run.Observation.ClusterID,
+				pods[i].ExtraIPs[j].IP, subject, pods[i].HostNetwork)
+			pods[i].ExtraIPs[j].Scope = extra.Scope
+			pods[i].ExtraIPs[j].Reason = extra.Reason
+			warnings = append(warnings, ws...)
+		}
 	}
 
 	out.Observation.Pods = pods

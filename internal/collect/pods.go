@@ -61,6 +61,7 @@ func (c *Collector) toPod(p *corev1.Pod, rsOwners map[string]ownerRef) (snapshot
 		UID:               string(p.UID),
 		Phase:             string(p.Status.Phase),
 		IP:                p.Status.PodIP,
+		ExtraIPs:          extraPodIPs(p),
 		Labels:            p.Labels,
 		HostNetwork:       p.Spec.HostNetwork,
 		NodeName:          p.Spec.NodeName,
@@ -118,6 +119,30 @@ func scrapeAnnotationsOf(annotations map[string]string) map[string]string {
 			out = make(map[string]string, len(ScrapeAnnotationKeys))
 		}
 		out[k] = v
+	}
+	return out
+}
+
+// extraPodIPs 取出 status.podIPs 里除主地址之外的那些。
+//
+// **双栈 Pod 有两个地址**，而 status.podIP 只是 status.podIPs 的第一项。
+// 漏掉第二个的后果是走它的连接解不出主体、判 UNKNOWN，覆盖它的规则于是
+// 缺席 —— 下发 default-deny 之后那条连接会被拦断。
+//
+// 按值比对主地址而不是按下标跳过第一项：Kubernetes 保证两者一致，但一份
+// 不一致的 status（改过的、或未来版本的）不该让主地址被当成"额外地址"重复
+// 记一遍。重复本身无害（区间按地址建，同一个地址两条会被折叠），但那时
+// 快照里会出现一个与 IP 列相同的 ExtraIP，读起来像数据坏了。
+func extraPodIPs(p *corev1.Pod) []snapshot.PodAddress {
+	if len(p.Status.PodIPs) <= 1 {
+		return nil
+	}
+	out := make([]snapshot.PodAddress, 0, len(p.Status.PodIPs)-1)
+	for _, addr := range p.Status.PodIPs {
+		if addr.IP == "" || addr.IP == p.Status.PodIP {
+			continue
+		}
+		out = append(out, snapshot.PodAddress{IP: addr.IP})
 	}
 	return out
 }

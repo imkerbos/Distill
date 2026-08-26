@@ -73,6 +73,18 @@ type ForeignScope struct {
 	MatchLabels map[string]string
 }
 
+// PodAddress 是 Pod 的一个地址及其归属判定。
+//
+// 归属跟着地址走，不跟着 Pod 走：双栈 Pod 的两个地址可能落在不同的登记网段
+// 里（甚至一个在登记内、一个在登记外），共用一个 Scope 会让其中一个的结论
+// 被另一个覆盖。
+type PodAddress struct {
+	IP    string
+	Scope cluster.Scope
+	// Reason 仅在 Scope 判不出来时非空，取值与主地址那一列同一套封闭枚举。
+	Reason cluster.Reason
+}
+
 // Namespace 是一个命名空间的观测快照。
 type Namespace struct {
 	// ClusterID 是所属集群。
@@ -105,7 +117,17 @@ type Pod struct {
 	Phase string
 	// IP 是 Pod IP。Pending 的 Pod 尚未分配，此处为空。
 	IP string
-	// IPScope 是 IP 在 Fleet 内的归属判定，空表示 IP 为空或无法解析。
+	// ExtraIPs 是这个 Pod 的**其余**地址，双栈 Pod 在此带上另一个协议族。
+	//
+	// Kubernetes 的 `status.podIPs` 是一个数组，`status.podIP` 等于它的第一项。
+	// 只读后者的话，双栈 Pod 的第二个地址不进快照、也不进身份区间表 ——
+	// 走那个地址的连接**解不出主体**、判 UNKNOWN，覆盖它的规则于是缺席，
+	// 下发 default-deny 之后会被拦断。方向危险，因此必须带全。
+	//
+	// 主地址仍留在 IP 里、不并进来：现有的每一条按 IP 的查询与展示都指着它，
+	// 而单栈集群（绝大多数）的这一项恒为空，形状完全不变。
+	ExtraIPs []PodAddress
+	// IPScope 是**主地址** IP 在 Fleet 内的归属判定，空表示 IP 为空或无法解析。
 	IPScope cluster.Scope
 	// IPScopeReason 仅在 IPScope 为 UNKNOWN 时非空。
 	IPScopeReason cluster.Reason

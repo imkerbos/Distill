@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -517,5 +518,71 @@ func TestDerivingOneClusterLeavesTheOtherAlone(t *testing.T) {
 	}
 	if validTo.Valid {
 		t.Errorf("cluster A interval closed at %v by a run of cluster B", validTo.Time)
+	}
+}
+
+// **双栈 Pod 的两个地址各建一条区间。**
+//
+// identity.Derive 按 (地址, 主体) 建区间，因此第二个地址只有被展开成独立的
+// 一条观测，区间表里才会有它。少了它，走那个地址的连接解不出主体、判
+// UNKNOWN，覆盖它的规则于是缺席 —— 下发 default-deny 之后会被拦断。
+func TestDualStackPodGetsAnIntervalPerAddress(t *testing.T) {
+	s, db := newTestStore(t)
+	at := time.Date(2026, 8, 26, 10, 0, 0, 0, time.UTC)
+
+	pod := snapshot.Pod{
+		ClusterID: clusterA, Namespace: "payment", Name: "api-1",
+		UID: "3c9d2b1a-0000-4000-8000-0000000000d1", Phase: "Running",
+		IP:           "10.4.1.7",
+		ExtraIPs:     []snapshot.PodAddress{{IP: "fd00:10:4::7"}},
+		Labels:       map[string]string{"app": "api"},
+		WorkloadKind: "Deployment", WorkloadName: "api",
+	}
+	if err := s.Save(t.Context(), podRun(clusterA, "dual-run-000000000000000001", at, pod)); err != nil {
+		t.Fatalf("Save() = %v", err)
+	}
+	derive(t, s, clusterA, "dual-run-000000000000000001")
+
+	got := dumpIntervals(t, db)
+	if len(got) != 2 {
+		t.Fatalf("建了 %d 条区间, want 2（每个地址一条）：\n%s",
+			len(got), strings.Join(got, "\n"))
+	}
+	var sawV4, sawV6 bool
+	for _, row := range got {
+		if strings.Contains(row, "10.4.1.7") {
+			sawV4 = true
+		}
+		if strings.Contains(row, "fd00:10:4::7") {
+			sawV6 = true
+		}
+		// 两条区间指向同一个主体：它们是同一个 Pod 的两个地址。
+		if !strings.Contains(row, "payment") || !strings.Contains(row, "api-1") {
+			t.Errorf("区间没挂到 payment/api-1 上：%s", row)
+		}
+	}
+	if !sawV4 || !sawV6 {
+		t.Errorf("缺了协议族（v4=%v v6=%v）：\n%s", sawV4, sawV6, strings.Join(got, "\n"))
+	}
+}
+
+// 单栈 Pod 仍然只有一条区间：绝大多数集群走这条路，形状不能变。
+func TestSingleStackPodStillGetsOneInterval(t *testing.T) {
+	s, db := newTestStore(t)
+	at := time.Date(2026, 8, 26, 10, 0, 0, 0, time.UTC)
+
+	pod := snapshot.Pod{
+		ClusterID: clusterA, Namespace: "payment", Name: "api-1",
+		UID: "3c9d2b1a-0000-4000-8000-0000000000d2", Phase: "Running",
+		IP: "10.4.1.7", Labels: map[string]string{"app": "api"},
+		WorkloadKind: "Deployment", WorkloadName: "api",
+	}
+	if err := s.Save(t.Context(), podRun(clusterA, "single-run-00000000000000001", at, pod)); err != nil {
+		t.Fatalf("Save() = %v", err)
+	}
+	derive(t, s, clusterA, "single-run-00000000000000001")
+
+	if got := dumpIntervals(t, db); len(got) != 1 {
+		t.Errorf("单栈 Pod 建了 %d 条区间, want 1：\n%s", len(got), strings.Join(got, "\n"))
 	}
 }

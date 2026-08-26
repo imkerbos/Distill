@@ -269,11 +269,11 @@ func insertPods(ctx context.Context, tx *sql.Tx, obs snapshot.Observation) error
 	stmt, err := tx.PrepareContext(ctx,
 		`INSERT INTO observed_pod
 		   (cluster_id, namespace, name, observed_at, run_id, uid, phase, ip,
-		    ip_scope, ip_scope_reason, labels, scrape_annotations,
+		    ip_scope, ip_scope_reason, extra_ips, labels, scrape_annotations,
 		    host_network, node_name, service_account,
 		    owner_kind, owner_name, workload_kind, workload_name,
 		    in_mesh, mesh_source, mesh_detail)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return fmt.Errorf("snapshotstore: prepare pod: %w", err)
 	}
@@ -292,10 +292,18 @@ func insertPods(ctx context.Context, tx *sql.Tx, obs snapshot.Observation) error
 			return fmt.Errorf("snapshotstore: marshal pod scrape annotations %s/%s: %w",
 				p.Namespace, p.Name, err)
 		}
+		// 额外地址恒写成数组，空时是 []：一个 NULL 与一个空数组在读回时
+		// 分不出"这行是加这一列之前写的"与"这个 Pod 只有一个地址"，
+		// 而前者其实也只有一个地址 —— 但那是靠推断，不是靠事实。
+		extra, err := json.Marshal(extraAddressRows(p.ExtraIPs))
+		if err != nil {
+			return fmt.Errorf("snapshotstore: marshal pod extra ips %s/%s: %w",
+				p.Namespace, p.Name, err)
+		}
 		if _, err := stmt.ExecContext(ctx,
 			obs.ClusterID, p.Namespace, p.Name, obs.ObservedAt, obs.RunID,
 			p.UID, p.Phase, p.IP, string(p.IPScope), string(p.IPScopeReason),
-			labels, scrape, p.HostNetwork, p.NodeName, p.ServiceAccount,
+			string(extra), labels, scrape, p.HostNetwork, p.NodeName, p.ServiceAccount,
 			p.OwnerKind, p.OwnerName, p.WorkloadKind, p.WorkloadName,
 			p.InMesh, string(p.MeshSource), p.MeshDetail); err != nil {
 			return fmt.Errorf("snapshotstore: insert pod %s/%s: %w", p.Namespace, p.Name, err)
@@ -521,4 +529,29 @@ func (s *Store) ForeignScopesAt(
 		return nil, false, fmt.Errorf("snapshotstore: iterate foreign scopes: %w", err)
 	}
 	return out, complete.Valid && complete.Bool, nil
+}
+
+// podAddressRow 是额外地址在 JSON 里的形状。
+//
+// 单独一个类型而不是直接序列化 snapshot.PodAddress：那个结构体的字段名一改，
+// 落库格式就跟着变，而库里已经写下的行不会跟着改 —— 一次重命名会让旧行读不
+// 回来，且只在读到旧数据时才表现出来。
+type podAddressRow struct {
+	IP     string `json:"ip"`
+	Scope  string `json:"scope"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// extraAddressRows 把额外地址翻成落库形状；**空时返回空切片，不是 nil**。
+//
+// json.Marshal(nil 切片) 给出 "null"，而这一列声明为 NOT NULL JSON。
+// 更要紧的是读回时 "null" 与 "[]" 分不出"没有额外地址"与"这一列坏了"。
+func extraAddressRows(in []snapshot.PodAddress) []podAddressRow {
+	out := make([]podAddressRow, 0, len(in))
+	for _, a := range in {
+		out = append(out, podAddressRow{
+			IP: a.IP, Scope: string(a.Scope), Reason: string(a.Reason),
+		})
+	}
+	return out
 }
