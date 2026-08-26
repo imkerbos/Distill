@@ -24,6 +24,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/imkerbos/Distill/internal/buildinfo"
+	"github.com/imkerbos/Distill/internal/collectrun"
 	"github.com/imkerbos/Distill/internal/collectstore"
 	"github.com/imkerbos/Distill/internal/config"
 	"github.com/imkerbos/Distill/internal/flow"
@@ -206,7 +207,24 @@ func run(configPath, clusterID string, timeout time.Duration, ingest ingestOptio
 	// 对账器与读栈同源：它必须与 /flows 那一屏走同一条判定路径，否则
 	// 一致率量的是另一个引擎（design doc 2026-08-25 §3.1）。
 	return collectAndIngest(ctx, clusterID, client, fleet, store, src, window,
-		collectstore.New(db, reg), logger)
+		collectstore.New(db, reg), foreignPlanesOf(probe), logger)
+}
+
+// foreignPlanesOf 把探测结果翻成随快照落库的那一份覆盖范围。
+//
+// **探测没查成时一律不完整**：Checked 为 false 说明我们连"有没有第二平面"
+// 都没问出来，那时任何精确到主体的说法都是编出来的。判定据此整片降级。
+func foreignPlanesOf(probe kubeclient.PlaneProbe) collectrun.ForeignPlanes {
+	if !probe.Checked {
+		return collectrun.ForeignPlanes{}
+	}
+	scopes := make([]snapshot.ForeignScope, 0, len(probe.Scopes))
+	for _, sc := range probe.Scopes {
+		scopes = append(scopes, snapshot.ForeignScope{
+			Namespace: sc.Namespace, MatchLabels: sc.MatchLabels,
+		})
+	}
+	return collectrun.ForeignPlanes{Scopes: scopes, Complete: probe.ScopesComplete}
 }
 
 // newClusterClient 把集群登记里的 kubeconfig 引用变成一个受守卫的客户端。

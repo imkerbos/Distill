@@ -77,6 +77,7 @@ var cleanupStatements = []string{
 	"DELETE FROM observed_node",
 	"DELETE FROM observed_pod",
 	"DELETE FROM observed_namespace",
+	"DELETE FROM collection_foreign_scope",
 	"DELETE FROM collection_warning",
 	"DELETE FROM collection_run_failure",
 	"DELETE FROM collection_run_resource",

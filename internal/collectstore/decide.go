@@ -5,12 +5,14 @@ import (
 	"fmt"
 
 	networkingv1 "k8s.io/api/networking/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/imkerbos/Distill/internal/cluster"
 	"github.com/imkerbos/Distill/internal/flow"
 	"github.com/imkerbos/Distill/internal/identity"
 	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/replay"
+	"github.com/imkerbos/Distill/internal/snapshot"
 	"github.com/imkerbos/Distill/internal/store"
 )
 
@@ -131,7 +133,22 @@ func (r *Reader) trafficOf(
 	// 「没查过」与「确认不存在」在一个布尔里长得一样，而前者必须降级。
 	// 只有平台确认过的 NONE 才配得上满置信度。
 	if c.EffectivePlanes().Degrades() {
-		opts = append(opts, replay.WithForeignPlane(true))
+		// 有没有第二平面是集群级的事实；**被它覆盖的是哪些主体**要按锚点
+		// 那一刻的快照读 —— CNP 的覆盖范围会变，拿当前范围解释历史窗口，
+		// 当时被覆盖的那一批就不会被降级（CLAUDE.md §4）。
+		scopes, complete, err := r.facts.ForeignScopesAt(ctx, d.clusterID, d.anchor)
+		switch {
+		case err != nil:
+			return traffic{}, err
+		case complete:
+			// 范围完整：降级收窄到真的被覆盖的那些主体。
+			opts = append(opts, replay.WithForeignPlaneScopes(foreignScopesOf(scopes)))
+		default:
+			// **范围不完整就整片降级**，不拿读到的那一半作答：不完整意味着
+			// 有主体被覆盖而我们不知道是哪些，漏掉一个就是把一条真的被管着
+			// 的连接判成可信。读不到任何采集也走这一支（见 ForeignScopesAt）。
+			opts = append(opts, replay.WithForeignPlane(true))
+		}
 	}
 	return traffic{
 		described:  d,
@@ -406,4 +423,22 @@ func (t traffic) externalAddress(ip string) bool {
 	default:
 		return false
 	}
+}
+
+// foreignScopesOf 把快照里的覆盖范围翻成求值器认的形状。
+//
+// 两个类型分别属于快照层与纯求值层，各自独立演进：求值器不该知道这些范围
+// 是从 CiliumNetworkPolicy 的 endpointSelector 里抽出来的，快照层也不该
+// 依赖求值器的选项类型。
+func foreignScopesOf(in []snapshot.ForeignScope) []replay.ForeignScope {
+	out := make([]replay.ForeignScope, 0, len(in))
+	for _, sc := range in {
+		out = append(out, replay.ForeignScope{
+			Namespace: sc.Namespace,
+			// MatchLabels 为空即"选中该范围内全部主体"，与 LabelSelector
+			// 值类型的空语义一致 —— 不必特判。
+			Selector: metav1.LabelSelector{MatchLabels: sc.MatchLabels},
+		})
+	}
+	return out
 }

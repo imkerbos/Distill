@@ -15,6 +15,11 @@ type Evaluator struct {
 	policies     []networkingv1.NetworkPolicy
 	namespaces   map[string]NamespaceRef
 	foreignPlane bool
+	// foreignScopes 是第二平面策略覆盖的主体范围（ForeignScope）。
+	//
+	// 与 foreignPlane 并存：那个是"没查过/查不动"时的整片降级，这个是
+	// "查过了，范围是这些"时的精确降级。
+	foreignScopes []ForeignScope
 }
 
 // Option 调整求值器的行为。
@@ -58,6 +63,10 @@ func NewEvaluator(
 // 降级不改变结论本身：DENY 仍然是 DENY，只是不得作为策略推荐的依据。
 func (e *Evaluator) confidenceFor(f Flow) Confidence {
 	if e.foreignPlane {
+		return ConfidenceDegraded
+	}
+	// 被第二平面策略选中的主体降级；其余照常可信（ForeignScope）。
+	if e.coveredByForeignPolicy(f) {
 		return ConfidenceDegraded
 	}
 	for _, endpoint := range []Endpoint{f.Source, f.Dest} {

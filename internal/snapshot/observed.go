@@ -34,12 +34,43 @@ type Observation struct {
 	// Gateways 是入口暴露对象快照，本轮只含 Kind=Ingress。
 	Gateways []Gateway
 
+	// ForeignScopes 是平台**不解释**的策略平面所覆盖的主体范围
+	// （design doc 2026-08-25 §2）。
+	//
+	// 跟着这一次快照走，而不是记在集群登记上：CNP 的覆盖范围会变，
+	// 今天那条选中 A、昨天那条可能选中 B。按"当前范围"去解释历史窗口，
+	// B 那一批就不会被降级 —— 而那正是它需要被降级的时候
+	// （CLAUDE.md §4：禁止用当前状态解释历史数据）。
+	ForeignScopes []ForeignScope
+	// ForeignScopesComplete 表示上面那份范围是**完整**的。
+	//
+	// **为 false 时判定必须整片降级**，不得只降 ForeignScopes 里那些：
+	// 范围不完整意味着有主体被覆盖而我们不知道是哪些，漏掉一个就是把一条
+	// 真的被管着的连接判成可信。
+	//
+	// 平面存在而范围不完整是常态，不是异常 —— 平台只解析它确定算得出来
+	// 的那部分（matchExpressions、非 k8s 标签来源、AdminNetworkPolicy
+	// 一族都算不出）。
+	ForeignScopesComplete bool
+
 	// Warnings 是采集当时发现的问题。
 	//
 	// 与 error 分开：这些不是采集失败，是采到的事实与登记不符。
 	// 当作错误会让一次成功的采集被丢掉，忽略则会让"注册表填错了"
 	// 一直等到求值阶段才以错误归属的形式表现出来。
 	Warnings []Warning
+}
+
+// ForeignScope 是一条平台不解释的策略所覆盖的主体范围。
+//
+// 只带 namespace 与一组标签相等条件 —— 这是从 CiliumNetworkPolicy 的
+// endpointSelector 里确定算得出来的部分。它**不描述那条策略放行了什么**，
+// 那是第二套求值引擎的事。
+type ForeignScope struct {
+	// Namespace 为空表示集群级，跨全部 namespace 生效。
+	Namespace string
+	// MatchLabels 为空表示选中该范围内全部主体。
+	MatchLabels map[string]string
 }
 
 // Namespace 是一个命名空间的观测快照。

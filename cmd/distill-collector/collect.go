@@ -28,9 +28,10 @@ var (
 
 func collectOnce(
 	ctx context.Context, clusterID string, client kubernetes.Interface,
-	fleet *cluster.Registry, store runStore, logger *slog.Logger,
+	fleet *cluster.Registry, store runStore,
+	planes collectrun.ForeignPlanes, logger *slog.Logger,
 ) (snapshot.Run, error) {
-	return collectrun.Once(ctx, clusterID, client, fleet, store, logger)
+	return collectrun.Once(ctx, clusterID, client, fleet, store, planes, logger)
 }
 
 func recordAbortedRun(

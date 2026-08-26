@@ -107,6 +107,16 @@ func RecordAborted(
 	}
 }
 
+// ForeignPlanes 是探测出来的第二平面覆盖范围，随这一次采集一起落库。
+//
+// 零值表示"范围不完整"（Complete 为 false），下游据此整片降级 —— 这是刻意的
+// 默认：一条没有填过这个参数的调用路径（比如 agent 推送模式）不该悄悄拿到
+// 精确降级，而精确降级建立在"我们确实看全了"这个前提上。
+type ForeignPlanes struct {
+	Scopes   []snapshot.ForeignScope
+	Complete bool
+}
+
 // Once 跑完一次采集：先自证只读，再采集，最后落库。
 //
 // **顺序是这个函数存在的理由。** AssertReadOnly 必须跑在任何一次 List
@@ -124,6 +134,7 @@ func Once(
 	client kubernetes.Interface,
 	fleet *cluster.Registry,
 	store Store,
+	planes ForeignPlanes,
 	logger *slog.Logger,
 ) (snapshot.Run, error) {
 	startedAt := time.Now()
@@ -160,6 +171,13 @@ func Once(
 	if err != nil {
 		return snapshot.Run{}, fmt.Errorf("collect cluster %s: %w", clusterID, err)
 	}
+	// 第二平面的覆盖范围跟着这一次快照落库（design doc 2026-08-25 §2）。
+	//
+	// 探测在建客户端那一步做（它要用同一份马上会被清掉的 kubeconfig），
+	// 结果一路带到这里 —— 而不是在这里再探一次：两次探测之间集群可能变了，
+	// 那时资产快照与覆盖范围描述的就是两个时刻。
+	run.Observation.ForeignScopes = planes.Scopes
+	run.Observation.ForeignScopesComplete = planes.Complete
 
 	// 归属判定紧跟在采集之后，用全 fleet 的登记（design doc 2026-08-18 §3.4）。
 	//

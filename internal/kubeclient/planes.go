@@ -25,24 +25,51 @@ type PlaneProbe struct {
 	Checked bool
 	// Detail 是探测到的平面种类，用于展示；不含地址、不含对象名。
 	Detail []string
+	// Scopes 是这些策略覆盖的主体范围，用于把降级收窄到真的被覆盖的主体。
+	//
+	// 在这之前，集群里只要存在一条 CNP，每一条判定都会被标成 DEGRADED ——
+	// 粒度粗到等于宣布这个集群完全不可信，而降级面越大，操作者越会习惯性
+	// 忽略它（design doc 2026-08-25 §2）。
+	Scopes []PlaneScope
+	// ScopesComplete 表示这份覆盖范围是**完整**的。
+	//
+	// **为 false 时调用方必须整片降级**，不得只降 Scopes 里那些：范围不完整
+	// 意味着有主体被覆盖而我们不知道是哪些，而漏掉一个就是把一条真的被管着
+	// 的连接判成可信。Present 为 true 而 ScopesComplete 为 false 是常态，
+	// 不是异常 —— 平台只解析它确定算得出来的那部分。
+	ScopesComplete bool
 }
 
 // probedPlanes 是平台知道自己**不解释**的那几个策略平面。
 //
 // 只列到 GroupVersionResource 一级，不解析任何对象内容：平台回答的是
 // "存不存在"，不是"它们放行了什么"—— 后者是第二套求值引擎（design doc §6）。
+// maxPlaneObjects 是一次探测允许读入的对象数上限。
+//
+// 超过即放弃精确降级、退回整片降级，**不拿被截断的一半作答**：少读一条
+// 就是漏掉一批被覆盖的主体，而漏掉的那些会被判成可信。
+const maxPlaneObjects = 1000
+
 var probedPlanes = []struct {
 	name string
 	gvr  schema.GroupVersionResource
+	// scoped 表示平台会解析这一类的覆盖范围。
+	//
+	// 只有 Cilium 那两类：它们的 endpointSelector 是一组标签相等条件，
+	// 确定算得出来。AdminNetworkPolicy 一族带优先级与 Pass 动作，覆盖范围
+	// 之外还要解释生效次序，本轮不碰 —— 它存在就整片降级。
+	scoped bool
+	// namespaced 表示这一类是命名空间级的；否则是集群级。
+	namespaced bool
 }{
 	{"CiliumNetworkPolicy", schema.GroupVersionResource{
-		Group: "cilium.io", Version: "v2", Resource: "ciliumnetworkpolicies"}},
+		Group: "cilium.io", Version: "v2", Resource: "ciliumnetworkpolicies"}, true, true},
 	{"CiliumClusterwideNetworkPolicy", schema.GroupVersionResource{
-		Group: "cilium.io", Version: "v2", Resource: "ciliumclusterwidenetworkpolicies"}},
+		Group: "cilium.io", Version: "v2", Resource: "ciliumclusterwidenetworkpolicies"}, true, false},
 	{"AdminNetworkPolicy", schema.GroupVersionResource{
-		Group: "policy.networking.k8s.io", Version: "v1alpha1", Resource: "adminnetworkpolicies"}},
+		Group: "policy.networking.k8s.io", Version: "v1alpha1", Resource: "adminnetworkpolicies"}, false, false},
 	{"BaselineAdminNetworkPolicy", schema.GroupVersionResource{
-		Group: "policy.networking.k8s.io", Version: "v1alpha1", Resource: "baselineadminnetworkpolicies"}},
+		Group: "policy.networking.k8s.io", Version: "v1alpha1", Resource: "baselineadminnetworkpolicies"}, false, false},
 }
 
 // ProbePlanes 探测目标集群里有没有平台不解释的其它策略平面。
@@ -93,24 +120,53 @@ func probePlanes(ctx context.Context, cfg *rest.Config) (PlaneProbe, error) {
 		}
 	}
 
-	out := PlaneProbe{Checked: true}
+	// ScopesComplete 起点为 true，任何一处算不出就落回 false。
+	// 起点为 false 会让"什么都没有"的集群也拿不到精确降级。
+	out := PlaneProbe{Checked: true, ScopesComplete: true}
 	for _, plane := range probedPlanes {
 		gv := plane.gvr.GroupVersion().String()
 		if !known[gv] {
 			// 这一类的 API 组根本不存在 —— 一个确定的"没有"。
 			continue
 		}
-		list, err := dyn.Resource(plane.gvr).List(ctx, metav1.ListOptions{Limit: 1})
+		// 列全量而不是 Limit:1：要拿覆盖范围就得看每一条。上限之内一次列完，
+		// 超过上限则整份范围作废（见下），不截断作答。
+		list, err := dyn.Resource(plane.gvr).List(ctx, metav1.ListOptions{Limit: maxPlaneObjects + 1})
 		if err != nil {
 			// 组在、却列不出来（多半是没有 RBAC）。这一类的答案是"不知道"，
 			// 而一个不知道就让整次探测降级 —— 不能拿其余几类的"没有"凑成
 			// 一个整体的"没有"。
 			out.Checked = false
+			out.ScopesComplete = false
 			continue
 		}
-		if len(list.Items) > 0 {
-			out.Present = true
-			out.Detail = append(out.Detail, plane.name)
+		if len(list.Items) == 0 {
+			continue
+		}
+		out.Present = true
+		out.Detail = append(out.Detail, plane.name)
+
+		if !plane.scoped {
+			// 这一类平台还不会解析覆盖范围（AdminNetworkPolicy 一族）。
+			// 它存在就意味着有主体被覆盖而我们说不出是哪些。
+			out.ScopesComplete = false
+			continue
+		}
+		if len(list.Items) > maxPlaneObjects {
+			// 超过上限：**整份范围作废**，不拿被截断的一半作答 ——
+			// 少一条就是漏掉一批被覆盖的主体。
+			out.ScopesComplete = false
+			continue
+		}
+		for _, item := range list.Items {
+			scope, ok := scopeOf(item, plane.namespaced)
+			if !ok {
+				// 这一条的覆盖范围算不出来（matchExpressions、别的标签来源、
+				// 或者 selector 写在 specs[] 里）。一条算不出，整份就不完整。
+				out.ScopesComplete = false
+				continue
+			}
+			out.Scopes = append(out.Scopes, scope)
 		}
 	}
 	return out, nil

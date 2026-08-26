@@ -338,7 +338,13 @@ func run(ctx context.Context, opts options, timeout time.Duration, logger *slog.
 			defer cancel()
 			// fleet 传 nil：**归属由平台判定**（design doc §3.4）。把 fleet
 			// 网段下发给每一个被管集群，等于把整个 fleet 的拓扑发出去。
-			_, err := collectrun.Once(ctx, cfg.ClusterID, client, nil, sink, logger)
+			//
+			// ForeignPlanes 传零值：推送模式下这个 agent 还不探测第二策略
+			// 平面。零值即"覆盖范围不完整"，平台据此**整片降级**这个集群的
+			// 判定 —— 保守且正确，而一个悄悄拿到精确降级的路径会把它没看过
+			// 的那些主体判成可信（internal/collectrun.ForeignPlanes）。
+			_, err := collectrun.Once(
+				ctx, cfg.ClusterID, client, nil, sink, collectrun.ForeignPlanes{}, logger)
 			return err
 		},
 		assetsEvery:   opts.assetsEvery,

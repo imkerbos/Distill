@@ -153,10 +153,11 @@ func insertRun(ctx context.Context, tx *sql.Tx, run snapshot.Run) error {
 
 	_, err := tx.ExecContext(ctx,
 		`INSERT INTO collection_run
-		   (cluster_id, run_id, observed_at, started_at, finished_at, status, error_reason)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		   (cluster_id, run_id, observed_at, started_at, finished_at, status, error_reason,
+		    foreign_scopes_complete)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		obs.ClusterID, obs.RunID, obs.ObservedAt, run.StartedAt, run.FinishedAt,
-		string(run.Status), string(run.ErrorReason))
+		string(run.Status), string(run.ErrorReason), obs.ForeignScopesComplete)
 	if err != nil {
 		// 唯一键冲突就是「这一次已经落过了」。用数据库的约束判重，而不是
 		// 先 SELECT 再 INSERT：后者在两次并发重试之间有窗口，而 CronJob
@@ -165,6 +166,24 @@ func insertRun(ctx context.Context, tx *sql.Tx, run snapshot.Run) error {
 			return fmt.Errorf("%w: cluster %s run %s", ErrRunExists, obs.ClusterID, obs.RunID)
 		}
 		return fmt.Errorf("snapshotstore: insert run: %w", err)
+	}
+
+	// 第二平面的覆盖范围与运行元数据同一个事务：完整度标志写在 run 上、
+	// 范围写在这里，两者分开落会出现"读到了范围、没读到完整度"的窗口，
+	// 而那时最自然的写法（当作完整）恰好是危险的那一个。
+	for i, sc := range obs.ForeignScopes {
+		labels, err := json.Marshal(sc.MatchLabels)
+		if err != nil {
+			return fmt.Errorf("snapshotstore: encode foreign scope labels: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO collection_foreign_scope
+			   (cluster_id, run_id, seq, namespace, match_labels)
+			 VALUES (?, ?, ?, ?, ?)`,
+			obs.ClusterID, obs.RunID, i, sc.Namespace, string(labels),
+		); err != nil {
+			return fmt.Errorf("snapshotstore: insert foreign scope: %w", err)
+		}
 	}
 
 	// 计数逐类写入，包括为 0 的那些。写 0 而非跳过：一个缺行的资源类型
@@ -441,4 +460,65 @@ const errDuplicateEntry uint16 = 1062
 func isDuplicateKey(err error) bool {
 	var me *mysqldriver.MySQLError
 	return errors.As(err, &me) && me.Number == errDuplicateEntry
+}
+
+// ForeignScopesAt 读出某一次采集观测到的第二平面覆盖范围。
+//
+// 按**观测时刻**取，与其余按锚点读的资产同一条路：判定要用的是"那一刻
+// 集群是什么样"，而 CNP 的覆盖范围会变（CLAUDE.md §4）。
+//
+// 第二个返回值是那一次采集算出来的范围完不完整。**为 false 时调用方必须
+// 整片降级**，不得只降返回的那些：范围不完整意味着有主体被覆盖而我们不知道
+// 是哪些，漏掉一个就是把一条真的被管着的连接判成可信。
+//
+// 那一刻没有任何采集时返回 (nil, false, nil) —— 空范围配上"不完整"，
+// 于是调用方走整片降级。**这是刻意的**：读不到就是不知道，而不知道时
+// 唯一安全的说法是"整片都不可信"。
+func (s *Store) ForeignScopesAt(
+	ctx context.Context, clusterID string, at time.Time,
+) ([]snapshot.ForeignScope, bool, error) {
+	var complete sql.NullBool
+	err := s.db.QueryRowContext(ctx,
+		`SELECT foreign_scopes_complete FROM collection_run
+		  WHERE cluster_id = ? AND observed_at = ? LIMIT 1`, clusterID, at.UTC()).Scan(&complete)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("snapshotstore: read foreign scope completeness: %w", err)
+	}
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT sc.namespace, sc.match_labels
+		   FROM collection_foreign_scope AS sc
+		   JOIN collection_run AS run
+		     ON run.cluster_id = sc.cluster_id AND run.run_id = sc.run_id
+		  WHERE sc.cluster_id = ? AND run.observed_at = ?
+		  ORDER BY sc.seq`, clusterID, at.UTC())
+	if err != nil {
+		return nil, false, fmt.Errorf("snapshotstore: read foreign scopes: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []snapshot.ForeignScope
+	for rows.Next() {
+		var (
+			sc  snapshot.ForeignScope
+			raw []byte
+		)
+		if err := rows.Scan(&sc.Namespace, &raw); err != nil {
+			return nil, false, fmt.Errorf("snapshotstore: scan foreign scope: %w", err)
+		}
+		if err := json.Unmarshal(raw, &sc.MatchLabels); err != nil {
+			// 存进去的是我们自己编码的 JSON，解不开说明那一行坏了。
+			// **整份作废**，不是跳过这一条：少一条范围就是漏掉一批被覆盖的
+			// 主体，而漏掉的那些会被判成可信。
+			return nil, false, nil //nolint:nilerr // 见上：坏行即"范围不完整"，走整片降级。
+		}
+		out = append(out, sc)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("snapshotstore: iterate foreign scopes: %w", err)
+	}
+	return out, complete.Valid && complete.Bool, nil
 }

@@ -10,6 +10,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/imkerbos/Distill/internal/cluster"
+	"github.com/imkerbos/Distill/internal/collectrun"
 	"github.com/imkerbos/Distill/internal/flow"
 	"github.com/imkerbos/Distill/internal/hubble"
 	"github.com/imkerbos/Distill/internal/kubeclient"
@@ -167,9 +168,12 @@ func collectAndIngest(
 	// rec 算一次一致率。允许为 nil —— 没有读栈的调用方（测试）不做这一步，
 	// 而 nil 表示"这一轮不对账"，**不是**"对账结果是好的"。
 	rec reconciler,
+	// planes 是第二平面的覆盖范围，随这一次快照落库。零值即"范围不完整"，
+	// 下游据此整片降级 —— 没填过这个参数的调用路径不该悄悄拿到精确降级。
+	planes collectrun.ForeignPlanes,
 	logger *slog.Logger,
 ) error {
-	result, err := collectOnce(ctx, clusterID, client, fleet, store, logger)
+	result, err := collectOnce(ctx, clusterID, client, fleet, store, planes, logger)
 	if err != nil {
 		return err
 	}
