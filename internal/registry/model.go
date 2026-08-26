@@ -353,6 +353,19 @@ type Cluster struct {
 	//
 	// 内置一张"谁执行谁"的表会随版本过时，而过时的那天没有任何东西会报错。
 	CNI cluster.CNI `json:"cni"`
+	// EnforcedPlanes 是操作者声明的、这个集群的 CNI **真的会执行**的第二
+	// 策略平面（EnforcedPlane）。
+	//
+	// **与 OtherPlanes 分开，回答的是两个问题**：那一栏是探测结果
+	// （"集群里有没有这类对象"），这一栏是事实声明（"它们是不是活的"）。
+	// 探测回答不了后者 —— 实测 Cilium 1.19.5 完全不实现 ANP，那种集群上的
+	// ANP 对象是死的。
+	//
+	// **默认为空 = 平台不按任何第二平面的语义求值**，照旧走"探测到就整片
+	// 降级"的保守路线。声明它必须带理由。
+	EnforcedPlanes []EnforcedPlane `json:"enforcedPlanes,omitempty"`
+	// EnforcedPlanesReason 是这个声明的依据。
+	EnforcedPlanesReason string `json:"enforcedPlanesReason,omitempty"`
 	// ManagedSystemNamespaces 是操作者明示"由平台管"的系统命名空间。
 	//
 	// **默认为空，也就是平台不碰 kube-system 一类**（policygen.systemNamespaces）。

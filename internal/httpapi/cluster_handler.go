@@ -60,6 +60,21 @@ type clusterPayload struct {
 	BusinessCycleSeconds int `json:"businessCycleSeconds"`
 	// BusinessCycleReason 是凭什么这么定。与时长必须同时给出。
 	BusinessCycleReason string `json:"businessCycleReason"`
+	// ManagedSystemNamespaces 是操作者明示"由平台管"的系统命名空间。
+	//
+	// 默认为空 = 平台不为 kube-system 一类生成候选策略。要纳入必须显式列出
+	// 并写明理由（校验在 registry.ValidateCluster）。**没有这一项，那道保护
+	// 就成了一堵没有门的墙** —— 真正需要管控 kube-system 的集群只能改库。
+	ManagedSystemNamespaces []string `json:"managedSystemNamespaces"`
+	// ManagedSystemNamespacesReason 是纳入它们的依据。与清单必须同时给出。
+	ManagedSystemNamespacesReason string `json:"managedSystemNamespacesReason"`
+	// EnforcedPlanes 是操作者声明的、这个集群的 CNI **真的会执行**的第二
+	// 策略平面（design doc 2026-08-25-existing-policies §2.2）。
+	//
+	// 默认为空 = 平台不按任何第二平面的语义求值。声明必须带理由。
+	EnforcedPlanes []registry.EnforcedPlane `json:"enforcedPlanes"`
+	// EnforcedPlanesReason 是这个声明的依据。与清单必须同时给出。
+	EnforcedPlanesReason string `json:"enforcedPlanesReason"`
 }
 
 // toCluster 把请求体转成领域对象。
@@ -88,6 +103,11 @@ func (p clusterPayload) toCluster() registry.Cluster {
 		NoNodeAgentsReason:  p.NoNodeAgentsReason,
 		BusinessCycle:       time.Duration(p.BusinessCycleSeconds) * time.Second,
 		BusinessCycleReason: p.BusinessCycleReason,
+
+		ManagedSystemNamespaces:       p.ManagedSystemNamespaces,
+		ManagedSystemNamespacesReason: p.ManagedSystemNamespacesReason,
+		EnforcedPlanes:                p.EnforcedPlanes,
+		EnforcedPlanesReason:          p.EnforcedPlanesReason,
 	}
 }
 

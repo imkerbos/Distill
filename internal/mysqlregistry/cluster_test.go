@@ -313,6 +313,10 @@ func TestClusterSurvivesAFullRoundTripThroughMySQL(t *testing.T) {
 	// 新注册的集群停在列默认值 **UNKNOWN** 上 ——「还没认过」而不是
 	// 「没有 CNI」。每个集群都有 CNI，认不出只说明还没采过一轮。
 	want.CNI = cluster.CNIUnknown
+	// 执行平面声明同理：列默认值是 JSON 的 []，读回来是空切片而写进去是 nil。
+	// 空的含义在这里是明确的 —— 没有人声明过任何平面在执行，
+	// 那就是默认的"不解释、整片降级"。
+	want.EnforcedPlanes = []registry.EnforcedPlane{}
 
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("round-tripped cluster =\n%+v\nwant\n%+v", got, want)

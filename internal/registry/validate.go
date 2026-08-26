@@ -96,6 +96,20 @@ func ValidateCluster(c Cluster) error {
 	if !c.State.Valid() {
 		return invalidf("接入状态 %q 不在已登记的取值范围内", c.State)
 	}
+	// 声明"CNI 执行某个第二平面"必须带理由：这是一次会改变判定的决定 ——
+	// 声明之后平台会按那个平面的语义算，而算错的方向是把一条通着的连接
+	// 判成不通。没有理由的决定在事后复盘时与"手滑填上去的"分不开。
+	if len(c.EnforcedPlanes) > 0 && strings.TrimSpace(c.EnforcedPlanesReason) == "" {
+		return invalid("声明 CNI 执行哪些策略平面必须写明理由：" +
+			"平台会据此按那个平面的语义求值，而一个并不生效的平面会让它" +
+			"把通着的连接判成不通")
+	}
+	for _, p := range c.EnforcedPlanes {
+		if !p.Valid() {
+			return invalidf("策略平面 %q 不在已登记的取值范围内", p)
+		}
+	}
+
 	// 纳入系统命名空间必须带理由：这是一次会改变爆炸半径的决定
 	// （一份下发到 kube-dns 的 default-deny 会让全集群失去 DNS），
 	// 而没有理由的决定在事后复盘时与"手滑填上去的"分不开。
