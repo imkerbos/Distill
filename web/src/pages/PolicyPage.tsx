@@ -1,11 +1,12 @@
 import { useState, type CSSProperties, type ReactNode } from 'react'
 import { EVIDENCE_LABEL, evidenceNote } from './evidenceView.ts'
+import { previewEvidenceNote, ruleEvidenceView, type RuleEvidenceView } from './ruleEvidenceView.ts'
 import { api, ApiError } from '../api/client'
 import {
   RISK_CATEGORY_LABEL,
   type CandidatePolicy, type CandidateRule, type ChangeKind, type ExcludedWorkload,
   type Granularity, type Kind, type MissingBaseline, type OverrideDecision, type Widening,
-  type RuleOrigin, type RuleOverride, type StaleOverride,
+  type RuleEvidence, type RuleOrigin, type RuleOverride, type StaleOverride,
   type UngeneratableItem, type UngeneratableReason, type WorkloadExclusionReason,
   type WritebackPlanResult, type WritebackPushResult,
 } from '../api/types'
@@ -17,8 +18,9 @@ import { policyExportView, type PolicyExportView } from './policyExportView'
 import { baselineGapViews, notApplicableNote, notAssessedNote, wouldBreakQualifierFor } from './preconditionsView'
 import { ALL_GRANULARITIES, granularityView, wideningNote } from './granularityView'
 import { accessEdges, edgeStatus, tighteningNote } from './accessGraphView'
-import { Disclosure, Segmented } from '../components/radix'
+import { Checkbox, Disclosure, Segmented } from '../components/radix'
 import {
+  deletionRows, EXCLUSION_HELP, EXCLUSION_NONE, exclusionRows,
   writebackCountDrift, writebackPushBody, writebackView,
   type WritebackPushBody, type WritebackView,
 } from './writebackView'
@@ -138,7 +140,10 @@ export default function PolicyPage({ cluster }: { cluster: string }) {
         candidates={pv.candidates}
         trafficObserved={pv.trafficObserved}
       />
-      <CandidateSection candidates={pv.candidates} overrides={overrides} cluster={cluster} onChanged={onChanged} />
+      <CandidateSection
+        candidates={pv.candidates} overrides={overrides} evidence={pv.evidence}
+        cluster={cluster} onChanged={onChanged}
+      />
       <PendingSection candidates={pv.candidates} overrides={overrides} cluster={cluster} onChanged={onChanged} />
       <StaleOverridesSection staleOverrides={pv.staleOverrides} />
       <MissingBaselineSection
@@ -447,12 +452,17 @@ function WritebackControl({ view, pageCounts }: {
 }) {
   const [plan, setPlan] = useState<WritebackPlanResult | null>(null)
   const [pushed, setPushed] = useState<WritebackPushResult | null>(null)
+  // 勾选的删除项。改动它会把当前计划作废：确认删除进指纹，勾完不重新出计划
+  // 就等于拿一份描述另一套动作的指纹去推（design doc 2026-08-24 §4.4）。
+  const [selected, setSelected] = useState<readonly string[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
   // 推送按钮的存在条件。计划为 null 时它恒为 null，因此"没出计划就能推"
   // 在这个组件里写不出来（见 writebackPushBody）。
-  const pushBody = writebackPushBody(plan?.plan ?? null)
+  const pushBody = writebackPushBody(plan?.plan ?? null, selected)
+  const deletions = deletionRows(plan?.plan.deletions ?? null)
+  const exclusions = exclusionRows(plan?.plan.exclusions ?? null)
   const drift = plan === null ? null : writebackCountDrift(pageCounts, plan.plan.counts)
 
   async function loadPlan() {
@@ -460,7 +470,7 @@ function WritebackControl({ view, pageCounts }: {
     setError('')
     setPushed(null)
     try {
-      setPlan(await api.policyWritebackPlan(view.planPath))
+      setPlan(await api.policyWritebackPlan(view.planPath, selected))
     } catch (err) {
       // 出计划失败时把上一份计划丢掉：留着它意味着推送按钮还在，而它对应的
       // 是一次操作者已经在试图刷新的、可能已经过期的计划。
@@ -472,6 +482,14 @@ function WritebackControl({ view, pageCounts }: {
     } finally {
       setBusy(false)
     }
+  }
+
+  // 勾选变化即作废当前计划：指纹覆盖这份确认，留着旧计划就等于允许拿一份
+  // 描述另一套动作的指纹去推。逼回"重新出计划"是这条流程唯一诚实的形态。
+  function toggleDeletion(path: string) {
+    setSelected(prev => prev.includes(path) ? prev.filter(p => p !== path) : [...prev, path])
+    setPlan(null)
+    setPushed(null)
   }
 
   async function push(body: WritebackPushBody) {
@@ -556,13 +574,64 @@ function WritebackControl({ view, pageCounts }: {
               ? '（无）'
               : plan.plan.files.map((f) => <div key={f.path}>{f.path}</div>)}
           </PlanRow>
+          {/* 被排除的主体排在文件清单**紧后面**：它回答的是"为什么上面那张
+              清单里没有它们"。放到页面末尾，读的人会先把那份少了几个 workload
+              的清单当成完整的（design doc 2026-08-25-trust-engineering §3.4）。 */}
+          <PlanRow label="因判定分歧被排除的主体">
+            {exclusions.length === 0
+              ? EXCLUSION_NONE
+              : (
+                <>
+                  {exclusions.map((row) => (
+                    <div key={row.label}>
+                      <span style={{ fontFamily: 'var(--mono)' }}>{row.label}</span>
+                      <span className="ml-2 text-ink-muted">分歧 {row.rateText}</span>
+                    </div>
+                  ))}
+                  <div className="text-ink-muted">{EXCLUSION_HELP}</div>
+                </>
+              )}
+          </PlanRow>
           {/* 这两份清单都来自平台出计划时**真的枚举过一次仓库**（design doc
               §2、§3）：枚举失败时后端整次不出计划，因此这里渲染的"（无）"是一个
               空集，不是一句没人算过的话。 */}
-          <PlanRow label="仓库里多余的文件">
-            {(plan.plan.extraneous ?? []).length === 0
-              ? '（无）平台从不删除仓库里的文件，多余的文件只列出来交人工处置。'
-              : (plan.plan.extraneous ?? []).map((p) => <div key={p}>{p}</div>)}
+          <PlanRow label="策略目录下的其它文件">
+            {deletions.length === 0
+              ? '（无）策略目录下没有本次候选集之外的文件。'
+              : deletions.map((row) => (
+                <div key={row.path} className="mb-2">
+                  <label style={{
+                    display: 'flex', gap: 'var(--space-2)', alignItems: 'flex-start',
+                    cursor: row.selectable ? 'pointer' : 'default',
+                  }}>
+                    {/* 不可删的那两类不给勾选框，而不是给一个禁用的：
+                        一个点不动的勾选框读起来是"界面坏了"，而它其实是
+                        一条结论（design doc 2026-08-24 §4.2）。 */}
+                    {row.selectable
+                      ? (
+                        <Checkbox
+                          checked={selected.includes(row.path)}
+                          onChange={() => toggleDeletion(row.path)}
+                          ariaLabel={`确认删除 ${row.path}`}
+                        />
+                      )
+                      : <span style={{ width: 16 }} aria-hidden="true" />}
+                    <span>
+                      <span style={{ fontFamily: 'var(--mono)' }}>{row.path}</span>
+                      <span className="ml-2 text-ink-muted">[{row.class}]</span>
+                      <div className="text-ink-muted">{row.reason}</div>
+                      {row.impactText !== '' && (
+                        <div className="text-ink-muted">删除影响：{row.impactText}</div>
+                      )}
+                    </span>
+                  </label>
+                </div>
+              ))}
+            {selected.length > 0 && plan === null && (
+              <div role="alert" style={{ color: 'var(--verdict-deny)' }}>
+                勾选已变，这份计划作废了。重新生成写回计划，确认删除会一并进指纹。
+              </div>
+            )}
           </PlanRow>
           {/* 攒着几条没人合的 distill 分支，说明这个流程没在运转（§2）——
               这是唯一能看见"人工合并那道门是否真的有人在走"的信号。
@@ -826,9 +895,12 @@ function OverrideAppliedRow({ cluster, override, onChanged }: {
 /* 2. 候选策略列表（仅启用规则）                                            */
 /* ---------------------------------------------------------------------- */
 
-function CandidateSection({ candidates, overrides, cluster, onChanged }: {
+function CandidateSection({ candidates, overrides, evidence, cluster, onChanged }: {
   candidates: CandidatePolicy[]
   overrides: RuleOverride[]
+  // null 表示这个集群没在记跨窗口证据，与"记了但为空"是两件事，
+  // 因此原样往下传，不在这里 ?? {}。
+  evidence: Record<string, RuleEvidence> | null
   cluster: string
   onChanged: () => void
 }) {
@@ -839,6 +911,9 @@ function CandidateSection({ candidates, overrides, cluster, onChanged }: {
       description="按 namespace/workload 分组，仅展示会被启用的规则。BASELINE 来自基础设施事实推导，LEARNED 来自观测流量学习——两者证据强度不同，徽标视觉可分。待确认（enabled=false）的规则见下一节，不在此处出现；已被人工禁用的规则也移到下一节，同一处能看到全部人工决定。"
       meta={`${candidates.length} 组`}
     >
+      {previewEvidenceNote({ evidence }) !== '' && (
+        <Notice>{previewEvidenceNote({ evidence })}</Notice>
+      )}
       {candidates.length === 0 ? (
         <EmptyState message="没有可生成的候选策略。" detail="见下方「不可生成清单」了解原因。" />
       ) : (
@@ -865,7 +940,7 @@ function CandidateSection({ candidates, overrides, cluster, onChanged }: {
               ) : (
                 <RuleTable
                   rules={enabled} namespace={c.namespace} workload={c.workload}
-                  cluster={cluster} onChanged={onChanged}
+                  evidence={evidence} cluster={cluster} onChanged={onChanged}
                 />
               )}
             </div>
@@ -876,13 +951,41 @@ function CandidateSection({ candidates, overrides, cluster, onChanged }: {
   )
 }
 
-function RuleTable({ rules, namespace, workload, cluster, onChanged }: {
+/**
+ * 一条规则的观测证据。
+ *
+ * 与「流量条数」分列而不是合并：那一列说的是**这一个窗口**里看到多少条，
+ * 这一列说的是这条规则我们看了多久。两个数合成一个，就再也分不出
+ * "观察了三周、一直如此"与"刚才那一小时里第一次出现"。
+ */
+function RuleEvidenceCell({ view }: { view: RuleEvidenceView }) {
+  return (
+    <div>
+      <Chip strong={view.strength === 'ESTABLISHED'}>{view.label}</Chip>
+      {view.detail !== '' && (
+        <div className="mt-[2px] text-xs text-ink-muted">{view.detail}</div>
+      )}
+      {view.note !== '' && (
+        <div className="mt-[2px] text-xs text-ink-muted">{view.note}</div>
+      )}
+    </div>
+  )
+}
+
+function RuleTable({ rules, namespace, workload, evidence, cluster, onChanged }: {
   rules: CandidateRule[]
   namespace: string
   workload: string
+  evidence: Record<string, RuleEvidence> | null
   cluster: string
   onChanged: () => void
 }) {
+  // 证据最弱的排在最前面：先看到的应当是最不该下发的那几条。
+  // 同档内保持后端给的顺序，不再二次排序 —— 屏幕上的顺序与导出的顺序
+  // 无关联，但同一屏两次打开的顺序必须一致。
+  const ordered = rules
+    .map((r) => ({ rule: r, ev: ruleEvidenceView(evidence, namespace, workload, r.fingerprint) }))
+    .sort((a, b) => a.ev.rank - b.ev.rank)
   return (
     <TableCard>
       <thead>
@@ -893,11 +996,12 @@ function RuleTable({ rules, namespace, workload, cluster, onChanged }: {
           <th>对端</th>
           <th>端口</th>
           <th className="num">流量条数</th>
+          <th>观测证据</th>
           <th>人工决定</th>
         </tr>
       </thead>
       <tbody>
-        {rules.map((r) => (
+        {ordered.map(({ rule: r, ev }) => (
           <tr key={r.fingerprint}>
             <td><OriginBadge origin={r.origin} /></td>
             <td><RuleBasis rule={r} /></td>
@@ -905,6 +1009,7 @@ function RuleTable({ rules, namespace, workload, cluster, onChanged }: {
             <td><RuleTargets values={r.peers} /></td>
             <td><RuleTargets values={r.ports} /></td>
             <td className="num">{r.flowCount}</td>
+            <td><RuleEvidenceCell view={ev} /></td>
             <td>
               <OverrideControl
                 cluster={cluster} namespace={namespace} workload={workload}
@@ -1436,7 +1541,7 @@ function formatTime(iso: string): string {
 
 const smallButtonStyle: CSSProperties = {
   padding: '4px 10px', fontSize: 'var(--text-xs)', fontWeight: 500,
-  color: 'var(--text-on-dark)', background: 'var(--accent)',
+  color: 'var(--text-on-accent)', background: 'var(--accent)',
   border: 'none', borderRadius: 'var(--radius-sm)', cursor: 'pointer',
 }
 

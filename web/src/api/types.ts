@@ -2,6 +2,9 @@ export type Verdict = 'ALLOW' | 'DENY' | 'UNKNOWN'
 export type Confidence = 'TRUSTED' | 'DEGRADED'
 
 /** 后端统一响应包络。code 为 0 表示成功，非 0 时 data 为 null。 */
+/** 集群与仓库之间的关系，对应后端 httpapi.ClusterDrift。 */
+export type ClusterDriftResult = 'CONVERGED' | 'PENDING' | 'CLUSTER_AHEAD' | 'UNKNOWN'
+
 export interface Envelope<T> {
   code: number
   msg: string
@@ -555,6 +558,14 @@ export type DriftResult =
 /** 漂移检测端点的响应。 */
 export interface DriftStatus {
   driftResult: DriftResult
+  /**
+   * 集群与仓库之间的关系：GitOps controller 到底有没有把仓库里那份落下去
+   * （design doc 2026-08-25 §5）。
+   *
+   * 与 driftResult 是两个问题，**不合并**：一个仓库没被动过、但 controller
+   * 三天没同步的集群，driftResult 是 IN_SYNC 而这一项是 PENDING。
+   */
+  clusterDriftResult: ClusterDriftResult
 }
 
 /**
@@ -840,11 +851,51 @@ export const IMPORT_SOURCE_LABEL: Record<ImportSource, string> = {
   CLUSTER: '集群',
 }
 
+/**
+ * 一条规则跨窗口累积下来的观测证据。
+ *
+ * 与 CandidatePolicy 里那条规则的 flowCount 是两件事：flowCount 只描述
+ * **当前这一个窗口**，每次重新生成都会变；这里的数只增不减，回答的是
+ * "这条规则我们看了多久"。
+ */
+export interface RuleEvidence {
+  /** 首末观测取的是**采集窗口的边界**，不是记录写入时刻。 */
+  firstSeen: string
+  lastSeen: string
+  /**
+   * 这条规则出现过的采集窗口数。
+   *
+   * 与 observations 分列、不合成一个"证据分"：一个窗口里刷了十万条的规则
+   * 与十个窗口里每次都出现几条的规则，前者一次压测就能造出来。
+   */
+  windows: number
+  /**
+   * 其中完整度为 COMPLETE 的窗口数。
+   *
+   * **必须与 windows 同时呈现。** 一条规则在二十个"证明不了看全"的窗口里
+   * 出现过，说明的是"我们看了很多次"，不是"我们看全了"；只显示总数会让
+   * 前者被读成后者。
+   */
+  completeWindows: number
+  observations: number
+}
+
 export interface PolicyPreview {
   cluster: string
   namespace: string
   window: TimeWindow
   candidates: CandidatePolicy[]
+  /**
+   * 每条候选规则的跨窗口证据，键是 `namespace/workload/fingerprint`。
+   *
+   * **为 null 表示没有记录过证据**（演示集群，或这个集群从未跑过采集），
+   * 不是"证据为零"；空对象才是后者。两者必须分开渲染 —— 一个读起来像
+   * "证据不足"的空白，实际含义是"我们没在记"，与 trafficObserved 同源。
+   *
+   * 键含主体：规则指纹只覆盖规则内容，不含主体，"egress 到 kube-dns:53"
+   * 在每个 workload 上都是同一个指纹。
+   */
+  evidence: Record<string, RuleEvidence> | null
   /**
    * 这份预演背后有没有真实观测。
    *
@@ -942,6 +993,76 @@ export interface WritebackFile {
   content: string
 }
 
+/** 一次对账的分类，对应 internal/reconcile.Class。 */
+export type ReconcileClass =
+  | 'AGREE'
+  | 'SOURCE_SILENT'
+  | 'PLATFORM_UNKNOWN'
+  | 'DISAGREE_OVER_PERMISSIVE'
+  | 'DISAGREE_UNDER_PERMISSIVE'
+
+/** 对账的聚合主体：与候选策略同一个主体，门禁按它拦。 */
+export interface ReconcileSubject {
+  namespace: string
+  workload: string
+}
+
+/** 一个主体上各类结论的条数。 */
+export type ReconcileCounts = Record<ReconcileClass, number>
+
+/** 按主体的对账结果。 */
+export interface ReconcileSubjectCounts {
+  subject: ReconcileSubject
+  counts: ReconcileCounts
+}
+
+/**
+ * 一次对账的完整结论，对应 store.ReconciliationReport。
+ *
+ * **一致率与它的口径必须一起走**：一个 0.98 的一致率，在"来源根本不报判定、
+ * 只有 3 条可比对连接"的情况下毫无意义，而它会被单独截图放进汇报里。
+ */
+export interface ReconciliationReport {
+  cluster: string
+  window: TimeWindow
+  /**
+   * 这段观测的来源到底报不报判定。
+   *
+   * 为 false 时整份报告只有 SOURCE_SILENT —— 那不是"平台全错"，是
+   * "这条接入方式对不了账"（NODE_CONNTRACK 与合成数据集恒为此）。
+   */
+  sourceReportsVerdicts: boolean
+  report: {
+    total: number
+    overall: ReconcileCounts
+    bySubject: ReconcileSubjectCounts[]
+  }
+}
+
+/** 一个多余文件的处置分类，对应 registry.DeletionClass。 */
+export type DeletionClass = 'DELETABLE' | 'NOT_APPLIED' | 'IMPACT_UNKNOWN' | 'UNPARSEABLE'
+
+/**
+ * 仓库路径下一个本次候选集不包含的文件，以及平台对它的处置结论
+ * （design doc 2026-08-24 §4.2）。
+ *
+ * 分类是封闭枚举，界面按它决定给不给勾选框 —— 平台看不懂的文件与影响算不
+ * 出来的文件一律不提供删除。
+ */
+export interface WritebackDeletion {
+  path: string
+  class: DeletionClass
+  /** 从这个文件里解析出的 NetworkPolicy 份数。 */
+  documents: number
+  /**
+   * 删掉它之后的四类计数；只有 DELETABLE 有。
+   *
+   * NOT_APPLIED 不带计数而不是带一份全零：全零读起来是"评估过、影响是零"，
+   * 而那一类的事实是"集群里根本没有这些对象"。
+   */
+  counts: Record<ChangeKind, number> | null
+}
+
 /**
  * 一次写回的完整计划，对应 registry.WritebackPlan。
  *
@@ -958,8 +1079,45 @@ export interface WritebackPlan {
    * 地址，不进任何会被读到的地方。
    */
   repoId: string
-  /** 将要新增或更新的文件。平台从不删除仓库里的文件。 */
+  /**
+   * 将要新增或更新的文件，**一个命名空间一个目录、一个主体一个方向一个文件**
+   * （`<policyPath>/distill/<namespace>/<workload>-ingress.yaml`，
+   * design doc 2026-08-24 §3.1、§3.6）。
+   *
+   * 切分的理由是评审粒度：单文件装下整集群时，改一条端口的 diff 落在几百行的
+   * 文件上，评审人无法只看自己那一块；而出入两个方向的风险性质也不同 ——
+   * egress 收错是隐蔽的超时，ingress 收错是立刻连不上。
+   */
   files: WritebackFile[]
+  /**
+   * 仓库路径下已有、但本次候选集不包含的文件，以及平台对每一个的处置结论
+   * （design doc 2026-08-24 §4）。
+   *
+   * 带 `| null`：零条时序列化成 `null` 而不是 `[]`，同 extraneous。
+   */
+  deletions: WritebackDeletion[] | null
+  /**
+   * 这一轮被排除出写回的主体，带排除依据
+   * （design doc 2026-08-25-trust-engineering §3.4）。
+   *
+   * 平台判定与集群实际执行分歧超阈的主体，它的候选规则很可能缺了现在正
+   * 通着的放行 —— 而 dry-run 看不出来，因为在平台的世界里那些连接本来就
+   * 不通。**排除而不是整次拒绝**：把整个集群卡住，这个平台在任何带第二
+   * 策略平面的集群上都永远出不了计划，而那正是它要服务的集群。
+   *
+   * 界面上不能省：一份少了三个 workload 的策略集，不说明的话读起来就是
+   * "这个集群只有这些 workload"。
+   *
+   * 带 `| null`：零条时序列化成 `null` 而不是 `[]`，同 extraneous。
+   */
+  exclusions: WritebackExclusion[] | null
+  /**
+   * 操作者确认要删除的路径，**进指纹**。
+   *
+   * 因此勾选删除之后必须重新出一次计划：新的确认会算出新的指纹，拿旧指纹
+   * 推送只会被拒（而拒绝理由指向指纹失效，盖住真正的原因）。
+   */
+  confirmed: string[] | null
   /** 目标分支，永远是新建的 distill/* 分支，不是绑定里那条部署分支（§2）。 */
   branch: string
   /**
@@ -988,6 +1146,20 @@ export interface WritebackPlan {
   existingBranches: string[] | null
   /** 这份计划的内容指纹，推送时原样回带。前端不重算，也无从重算。 */
   fingerprint: string
+}
+
+/** 被排除出写回的一个主体，以及排除的依据。 */
+export interface WritebackExclusion {
+  namespace: string
+  /** namespace 粒度下为空串：那一层的候选是折叠过的，整个 namespace 一起排除。 */
+  workload: string
+  /**
+   * 这个主体上"平台判 DENY、集群实际放行"的占比。
+   *
+   * 报具体数字而不是一个布尔：0.06 与 0.9 都超阈，但前者值得去看明细、
+   * 后者说明平台在这个主体上基本不成立，两者的处置不是一回事。
+   */
+  underPermissiveRate: number
 }
 
 /**

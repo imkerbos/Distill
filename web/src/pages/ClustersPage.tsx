@@ -1,9 +1,9 @@
 import { Fragment, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react'
-import { driftView } from './driftView.ts'
+import { clusterDriftView, driftView } from './driftView.ts'
 import { api, ApiError } from '../api/client'
 import {
   IMPORT_ROLE_LABEL, IMPORT_SOURCE_LABEL, ONBOARD_STATE_LABEL,
-  type APIServer, type DriftResult, type GitBinding, type GitRepo, type ImportRole, type ImportSource,
+  type APIServer, type ClusterDriftResult, type DriftResult, type GitBinding, type GitRepo, type ImportRole, type ImportSource,
   type PolicyImportItem, type RegisteredCluster,
 } from '../api/types'
 import { Checkbox, Disclosure } from '../components/radix'
@@ -479,6 +479,7 @@ function GitBindingCell({ clusterId, git, repo, onChanged }: {
  */
 function DriftCheck({ clusterId }: { clusterId: string }) {
   const [result, setResult] = useState<DriftResult | null>(null)
+  const [clusterResult, setClusterResult] = useState<ClusterDriftResult | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
@@ -488,10 +489,12 @@ function DriftCheck({ clusterId }: { clusterId: string }) {
     try {
       const status = await api.gitBindingDrift(clusterId)
       setResult(status.driftResult)
+      setClusterResult(status.clusterDriftResult)
     } catch (err) {
       // 请求本身失败与「查了、够不到仓库」是两件事：后者由服务端答
       // UNKNOWN，前者连服务端都没答上。两者都不得读成"一致"。
       setResult(null)
+      setClusterResult(null)
       setError(err instanceof ApiError ? err.msg : '漂移检测失败，请稍后重试')
     } finally {
       setBusy(false)
@@ -499,6 +502,9 @@ function DriftCheck({ clusterId }: { clusterId: string }) {
   }
 
   const view = result === null ? null : driftView(result)
+  // 两个结论并排显示，不合成一个：仓库没被动过、但 controller 三天没同步的
+  // 集群，上面那条是"一致"，下面这条才是"还没生效"（design doc 2026-08-25 §5）。
+  const clusterView = clusterResult === null ? null : clusterDriftView(clusterResult)
   return (
     <>
       <Button
@@ -511,8 +517,16 @@ function DriftCheck({ clusterId }: { clusterId: string }) {
       </Button>
       {view && (
         <div style={{ fontSize: 'var(--text-xs)', marginTop: 2 }}>
+          <div className="text-ink-muted">仓库 vs 平台最后写过的</div>
           <div style={{ color: DRIFT_TONE_COLOR[view.tone] }}>{view.label}</div>
           <div className="text-ink-2">{view.action}</div>
+        </div>
+      )}
+      {clusterView && (
+        <div style={{ fontSize: 'var(--text-xs)', marginTop: 4 }}>
+          <div className="text-ink-muted">集群 vs 仓库（GitOps 落下去了吗）</div>
+          <div style={{ color: DRIFT_TONE_COLOR[clusterView.tone] }}>{clusterView.label}</div>
+          <div className="text-ink-2">{clusterView.action}</div>
         </div>
       )}
       {error && <ErrorNotice>{error}</ErrorNotice>}

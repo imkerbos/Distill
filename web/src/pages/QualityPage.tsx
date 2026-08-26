@@ -1,6 +1,7 @@
 import { api } from '../api/client'
 import { UNKNOWN_REASON_LABEL } from '../api/types'
 import { useResource } from '../api/useResource'
+import { reconcileView } from './reconcileView'
 import DataSourceNotice from '../components/DataSourceNotice'
 import { EmptyState, PageHeader, Section, Skeleton, StatTile, TableCard } from '../components/ui'
 
@@ -8,6 +9,13 @@ const pct = (v: number) => `${(v * 100).toFixed(1)}%`
 
 export default function QualityPage({ cluster }: { cluster: string }) {
   const { data: q, error, loading } = useResource(cluster, () => api.quality(cluster))
+  // 一致率与其余质量指标同屏：它回答的是"这一屏的其它数字有多可信"，
+  // 放到另一页去看等于没有（design doc 2026-08-25 §3）。
+  //
+  // 单独一次请求、失败不拖垮这一屏：对账依赖流量来源报不报判定，一个
+  // 对不了账的集群仍然要能看到覆盖率与无法判定比例。
+  const { data: rec } = useResource(cluster, () => api.reconciliation(cluster))
+  const rv = reconcileView(rec ?? null)
 
   // 标题与数据来源一起提到早退分支之前：来源标识必须与内容同屏，包括这一
   // 屏读不到数据的时候——一句"加载失败"同样要说清它说的是哪一种集群
@@ -41,6 +49,56 @@ export default function QualityPage({ cluster }: { cluster: string }) {
         <StatTile label="不受管控 Pod" value={`${q.unmanagedPodCount} 个`}
           note="hostNetwork，已排除出覆盖率" />
       </div>
+
+      <Section
+        title="平台判定与集群实际执行的一致率"
+        description="这是唯一一个能在真实流量上度量的可信度指标：同一批连接，平台回放算出的判定与执行平面自己报的判定差多少。它不回答“规则全不全”，只回答“已经给出的判定准不准”。"
+      >
+        <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3">
+          <StatTile label="一致率" value={rv.rateText}
+            note={rv.available ? `${rv.comparable} 条可比对` : '算不出来'} />
+          <StatTile label="平台低估放行面" value={`${rv.under.count} 条`} tone="deny"
+            note="平台判 DENY、集群实际放行" />
+          <StatTile label="平台高估放行面" value={`${rv.over.count} 条`} tone="unknown"
+            note="平台判 ALLOW、集群实际拦下" />
+          <StatTile label="平台答不出" value={`${rv.platformUnknown} 条`} tone="unknown"
+            note="覆盖不足，不是判错" />
+        </div>
+
+        {!rv.available && (
+          <p className="mt-2 text-sm text-ink-2">{rv.unavailableReason}</p>
+        )}
+
+        {/* 两个方向的说明必须跟着数字走：一个没有解释的“低估 3 条”，
+            读者不知道该紧张还是该忽略。 */}
+        <p className="mt-3 mb-0 text-xs text-deny">{rv.under.help}</p>
+        <p className="mt-1 mb-0 text-xs text-ink-2">{rv.over.help}</p>
+
+        {rv.subjects.length > 0 && (
+          <div className="mt-3">
+            <table className="dt">
+            <thead>
+              <tr>
+                <th>主体</th><th className="num">一致</th><th className="num">低估</th>
+                <th className="num">高估</th><th className="num">低估率</th><th>写回</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rv.subjects.map((row) => (
+                <tr key={row.label} style={{ color: row.blocked ? 'var(--verdict-deny)' : undefined }}>
+                  <td>{row.label}</td>
+                  <td className="num">{row.agreeCount}</td>
+                  <td className="num">{row.underCount}</td>
+                  <td className="num">{row.overCount}</td>
+                  <td className="num">{row.underRate === null ? '—' : pct(row.underRate)}</td>
+                  <td>{row.blocked ? '会被门禁拦下' : ''}</td>
+                </tr>
+              ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Section>
 
       <div className="mt-5">
         <Section

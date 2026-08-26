@@ -1,5 +1,8 @@
 import { windowAbsent } from './policyExportView.ts'
-import type { ChangeKind, PolicyPreview, TimeWindow, WritebackPlan } from '../api/types'
+import type {
+  ChangeKind, DeletionClass, PolicyPreview, TimeWindow,
+  WritebackDeletion, WritebackExclusion, WritebackPlan,
+} from '../api/types'
 
 /**
  * 写回入口的全部取数：能不能走、不能走时的理由、两步各自要请求哪个路径，
@@ -43,6 +46,31 @@ export interface WritebackView {
 export interface WritebackPushBody {
   readonly branch: string
   readonly fingerprint: string
+  /**
+   * 操作者确认要删除的路径。
+   *
+   * 它是这个请求里唯一一项服务端重算不出来的东西 —— 删哪几个是人的决定。
+   * 但它不是授权：能不能删由服务端重算出的清单说了算，而指纹钉住的正是
+   * "文件 + 这份确认"这一整份计划（design doc 2026-08-24 §4.4）。
+   */
+  readonly deletions: readonly string[]
+}
+
+/** 计划里一条多余文件在界面上的形态。 */
+export interface DeletionRow {
+  readonly path: string
+  readonly class: DeletionClass
+  /** 能不能勾选删除。 */
+  readonly selectable: boolean
+  /** 为什么可以删 / 为什么不给删。**恒非空** —— 一个没有理由的禁用等于坏掉的界面。 */
+  readonly reason: string
+  /**
+   * 删除影响那一行的成品文字；没有计数时为空串。
+   *
+   * 在视图层渲染而不是让页面再写一份枚举顺序：四类的次序是一条约定，
+   * 两处各写一份就会出现同一份计数在两屏上顺序不同。
+   */
+  readonly impactText: string
 }
 
 /** 一类计数在"页面正在显示的那一份"与"计划里重算出的那一份"上的两个取值。 */
@@ -141,10 +169,103 @@ export function writebackView(pv: PolicyPreview): WritebackView {
  * 指纹为空串时同样返回 null：一次不带指纹的推送在服务端只会被拒绝，发出去
  * 只是把一条注定失败的调用摆在操作者面前，而失败信息会盖住真正的原因。
  */
-export function writebackPushBody(plan: WritebackPlan | null): WritebackPushBody | null {
+export function writebackPushBody(
+  plan: WritebackPlan | null, confirmed: readonly string[] = [],
+): WritebackPushBody | null {
   if (plan === null) return null
   if (plan.branch.trim() === '' || plan.fingerprint.trim() === '') return null
-  return { branch: plan.branch, fingerprint: plan.fingerprint }
+  // 只带平台在这份计划里标为可处置的那几条。多带的会被服务端拒（判据在
+  // registry.NewWritebackPlan），在这一层先滤掉是为了让"勾了一个平台没提供
+  // 的路径"这件事在界面上写不出来 —— 而不是替服务端做判断。
+  const offered = new Set(
+    (plan.deletions ?? []).filter(d => selectableClass(d.class)).map(d => d.path),
+  )
+  return {
+    branch: plan.branch,
+    fingerprint: plan.fingerprint,
+    deletions: confirmed.filter(p => offered.has(p)),
+  }
+}
+
+/**
+ * 把计划里的多余文件清单渲染成界面要的那几项（design doc 2026-08-24 §4.2）。
+ *
+ * 四类都显示，但只有两类给勾选框：平台看不懂的文件（UNPARSEABLE）与影响
+ * 算不出来的文件（IMPACT_UNKNOWN）不提供删除 —— 一个平台连"删了会怎样"
+ * 都答不出来的文件，删除它的后果没有人评估过。
+ *
+ * 每一行都带一句为什么。一个禁用的勾选框配一句空理由，在界面上读起来是
+ * "这里坏了"，而它其实是一条结论。
+ */
+export function deletionRows(deletions: readonly WritebackDeletion[] | null): DeletionRow[] {
+  return (deletions ?? []).map(d => ({
+    path: d.path,
+    class: d.class,
+    selectable: selectableClass(d.class),
+    reason: DELETION_REASON[d.class] ?? '平台没有认出这个处置分类，因此不提供删除。',
+    impactText: d.counts === null
+      ? ''
+      : CHANGE_KINDS.map(k => `${k} ${d.counts?.[k] ?? 0}`).join('　'),
+  }))
+}
+
+/** 一条排除在界面上要显示的东西。 */
+export interface ExclusionRow {
+  /** 主体的写法：namespace 粒度下就是 namespace 本身。 */
+  label: string
+  /** 分歧率，形如 `20%`。 */
+  rateText: string
+}
+
+/**
+ * 把计划里的排除清单渲染成界面要的那几项
+ * （design doc 2026-08-25-trust-engineering §3.4）。
+ *
+ * **零条时也要有话说**，由调用方渲染 EXCLUSION_NONE：一个空区块与"这一栏
+ * 不存在"在屏幕上长得一样，而"没有任何主体被排除"是一条结论，值得占一行。
+ *
+ * 分歧率取整到百分点显示，但**不做四舍五入到 0**：6% 与 90% 都超阈，前者
+ * 值得去看明细、后者说明平台在这个主体上基本不成立。
+ */
+export function exclusionRows(
+  exclusions: readonly WritebackExclusion[] | null,
+): ExclusionRow[] {
+  return (exclusions ?? []).map(e => ({
+    label: e.workload === '' ? e.namespace : `${e.namespace}/${e.workload}`,
+    rateText: `${Math.round(e.underPermissiveRate * 100)}%`,
+  }))
+}
+
+/**
+ * 排除区块的说明。
+ *
+ * 必须说清三件事：为什么排除、为什么 dry-run 看不出来、这些主体的既有策略
+ * 会怎样。少了第三条，读的人会以为平台把它们的策略删了。
+ */
+export const EXCLUSION_HELP =
+  '这些主体上，平台判定与集群实际执行对不上，且分歧落在会造成阻断的那一侧'
+  + '（平台判 DENY、集群实际放行）。它们的候选规则很可能缺了现在正通着的放行，'
+  + '而 dry-run 看不出来 —— 在平台的世界里那些连接本来就不通。'
+  + '本次不写它们，既有的策略文件也保持不动（既不更新也不删除）。'
+  + '先去质量页看分歧明细，确认平台漏了什么再回来。'
+
+/** 一条都没有时显示的话。空区块读起来像"这一栏坏了"，而它是一条结论。 */
+export const EXCLUSION_NONE = '没有主体因判定分歧被排除，本次候选集覆盖全部主体。'
+
+/** 哪几类允许被勾选删除。与服务端 registry.DeletionClass.confirmable 同一套判据。 */
+function selectableClass(c: DeletionClass): boolean {
+  return c === 'DELETABLE' || c === 'NOT_APPLIED'
+}
+
+/** 每一类的处置说明。封闭枚举，逐条写死 —— 它是操作者决定删不删的依据。 */
+const DELETION_REASON: Record<DeletionClass, string> = {
+  DELETABLE: '本次候选集不再包含它。删除影响已经算出来，见右侧四类计数。',
+  NOT_APPLIED: '仓库里有、集群里没有：这些策略从没被应用，或已被人手工删掉。删掉它对集群没有影响。',
+  IMPACT_UNKNOWN: '平台算不出删掉它的影响：这段时间窗里没有足够观测，'
+    + '或者它是在这段窗口之后才被下发到集群的（GitOps 下的常见时序）。'
+    + '此时重放算出来的会是「删掉一个当时并不存在的东西」，恒为无变化 —— '
+    + '那是一个朝让人放心的方向错的数字。先重新采集一轮，再出一次计划。',
+  UNPARSEABLE: '平台没能把它解析成 NetworkPolicy（别人放的文件、模板，或被改坏的策略）。永不提供删除。',
 }
 
 /**

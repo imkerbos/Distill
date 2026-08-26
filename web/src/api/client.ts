@@ -4,7 +4,8 @@ import type {
   CurrentSession, Decision, Envelope, FlowFilter, FlowPage, GitBindingWrite, IssuedAgentToken,
   GitRepo, GitRepoWrite, Granularity, Identity, ImportRole, ImportSource, IngestSummary, OverrideDecision,
   PathVerifyStatus, PlatformSettingView, PlatformSettingWrite, PolicyImportItem, PolicyPreview,
-  Quality, RegisteredCluster, RepoVerifyStatus, Role, SecurityReport, Topology, TopologyLevel,
+  Quality, ReconciliationReport, RegisteredCluster, RepoVerifyStatus, Role, SecurityReport,
+  Topology, TopologyLevel,
   WritebackPlanResult, WritebackPushResult,
   DriftStatus,
 } from './types'
@@ -390,6 +391,16 @@ export const api = {
 
   quality: (cluster: string) =>
     request<Quality>(`/api/v1/clusters/${encodeURIComponent(cluster)}/quality`),
+
+  /**
+   * 一致率：平台判定与集群实际执行差多少。
+   *
+   * 不带 from/to —— 服务端按这个集群现解默认窗口。前端自己拼窗口会让
+   * 这一屏的口径与 /flows 那一屏悄悄分家。
+   */
+  reconciliation: (cluster: string) =>
+    request<ReconciliationReport>(
+      `/api/v1/clusters/${encodeURIComponent(cluster)}/reconciliation`),
   security: (cluster: string) =>
     request<SecurityReport>(`/api/v1/clusters/${encodeURIComponent(cluster)}/security`),
 
@@ -472,14 +483,20 @@ export const api = {
    * 又多了一个可以与页面分歧的取数点，而这里分歧的后果比导出更硬——推送时
    * 服务端会拿请求里的时间窗重算整份计划再比指纹。
    */
-  policyWritebackPlan: (path: string) =>
-    request<WritebackPlanResult>(assertApiPath(path), { method: 'POST' }),
+  policyWritebackPlan: (path: string, deletions: readonly string[] = []) =>
+    request<WritebackPlanResult>(assertApiPath(path), {
+      method: 'POST',
+      // 勾选的删除项要一起送上：指纹覆盖"文件 + 这份确认"，不带它拿回来的
+      // 指纹描述的是另一份计划（design doc 2026-08-24 §4.4）。
+      body: JSON.stringify({ deletions }),
+    }),
 
   /**
    * 把操作者确认过的那份计划推到一条新分支上。
    *
    * 请求体原样收 `writebackPushBody` 的产出，**这一层不拼、不补、不改**：
-   * 里面只有分支名与指纹两项，且都必须逐字来自操作者刚看过的那份计划。
+   * 里面只有分支名、指纹与确认删除三项，前两项逐字来自操作者刚看过的那份
+   * 计划，第三项是他在那份计划上勾出来的（design doc 2026-08-24 §4.4）。
    * 在这里补一个字段（哪怕是"顺手带上计数"）就等于让写回请求自述影响面，
    * 而影响面必须由平台在写前重算（§4）。
    *
@@ -487,7 +504,10 @@ export const api = {
    * 非管理员拒（规范 §34）。调用方要做的是把 msg 原样展示，不收窄成一句
    * "推送失败"——"这份计划过期了"与"服务出错了"的下一步动作完全相反。
    */
-  policyWritebackPush: (path: string, body: { branch: string; fingerprint: string }) =>
+  policyWritebackPush: (
+    path: string,
+    body: { branch: string; fingerprint: string; deletions: readonly string[] },
+  ) =>
     request<WritebackPushResult>(assertApiPath(path), {
       method: 'POST',
       body: JSON.stringify(body),

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { ALL_DRIFT_RESULTS, driftView } from '../src/pages/driftView.ts'
+import { ALL_DRIFT_RESULTS, driftView, ALL_CLUSTER_DRIFT_RESULTS, clusterDriftView } from '../src/pages/driftView.ts'
 import type { DriftResult } from '../src/api/types.ts'
 
 const PAGE_SOURCE = readFileSync(
@@ -48,4 +48,40 @@ test('页面渲染了漂移结论', () => {
   assert.ok(PAGE_SOURCE.includes('driftView'),
     'ClustersPage 没有渲染漂移结论：锚点又一次没有消费方')
   assert.ok(!/\{false\s*&&/.test(PAGE_SOURCE), 'ClustersPage 里有被写死为 false 的渲染分支')
+})
+
+/* ---------------------------------------------------------------------- */
+/* 集群漂移：GitOps 到底有没有把仓库里那份落下去                             */
+/* ---------------------------------------------------------------------- */
+
+/**
+ * 四个结论各有各的处置，且**未登记的取值按 UNKNOWN 处理**。
+ *
+ * 与 driftView 同一条纪律：一个读不懂的取值不能当成最让人安心的那个 ——
+ * CONVERGED 会让操作者以为下发已经生效。
+ */
+test('每个集群漂移结论都有说法，未登记取值落到 UNKNOWN', () => {
+  for (const r of ALL_CLUSTER_DRIFT_RESULTS) {
+    const v = clusterDriftView(r)
+    assert.notEqual(v.label.trim(), '', `${r} 没有说法`)
+    assert.notEqual(v.action.trim(), '', `${r} 没有处置`)
+  }
+  const unknown = clusterDriftView(undefined)
+  assert.deepEqual(unknown, clusterDriftView('UNKNOWN'))
+  // @ts-expect-error 故意传一个后端将来才会有的取值
+  assert.deepEqual(clusterDriftView('SOMETHING_NEW'), clusterDriftView('UNKNOWN'))
+})
+
+/**
+ * 只有 CONVERGED 是"绿"的。
+ *
+ * PENDING（仓库有集群没有）与 CLUSTER_AHEAD（集群有仓库没有）都是要人去看的
+ * 状态；UNKNOWN 更不能是绿的 —— 那是"平台没看全"。
+ */
+test('只有 CONVERGED 是 ok 档', () => {
+  for (const r of ALL_CLUSTER_DRIFT_RESULTS) {
+    const tone = clusterDriftView(r).tone
+    if (r === 'CONVERGED') assert.equal(tone, 'ok')
+    else assert.notEqual(tone, 'ok', `${r} 被标成了"没问题"`)
+  }
 })

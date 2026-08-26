@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import {
+  deletionRows, EXCLUSION_HELP, EXCLUSION_NONE, exclusionRows,
   writebackCountDrift, writebackPushBody, writebackView,
 } from '../src/pages/writebackView.ts'
 import type {
@@ -33,6 +34,12 @@ function plan(opts: Partial<WritebackPlan> = {}): WritebackPlan {
     branch: 'distill/prod-asia-1-20260814T101500Z',
     commitMessage: 'policy: distill 写回 prod-asia-1',
     counts: PAGE_COUNTS,
+    deletions: [{
+      path: 'p/a.yaml', class: 'DELETABLE', documents: 1,
+      counts: { WOULD_BREAK: 0, WOULD_OPEN: 0, UNCHANGED: 0, UNKNOWN: 0 },
+    }],
+    exclusions: null,
+    confirmed: null,
     extraneous: null,
     existingBranches: null,
     fingerprint: 'a'.repeat(64),
@@ -147,14 +154,18 @@ test('计划缺指纹或缺分支时不产出推送请求体', () => {
  * 多一个字段就是写回请求自述影响面的开始，而影响面必须由平台在写前重算
  * （design doc §4）。因此这里断言的是键集合本身，不只是那两个值。
  */
-test('推送请求体只含分支与指纹，且逐字来自计划', () => {
+test('推送请求体只含分支、指纹与确认删除，且逐字来自计划', () => {
   const p = plan()
   const body = writebackPushBody(p)
 
   assert.notEqual(body, null)
-  assert.deepEqual(body, { branch: p.branch, fingerprint: p.fingerprint })
-  assert.deepEqual(Object.keys(body ?? {}).sort(), ['branch', 'fingerprint'],
-    '请求体里出现了第三个字段：写回请求不携带任何数字，计数由平台重算')
+  assert.deepEqual(body, { branch: p.branch, fingerprint: p.fingerprint, deletions: [] })
+  // 封闭清单：**请求体里一个数字都不许有**。deletions 是人的决定（删哪几个），
+  // 服务端重算不出来，因此它必须由请求带上，而指纹钉住它（design doc
+  // 2026-08-24 §4.4）。四类计数仍然由平台重算 —— 一个能自述"我这次只会
+  // 打断 0 条"的调用方等于自己描述自己那次变更的爆炸半径。
+  assert.deepEqual(Object.keys(body ?? {}).sort(), ['branch', 'deletions', 'fingerprint'],
+    '请求体里出现了计划外的字段：写回请求不携带任何数字，计数由平台重算')
 })
 
 /* ---------------------------------------------------------------------- */
@@ -247,8 +258,10 @@ test('页面的写回入口仍然从 writebackView 取数', () => {
 })
 
 test('两次请求都走 view 上的路径，页面不自己拼 URL', () => {
-  assert.match(PAGE_SOURCE, /api\.policyWritebackPlan\(view\.planPath\)/,
-    '出计划没有走 view.planPath')
+  // 允许第二个入参（勾选的删除项）：路径仍然只由 writebackView 拼一次，
+  // 而确认删除必须与出计划一起送上 —— 它进指纹（design doc 2026-08-24 §4.4）。
+  assert.match(PAGE_SOURCE, /api\.policyWritebackPlan\(view\.planPath, selected\)/,
+    '出计划没有走 view.planPath，或者没有把勾选的删除项一起送上')
   assert.match(PAGE_SOURCE, /api\.policyWritebackPush\(view\.pushPath, body\)/,
     '推送没有走 view.pushPath，或者请求体不是 writebackPushBody 的产出')
 })
@@ -267,7 +280,7 @@ test('出计划的按钮禁用绑在 view.available 上，理由渲染出来', (
  * 原样产出的那一个对象，页面不自己拼。
  */
 test('推送按钮只在拿到计划之后才存在，且请求体原样来自 writebackPushBody', () => {
-  assert.match(PAGE_SOURCE, /const pushBody = writebackPushBody\(plan\?\.plan \?\? null\)/,
+  assert.match(PAGE_SOURCE, /const pushBody = writebackPushBody\(plan\?\.plan \?\? null, selected\)/,
     '推送请求体不再由 writebackPushBody 从计划产出：页面自己拼一个指纹上去，'
     + '"推的是操作者看过的那一份"这个保证就没了')
   assert.match(PAGE_SOURCE, /\{pushBody && \(/,
@@ -287,7 +300,12 @@ test('计划里的文件、分支、提交信息、多余文件都渲染出来',
     ['{plan.plan.branch}', '目标分支没有展示：操作者不知道这次会推到哪条分支'],
     ['{plan.plan.commitMessage}', '提交信息没有展示：评审人唯一会读的那句话没有经过操作者'],
     ['plan.plan.files.map', '将要新增/更新的文件清单没有逐条展示'],
-    ['plan.plan.extraneous', '仓库里多余文件的清单没有展示（design doc §3）'],
+    ['deletionRows(plan?.plan.deletions',
+      '策略目录下其它文件的处置清单没有展示（design doc 2026-08-24 §4）'],
+    ['toggleDeletion(row.path)',
+      '删除项不能勾选：删除必须由人逐条确认，一个只读的清单等于没有删除这条路'],
+    ['{row.reason}',
+      '每一类的处置说明没有渲染：一个不给勾的行配一句空理由，读起来是"界面坏了"'],
     // 落点与"仓库上攒了几条分支"这两项都是本轮补上的：前者进指纹，因此
     // 必须被操作者读到；后者是唯一能看见人工合并那道门有没有人走的信号。
     ['{plan.plan.repoId}', '目标仓库没有展示：它进了指纹，操作者却没读到自己批准的落点'],
@@ -350,4 +368,104 @@ test('页面不渲染计划里的文件内容，也不重建 YAML', () => {
     assert.equal(PAGE_SOURCE.includes(forbidden), false,
       `页面里出现了 ${forbidden}：写回的内容必须逐字节是服务端产出的那一份`)
   }
+})
+
+/* ---------------------------------------------------------------------- */
+/* 删除项：平台提供什么，界面才允许勾什么                                    */
+/* ---------------------------------------------------------------------- */
+
+/**
+ * 只有平台标为可处置的那两类才允许勾选（design doc 2026-08-24 §4.2）。
+ *
+ * 平台看不懂的文件（UNPARSEABLE）与影响算不出来的文件（IMPACT_UNKNOWN）
+ * 必须显示、但不给勾选框：显示是因为它们仍然是仓库里多出来的东西，需要人
+ * 处置；不给勾是因为平台连"删掉它会发生什么"都答不出来。
+ */
+test('删除项按平台给的分类决定可不可勾', () => {
+  const rows = deletionRows([
+    { path: 'p/a.yaml', class: 'DELETABLE', documents: 2, counts: zeroCounts() },
+    { path: 'p/b.yaml', class: 'NOT_APPLIED', documents: 1, counts: null },
+    { path: 'p/c.yaml', class: 'IMPACT_UNKNOWN', documents: 1, counts: null },
+    { path: 'p/d.yaml', class: 'UNPARSEABLE', documents: 0, counts: null },
+  ])
+  assert.deepEqual(rows.map(r => r.selectable), [true, true, false, false])
+  // 每一行都要有一句为什么，不能只给一个禁用的勾选框。
+  for (const row of rows) assert.notEqual(row.reason.trim(), '', `${row.path} 缺少处置说明`)
+})
+
+/**
+ * 勾选了删除项之后，推送请求体必须带上它们。
+ *
+ * 指纹覆盖"文件 + 这份确认"，因此漏带等于推一份与操作者确认的那份不同的
+ * 计划 —— 服务端会拒，但拒绝理由会指向指纹失效，把真正的原因盖住。
+ */
+test('推送请求体带上已确认的删除', () => {
+  const body = writebackPushBody(plan({}), ['p/a.yaml'])
+  assert.deepEqual(body?.deletions, ['p/a.yaml'])
+})
+
+/**
+ * 没勾任何东西时删除清单是空数组，不是 undefined。
+ *
+ * 缺省行为必须安全，也必须**明确**：一个不带这个字段的请求与一个带空清单的
+ * 请求在服务端是同一件事，但在这一层写成空数组，"这次不删任何东西"就是一句
+ * 说出来的话，而不是一个漏掉的字段。
+ */
+test('没有确认删除时清单是空数组', () => {
+  assert.deepEqual(writebackPushBody(plan({}), [])?.deletions, [])
+})
+
+/** zeroCounts 是四类齐全、全为零的一份计数。 */
+function zeroCounts(): Record<string, number> {
+  return { WOULD_BREAK: 0, WOULD_OPEN: 0, UNCHANGED: 0, UNKNOWN: 0 }
+}
+
+// 排除清单：主体写法与分歧率。
+//
+// namespace 粒度下 workload 为空串，那时不能渲染成 "payment/"，那是一个
+// 看起来像 bug 的标签。
+test('排除清单渲染主体与分歧率', () => {
+  const rows = exclusionRows([
+    { namespace: 'payment', workload: 'api', underPermissiveRate: 0.2 },
+    { namespace: 'batch', workload: '', underPermissiveRate: 0.06 },
+  ])
+  assert.deepEqual(rows, [
+    { label: 'payment/api', rateText: '20%' },
+    { label: 'batch', rateText: '6%' },
+  ])
+})
+
+// null 与空数组都当作"没有排除"，不抛。
+test('没有排除时是空清单', () => {
+  assert.deepEqual(exclusionRows(null), [])
+  assert.deepEqual(exclusionRows([]), [])
+})
+
+// 说明必须交代"既有策略会怎样"。
+//
+// 少了这一句，读的人会以为平台把被排除主体的策略删了 —— 而实际相反：
+// 那些文件被刻意保持不动。
+test('排除说明交代既有策略保持不动', () => {
+  assert.match(EXCLUSION_HELP, /既不更新也不删除/)
+  assert.match(EXCLUSION_HELP, /dry-run/)
+})
+
+// 零条时也要有话说：一个空区块在屏幕上与"这一栏不存在"长得一样。
+test('零条排除时给出结论而不是空白', () => {
+  assert.notEqual(EXCLUSION_NONE, '')
+})
+
+const POLICY_PAGE = readFileSync(new URL('../src/pages/PolicyPage.tsx', import.meta.url), 'utf8')
+
+// 排除区块必须真的渲染在计划面板里，且排在文件清单**之后**。
+//
+// 它回答的是"为什么上面那张清单里没有它们"—— 放到页面末尾，读的人会先把
+// 那份少了几个 workload 的清单当成完整的。
+test('计划面板渲染排除区块，且紧跟文件清单', () => {
+  const files = POLICY_PAGE.indexOf('将要新增/更新的文件')
+  const excl = POLICY_PAGE.indexOf('因判定分歧被排除的主体')
+  const others = POLICY_PAGE.indexOf('策略目录下的其它文件')
+  assert.ok(excl > 0, '计划面板里没有排除区块')
+  assert.ok(files < excl && excl < others,
+    '排除区块不在文件清单与其它文件之间，读的人会先把残缺的清单当成完整的')
 })

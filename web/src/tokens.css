@@ -34,6 +34,9 @@
   --text-secondary: #45453f;
   --text-muted: #74746d;
   --text-on-dark: #ffffff;
+  /* accent 填充上的文字色。accent 在两个主题里反色（浅色近黑 / 深色近白），
+     因此这条也必须跟着反，否则深色下白字落在近白按钮上看不见。 */
+  --text-on-accent: #ffffff;
   --accent: #2c2c28;
 
   /*
@@ -124,6 +127,7 @@
     --text-secondary: #b9b9b4;
     --text-muted: #8a8a86;
     --text-on-dark: #ffffff;
+    --text-on-accent: #16161a;
     --accent: #e8e8e6;
 
     --brand: #8fa0e8;

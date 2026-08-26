@@ -266,7 +266,7 @@ export function Button({
   variant?: 'primary' | 'secondary'
 } & ButtonHTMLAttributes<HTMLButtonElement>) {
   const look = variant === 'primary'
-    ? 'border-transparent bg-accent text-[var(--text-on-dark)]'
+    ? 'border-transparent bg-accent text-[var(--text-on-accent)]'
     : 'border-line-strong bg-surface text-ink'
   return (
     <button
