@@ -115,6 +115,32 @@ kubectl -n distill logs -f job/<生成的名字>
 在设置页配）。平台主服务存的是引用，没有任何一条把引用变成凭据的路径 ——
 解析只发生在这个进程里。
 
+### 采集器跑在被采集集群内时：用 `tokenFile`，不要内嵌 token
+
+采集器与目标集群同处一个集群时，kubeconfig 应当**引用投影卷**，而不是内嵌一份
+`kubectl create token` 生成的静态 token：
+
+```yaml
+clusters:
+  - name: target
+    cluster:
+      server: https://kubernetes.default.svc
+      certificate-authority: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+users:
+  - name: ro
+    user:
+      tokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+```
+
+**内嵌 token 会过期**（`kubectl create token` 默认一小时，最长受集群配置限制），
+而过期之后的症状是采集器报
+`could not prove read-only access to the target cluster` —— 那句话读起来像 RBAC
+配错了，会把人送去审计一份完全正常的权限。`tokenFile` 让 client-go 每次请求前
+重读文件，kubelet 轮转之后自动跟上。
+
+投影卷由 `automountServiceAccountToken`（默认开）挂在上面那个路径，不必在
+Pod 里额外声明。跨集群采集拿不到这条路径，那时才需要一份带凭据的 kubeconfig。
+
 要定时跑之前先想清楚两件事：失败重试的语义，以及并发 —— 同一个集群的两次采集
 同时落库会撞 `observed_at` 主键。
 
