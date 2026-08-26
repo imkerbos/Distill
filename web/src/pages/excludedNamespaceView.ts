@@ -41,7 +41,7 @@ export function excludedNamespaceRows(
  * 会让人去找哪里配错了。
  */
 export const EXCLUDED_NS_HELP =
-  '这些命名空间平台**有意不碰**：候选集是给每个 workload 装上 default-deny 再把'
+  '这些命名空间平台「有意不碰」：候选集是给每个 workload 装上 default-deny 再把'
   + '观测到的连接放回去，而一份下发到 kube-dns 的 default-deny 会让整个集群失去 DNS。'
   + '它们的流量照常参与判定与对账 —— 不生成策略不等于看不见。'
 

@@ -58,7 +58,7 @@ export function retirementView(r: RetirementReport | null | undefined): Retireme
     unavailableReason: '',
     rows,
     truncationNote: r.truncated
-      ? '集群里的策略数超过了平台一次能逐条评估的上限，这份清单**不完整**。'
+      ? '集群里的策略数超过了平台一次能逐条评估的上限，这份清单「不完整」。'
         + '没有列出来的那些不是"平台认为它们可以留着"——它们根本没被算过。'
       : '',
     emptyNote: rows.length === 0
@@ -96,7 +96,7 @@ function toRow(c: RetirementCandidate): RetirementRow {
  */
 export const RETIREMENT_HELP =
   '平台不会删除集群里的任何策略 —— 它对被管集群没有写权限，退休要么由人做、'
-  + '要么走 GitOps。下面每一条的结论只描述**单独退休它**：两条策略可能互相兜底，'
+  + '要么走 GitOps。下面每一条的结论只描述「单独退休它」：两条策略可能互相兜底，'
   + '各自单独删都没影响，一起删就断了。'
-  + '而"没有连接会断"说的是**这段观测里**：一条只在月结那天走的放行，'
+  + '而"没有连接会断"说的是「这段观测里」：一条只在月结那天走的放行，'
   + '在这个窗口里看不见，删掉它下个月才会表现出来。'

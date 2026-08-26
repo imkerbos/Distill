@@ -30,6 +30,11 @@ export function VerdictBadge({ verdict, confidence }: { verdict: Verdict; confid
       title={degraded ? '判定可信度降级：源身份被 sidecar 遮蔽或集群存在 Cilium 策略' : undefined}
       style={{
         display: 'inline-flex', alignItems: 'center', gap: 4,
+        // 不换行。判定是这个平台最重要的一列，而它在窄格子里会被逐字
+        // 折成竖排 —— 实测「无法判定 · 降级」被挤进 47px 宽、折成四行，
+        // 读起来不像一个结论，像一处渲染故障。宁可让那一列把表撑宽：
+        // 表格本来就能横向滚动，而一个看不懂的判定等于没有判定。
+        whiteSpace: 'nowrap',
         padding: '2px 8px', fontSize: 12, fontWeight: 500,
         color: c.fg, background: c.bg, borderRadius: 999,
         border: degraded

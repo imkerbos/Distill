@@ -5,6 +5,7 @@ import * as RadixSelect from '@radix-ui/react-select'
 import * as RadixTabs from '@radix-ui/react-tabs'
 import * as RadixTooltip from '@radix-ui/react-tooltip'
 import type { ReactNode } from 'react'
+import { fromSelectValue, toSelectValue } from './selectValue'
 
 /*
  * 建在 Radix 上的三个原语。
@@ -182,7 +183,7 @@ export function Dropdown({ value, onChange, options, ariaLabel, className = '' }
   className?: string
 }) {
   return (
-    <RadixSelect.Root value={value} onValueChange={onChange}>
+    <RadixSelect.Root value={toSelectValue(value)} onValueChange={(v) => onChange(fromSelectValue(v))}>
       <RadixSelect.Trigger
         aria-label={ariaLabel}
         className={`ctl inline-flex items-center justify-between gap-2 ${className}`}
@@ -198,7 +199,7 @@ export function Dropdown({ value, onChange, options, ariaLabel, className = '' }
           <RadixSelect.Viewport className="p-1">
             {options.map(([v, label]) => (
               <RadixSelect.Item
-                key={v} value={v}
+                key={v} value={toSelectValue(v)}
                 className="cursor-pointer rounded-chip px-2 py-1 text-sm text-ink outline-none
                            data-[highlighted]:bg-sunken data-[state=checked]:font-medium"
               >

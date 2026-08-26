@@ -29,7 +29,7 @@ const UNATTACHED_REASON: Record<UnattachedReason, string> = {
     + '改成按标签选中某一个 workload 再导入。',
   NO_RULES:
     '这条策略一条 ingress/egress 规则都没有。空规则在 NetworkPolicy 语义里是 '
-    + 'default-deny，那是**收紧**，而导入这条路只接受补充放行。要收紧走策略生成本身。',
+    + 'default-deny，那是「收紧」，而导入这条路只接受补充放行。要收紧走策略生成本身。',
   NO_SUCH_WORKLOAD:
     '这个集群里没有该主体的 Pod（还没部署，或者缩到了零）。'
     + '挂上去会生成一条选不中任何 Pod 的策略：它不报错，只是永远不生效。'

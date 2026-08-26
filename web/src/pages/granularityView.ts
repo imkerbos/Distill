@@ -65,14 +65,14 @@ export const ALL_GRANULARITIES: readonly Granularity[] = ['NAMESPACE', 'WORKLOAD
 export function wideningNote(list: readonly Widening[] | null | undefined): string {
   if (list == null) {
     return '服务端没有说明这次折叠多放宽了多少（widening 缺席，按契约它恒为非 nil，'
-      + '因此这是一份老响应或字段改了名）。**不得把它读作「折叠无损」** ——'
+      + '因此这是一份老响应或字段改了名）。不得把它读作「折叠无损」 ——'
       + '粗化只会放宽，而这一屏此刻答不出放宽了多少。先弄清服务端为什么没回答。'
   }
   if (list.length === 0) return ''
 
   const widened = list.filter((w) => w.extraGrants > 0)
   if (widened.length === 0) {
-    return `这次折叠**无损**：${list.length} 个命名空间里，每条规则原本就是该命名空间内`
+    return `这次折叠「无损」：${list.length} 个命名空间里，每条规则原本就是该命名空间内`
       + '所有工作负载共有的，因此粗粒度与细粒度的允许面完全相同 —— 份数少了，'
       + '放行的东西一个没多。'
   }
@@ -82,7 +82,7 @@ export function wideningNote(list: readonly Widening[] | null | undefined): stri
     .sort((a, b) => b.extraGrants - a.extraGrants)
     .map((w) => `${w.namespace}（多 ${w.extraGrants} 份，${w.workloads} 个工作负载）`)
     .join('；')
-  return `这次折叠**放宽了**：合计多出 ${total} 份授权，分布在 ${widened.length} 个命名空间 —— ${detail}。`
+  return `这次折叠「放宽了」：合计多出 ${total} 份授权，分布在 ${widened.length} 个命名空间 —— ${detail}。`
     + '多出来的意思是：这些命名空间里原本只有部分工作负载能走的放行，折叠之后'
     + '其中每个 Pod 都能走。要精确控制就切回 workload 粒度看这几个命名空间。'
 }
