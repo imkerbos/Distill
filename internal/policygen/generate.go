@@ -40,6 +40,12 @@ type Input struct {
 	// （design doc 2026-08-18-baseline-applicability §3）。
 	// 依据齐备的数据源（fixture）传 nil。
 	UnassessedBaselines []baseline.Kind
+	// Imports 是人工导入、要补进候选集的策略（registry.RoleCandidateAddition）。
+	//
+	// **它补的是观测看不见的东西**：月结批处理、季度对账、只在故障时走的灾备
+	// 链路，不在窗口里就学不出规则，而 dry-run 也报不出来（它只评估见过的
+	// 连接）。这是操作者补上那条规则的入口。
+	Imports []ImportedPolicy
 }
 
 // Result 是一次生成的全部产物。
@@ -65,6 +71,12 @@ type Result struct {
 	Ungeneratable []UngeneratableItem `json:"ungeneratable"`
 	// ExcludedWorkloads 是从未进入候选策略花名册的 Pod，按 (namespace, pod) 确定排序。
 	ExcludedWorkloads []ExcludedWorkload `json:"excludedWorkloads"`
+	// UnattachedImports 是挂不到任何主体上、因而没有进候选集的导入。
+	//
+	// **必须与候选集一起返回**：一条导入进来了却没出现在候选集里，操作者会
+	// 以为它生效了 —— 而它恰恰是用来补那条平台看不见的连接的，"以为补上了"
+	// 比"知道没补上"危险得多。
+	UnattachedImports []UnattachedImport `json:"unattachedImports"`
 }
 
 // MissingBaseline 是一个 namespace 缺失的 Baseline 类型。
@@ -184,10 +196,19 @@ func Generate(in Input) Result {
 		}
 	}
 
-	res := Result{Ungeneratable: dedupeGaps(bad), ExcludedWorkloads: excluded}
+	// 导入并进名册**之后**：一条挂到集群里并不存在的 workload 上的导入，
+	// 会生成一条选不中任何 Pod 的幽灵策略 —— 它不报错，只是永远不生效，
+	// 而操作者以为自己补上了那条放行。因此要拿名册核对，核不上就报出来。
+	imported, unattached := importedRules(in.Imports, workloads)
+
+	res := Result{
+		Ungeneratable: dedupeGaps(bad), ExcludedWorkloads: excluded,
+		UnattachedImports: unattached,
+	}
 	for s := range workloads {
 		rules := append([]Rule{}, byWorkload[s]...)
 		rules = append(rules, baselineByNS[s.namespace]...)
+		rules = append(rules, imported[s]...)
 		sortRules(rules)
 		res.Policies = append(res.Policies, CandidatePolicy{
 			// 生成恒为 workload 粒度 —— 那是最细的一层，也是人工确认挂靠的

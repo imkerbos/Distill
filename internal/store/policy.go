@@ -143,6 +143,13 @@ type PolicyPreview struct {
 	// 不随 namespace 裁剪：它讲的是那一次采集拿回了什么，与在看哪个
 	// namespace 无关 —— 与 Ungeneratable / ExcludedWorkloads 同理。
 	NotAssessedBaselines []baseline.Kind `json:"notAssessedBaselines"`
+	// UnattachedImports 是挂不到任何主体上、因而没有进候选集的人工导入。
+	//
+	// **与候选集一起返回，不省。** 一条导入进来了却没出现在候选集里，操作者
+	// 会以为它生效了 —— 而它恰恰是用来补那条平台看不见的连接的（月结批处理、
+	// 灾备链路），"以为补上了"比"知道没补上"危险得多，因为 dry-run 报不出
+	// 这个缺口：它只评估见过的连接。
+	UnattachedImports []policygen.UnattachedImport `json:"unattachedImports"`
 	// Ungeneratable 是无法表达为规则的流量。
 	Ungeneratable []policygen.UngeneratableItem `json:"ungeneratable"`
 	// ExcludedWorkloads 是从未进入候选策略花名册的 Pod（hostNetwork、
@@ -272,6 +279,14 @@ func (r *FixtureReader) generate(
 	// 策略集：目的地在其他 namespace 的流量因为对应策略被滤掉而落到
 	// ALLOW，凭空造出 WOULD_OPEN，同时 WOULD_BREAK 被低估 —— 两个方向
 	// 同时错，且都朝着让人放心的方向（spec §5）。
+	// 导入对演示集群同样生效，与人工覆盖同一条理由：登记在注册表里的决定
+	// 不该因为数据来源是合成的就被忽略 —— 那会让这条路在 demo 上演示不出来，
+	// 而演示正是它被理解的方式。
+	imports, err := r.candidateImports(ctx, clusterID)
+	if err != nil {
+		return candidateSet{}, err
+	}
+
 	gen := policygen.Generate(policygen.Input{
 		ClusterID: clusterID,
 		Assets:    assets, Namespaces: c.Namespaces,
@@ -280,6 +295,7 @@ func (r *FixtureReader) generate(
 		// workload 会从候选集里悄悄消失，连带绕过它们的强制 Baseline 注入。
 		Pods:         c.Pods,
 		Observations: obs,
+		Imports:      imports,
 	})
 
 	return candidateSet{cluster: c, observations: obs, result: gen}, nil
@@ -377,6 +393,7 @@ func (r *FixtureReader) PolicyPreviewAtGranularity(
 		// 读作"这个 Reader 没回答"（见字段说明）。
 		NotAssessedBaselines: []baseline.Kind{},
 		Ungeneratable:        gen.Ungeneratable,
+		UnattachedImports:    gen.UnattachedImports,
 		ExcludedWorkloads:    gen.ExcludedWorkloads,
 		Prediction:           report,
 		Kinds:                baseline.AllKinds(),
@@ -754,4 +771,32 @@ func SubjectOfEndpoint(ep replay.Endpoint) reconcile.Subject {
 		return reconcile.Subject{Namespace: ep.Pod.Namespace}
 	}
 	return reconcile.Subject{Namespace: ep.Pod.Namespace, Workload: workload}
+}
+
+// candidateImports 读出这个集群要补进候选集的人工导入。
+//
+// 与 collectstore 那一份同形、同判据（只取 CANDIDATE_ADDITION、坏记录跳过）：
+// 两个 Reader 对"哪些导入算数"必须是同一个答案，否则同一条导入在演示集群与
+// 采集集群上会有两种命运，而读的人无从知道哪一种是对的。
+func (r *FixtureReader) candidateImports(
+	ctx context.Context, clusterID string,
+) ([]policygen.ImportedPolicy, error) {
+	stored, err := r.source.PolicyImports(ctx, clusterID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]policygen.ImportedPolicy, 0, len(stored))
+	for _, imp := range stored {
+		if imp.Role != registry.RoleCandidateAddition {
+			continue
+		}
+		parsed, err := registry.ParseImport(imp.YAML)
+		if err != nil {
+			continue
+		}
+		out = append(out, policygen.ImportedPolicy{
+			ImportID: imp.ImportID, Policy: parsed.Policy,
+		})
+	}
+	return out, nil
 }

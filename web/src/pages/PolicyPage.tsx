@@ -1,12 +1,16 @@
 import { useState, type CSSProperties, type ReactNode } from 'react'
 import { EVIDENCE_LABEL, evidenceNote } from './evidenceView.ts'
 import { previewEvidenceNote, ruleEvidenceView, type RuleEvidenceView } from './ruleEvidenceView.ts'
+import {
+  IMPORTED_BASIS, isImported, UNATTACHED_HELP, UNATTACHED_NONE, unattachedRows,
+} from './importedView.ts'
 import { api, ApiError } from '../api/client'
 import {
   RISK_CATEGORY_LABEL,
   type CandidatePolicy, type CandidateRule, type ChangeKind, type ExcludedWorkload,
   type Granularity, type Kind, type MissingBaseline, type OverrideDecision, type Widening,
   type RuleEvidence, type RuleOrigin, type RuleOverride, type StaleOverride,
+  type UnattachedImport,
   type UngeneratableItem, type UngeneratableReason, type WorkloadExclusionReason,
   type WritebackPlanResult, type WritebackPushResult,
 } from '../api/types'
@@ -155,6 +159,10 @@ export default function PolicyPage({ cluster }: { cluster: string }) {
         notApplicable={pv.notApplicableBaselines}
       />
       <ExcludedWorkloadSection items={pv.excludedWorkloads ?? []} />
+      {/* 挂不上的导入与"不可生成"并列成节，不合并：后者说的是"这条流量表达
+          不成规则"，前者说的是"这条人写下来的规则没挂上任何主体"。两者的
+          处置完全不同 —— 前者要改导入的 YAML，后者要改平台或改集群。 */}
+      <UnattachedImportSection items={pv.unattachedImports ?? []} />
       <UngeneratableSection items={pv.ungeneratable} />
     </div>
   )
@@ -1054,11 +1062,37 @@ function RuleTargets({ values }: { values: string[] }) {
  * 而不是靠色相区分。
  */
 function OriginBadge({ origin }: { origin: RuleOrigin }) {
-  return origin === 'BASELINE' ? <Chip strong>BASELINE</Chip> : <Chip>LEARNED</Chip>
+  // 三种来源三种读法：BASELINE 是从基础设施事实推导出来的，LEARNED 是从流量
+  // 学的，IMPORTED 是人写下来的。把 IMPORTED 落回 LEARNED 那一支（原来的
+  // 三元表达式就会这么干），一条人工补的规则会显示成平台自己学出来的。
+  switch (origin) {
+    case 'BASELINE':
+      return <Chip strong>BASELINE</Chip>
+    case 'IMPORTED':
+      return <Chip strong>人工导入</Chip>
+    default:
+      return <Chip>LEARNED</Chip>
+  }
 }
 
 /** 规则依据：BASELINE 展示类型与推导来源，LEARNED 展示证据等级与命中的风险端口。 */
 function RuleBasis({ rule }: { rule: CandidateRule }) {
+  // 导入规则没有 baseline 类型、也没有学习证据类别，两个分支都会落空 ——
+  // 而落空之后那一栏是空的，读的人只看到一条流量条数为 0 的规则，
+  // 那正好读成"没人用、可以收紧"。
+  if (isImported(rule)) {
+    return (
+      <div>
+        <div>人工导入</div>
+        <div className="mt-[2px] text-xs text-ink-muted">{IMPORTED_BASIS}</div>
+        {rule.risk && (
+          <div className="mt-[2px] text-xs text-ink-muted">
+            {RISK_CATEGORY_LABEL[rule.risk.category] ?? rule.risk.category}：{rule.risk.name} :{rule.risk.port}
+          </div>
+        )}
+      </div>
+    )
+  }
   if (rule.baseline) {
     return (
       <div>
@@ -1721,6 +1755,46 @@ function AccessSection({ candidates, trafficObserved }: {
             })}
           </tbody>
         </ScrollTableCard>
+      )}
+    </Section>
+  )
+}
+
+
+/**
+ * 挂不到任何主体上、因而没有进候选集的人工导入。
+ *
+ * **零条时也要出现，且说一句话。** 一个不显示的区块与"全都挂上了"在屏幕上
+ * 长得一样，而操作者导入这些规则正是因为 dry-run 看不见那条连接 ——
+ * 他没有第二个地方能发现这条补充没生效。
+ */
+function UnattachedImportSection({ items }: { items: UnattachedImport[] }) {
+  const rows = unattachedRows(items)
+  return (
+    <Section
+      title="没有挂上的人工导入"
+      description={UNATTACHED_HELP}
+      meta={`${rows.length} 条`}
+    >
+      {rows.length === 0 ? (
+        <EmptyState
+          message={UNATTACHED_NONE}
+          detail="导入的补充规则与学习出来的规则并列显示在候选策略里，来源徽标标为「人工导入」。"
+        />
+      ) : (
+        <TableCard>
+          <thead>
+            <tr><th>导入</th><th>原因与处置</th></tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.importId}>
+                <td className="mono">{row.label}</td>
+                <td>{row.reason}</td>
+              </tr>
+            ))}
+          </tbody>
+        </TableCard>
       )}
     </Section>
   )

@@ -131,5 +131,16 @@ func (s fixtureOnlySource) RuleOverrides(
 	return s.reg.RuleOverrides(ctx, clusterID)
 }
 
+// PolicyImports 透传导入清单。
+//
+// 与 RuleOverrides 一样直接转发，不额外收窄：这份数据源已经把集群清单限制在
+// FIXTURE 上，而一条挂在 COLLECTED 集群上的导入根本取不到 —— 收窄发生在
+// 集群解析那一步，不必在每个读方法里各写一遍。
+func (s fixtureOnlySource) PolicyImports(
+	ctx context.Context, clusterID string,
+) ([]registry.PolicyImport, error) {
+	return s.reg.PolicyImports(ctx, clusterID)
+}
+
 // 编译期确认收窄后的数据源仍然满足 store 要的形状。
 var _ store.ClusterSource = fixtureOnlySource{}

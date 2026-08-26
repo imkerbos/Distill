@@ -161,6 +161,7 @@ func (r *Reader) PolicyPreviewAtGranularity(
 		// 一个平台自己推出来的结论看上去也有人签过字。
 		NotApplicableBaselines: store.FilterMissing(gen.NotApplicableBaselines, namespace),
 		Ungeneratable:          gen.Ungeneratable,
+		UnattachedImports:      gen.UnattachedImports,
 		ExcludedWorkloads:      gen.ExcludedWorkloads,
 		Prediction:             report,
 		Kinds:                  baseline.AllKinds(),
@@ -241,6 +242,16 @@ func (r *Reader) generate(
 	// "我们没看过"，而两者在资产里长得一模一样。
 	notAssessed := notAssessedBaselines(evidence)
 
+	// 人工导入的补充规则进候选集（design doc 2026-08-25-existing-policies §3）。
+	//
+	// **读失败就整次失败，不降级成"没有导入"**：那些规则补的正是观测看不见
+	// 的连接，静默丢掉会让一份缺了月结批处理放行的策略集看起来完整 —— 而
+	// dry-run 报不出这个缺口，它只评估见过的连接。
+	imports, err := r.candidateImports(ctx, clusterID)
+	if err != nil {
+		return candidateSet{}, err
+	}
+
 	return candidateSet{
 		traffic:         t,
 		trafficObserved: trafficObserved,
@@ -254,6 +265,7 @@ func (r *Reader) generate(
 			Pods:                t.roster(),
 			Observations:        obs,
 			UnassessedBaselines: notAssessed,
+			Imports:             imports,
 		}),
 		notAssessed:  notAssessed,
 		inapplicable: inapplicableBaselines(c),
@@ -586,4 +598,40 @@ func (r *Reader) Reconciliation(
 		Report:                rep,
 		Samples:               store.ReconciliationSamplesOf(rep.Samples),
 	}, nil
+}
+
+// candidateImports 读出这个集群要补进候选集的人工导入。
+//
+// **只取 CANDIDATE_ADDITION。** 另一个角色 BASELINE_CURRENT 描述的是"集群
+// 当前跑着什么"，它属于回放的 current 侧，与候选集是两件事；混进来会让一条
+// 用于描述现状的策略变成一条平台推荐下发的规则。
+//
+// 解析失败**跳过那一条并继续**，不是整次失败：导入在写入时已经过
+// registry.ParseImport 校验，走到这里还解析不了说明那条记录本身坏了（库被
+// 手工改过、或迁移出过问题）。为一条坏记录让整个集群的预览打不开，处置成本
+// 远高于它本身；而它不会被静默当成"没有这条规则"—— 挂不上的导入由
+// policygen 报进 UnattachedImports，坏记录则在日志里留痕。
+//
+// **不做 YAML 缓存**：导入随时会被增删，而一次预览要的是"此刻登记的是什么"。
+func (r *Reader) candidateImports(
+	ctx context.Context, clusterID string,
+) ([]policygen.ImportedPolicy, error) {
+	stored, err := r.src.PolicyImports(ctx, clusterID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]policygen.ImportedPolicy, 0, len(stored))
+	for _, imp := range stored {
+		if imp.Role != registry.RoleCandidateAddition {
+			continue
+		}
+		parsed, err := registry.ParseImport(imp.YAML)
+		if err != nil {
+			continue
+		}
+		out = append(out, policygen.ImportedPolicy{
+			ImportID: imp.ImportID, Policy: parsed.Policy,
+		})
+	}
+	return out, nil
 }

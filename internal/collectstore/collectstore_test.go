@@ -89,6 +89,7 @@ var cleanupStatements = []string{
 // 本身从哪张表读出来与此无关，那一半由 internal/mysqlregistry 的集成测试守。
 type stubSource struct {
 	clusters []registry.Cluster
+	imports  map[string][]registry.PolicyImport
 }
 
 func (s stubSource) Clusters(context.Context) ([]registry.Cluster, error) { return s.clusters, nil }
@@ -104,6 +105,11 @@ func (s stubSource) Cluster(_ context.Context, id string) (registry.Cluster, boo
 
 func (s stubSource) RuleOverrides(context.Context, string) ([]registry.RuleOverride, error) {
 	return nil, nil
+}
+
+// PolicyImports 交回登记的导入；用例不设时为空。
+func (s stubSource) PolicyImports(_ context.Context, clusterID string) ([]registry.PolicyImport, error) {
+	return s.imports[clusterID], nil
 }
 
 // testSource 把两个测试集群都登记为 COLLECTED。
@@ -142,6 +148,19 @@ func ccnpSource() stubSource {
 func newTestReader(t *testing.T) (*collectstore.Reader, *snapshotstore.Store) {
 	t.Helper()
 	return newTestReaderWithSource(t, testSource())
+}
+
+// newTestReaderWithImports 同 newTestReader，但注册表里带上导入策略。
+//
+// 单独一个入口而不是给 newTestReader 加参数：几十处用例挂在它固定的那份
+// 注册表上，改它的形状等于同时改掉那些用例的前提。
+func newTestReaderWithImports(
+	t *testing.T, imports map[string][]registry.PolicyImport,
+) (*collectstore.Reader, *snapshotstore.Store) {
+	t.Helper()
+	src := testSource()
+	src.imports = imports
+	return newTestReaderWithSource(t, src)
 }
 
 // newTestReaderWithSource 同上，但由调用方决定注册表里登记了什么。

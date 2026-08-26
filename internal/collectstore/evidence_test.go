@@ -2,10 +2,13 @@ package collectstore_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/imkerbos/Distill/internal/flow"
+	"github.com/imkerbos/Distill/internal/policygen"
+	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/snapshotstore"
 	"github.com/imkerbos/Distill/internal/store"
 )
@@ -126,5 +129,100 @@ func TestReconciliationCarriesDrillableSamples(t *testing.T) {
 		if smp.At.IsZero() {
 			t.Errorf("样本没有连接发生的时刻，无法对齐历史快照：%+v", smp)
 		}
+	}
+}
+
+// 人工导入的补充规则真的进候选集，而 BASELINE_CURRENT 不进。
+//
+// 导入这条路存在的理由是**观测看不见的东西**：月结批处理、季度对账、只在
+// 故障时走的灾备链路 —— 不在窗口里就学不出规则，而 dry-run 也报不出来。
+// 它是学习期门槛那条根本限制的人工补救入口。
+//
+// 两个角色必须分开：BASELINE_CURRENT 描述的是"集群当前跑着什么"，属于回放的
+// current 侧；混进候选集会让一条用于描述现状的策略变成一条平台推荐下发的规则。
+func TestCandidateAdditionImportsReachTheCandidateSet(t *testing.T) {
+	const addition = `apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: monthly-settlement
+  namespace: payment
+spec:
+  podSelector:
+    matchLabels:
+      app: api
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - ipBlock:
+        cidr: 10.9.0.0/28
+    ports:
+    - port: 5432
+      protocol: TCP
+`
+	// 同一份内容登记成 BASELINE_CURRENT，它不该出现在候选集里。
+	current := strings.Replace(addition, "monthly-settlement", "describes-current", 1)
+
+	r, s := newTestReaderWithImports(t, map[string][]registry.PolicyImport{
+		collectedID: {
+			{
+				ClusterID: collectedID, ImportID: "imp-addition",
+				Role: registry.RoleCandidateAddition, Source: registry.SourcePaste,
+				Namespace: "payment", Name: "monthly-settlement", YAML: addition,
+			},
+			{
+				ClusterID: collectedID, ImportID: "imp-current",
+				Role: registry.RoleBaselineCurrent, Source: registry.SourcePaste,
+				Namespace: "payment", Name: "describes-current", YAML: current,
+			},
+		},
+	})
+	seedPreviewCluster(t, s)
+	saveIngest(t, s, []flow.Connection{conn(recycledIP, peerIP, portResolved)})
+
+	pv, err := r.PolicyPreview(context.Background(), collectedID, "", describedWindow())
+	if err != nil {
+		t.Fatalf("PolicyPreview() = %v", err)
+	}
+	if len(pv.UnattachedImports) != 0 {
+		t.Fatalf("导入没挂上：%+v", pv.UnattachedImports)
+	}
+
+	var imported int
+	for _, c := range pv.Candidates {
+		for _, rule := range c.Rules {
+			if rule.Origin != policygen.OriginImported {
+				continue
+			}
+			imported++
+			if c.Namespace != "payment" || c.Workload != "api" {
+				t.Errorf("导入规则挂到了 %s/%s，want payment/api", c.Namespace, c.Workload)
+			}
+			// 那个 0 不是"没有流量"，界面必须按来源解释它。
+			if rule.FlowCount != 0 {
+				t.Errorf("FlowCount = %d, want 0", rule.FlowCount)
+			}
+		}
+	}
+	if imported != 1 {
+		t.Fatalf("候选集里有 %d 条导入规则, want 1 —— BASELINE_CURRENT 那条"+
+			"描述的是现状，不该变成一条平台推荐下发的规则", imported)
+	}
+
+	// 导入的规则必须进得了生效策略集：进不去等于没补上，而操作者以为补上了。
+	var inEnabled bool
+	for _, p := range pv.Overridden.Enabled {
+		if p.Namespace == "payment" {
+			for _, e := range p.Spec.Egress {
+				for _, port := range e.Ports {
+					if port.Port != nil && port.Port.IntValue() == 5432 {
+						inEnabled = true
+					}
+				}
+			}
+		}
+	}
+	if !inEnabled {
+		t.Error("导入的放行没有进生效策略集，写回时它不会被写出去")
 	}
 }

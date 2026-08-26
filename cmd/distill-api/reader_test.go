@@ -43,6 +43,10 @@ func (s stubClusterSource) RuleOverrides(context.Context, string) ([]registry.Ru
 	return nil, nil
 }
 
+func (s stubClusterSource) PolicyImports(context.Context, string) ([]registry.PolicyImport, error) {
+	return nil, nil
+}
+
 // fixtureBackedID 是 internal/fixture 里确实有整套数据的集群。
 //
 // 测试里刻意用它来登记 COLLECTED：来源若是从「有没有数据」推断出来的，

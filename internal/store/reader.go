@@ -25,6 +25,12 @@ type ClusterSource interface {
 	// 与集群一起放在同一个来源接口里：两者都来自 registry.Store，
 	// 拆成两个参数只会让装配方有机会传进两个不一致的实现。
 	RuleOverrides(ctx context.Context, clusterID string) ([]registry.RuleOverride, error)
+	// PolicyImports 返回一个集群下未删除的导入策略。
+	//
+	// 与 RuleOverrides 放在同一个来源接口里，理由相同：两者都来自
+	// registry.Store，而它们都会改变候选集长什么样 —— 拆成两个参数只会让
+	// 装配方有机会传进两个不一致的实现。
+	PolicyImports(ctx context.Context, clusterID string) ([]registry.PolicyImport, error)
 }
 
 // TopologyNode 是拓扑图中的一个命名空间节点。

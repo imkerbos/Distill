@@ -21,6 +21,13 @@ const (
 	OriginBaseline RuleOrigin = "BASELINE"
 	// OriginLearned 表示规则从观测流量学习得出。
 	OriginLearned RuleOrigin = "LEARNED"
+	// OriginImported 表示规则来自人工导入（registry.RoleCandidateAddition）。
+	//
+	// 与 LEARNED 必须分得开：那些是平台从流量里猜出来的，FlowCount 是它的
+	// 证据；导入规则的 FlowCount 恒为 0，而**那不是"没有流量"** —— 导入这条
+	// 路存在的理由正是那条连接不在观测里。界面把两者混成一栏，一条人工补上
+	// 的月结批处理规则会显示成"没人用、可以收紧"。
+	OriginImported RuleOrigin = "IMPORTED"
 )
 
 // EvidenceClass 是学习规则的证据来源。封闭枚举。

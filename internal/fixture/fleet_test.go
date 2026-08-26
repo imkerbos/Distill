@@ -34,6 +34,10 @@ func (m memSource) RuleOverrides(context.Context, string) ([]registry.RuleOverri
 	return nil, nil
 }
 
+func (m memSource) PolicyImports(context.Context, string) ([]registry.PolicyImport, error) {
+	return nil, nil
+}
+
 func fixtureSource() memSource { return memSource{clusters: fixtureClusters()} }
 
 // fixtureClusters 镜像 internal/fixture/asset.go 里两个集群的注册信息。

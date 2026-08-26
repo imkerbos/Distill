@@ -300,7 +300,19 @@ export interface SecurityReport {
 }
 
 /** 规则来源。BASELINE 由基础设施事实推导，LEARNED 由观测到的流量学习。 */
-export type RuleOrigin = 'BASELINE' | 'LEARNED'
+export type RuleOrigin = 'BASELINE' | 'LEARNED' | 'IMPORTED'
+
+/** 一条挂不到任何主体上、因而没有进候选集的人工导入。 */
+export interface UnattachedImport {
+  importId: string
+  namespace: string
+  name: string
+  /** 封闭枚举，不是自由文本。 */
+  reason: UnattachedReason
+}
+
+/** 导入挂不上主体的原因。封闭枚举，对应 policygen.UnattachedReason。 */
+export type UnattachedReason = 'NO_WORKLOAD_LABEL' | 'NO_RULES' | 'NO_SUCH_WORKLOAD'
 
 /** LEARNED 规则的证据等级，决定是否默认启用。 */
 export type EvidenceClass =
@@ -885,6 +897,15 @@ export interface PolicyPreview {
   namespace: string
   window: TimeWindow
   candidates: CandidatePolicy[]
+  /**
+   * 挂不到任何主体上、因而没有进候选集的人工导入。
+   *
+   * **不能省。** 一条导入进来了却没出现在候选集里，操作者会以为它生效了 ——
+   * 而它恰恰是用来补那条平台看不见的连接的（月结批处理、灾备链路），
+   * "以为补上了"比"知道没补上"危险得多：dry-run 报不出这个缺口，
+   * 它只评估见过的连接。
+   */
+  unattachedImports: UnattachedImport[] | null
   /**
    * 每条候选规则的跨窗口证据，键是 `namespace/workload/fingerprint`。
    *

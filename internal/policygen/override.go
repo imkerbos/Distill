@@ -96,6 +96,10 @@ func Apply(base Result, overrides []Override) (Result, []StaleOverride) {
 		NotApplicableBaselines: base.NotApplicableBaselines,
 		Ungeneratable:          base.Ungeneratable,
 		ExcludedWorkloads:      base.ExcludedWorkloads,
+		// 挂不上的导入原样带过来：人工覆盖改的是"哪几条规则算启用"，
+		// 改不了"这条导入挂没挂上主体"。丢掉它，覆盖之后那一份预览会显示
+		// 成"全部导入都挂上了"—— 一份凭空好看起来的清单。
+		UnattachedImports: base.UnattachedImports,
 	}
 	// 深拷贝规则切片：Result 里的 Policies 与 Rules 都是切片，
 	// 直接复用底层数组会让对 out 的写入穿透回 base。

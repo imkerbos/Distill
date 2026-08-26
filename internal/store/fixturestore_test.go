@@ -42,6 +42,7 @@ func fixtureClusters() []registry.Cluster {
 type memSource struct {
 	clusters  map[string]registry.Cluster
 	overrides map[string][]registry.RuleOverride
+	imports   map[string][]registry.PolicyImport
 }
 
 func newSource(cs ...registry.Cluster) *memSource {
@@ -68,6 +69,14 @@ func (m *memSource) Cluster(_ context.Context, id string) (registry.Cluster, boo
 // RuleOverrides 返回该集群下测试预先装好的人工决定。
 func (m *memSource) RuleOverrides(_ context.Context, clusterID string) ([]registry.RuleOverride, error) {
 	return m.overrides[clusterID], nil
+}
+
+// PolicyImports 交回这个集群登记的导入。
+//
+// 真的按集群返回、不恒空：导入会改变候选集长什么样，一个恒空的替身会让
+// "导入进了候选集"这条断言永远通过。
+func (m *memSource) PolicyImports(_ context.Context, clusterID string) ([]registry.PolicyImport, error) {
+	return m.imports[clusterID], nil
 }
 
 // offboard 模拟一次下线：软删除之后集群不再出现在注册表的读结果里。
