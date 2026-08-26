@@ -6,12 +6,13 @@ import {
   TREND_HELP, TREND_NONE, trendRows,
 } from './reconcileView'
 import DataSourceNotice from '../components/DataSourceNotice'
+import { flowIngestView, isNeverIngestedError } from './flowIngestView'
 import { EmptyState, PageHeader, Section, Skeleton, StatTile, TableCard } from '../components/ui'
 
 const pct = (v: number) => `${(v * 100).toFixed(1)}%`
 
 export default function QualityPage({ cluster }: { cluster: string }) {
-  const { data: q, error, loading } = useResource(cluster, () => api.quality(cluster))
+  const { data: q, error, cause, loading } = useResource(cluster, () => api.quality(cluster))
   // 一致率与其余质量指标同屏：它回答的是"这一屏的其它数字有多可信"，
   // 放到另一页去看等于没有（design doc 2026-08-25 §3）。
   //
@@ -38,6 +39,23 @@ export default function QualityPage({ cluster }: { cluster: string }) {
     </>
   )
 
+  // 「这个集群从未摄入过流量」是一个状态，不是一次读取故障。
+  //
+  // 后端在这条路径上给的是 HTTP 200 加一个专门的业务码，而这一屏原先把它
+  // 连同真正的故障一起渲染成一行红字 —— 操作者读到的是"这一屏坏了"，
+  // 而它其实是"还没开始"。其余五屏都已经分开处理，只有这里没有；同一个
+  // 状态在不同屏上给两套说法，人会按先看到的那一屏行动。
+  //
+  // 文案取自 flowIngestView，与流量页、采集页同一句。
+  if (isNeverIngestedError(cause)) {
+    const ingest = flowIngestView(null)
+    return (
+      <div>
+        {head}
+        <EmptyState message={ingest.headline} detail={ingest.action} />
+      </div>
+    )
+  }
   if (error) return <div>{head}<p className="text-deny">{error}</p></div>
   if (loading || !q) return <div>{head}<Skeleton /></div>
 

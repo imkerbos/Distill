@@ -1388,8 +1388,14 @@ function ImportSection({ clusters, refreshKey, onChanged }: {
           </FormGrid>
 
           <SubHeading>NetworkPolicy YAML</SubHeading>
+          {/*
+            SubHeading 是一个标题，不是一个 label —— 屏幕阅读器不会把它读成
+            这个输入框的名字，读到的只是"文本区域"。这一格里贴的是会成为
+            现状基线的策略原文，读不出它是什么框，就分不清自己贴到了哪里。
+          */}
           <textarea
             className="ctl w-full"
+            aria-label="NetworkPolicy YAML"
             value={yaml}
             onChange={(e) => setYaml(e.target.value)}
             rows={10}
