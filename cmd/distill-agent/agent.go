@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
@@ -115,17 +116,23 @@ func readToken(path string) (string, error) {
 //
 // **推送模式下根本不存在 kubeconfig**：凭据是 kubelet 投进来的那份 token，
 // 平台从来没有见过它，也就无从泄漏（design doc §1）。
-func inClusterClient() (kubernetes.Interface, error) {
+func inClusterClient() (kubernetes.Interface, dynamic.Interface, error) {
 	cfg, err := rest.InClusterConfig()
 	if err != nil {
 		// 不包 err：它会带上环境变量名与挂载路径。
-		return nil, errors.New("this process is not running inside a cluster: push mode needs an in-cluster ServiceAccount")
+		return nil, nil, errors.New("this process is not running inside a cluster: push mode needs an in-cluster ServiceAccount")
 	}
 	client, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
-		return nil, errors.New("cannot build a Kubernetes client from the in-cluster credentials")
+		return nil, nil, errors.New("cannot build a Kubernetes client from the in-cluster credentials")
 	}
-	return client, nil
+	// 动态客户端读 ANP 一族（CRD，没有 typed client）。用同一份 cfg：
+	// 两个客户端必须是同一个身份，否则自证只读的那次问询问的是另一个主体。
+	dyn, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		return nil, nil, errors.New("cannot build a dynamic Kubernetes client from the in-cluster credentials")
+	}
+	return client, dyn, nil
 }
 
 // agentConfig 是平台答复的采集配置。
@@ -295,7 +302,7 @@ func run(ctx context.Context, opts options, timeout time.Duration, logger *slog.
 	// 那是一次性的，与轮换无关。
 	sink := newHTTPSinkReading(opts.platformURL, fileTokenReader(opts.tokenFile), httpClient)
 
-	client, err := inClusterClient()
+	client, dyn, err := inClusterClient()
 	if err != nil {
 		// 客户端建不起来同样要留下痕迹：不上报的话，界面显示「这个集群还
 		// 没有过任何一次资产采集」，与一个 agent 压根没被拉起来的集群
@@ -344,7 +351,7 @@ func run(ctx context.Context, opts options, timeout time.Duration, logger *slog.
 			// 判定 —— 保守且正确，而一个悄悄拿到精确降级的路径会把它没看过
 			// 的那些主体判成可信（internal/collectrun.ForeignPlanes）。
 			_, err := collectrun.Once(
-				ctx, cfg.ClusterID, client, nil, sink, collectrun.ForeignPlanes{}, logger)
+				ctx, cfg.ClusterID, client, dyn, nil, sink, collectrun.ForeignPlanes{}, logger)
 			return err
 		},
 		assetsEvery:   opts.assetsEvery,

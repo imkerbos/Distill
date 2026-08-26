@@ -42,6 +42,14 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources: [networkpolicies, ingresses]
     verbs: [get, list]
+  # 管理面策略。这一族带 Deny 动作且先于 NetworkPolicy 生效 —— 不读它，
+  # 平台会把一条其实被 ANP 拦住的连接解释成放行。
+  #
+  # 绝大多数集群没装这一族 CRD，那时 apiserver 返回 404，采集器据此记零条
+  # 而不是记失败。多给这一条权限在没有 CRD 的集群上不产生任何效果。
+  - apiGroups: ["policy.networking.k8s.io"]
+    resources: [adminnetworkpolicies, baselineadminnetworkpolicies]
+    verbs: [get, list]
   - apiGroups: ["apps"]
     # 只读 ReplicaSet，且只为把 Pod 解析到它的 Deployment：Pod 的
     # ownerReference 指到 ReplicaSet，再顺着 RS 自己的 ownerReference 到

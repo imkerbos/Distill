@@ -8,6 +8,7 @@ import (
 	"github.com/imkerbos/Distill/internal/cluster"
 	"github.com/imkerbos/Distill/internal/collectrun"
 	"github.com/imkerbos/Distill/internal/snapshot"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -28,10 +29,10 @@ var (
 
 func collectOnce(
 	ctx context.Context, clusterID string, client kubernetes.Interface,
-	fleet *cluster.Registry, store runStore,
+	dyn dynamic.Interface, fleet *cluster.Registry, store runStore,
 	planes collectrun.ForeignPlanes, logger *slog.Logger,
 ) (snapshot.Run, error) {
-	return collectrun.Once(ctx, clusterID, client, fleet, store, planes, logger)
+	return collectrun.Once(ctx, clusterID, client, dyn, fleet, store, planes, logger)
 }
 
 func recordAbortedRun(

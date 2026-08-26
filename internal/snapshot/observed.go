@@ -33,6 +33,8 @@ type Observation struct {
 	Policies []NetworkPolicy
 	// Gateways 是入口暴露对象快照，本轮只含 Kind=Ingress。
 	Gateways []Gateway
+	// AdminPolicies 是集群现存的 ANP 与 BANP，**只存不解释**。
+	AdminPolicies []AdminPolicy
 
 	// ForeignScopes 是平台**不解释**的策略平面所覆盖的主体范围
 	// （design doc 2026-08-25 §2）。
@@ -212,6 +214,48 @@ type NetworkPolicy struct {
 	Name string
 	// UID 区分同名重建的策略。
 	UID string
+	// Manifest 是该策略的 YAML 原文。
+	Manifest string
+}
+
+// AdminPolicyKind 是管理面策略的种类，封闭枚举。
+//
+// 两者是同一个 API 组下的两种对象，**求值次序完全不同**：ANP 在标准
+// NetworkPolicy 之前生效，BANP 在其之后兜底。把它们混作一类，会让一条
+// 兜底规则被当成前置规则解释，方向恰好相反。
+type AdminPolicyKind string
+
+const (
+	// AdminPolicyAdmin 是 AdminNetworkPolicy，带 priority，先于 NetworkPolicy 生效。
+	AdminPolicyAdmin AdminPolicyKind = "ADMIN_NETWORK_POLICY"
+	// AdminPolicyBaseline 是 BaselineAdminNetworkPolicy，无 priority，在 NetworkPolicy 之后兜底。
+	AdminPolicyBaseline AdminPolicyKind = "BASELINE_ADMIN_NETWORK_POLICY"
+)
+
+// AdminPolicy 是集群里一条管理面策略的原文快照。
+//
+// 本轮**只存不解释**：落库让"这个集群上有哪些 ANP、当时长什么样"成为可以
+// 回看的事实，求值仍然照旧整片降级。先存后解释而不是一步到位，是因为
+// ANP 的求值是有序短路的（ANP → NP → BANP），而一个只对了一半的次序实现
+// 会给出一个自信的错答案 —— 那比不解释更危险。
+type AdminPolicy struct {
+	// ClusterID 是所属集群。
+	ClusterID string
+	// Kind 区分 ANP 与 BANP。
+	Kind AdminPolicyKind
+	// Name 是策略名。这两类都是集群级对象，没有 namespace。
+	Name string
+	// UID 区分同名重建的策略。
+	UID string
+	// Priority 是 ANP 的优先级，**数值小的先生效**。
+	Priority int32
+	// PriorityKnown 表示上面那个数是真的读到了。
+	//
+	// 与 Priority 分开而不是拿 0 表示"没有"：0 是一个合法的 ANP 优先级，
+	// 而且是**最高**的那一个。合并之后，一条读不出优先级的策略会被当成
+	// 优先级最高的策略排到最前面 —— 错得最狠的那个方向。BANP 没有优先级，
+	// 这里恒为 false。
+	PriorityKnown bool
 	// Manifest 是该策略的 YAML 原文。
 	Manifest string
 }

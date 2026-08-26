@@ -238,6 +238,9 @@ func insertObservation(ctx context.Context, tx *sql.Tx, obs snapshot.Observation
 	if err := insertPolicies(ctx, tx, obs); err != nil {
 		return err
 	}
+	if err := insertAdminPolicies(ctx, tx, obs); err != nil {
+		return err
+	}
 	return insertGateways(ctx, tx, obs)
 }
 
@@ -408,6 +411,27 @@ func insertPolicies(ctx context.Context, tx *sql.Tx, obs snapshot.Observation) e
 			obs.ClusterID, p.Namespace, p.Name, obs.ObservedAt, obs.RunID,
 			p.UID, p.Manifest); err != nil {
 			return fmt.Errorf("snapshotstore: insert policy %s/%s: %w", p.Namespace, p.Name, err)
+		}
+	}
+	return nil
+}
+
+// insertAdminPolicies 落 ANP 与 BANP 的原文。
+func insertAdminPolicies(ctx context.Context, tx *sql.Tx, obs snapshot.Observation) error {
+	stmt, err := tx.PrepareContext(ctx,
+		`INSERT INTO observed_admin_policy
+		   (cluster_id, policy_kind, name, observed_at, run_id, uid, priority, priority_known, manifest)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return fmt.Errorf("snapshotstore: prepare admin policy: %w", err)
+	}
+	defer func() { _ = stmt.Close() }()
+
+	for _, p := range obs.AdminPolicies {
+		if _, err := stmt.ExecContext(ctx,
+			obs.ClusterID, string(p.Kind), p.Name, obs.ObservedAt, obs.RunID,
+			p.UID, p.Priority, p.PriorityKnown, p.Manifest); err != nil {
+			return fmt.Errorf("snapshotstore: insert admin policy %s %s: %w", p.Kind, p.Name, err)
 		}
 	}
 	return nil

@@ -139,7 +139,7 @@ func TestAFailedIngestionFailsTheRunButKeepsTheAssets(t *testing.T) {
 	store := newCollectorStore()
 	src := hubbleSource(flow.IngestResult{}, hubble.ErrRelayUnavailable)
 
-	err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testFleet(),
+	err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testDynamic(), testFleet(),
 		store, src, testWindow(), nil, nil, collectrun.ForeignPlanes{}, quietLogger())
 	if !errors.Is(err, hubble.ErrRelayUnavailable) {
 		t.Fatalf("collectAndIngest() error = %v, want it to wrap %v — "+
@@ -176,7 +176,7 @@ func TestAFailedCollectionRecordsNoIngestion(t *testing.T) {
 	answerReviews(cs, true)
 	src := hubbleSource(hubbleResult(t, testWindow(), oneConnection()), nil)
 
-	err := collectAndIngest(t.Context(), testClusterID, cs, testFleet(),
+	err := collectAndIngest(t.Context(), testClusterID, cs, testDynamic(), testFleet(),
 		store, src, testWindow(), nil, nil, collectrun.ForeignPlanes{}, quietLogger())
 	if !errors.Is(err, ErrNotProvenReadOnly) {
 		t.Fatalf("collectAndIngest() error = %v, want %v", err, ErrNotProvenReadOnly)
@@ -197,7 +197,7 @@ func TestIngestionAndCollectionAreRecordedApart(t *testing.T) {
 	store := newCollectorStore()
 	src := hubbleSource(hubbleResult(t, testWindow(), oneConnection()), nil)
 
-	if err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testFleet(),
+	if err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testDynamic(), testFleet(),
 		store, src, testWindow(), nil, nil, collectrun.ForeignPlanes{}, quietLogger()); err != nil {
 		t.Fatalf("collectAndIngest() error = %v", err)
 	}
@@ -251,7 +251,7 @@ func TestIngestionStatusFollowsTheEvidence(t *testing.T) {
 			store := newCollectorStore()
 			src := hubbleSource(hubbleResult(t, tc.covered, oneConnection()), nil)
 
-			if err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testFleet(),
+			if err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testDynamic(), testFleet(),
 				store, src, window, nil, nil, collectrun.ForeignPlanes{}, quietLogger()); err != nil {
 				t.Fatalf("collectAndIngest() error = %v", err)
 			}
@@ -277,7 +277,7 @@ func TestTheSourceIsAskedForThisClusterAndWindow(t *testing.T) {
 	src := &flowSource{source: stub, kind: flow.SourceHubble}
 	window := testWindow()
 
-	if err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testFleet(),
+	if err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testDynamic(), testFleet(),
 		store, src, window, nil, nil, collectrun.ForeignPlanes{}, quietLogger()); err != nil {
 		t.Fatalf("collectAndIngest() error = %v", err)
 	}
@@ -296,7 +296,7 @@ func TestTheSourceIsAskedForThisClusterAndWindow(t *testing.T) {
 func TestNoRelayMeansNoIngestRecord(t *testing.T) {
 	store := newCollectorStore()
 
-	if err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testFleet(),
+	if err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testDynamic(), testFleet(),
 		store, nil, testWindow(), nil, nil, collectrun.ForeignPlanes{}, quietLogger()); err != nil {
 		t.Fatalf("collectAndIngest() error = %v", err)
 	}
@@ -313,7 +313,7 @@ func TestAFailedIngestStoreIsReported(t *testing.T) {
 	store.ingestErr = want
 	src := hubbleSource(hubbleResult(t, testWindow(), oneConnection()), nil)
 
-	err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testFleet(),
+	err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testDynamic(), testFleet(),
 		store, src, testWindow(), nil, nil, collectrun.ForeignPlanes{}, quietLogger())
 	if !errors.Is(err, want) {
 		t.Fatalf("collectAndIngest() error = %v, want it to wrap %v", err, want)

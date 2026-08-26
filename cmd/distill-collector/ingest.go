@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"time"
 
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/imkerbos/Distill/internal/cluster"
@@ -162,6 +163,9 @@ func collectAndIngest(
 	ctx context.Context,
 	clusterID string,
 	client kubernetes.Interface,
+	// dyn 读 ANP 一族。允许为 nil —— 那时这一类记为采集失败，
+	// **不是**"这个集群没有 ANP"。
+	dyn dynamic.Interface,
 	fleet *cluster.Registry,
 	store collectorStore,
 	src *flowSource,
@@ -177,7 +181,7 @@ func collectAndIngest(
 	planes collectrun.ForeignPlanes,
 	logger *slog.Logger,
 ) error {
-	result, err := collectOnce(ctx, clusterID, client, fleet, store, planes, logger)
+	result, err := collectOnce(ctx, clusterID, client, dyn, fleet, store, planes, logger)
 	if err != nil {
 		return err
 	}

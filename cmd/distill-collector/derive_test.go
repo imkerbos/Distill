@@ -129,7 +129,7 @@ func contended() error {
 func TestACollectionHandsTheRunToIdentityDerivation(t *testing.T) {
 	store := newCollectorStore()
 
-	if err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testFleet(),
+	if err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testDynamic(), testFleet(),
 		store, nil, testWindow(), nil, nil, collectrun.ForeignPlanes{}, quietLogger()); err != nil {
 		t.Fatalf("collectAndIngest() error = %v", err)
 	}
@@ -157,7 +157,7 @@ func TestACollectionHandsTheRunToIdentityDerivation(t *testing.T) {
 func TestDerivationIsSerialisedPerCluster(t *testing.T) {
 	store := newCollectorStore()
 
-	if err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testFleet(),
+	if err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testDynamic(), testFleet(),
 		store, nil, testWindow(), nil, nil, collectrun.ForeignPlanes{}, quietLogger()); err != nil {
 		t.Fatalf("collectAndIngest() error = %v", err)
 	}
@@ -184,7 +184,7 @@ func TestAContendedDerivationFailsAndIsRecorded(t *testing.T) {
 	store := newCollectorStore()
 	store.lockErr = contended()
 
-	err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testFleet(),
+	err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testDynamic(), testFleet(),
 		store, nil, testWindow(), nil, nil, collectrun.ForeignPlanes{}, quietLogger())
 	if !errors.Is(err, snapshotstore.ErrDeriveInProgress) {
 		t.Fatalf("collectAndIngest() error = %v, want it to wrap %v — a swallowed contention "+
@@ -220,7 +220,7 @@ func TestDerivationAndCollectionAreRecordedApart(t *testing.T) {
 	store := newCollectorStore()
 	store.deriveErr = errors.New("the observation carries two subjects at one instant")
 
-	err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testFleet(),
+	err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testDynamic(), testFleet(),
 		store, nil, testWindow(), nil, nil, collectrun.ForeignPlanes{}, quietLogger())
 	if !errors.Is(err, store.deriveErr) {
 		t.Fatalf("collectAndIngest() error = %v, want it to wrap the derivation failure %v",
@@ -267,7 +267,7 @@ func TestAnIncompleteCollectionIsStillHandedToDerivation(t *testing.T) {
 	forbidList(cs, "networkpolicies")
 	store := newCollectorStore()
 
-	if err := collectAndIngest(t.Context(), testClusterID, cs, testFleet(),
+	if err := collectAndIngest(t.Context(), testClusterID, cs, testDynamic(), testFleet(),
 		store, nil, testWindow(), nil, nil, collectrun.ForeignPlanes{}, quietLogger()); err != nil {
 		t.Fatalf("collectAndIngest() error = %v", err)
 	}
@@ -292,7 +292,7 @@ func TestAFailedCollectionDerivesNothing(t *testing.T) {
 	answerReviews(cs, true)
 	store := newCollectorStore()
 
-	err := collectAndIngest(t.Context(), testClusterID, cs, testFleet(),
+	err := collectAndIngest(t.Context(), testClusterID, cs, testDynamic(), testFleet(),
 		store, nil, testWindow(), nil, nil, collectrun.ForeignPlanes{}, quietLogger())
 	if !errors.Is(err, ErrNotProvenReadOnly) {
 		t.Fatalf("collectAndIngest() error = %v, want %v", err, ErrNotProvenReadOnly)
@@ -324,7 +324,7 @@ func TestADerivationFailureDoesNotCostTheFlowWindow(t *testing.T) {
 	store.deriveErr = errors.New("the observation carries two subjects at one instant")
 	src := hubbleSource(hubbleResult(t, testWindow(), oneConnection()), nil)
 
-	err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testFleet(),
+	err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testDynamic(), testFleet(),
 		store, src, testWindow(), nil, nil, collectrun.ForeignPlanes{}, quietLogger())
 
 	got := store.onlyIngest(t)
@@ -380,7 +380,7 @@ func TestFlowIngestionIsRecordedBeforeDerivationRuns(t *testing.T) {
 	store := newCollectorStore()
 	src := hubbleSource(hubbleResult(t, testWindow(), oneConnection()), nil)
 
-	if err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testFleet(),
+	if err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testDynamic(), testFleet(),
 		store, src, testWindow(), nil, nil, collectrun.ForeignPlanes{}, quietLogger()); err != nil {
 		t.Fatalf("collectAndIngest() error = %v", err)
 	}
@@ -413,7 +413,7 @@ func TestDerivationCannotBurnTheContextTheIngestionNeeds(t *testing.T) {
 	store.beforeDerive = cancel
 	store.deriveErr = context.DeadlineExceeded
 
-	err := collectAndIngest(ctx, testClusterID, readOnlyCluster(), testFleet(),
+	err := collectAndIngest(ctx, testClusterID, readOnlyCluster(), testDynamic(), testFleet(),
 		store, &flowSource{source: probe, kind: flow.SourceHubble}, testWindow(), nil, nil, collectrun.ForeignPlanes{}, quietLogger())
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("collectAndIngest() error = %v, want it to carry the derivation timeout", err)
@@ -445,7 +445,7 @@ func TestBothIngestionAndDerivationFailuresSurface(t *testing.T) {
 	store.deriveErr = errors.New("the observation carries two subjects at one instant")
 	src := hubbleSource(flow.IngestResult{}, hubble.ErrRelayUnavailable)
 
-	err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testFleet(),
+	err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testDynamic(), testFleet(),
 		store, src, testWindow(), nil, nil, collectrun.ForeignPlanes{}, quietLogger())
 	if !errors.Is(err, hubble.ErrRelayUnavailable) {
 		t.Errorf("collectAndIngest() error = %v, want it to still carry the ingest failure %v",
@@ -475,7 +475,7 @@ func TestAFailedDeriveRecordIsReported(t *testing.T) {
 	store := newCollectorStore()
 	store.deriveRunErr = want
 
-	err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testFleet(),
+	err := collectAndIngest(t.Context(), testClusterID, readOnlyCluster(), testDynamic(), testFleet(),
 		store, nil, testWindow(), nil, nil, collectrun.ForeignPlanes{}, quietLogger())
 	if !errors.Is(err, want) {
 		t.Fatalf("collectAndIngest() error = %v, want it to wrap %v", err, want)

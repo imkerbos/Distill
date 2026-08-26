@@ -36,7 +36,7 @@ func (c podClassifier) classifyPodIP(
 }
 
 func collectorWith(registry *cluster.Registry) podClassifier {
-	return podClassifier{Collector: New(testClusterID, nil, nil), registry: registry}
+	return podClassifier{Collector: New(testClusterID, nil, nil, nil), registry: registry}
 }
 
 func kinds(ws []snapshot.Warning) []snapshot.WarningKind {

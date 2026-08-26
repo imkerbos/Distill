@@ -36,11 +36,19 @@
 | `observed_asset` / `observed_pod_*` | 采集到的资产快照 |
 | `pod_identity_interval` | Pod 身份的时间区间 —— 六个读方法都从这张表出发 |
 | `observed_connection` | 观测到的连接 |
+| `observed_admin_policy` | 采集到的 ANP / BANP 原文，**只存不解释** |
 | `collection_run` / `identity_derive_run` | 采集与推导的运行记录（状态、错误原因） |
 | `policy_*` | 导入策略、覆盖决定、写回计划与推送记录 |
 | `platform_account` / `platform_setting` | 账号与运行期设置 |
 
 `policy_*` 系列表保留 `plane` 字段，当前取值仅 `networkpolicy`。
+
+`observed_admin_policy` 与 `observed_network_policy` 刻意分表。ANP 一族是集群级的、带优先级、
+且求值次序与标准 NetworkPolicy 完全不同 —— ANP 在前，BANP 在后。混进一张表要靠一个字段区分
+两者，而那个字段一旦漏判，一条兜底规则就会被当成前置规则解释，方向恰好相反。
+
+同理，`priority` 与 `priority_known` 是两列。0 是合法且**最高**的 ANP 优先级，拿 0 兼表
+"没读到"，会把一条读不懂的策略排到所有策略之前。
 
 ## 时间
 

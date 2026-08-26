@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"time"
 
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/imkerbos/Distill/internal/cluster"
@@ -132,6 +133,7 @@ func Once(
 	ctx context.Context,
 	clusterID string,
 	client kubernetes.Interface,
+	dyn dynamic.Interface,
 	fleet *cluster.Registry,
 	store Store,
 	planes ForeignPlanes,
@@ -167,7 +169,7 @@ func Once(
 		return snapshot.Run{}, err
 	}
 
-	run, err := collect.New(clusterID, client, time.Now).Collect(ctx, runID)
+	run, err := collect.New(clusterID, client, dyn, time.Now).Collect(ctx, runID)
 	if err != nil {
 		return snapshot.Run{}, fmt.Errorf("collect cluster %s: %w", clusterID, err)
 	}

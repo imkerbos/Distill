@@ -74,6 +74,12 @@ func TestAssertReadOnlyAsksAboutEveryPolicyResourceAndVerb(t *testing.T) {
 		"networkpolicies.networking.k8s.io",
 		"ciliumnetworkpolicies.cilium.io",
 		"ciliumclusterwidenetworkpolicies.cilium.io",
+		// ANP 一族带 Deny 动作且先于 NetworkPolicy 生效 —— 一条就能拦掉
+		// 整个集群的流量，是这份清单里最该被问到的两类。
+		"adminnetworkpolicies.policy.networking.k8s.io",
+		"baselineadminnetworkpolicies.policy.networking.k8s.io",
+		"globalnetworkpolicies.crd.projectcalico.org",
+		"networkpolicies.crd.projectcalico.org",
 	} {
 		for _, verb := range []string{"create", "update", "patch", "delete", "deletecollection"} {
 			if !got[verb+" "+res] {

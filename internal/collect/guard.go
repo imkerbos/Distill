@@ -20,15 +20,25 @@ type policyResource struct {
 	resource string
 }
 
-// policyResources 是三类策略对象。
+// policyResources 是每一类能阻断生产流量的策略对象。
 //
-// Cilium 的两类一并检查：CLAUDE.md 说的是"日常 Kubernetes 策略写权限"，
-// 而在装了 Cilium 的集群上，CCNP 与 CNP 同样是能阻断生产流量的策略平面。
-// 只查标准 NetworkPolicy 会让一个持有 CCNP 写权限的凭据顺利通过自检。
+// 不止标准 NetworkPolicy：CLAUDE.md 说的是"日常 Kubernetes 策略写权限"，
+// 而在装了 Cilium 的集群上 CNP/CCNP、在装了 Calico 的集群上 GNP、在装了
+// ANP 一族的集群上 ANP/BANP，同样能切断连接。只查标准 NetworkPolicy 会让
+// 一个持有 CCNP 或 ANP 写权限的凭据顺利通过自检 —— 而这一族尤其危险：
+// 它带 Deny 动作，一条就能拦掉整个集群的流量。
+//
+// 这份清单与 kubeclient.probedPlanes 覆盖同一批平面，但**刻意不共用**：
+// 那份是"平台不解释什么"，这份是"平台绝不能写什么"。合并之后，某天为了
+// 开始解释某个平面而把它从那份清单里挪走，会连带撤掉这里的写权限自检。
 var policyResources = []policyResource{
 	{"networking.k8s.io", "networkpolicies"},
 	{"cilium.io", "ciliumnetworkpolicies"},
 	{"cilium.io", "ciliumclusterwidenetworkpolicies"},
+	{"policy.networking.k8s.io", "adminnetworkpolicies"},
+	{"policy.networking.k8s.io", "baselineadminnetworkpolicies"},
+	{"crd.projectcalico.org", "globalnetworkpolicies"},
+	{"crd.projectcalico.org", "networkpolicies"},
 }
 
 // AssertReadOnly 自证当前凭据不具备任何网络策略的写权限。

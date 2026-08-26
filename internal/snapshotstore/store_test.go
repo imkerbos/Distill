@@ -60,6 +60,7 @@ var cleanupStatements = []string{
 	"DELETE FROM flow_ingest_run",
 	"DELETE FROM pod_identity_interval",
 	"DELETE FROM observed_gateway",
+	"DELETE FROM observed_admin_policy",
 	"DELETE FROM observed_network_policy",
 	"DELETE FROM observed_endpoints",
 	"DELETE FROM observed_service",
@@ -163,6 +164,15 @@ func sampleRun(clusterID, runID string, observedAt time.Time) snapshot.Run {
 			Gateways: []snapshot.Gateway{{
 				ClusterID: clusterID, Namespace: "shop", Name: "public",
 				Kind: "Ingress", BackendService: "web",
+			}},
+			AdminPolicies: []snapshot.AdminPolicy{{
+				ClusterID: clusterID, Kind: snapshot.AdminPolicyAdmin, Name: "tenant-isolation",
+				UID: "8f14e45f-ceea-467a-9ba5-7b5f0f1f0f02", Priority: 20, PriorityKnown: true,
+				Manifest: "apiVersion: policy.networking.k8s.io/v1alpha1\nkind: AdminNetworkPolicy\n",
+			}, {
+				ClusterID: clusterID, Kind: snapshot.AdminPolicyBaseline, Name: "default",
+				UID:      "8f14e45f-ceea-467a-9ba5-7b5f0f1f0f03",
+				Manifest: "apiVersion: policy.networking.k8s.io/v1alpha1\nkind: BaselineAdminNetworkPolicy\n",
 			}},
 		},
 	}
@@ -547,5 +557,55 @@ func TestNilLabelsAreStoredAsEmptyJSONNotNull(t *testing.T) {
 			t.Errorf("JSON_TYPE(%s) = %q, want %q (nil must not become JSON null)",
 				tc.column, got, tc.want)
 		}
+	}
+}
+
+// ANP 与 BANP 同名不冲突：它们是两类对象，求值次序一前一后。
+// kind 不进主键的话，后写的那条会覆盖先写的，而被覆盖掉的那条
+// 在库里表现为"这个集群没有它" —— 少掉一条 Deny 的方向。
+func TestSaveKeepsAdminPoliciesOfBothKindsWithTheSameName(t *testing.T) {
+	s, db := newTestStore(t)
+
+	run := sampleRun(clusterA, "run-anp", time.Date(2026, 8, 26, 9, 0, 0, 0, time.UTC))
+	run.Observation.AdminPolicies = []snapshot.AdminPolicy{
+		{ClusterID: clusterA, Kind: snapshot.AdminPolicyAdmin, Name: "default",
+			UID: "u1", Priority: 0, PriorityKnown: true, Manifest: "kind: AdminNetworkPolicy\n"},
+		{ClusterID: clusterA, Kind: snapshot.AdminPolicyBaseline, Name: "default",
+			UID: "u2", Manifest: "kind: BaselineAdminNetworkPolicy\n"},
+	}
+	if err := s.Save(t.Context(), run); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	if n := scanInt(t, db,
+		`SELECT COUNT(*) FROM observed_admin_policy WHERE cluster_id = ? AND name = 'default'`,
+		clusterA); n != 2 {
+		t.Fatalf("rows for name 'default' = %d, want 2 (one per kind)", n)
+	}
+
+	// 优先级 0 必须以 known 落库：它是最高的那一个，与"没读到"分不开的话，
+	// 一条读不懂的策略会被排到所有策略之前。
+	var (
+		priority int
+		known    bool
+	)
+	if err := db.QueryRowContext(t.Context(),
+		`SELECT priority, priority_known FROM observed_admin_policy
+		  WHERE cluster_id = ? AND policy_kind = ? AND name = 'default'`,
+		clusterA, string(snapshot.AdminPolicyAdmin)).Scan(&priority, &known); err != nil {
+		t.Fatalf("read back the ANP: %v", err)
+	}
+	if priority != 0 || !known {
+		t.Errorf("priority = %d (known=%v), want 0 (known=true)", priority, known)
+	}
+
+	if err := db.QueryRowContext(t.Context(),
+		`SELECT priority_known FROM observed_admin_policy
+		  WHERE cluster_id = ? AND policy_kind = ? AND name = 'default'`,
+		clusterA, string(snapshot.AdminPolicyBaseline)).Scan(&known); err != nil {
+		t.Fatalf("read back the BANP: %v", err)
+	}
+	if known {
+		t.Error("the BANP came back with a known priority; it has none")
 	}
 }

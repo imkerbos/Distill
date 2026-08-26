@@ -65,16 +65,19 @@ func TestObservationCountsEachResourceFromItsOwnSlice(t *testing.T) {
 		Endpoints:  make([]snapshot.Endpoints, 5),
 		Policies:   make([]snapshot.NetworkPolicy, 6),
 		Gateways:   make([]snapshot.Gateway, 7),
+		// ANP 与 BANP 共一个计数：它们由同一次采集动作产出。
+		AdminPolicies: make([]snapshot.AdminPolicy, 8),
 	}
 
 	want := map[snapshot.ResourceKind]int{
-		snapshot.ResourceNamespace:     1,
-		snapshot.ResourcePod:           2,
-		snapshot.ResourceNode:          3,
-		snapshot.ResourceService:       4,
-		snapshot.ResourceEndpointSlice: 5,
-		snapshot.ResourceNetworkPolicy: 6,
-		snapshot.ResourceIngress:       7,
+		snapshot.ResourceNamespace:          1,
+		snapshot.ResourcePod:                2,
+		snapshot.ResourceNode:               3,
+		snapshot.ResourceService:            4,
+		snapshot.ResourceEndpointSlice:      5,
+		snapshot.ResourceNetworkPolicy:      6,
+		snapshot.ResourceIngress:            7,
+		snapshot.ResourceAdminNetworkPolicy: 8,
 	}
 	got := o.Counts()
 	for kind, n := range want {

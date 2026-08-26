@@ -14,6 +14,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/imkerbos/Distill/internal/cluster"
@@ -30,6 +31,7 @@ const listPageSize = 500
 type Collector struct {
 	clusterID string
 	client    kubernetes.Interface
+	dynamic   dynamic.Interface
 	now       func() time.Time
 }
 
@@ -40,12 +42,15 @@ type Collector struct {
 // 跑在被管集群内，给它 fleet 登记等于把整个 fleet 的拓扑发出去。判定挪到
 // 采集之后的 Classify，PULL 与 PUSH 共用同一份实现。
 //
+// dyn 用于管理面策略（ANP/BANP）—— 它们是 CRD，没有 typed client。
+// 传 nil 时那一类记为采集失败，**不记为"这个集群没有 ANP"**。
+//
 // now 可注入以保证测试确定性。
-func New(clusterID string, client kubernetes.Interface, now func() time.Time) *Collector {
+func New(clusterID string, client kubernetes.Interface, dyn dynamic.Interface, now func() time.Time) *Collector {
 	if now == nil {
 		now = time.Now
 	}
-	return &Collector{clusterID: clusterID, client: client, now: now}
+	return &Collector{clusterID: clusterID, client: client, dynamic: dyn, now: now}
 }
 
 // resourceCollector 是一类资源的采集动作。
@@ -95,6 +100,7 @@ func (c *Collector) Collect(ctx context.Context, runID string) (snapshot.Run, er
 		{snapshot.ResourceEndpointSlice, c.collectEndpointSlices},
 		{snapshot.ResourceNetworkPolicy, c.collectNetworkPolicies},
 		{snapshot.ResourceIngress, c.collectIngresses},
+		{snapshot.ResourceAdminNetworkPolicy, c.collectAdminPolicies},
 	}
 
 	attempted := make([]snapshot.ResourceKind, 0, len(steps))

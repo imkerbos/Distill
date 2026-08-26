@@ -140,7 +140,7 @@ func stubClock(start time.Time) func() time.Time {
 func newTestCollector(t *testing.T, objs ...runtime.Object) (*Collector, *fake.Clientset) {
 	t.Helper()
 	cs := fake.NewClientset(objs...)
-	return New(testClusterID, cs, stubClock(time.Unix(1700000000, 0).UTC())), cs
+	return New(testClusterID, cs, newDynamic(), stubClock(time.Unix(1700000000, 0).UTC())), cs
 }
 
 // failList 让某类资源的 List 直接失败。resource 用 "*" 表示所有类型。
@@ -240,6 +240,13 @@ func TestCollectIsPartialWhenOneResourceKindFails(t *testing.T) {
 func TestCollectIsFailedWhenEveryResourceKindFails(t *testing.T) {
 	c, cs := newTestCollector(t, healthyObjects()...)
 	failList(cs, "*", forbidden("everything"))
+	// 管理面策略走的是动态客户端，不受 typed client 的 reactor 影响。
+	// 不一并挡掉的话，这一轮里有一类其实成功了，"每一类都失败"就是假的。
+	dyn := newDynamic()
+	dyn.PrependReactor("list", "*", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, forbidden("everything")
+	})
+	c.dynamic = dyn
 
 	run, err := c.Collect(context.Background(), "run-1")
 	if err != nil {
@@ -248,8 +255,8 @@ func TestCollectIsFailedWhenEveryResourceKindFails(t *testing.T) {
 	if run.Status != snapshot.RunFailed {
 		t.Fatalf("Status = %q, want %q", run.Status, snapshot.RunFailed)
 	}
-	if len(run.Failures) != 8 {
-		t.Errorf("len(Failures) = %d, want 8 (one per attempted kind); got %+v", len(run.Failures), run.Failures)
+	if len(run.Failures) != 9 {
+		t.Errorf("len(Failures) = %d, want 9 (one per attempted kind); got %+v", len(run.Failures), run.Failures)
 	}
 }
 

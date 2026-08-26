@@ -74,6 +74,11 @@ const (
 	ResourceNetworkPolicy ResourceKind = "NETWORKPOLICY"
 	// ResourceIngress 是 Ingress。
 	ResourceIngress ResourceKind = "INGRESS"
+	// ResourceAdminNetworkPolicy 是 AdminNetworkPolicy 与 BaselineAdminNetworkPolicy。
+	//
+	// 一类而非两类：它们由同一次 List 循环采下，一次失败必然同时影响两者，
+	// 拆成两条会在失败清单里产生两行说同一件事的记录。
+	ResourceAdminNetworkPolicy ResourceKind = "ADMINNETWORKPOLICY"
 )
 
 // FailureReason 是一类资源采集失败的原因，封闭枚举。
@@ -153,5 +158,8 @@ func (o Observation) Counts() map[ResourceKind]int {
 		ResourceEndpointSlice: len(o.Endpoints),
 		ResourceNetworkPolicy: len(o.Policies),
 		ResourceIngress:       len(o.Gateways),
+		// ANP 与 BANP 合成一个计数：它们由同一次采集动作产出，一次失败
+		// 必然同时影响两者，拆成两行会在可见面上说同一件事两遍。
+		ResourceAdminNetworkPolicy: len(o.AdminPolicies),
 	}
 }

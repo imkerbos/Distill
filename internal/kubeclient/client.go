@@ -11,6 +11,7 @@ import (
 	"net"
 	"time"
 
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -47,6 +48,36 @@ func newFromConfig(cfg *rest.Config) (kubernetes.Interface, error) {
 	client, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("kubeclient: build client: %w", err)
+	}
+	return client, nil
+}
+
+// NewDynamic 构造受同一套守卫约束的动态客户端。
+//
+// 单独一个构造函数而不是让 New 返回两个：动态客户端只为 CRD 而存在
+// （当前是 ANP 一族），而绝大多数调用方一个 CRD 都不读。让它们全都接下
+// 一个用不上的返回值，会让"谁在读 CRD"这件事在代码里看不出来。
+//
+// 守卫与超时与 New 完全一致 —— 走的是同一个 newRESTConfig。
+func NewDynamic(kubeconfig []byte) (dynamic.Interface, error) {
+	cfg, err := clientcmd.RESTConfigFromKubeConfig(kubeconfig)
+	if err != nil {
+		return nil, fmt.Errorf("kubeclient: parse kubeconfig: %w", err)
+	}
+	return NewDynamicFromConfig(cfg)
+}
+
+// NewDynamicFromConfig 在给定配置上构造动态客户端，供集群内路径复用。
+//
+// 集群内的 agent 拿到的是 rest.InClusterConfig()，没有 kubeconfig 字节可传。
+func NewDynamicFromConfig(cfg *rest.Config) (dynamic.Interface, error) {
+	cfg.UserAgent = userAgent
+	cfg.Timeout = requestTimeout
+	cfg.Dial = guardedDial
+
+	client, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("kubeclient: build dynamic client: %w", err)
 	}
 	return client, nil
 }

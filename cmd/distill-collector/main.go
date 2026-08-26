@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/imkerbos/Distill/internal/buildinfo"
@@ -145,7 +146,7 @@ func run(configPath, clusterID string, timeout time.Duration, ingest ingestOptio
 	startedAt := time.Now()
 	store := snapshotstore.New(db)
 
-	client, probe, reason, err := newClusterClient(ctx, reg, target)
+	clients, probe, reason, err := newClusterClient(ctx, reg, target)
 	if err != nil {
 		// 凭据解析不出来、或客户端构造不出来，都是"这一轮根本没开始"。
 		// 不落这一行，界面会把一次配置错误显示成"这个集群还没有被采集过"，
@@ -206,7 +207,7 @@ func run(configPath, clusterID string, timeout time.Duration, ingest ingestOptio
 
 	// 对账器与读栈同源：它必须与 /flows 那一屏走同一条判定路径，否则
 	// 一致率量的是另一个引擎（design doc 2026-08-25 §3.1）。
-	return collectAndIngest(ctx, clusterID, client, fleet, store, src, window,
+	return collectAndIngest(ctx, clusterID, clients.typed, clients.dynamic, fleet, store, src, window,
 		collectstore.New(db, reg), reg, foreignPlanesOf(probe), logger)
 }
 
@@ -237,16 +238,16 @@ func foreignPlanesOf(probe kubeclient.PlaneProbe) collectrun.ForeignPlanes {
 // 刻意不带底层细节，从它反推原因只能靠字符串匹配。
 func newClusterClient(
 	ctx context.Context, reg registry.Store, target registry.Cluster,
-) (kubernetes.Interface, kubeclient.PlaneProbe, snapshot.RunErrorReason, error) {
+) (clusterClients, kubeclient.PlaneProbe, snapshot.RunErrorReason, error) {
 	ref := target.KubeconfigRef
 	if ref == "" {
-		return nil, kubeclient.PlaneProbe{}, snapshot.RunErrorCredentialUnavailable,
+		return clusterClients{}, kubeclient.PlaneProbe{}, snapshot.RunErrorCredentialUnavailable,
 			fmt.Errorf("cluster %q has no kubeconfig reference registered", target.ID)
 	}
 	// 引用来自数据库里操作者填的值，先过短名校验再交给解析器：
 	// 短名会被拼进后端的资源路径，能表达的字符越多，能表达的越权路径越多。
 	if err := secrets.ValidateRef(ref); err != nil {
-		return nil, kubeclient.PlaneProbe{}, snapshot.RunErrorCredentialUnavailable,
+		return clusterClients{}, kubeclient.PlaneProbe{}, snapshot.RunErrorCredentialUnavailable,
 			fmt.Errorf("cluster %q has an invalid kubeconfig reference: %w", target.ID, err)
 	}
 
@@ -254,30 +255,30 @@ func newClusterClient(
 	// 的问题 —— 那条禁止启动快照的规则针对的是常驻服务。
 	setting, err := settings.New(reg).Current(ctx)
 	if err != nil {
-		return nil, kubeclient.PlaneProbe{}, snapshot.RunErrorCredentialUnavailable,
+		return clusterClients{}, kubeclient.PlaneProbe{}, snapshot.RunErrorCredentialUnavailable,
 			fmt.Errorf("read the platform setting: %w", err)
 	}
 	resolver, err := newSecretResolver(ctx, setting)
 	if err != nil {
-		return nil, kubeclient.PlaneProbe{}, snapshot.RunErrorCredentialUnavailable, err
+		return clusterClients{}, kubeclient.PlaneProbe{}, snapshot.RunErrorCredentialUnavailable, err
 	}
 	if resolver == nil {
 		// 后端是 NONE：操作者明确选了"不解析凭据"，于是也就没有采集。
 		// 静默跳过会让这次运行看起来只是"什么都没采到"。
-		return nil, kubeclient.PlaneProbe{}, snapshot.RunErrorCredentialUnavailable,
+		return clusterClients{}, kubeclient.PlaneProbe{}, snapshot.RunErrorCredentialUnavailable,
 			errors.New("the secrets backend is NONE: the collector cannot resolve a kubeconfig")
 	}
 
 	kubeconfig, err := resolver.Resolve(ctx, ref)
 	if err != nil {
 		if errors.Is(err, secrets.ErrNotFound) {
-			return nil, kubeclient.PlaneProbe{}, snapshot.RunErrorCredentialUnavailable,
+			return clusterClients{}, kubeclient.PlaneProbe{}, snapshot.RunErrorCredentialUnavailable,
 				fmt.Errorf("the kubeconfig reference %q resolves to nothing", ref)
 		}
 		// 底层错误不外传：目录后端的错误里带文件系统路径，Secret Manager
 		// 的错误里带项目与资源名（规范 §22）。引用本身不是机密，说得出
 		// 是哪一个引用就够操作者定位了。
-		return nil, kubeclient.PlaneProbe{}, snapshot.RunErrorCredentialUnavailable,
+		return clusterClients{}, kubeclient.PlaneProbe{}, snapshot.RunErrorCredentialUnavailable,
 			fmt.Errorf("cannot resolve the kubeconfig reference %q", ref)
 	}
 	// 解析出来的字节用完即清。清的是这一份原始副本 —— 客户端内部仍然
@@ -291,7 +292,7 @@ func newClusterClient(
 		// apiserver 地址一起带出来，而这个进程的输出终点是集群日志。
 		// 凭据本身拿到了，构造不出客户端 —— 包括 apiserver 地址被出站守卫
 		// 拒绝。与凭据不可用分开：两者的处置一个是改凭据，一个是改地址。
-		return nil, kubeclient.PlaneProbe{}, snapshot.RunErrorClientUnavailable,
+		return clusterClients{}, kubeclient.PlaneProbe{}, snapshot.RunErrorClientUnavailable,
 			fmt.Errorf("cannot build a Kubernetes client from the kubeconfig behind %q", ref)
 	}
 	// 平面探测与客户端构造放在一起：**它要用的正是这份马上就要被清掉的
@@ -302,7 +303,26 @@ func newClusterClient(
 	if err != nil {
 		probe = kubeclient.PlaneProbe{}
 	}
-	return client, probe, snapshot.RunErrorNone, nil
+
+	// 动态客户端同样在这里建，理由与探测一致：它要的也是这份就要被清掉的
+	// kubeconfig。构造失败**不中止采集** —— 丢的只是 ANP 这一类，而那一类
+	// 会自己以一条采集失败的形式记进本次运行，比整轮放弃更接近事实。
+	dyn, err := kubeclient.NewDynamic(kubeconfig)
+	if err != nil {
+		dyn = nil
+	}
+	return clusterClients{typed: client, dynamic: dyn}, probe, snapshot.RunErrorNone, nil
+}
+
+// clusterClients 是一个目标集群的两个客户端。
+//
+// 装进一个结构体而不是多返回一个值：这个函数已经返回四样东西，
+// 而第五个裸接口值在调用点上与第一个长得一模一样。
+type clusterClients struct {
+	// typed 读内建资源。
+	typed kubernetes.Interface
+	// dynamic 读 CRD（当前只有 ANP 一族）。为 nil 表示这一类采不了。
+	dynamic dynamic.Interface
 }
 
 // newSecretResolver 按设置选出的后端装配凭据解析器。

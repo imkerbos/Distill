@@ -151,7 +151,7 @@ func TestReadOnlyIsProvenBeforeTheClusterIsRead(t *testing.T) {
 	cs := readOnlyCluster()
 	store := &recordingStore{}
 
-	if _, err := collectOnce(t.Context(), testClusterID, cs, testFleet(), store, collectrun.ForeignPlanes{}, quietLogger()); err != nil {
+	if _, err := collectOnce(t.Context(), testClusterID, cs, testDynamic(), testFleet(), store, collectrun.ForeignPlanes{}, quietLogger()); err != nil {
 		t.Fatalf("collectOnce() error = %v", err)
 	}
 
@@ -184,7 +184,7 @@ func TestWriteAccessStopsTheRunButLeavesATrace(t *testing.T) {
 	answerReviews(cs, true)
 	store := &recordingStore{}
 
-	_, err := collectOnce(t.Context(), testClusterID, cs, testFleet(), store, collectrun.ForeignPlanes{}, quietLogger())
+	_, err := collectOnce(t.Context(), testClusterID, cs, testDynamic(), testFleet(), store, collectrun.ForeignPlanes{}, quietLogger())
 	if !errors.Is(err, ErrNotProvenReadOnly) {
 		t.Fatalf("collectOnce() error = %v, want %v", err, ErrNotProvenReadOnly)
 	}
@@ -233,7 +233,7 @@ func TestABlockedAPIServerIsNotReportedAsUnprovenReadOnly(t *testing.T) {
 		})
 	store := &recordingStore{}
 
-	_, err := collectOnce(t.Context(), testClusterID, cs, testFleet(), store, collectrun.ForeignPlanes{}, quietLogger())
+	_, err := collectOnce(t.Context(), testClusterID, cs, testDynamic(), testFleet(), store, collectrun.ForeignPlanes{}, quietLogger())
 	if !errors.Is(err, ErrBlockedAPIServer) {
 		t.Fatalf("collectOnce() error = %v, want %v", err, ErrBlockedAPIServer)
 	}
@@ -258,7 +258,7 @@ func TestTheSelfCheckFailureCarriesNoAPIServerDetail(t *testing.T) {
 			return true, nil, errors.New(`Post "https://10.9.8.7:6443/apis/authorization.k8s.io/v1": dial tcp timeout`)
 		})
 
-	_, err := collectOnce(t.Context(), testClusterID, cs, testFleet(), &recordingStore{}, collectrun.ForeignPlanes{}, quietLogger())
+	_, err := collectOnce(t.Context(), testClusterID, cs, testDynamic(), testFleet(), &recordingStore{}, collectrun.ForeignPlanes{}, quietLogger())
 	if !errors.Is(err, ErrNotProvenReadOnly) {
 		t.Fatalf("collectOnce() error = %v, want %v", err, ErrNotProvenReadOnly)
 	}
@@ -278,7 +278,7 @@ func TestAPartialCollectionIsStoredAsPartial(t *testing.T) {
 	forbidList(cs, "networkpolicies")
 	store := &recordingStore{}
 
-	result, err := collectOnce(t.Context(), testClusterID, cs, testFleet(), store, collectrun.ForeignPlanes{}, quietLogger())
+	result, err := collectOnce(t.Context(), testClusterID, cs, testDynamic(), testFleet(), store, collectrun.ForeignPlanes{}, quietLogger())
 	if err != nil {
 		t.Fatalf("collectOnce() error = %v, want a stored partial run — one refused resource kind must not abandon the whole run", err)
 	}
@@ -304,7 +304,7 @@ func TestAPartialCollectionIsStoredAsPartial(t *testing.T) {
 func TestACleanCollectionIsStoredAsOK(t *testing.T) {
 	store := &recordingStore{}
 
-	result, err := collectOnce(t.Context(), testClusterID, readOnlyCluster(), testFleet(), store, collectrun.ForeignPlanes{}, quietLogger())
+	result, err := collectOnce(t.Context(), testClusterID, readOnlyCluster(), testDynamic(), testFleet(), store, collectrun.ForeignPlanes{}, quietLogger())
 	if err != nil {
 		t.Fatalf("collectOnce() error = %v", err)
 	}
@@ -339,7 +339,7 @@ func TestACancelledRunStillReachesTheStore(t *testing.T) {
 		return false, nil, nil
 	})
 
-	if _, err := collectOnce(ctx, testClusterID, cs, testFleet(), store, collectrun.ForeignPlanes{}, quietLogger()); err != nil {
+	if _, err := collectOnce(ctx, testClusterID, cs, testDynamic(), testFleet(), store, collectrun.ForeignPlanes{}, quietLogger()); err != nil {
 		t.Fatalf("collectOnce() error = %v", err)
 	}
 	store.only(t)
@@ -354,7 +354,7 @@ func TestAFailedStoreIsReported(t *testing.T) {
 	want := errors.New("mysql is down")
 	store := &recordingStore{err: want}
 
-	_, err := collectOnce(t.Context(), testClusterID, readOnlyCluster(), testFleet(), store, collectrun.ForeignPlanes{}, quietLogger())
+	_, err := collectOnce(t.Context(), testClusterID, readOnlyCluster(), testDynamic(), testFleet(), store, collectrun.ForeignPlanes{}, quietLogger())
 	if !errors.Is(err, want) {
 		t.Fatalf("collectOnce() error = %v, want it to wrap %v", err, want)
 	}
@@ -394,7 +394,7 @@ func TestCollectedRunReachesTheStoreWithItsAddressesClassified(t *testing.T) {
 	store := &recordingStore{}
 
 	if _, err := collectOnce(context.Background(), testClusterID, cs,
-		testFleet(), store, collectrun.ForeignPlanes{}, quietLogger()); err != nil {
+		testDynamic(), testFleet(), store, collectrun.ForeignPlanes{}, quietLogger()); err != nil {
 		t.Fatalf("collectOnce = %v", err)
 	}
 
@@ -430,7 +430,7 @@ func TestPushCollectionLeavesOwnershipToThePlatform(t *testing.T) {
 	store := &recordingStore{}
 
 	if _, err := collectOnce(context.Background(), testClusterID, cs,
-		nil, store, collectrun.ForeignPlanes{}, quietLogger()); err != nil {
+		testDynamic(), nil, store, collectrun.ForeignPlanes{}, quietLogger()); err != nil {
 		t.Fatalf("collectOnce = %v", err)
 	}
 
