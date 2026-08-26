@@ -70,6 +70,21 @@ var probedPlanes = []struct {
 		Group: "policy.networking.k8s.io", Version: "v1alpha1", Resource: "adminnetworkpolicies"}, false, false},
 	{"BaselineAdminNetworkPolicy", schema.GroupVersionResource{
 		Group: "policy.networking.k8s.io", Version: "v1alpha1", Resource: "baselineadminnetworkpolicies"}, false, false},
+	// Calico 的私有策略平面。**它有 deny 与 order（优先级）**，与标准
+	// NetworkPolicy 叠加生效 —— 与 CNP 同一类风险。
+	//
+	// **不解析覆盖范围**（scoped=false）：Calico 的 selector 是一个字符串
+	// 表达式（`label == "value"` 语法），不是 LabelSelector，还带 tier 分层。
+	// 解析它需要一个表达式解析器，而解析错会圈出错误的主体集合 —— 与
+	// matchExpressions 那条同一个理由，往"算不出"倒。
+	//
+	// **staged 变体刻意不列**：那是影子模式，只产生指标、不真的执行。
+	// 把它算作生效的第二平面，会让一个只是在预演的集群被无谓地整片降级，
+	// 而降级面越大，操作者越会习惯性忽略它。
+	{"CalicoGlobalNetworkPolicy", schema.GroupVersionResource{
+		Group: "crd.projectcalico.org", Version: "v1", Resource: "globalnetworkpolicies"}, false, false},
+	{"CalicoNetworkPolicy", schema.GroupVersionResource{
+		Group: "crd.projectcalico.org", Version: "v1", Resource: "networkpolicies"}, false, true},
 }
 
 // ProbePlanes 探测目标集群里有没有平台不解释的其它策略平面。

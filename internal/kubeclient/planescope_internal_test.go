@@ -1,6 +1,7 @@
 package kubeclient
 
 import (
+	"strings"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -110,5 +111,63 @@ func TestClusterWideScopeCarriesNoNamespace(t *testing.T) {
 	}
 	if got.Namespace != "" {
 		t.Errorf("Namespace = %q, want 空（集群级跨全部 namespace）", got.Namespace)
+	}
+}
+
+// **Calico 的私有策略平面必须在探测表里。**
+//
+// 探测原本只查 cilium.io 与 policy.networking.k8s.io。而 Calico 集群上装着
+// crd.projectcalico.org 的 GlobalNetworkPolicy —— 它有 deny、有 order（优先级），
+// 与标准 NetworkPolicy 叠加生效。表里没有它，平台在 Calico 集群上会报
+// PlanesNone（确认没有第二平面）并以满置信度答每一条判定。
+//
+// UAT 与本地 Calico 集群上这两个 CRD 都装着（2026-08-26 实测）。
+func TestProbedPlanesCoversCalico(t *testing.T) {
+	want := map[string]bool{
+		"globalnetworkpolicies.crd.projectcalico.org": false,
+		"networkpolicies.crd.projectcalico.org":       false,
+	}
+	for _, p := range probedPlanes {
+		key := p.gvr.Resource + "." + p.gvr.Group
+		if _, ok := want[key]; ok {
+			want[key] = true
+		}
+	}
+	for key, found := range want {
+		if !found {
+			t.Errorf("探测表里没有 %s —— Calico 集群上的第二策略平面会被漏掉", key)
+		}
+	}
+}
+
+// **Calico 的策略不解析覆盖范围。**
+//
+// 它的 selector 是一个字符串表达式（`label == "value"` 语法），不是
+// LabelSelector；还带 order 与 tier。解析它需要一个表达式解析器，而解析错
+// 会圈出错误的主体集合 —— 与 matchExpressions 那条同一个理由，往"算不出"倒。
+// 因此这一类存在即整片降级，不做精确降级。
+func TestCalicoPlanesAreNotScoped(t *testing.T) {
+	for _, p := range probedPlanes {
+		if p.gvr.Group != "crd.projectcalico.org" {
+			continue
+		}
+		if p.scoped {
+			t.Errorf("%s 被标成可解析覆盖范围 —— 它的 selector 是字符串表达式，"+
+				"解析错会圈出错误的主体集合", p.gvr.Resource)
+		}
+	}
+}
+
+// **staged 策略不进探测表。**
+//
+// Calico 的 staged 策略是影子模式：只产生指标，不真的执行。把它算作生效的
+// 第二平面，会让一个只是在预演的集群被无谓地整片降级 —— 而降级面越大，
+// 操作者越会习惯性忽略它。
+func TestStagedCalicoPoliciesAreNotProbed(t *testing.T) {
+	for _, p := range probedPlanes {
+		if strings.HasPrefix(p.gvr.Resource, "staged") {
+			t.Errorf("探测表里有 staged 策略 %s —— 它不执行，不该让判定降级",
+				p.gvr.Resource)
+		}
 	}
 }
