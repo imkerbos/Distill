@@ -447,7 +447,16 @@ func loadIntervals(t *testing.T, db *sql.DB, clusterID, podIP string) []identity
 //
 // 排除 hostNetwork Pod 不是替代方案：那样解析器对一个节点地址会答
 // NOT_COVERED，意思是"那一刻没有 Pod 用这个地址"—— 而事实是有好几个。
-func TestHostNetworkPodsShareANodeAddressAndResolveAmbiguous(t *testing.T) {
+//
+// **结论从 AMBIGUOUS 改成 HOST_NETWORK**，而这条用例真正守着的性质没变：
+// 三行都留下、UID 各不相同、不交出任何一个主体。改的只是那个结论说的是
+// 什么 —— AMBIGUOUS 说"我不知道它是谁"，而这里的事实是确定的：这一端不在
+// Pod 网络里，NetworkPolicy 选不中它。
+//
+// 真集群上的代价：实测 UAT 有 26.3% 的判定是 UNKNOWN，其中绝大部分是这件
+// 事被算成了歧义 —— 把确定的事实计进「无法判定」，会让那个比例失去意义，
+// 而它正是平台用来说明自己能力边界的数。
+func TestHostNetworkPodsShareANodeAddressAndResolveHostNetwork(t *testing.T) {
 	s, db := newTestStore(t)
 
 	const nodeIP = "10.128.0.5"
@@ -477,12 +486,14 @@ func TestHostNetworkPodsShareANodeAddressAndResolveAmbiguous(t *testing.T) {
 			len(uids), len(agents), dumpIntervals(t, db))
 	}
 
-	// 那一刻的解析必须是 AMBIGUOUS，且不交出任何一个主体。
+	// 那一刻的解析必须是 HOST_NETWORK，且**仍然不交出任何一个主体** ——
+	// 后半句才是这条用例的承重部分：任选一个仍然能查出结果、仍然不报错，
+	// 而错的那次没有任何症状。
 	got, outcome := identity.Resolve(shared, runOneAt)
-	if outcome != identity.OutcomeAmbiguous {
-		t.Errorf("Resolve(node address) outcome = %q, want %q: several subjects held it at that "+
-			"moment, and picking one still answers, still does not error",
-			outcome, identity.OutcomeAmbiguous)
+	if outcome != identity.OutcomeHostNetwork {
+		t.Errorf("Resolve(node address) outcome = %q, want %q: they share the node address "+
+			"because they are not in the pod network, which is a conclusion rather than a gap",
+			outcome, identity.OutcomeHostNetwork)
 	}
 	if got != (identity.Identity{}) {
 		t.Errorf("Resolve(node address) identity = %+v, want the zero value", got)

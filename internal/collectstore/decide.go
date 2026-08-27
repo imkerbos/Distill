@@ -307,15 +307,22 @@ func (t traffic) attribute(c flow.Connection) attributed {
 // 数据里一个真实的洞，后者只是"对端本来就没有主体"。报前者，SNAPSHOT_MISSING
 // 的统计口径才仍然只数真正的快照缺口。
 func (t traffic) unknownReasonFor(a attributed) replay.UnknownReason {
+	// HOST_NETWORK 是**解出来了**的一种：那一端不在 Pod 网络里，策略选不中
+	// 它 —— 这是一个结论，不是一次弃权（同 NOT_COVERED 那条注释）。把它当成
+	// 缺口会让 26.3% 的 UNKNOWN 里绝大部分其实是判得出来的，而那个比例正是
+	// 平台用来说明自己能力边界的数。
+	resolved := func(o identity.Outcome) bool {
+		return o == identity.OutcomeResolved || o == identity.OutcomeHostNetwork
+	}
 	inClusterGap := func(outcome identity.Outcome, ip string) bool {
-		return outcome != identity.OutcomeResolved && !t.externalAddress(ip)
+		return !resolved(outcome) && !t.externalAddress(ip)
 	}
 	switch {
 	case a.srcOutcome == identity.OutcomeAmbiguous || a.dstOutcome == identity.OutcomeAmbiguous:
 		return replay.ReasonIPAmbiguous
 	case inClusterGap(a.srcOutcome, a.conn.Source.IP) || inClusterGap(a.dstOutcome, a.conn.Dest.IP):
 		return replay.ReasonSnapshotMissing
-	case a.srcOutcome != identity.OutcomeResolved || a.dstOutcome != identity.OutcomeResolved:
+	case !resolved(a.srcOutcome) || !resolved(a.dstOutcome):
 		// 剩下的只可能是"解不出主体、且地址不属于任何已登记网段"，
 		// 那正是 EXTERNAL_NO_IDENTITY 登记的那件事。
 		return replay.ReasonExternalNoIdentity
@@ -414,6 +421,12 @@ func (t traffic) unmanaged(a attributed) bool {
 	if a.decision.Reason.Unmanaged {
 		return true
 	}
+	// HOST_NETWORK 本身就是"这一端不受管控"的结论，无论解出了具体哪个 Pod。
+	// 多个 hostNetwork Pod 共用节点 IP 时 Identity 是零值，因此不能只看
+	// a.src.HostNetwork —— 那时它是 false，而事实恰恰相反。
+	if a.srcOutcome == identity.OutcomeHostNetwork || a.dstOutcome == identity.OutcomeHostNetwork {
+		return true
+	}
 	if a.srcOutcome == identity.OutcomeResolved && a.src.HostNetwork {
 		return true
 	}
@@ -425,7 +438,13 @@ func (t traffic) unmanaged(a attributed) bool {
 // 归属解不出来时只给地址，**不给一个空的 namespace/名字**：一个写着
 // "cluster//"的标签在界面上看起来像一个真实主体，而它什么都不是。
 func (t traffic) endpointLabel(ip string, id identity.Identity, outcome identity.Outcome) string {
-	if outcome != identity.OutcomeResolved {
+	// HOST_NETWORK 且解出了具体 Pod（那个节点上只有一个）时照常给名字；
+	// 多个共用节点 IP 时 Identity 是零值，落到下面那一支只给地址 ——
+	// 一个写着 "cluster//" 的标签在界面上看起来像一个真实主体。
+	if outcome != identity.OutcomeResolved && outcome != identity.OutcomeHostNetwork {
+		return ip
+	}
+	if id.PodName == "" {
 		return ip
 	}
 	return fmt.Sprintf("%s/%s/%s", t.clusterID, id.Namespace, id.PodName)

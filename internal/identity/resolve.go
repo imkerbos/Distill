@@ -18,6 +18,20 @@ const (
 	// 与 NOT_COVERED 不得合并：合成一个会让"我们没数据"被读成"那时确实
 	// 没有 Pod"，而后者是下游会当作事实使用的结论。
 	OutcomeNoData Outcome = "NO_DATA"
+	// OutcomeHostNetwork 表示覆盖那一刻的区间**全都是 hostNetwork Pod**。
+	//
+	// 它们共用节点 IP，因此"多个区间覆盖同一时刻"是常态而不是异常 ——
+	// 一个节点上跑着十个 DaemonSet Pod 就有十个区间。按 AMBIGUOUS 处理会
+	// 把这件事报成"归属不唯一，我不知道它是谁"，而真相是一个确定的结论：
+	// **这一端不受 NetworkPolicy 管控**（它不在 Pod 网络里，策略选不中它）。
+	//
+	// 与 NOT_COVERED 同一条纪律 —— 那条的注释写着"这是一个结论，不是一次
+	// 弃权"。把确定的事实计进「无法判定」，会让那个比例失去意义：实测这个
+	// 集群 26.3% 的 UNKNOWN 里，绝大部分是这件事。
+	//
+	// **只在全都是 hostNetwork 时成立。** 混合（既有 hostNetwork 又有普通
+	// Pod）仍然是真歧义：那时确实答不出这条连接的另一端是不是受管控的那个。
+	OutcomeHostNetwork Outcome = "HOST_NETWORK"
 )
 
 // Valid 判断该结果是否已登记。
@@ -27,7 +41,7 @@ const (
 // 结果不得被当成任何一种结论。
 func (o Outcome) Valid() bool {
 	switch o {
-	case OutcomeResolved, OutcomeAmbiguous, OutcomeNotCovered, OutcomeNoData:
+	case OutcomeResolved, OutcomeAmbiguous, OutcomeNotCovered, OutcomeNoData, OutcomeHostNetwork:
 		return true
 	default:
 		return false
@@ -44,18 +58,33 @@ func (o Outcome) Valid() bool {
 // AMBIGUOUS：任选一个仍然能查出结果、仍然不报错，而错的那次没有任何症状。
 func Resolve(intervals []Interval, at time.Time) (Identity, Outcome) {
 	var (
-		hit     Identity
-		matches int
+		hit        Identity
+		matches    int
+		allHostNet = true
 	)
 	for _, iv := range intervals {
 		if iv.Covers(at) {
 			hit = iv.Identity
 			matches++
+			if !iv.Identity.HostNetwork {
+				allHostNet = false
+			}
 		}
 	}
 	switch {
+	case matches == 1 && hit.HostNetwork:
+		// 单个 hostNetwork 区间也走这一支：解出来的那个 Pod 确实是它，
+		// 但下游关心的不是"哪个 Pod"，而是"这一端受不受策略管控"，
+		// 而答案与有几个区间无关。两处给出不同的 Outcome 会让同一个事实
+		// 在一个节点上只跑一个 hostNetwork Pod 时表现成另一回事。
+		return hit, OutcomeHostNetwork
 	case matches == 1:
 		return hit, OutcomeResolved
+	case matches > 1 && allHostNet:
+		// 全是 hostNetwork：它们共用节点 IP，这不是归属不唯一，而是
+		// 一个确定的结论 —— 这一端不在 Pod 网络里。Identity 返回零值，
+		// 与 AMBIGUOUS 同理：具体是哪一个 Pod 既答不出也不重要。
+		return Identity{}, OutcomeHostNetwork
 	case matches > 1:
 		return Identity{}, OutcomeAmbiguous
 	}

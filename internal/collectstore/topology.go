@@ -171,7 +171,21 @@ func (d described) edges(level store.TopologyLevel) ([]store.TopologyEdge, int) 
 	for _, c := range d.conns {
 		src, srcOutcome := d.subjectAt(c.Source)
 		dst, dstOutcome := d.subjectAt(c.Dest)
-		if srcOutcome != identity.OutcomeResolved || dstOutcome != identity.OutcomeResolved {
+		// HOST_NETWORK 分两种：那个节点上只跑着一个 hostNetwork Pod 时身份是
+		// 解出来的，画得上图；多个共用节点 IP 时 Identity 是零值，那时才真的
+		// 定位不了。按 Outcome 一刀切会把前者也算进「无法定位」，而它明明有
+		// 名有姓。
+		placeable := func(o identity.Outcome, id identity.Identity) bool {
+			switch o {
+			case identity.OutcomeResolved:
+				return true
+			case identity.OutcomeHostNetwork:
+				return id.PodName != ""
+			default:
+				return false
+			}
+		}
+		if !placeable(srcOutcome, src) || !placeable(dstOutcome, dst) {
 			unplaceable++
 			continue
 		}
