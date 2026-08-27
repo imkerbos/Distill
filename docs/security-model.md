@@ -33,10 +33,21 @@
   或 `database/sql`。查传递图不查直接 import —— 直接 import 干净但中间包把它拖进来，
   编译产物里照样有。
 - `internal/registry` 的 kubecred 调用点测试：主服务里没有把 kubeconfig 引用变成凭据的路径。
+- 采集器启动时的只读自证（`collect.AssertReadOnly`）：用 SelfSubjectAccessReview 逐一
+  问过**七类**能阻断生产流量的策略对象 —— 标准 NetworkPolicy、Cilium 的 CNP/CCNP、
+  AdminNetworkPolicy 与 BaselineAdminNetworkPolicy、Calico 的 GlobalNetworkPolicy 与
+  NetworkPolicy —— 任何一类拿到写动词就拒绝启动。只查标准 NetworkPolicy 会让一个持有
+  CCNP 或 ANP 写权限的凭据顺利通过自检，而后两族尤其危险：它们带 Deny 动作，一条就能
+  拦掉整个集群的流量。**问不出结果时同样拒绝启动** —— 连"我有没有写权限"都答不上来时，
+  假定没有是这条守卫最没用的失败方向。
 
 ## 凭据处置
 
 - **agent token**：256 bit `crypto/rand`，一次性显示，库里只存 SHA-256，可吊销。
+  **集群下线时这些凭据立刻失效**，两道防线各自成立：认证层按集群是否已下线拒绝
+  （对下线之前签发的那些同样生效），下线动作本身在同一个事务里把它们置为已吊销。
+  少了任何一道，一个已经从每一屏消失的集群仍然在收数据，而那些凭据没有任何界面
+  可以看见或吊销 —— 影响是凭据、账单与审计三条。
   不用 bcrypt —— 慢哈希买的是低熵口令的暴力破解成本，而 256 bit 随机串没有字典空间可省，
   代价却是每次摄入都加一次 bcrypt 的 CPU。
 - **平台从不接收被管集群的 in-cluster 凭据。** agent 用集群自己的 SA 读，平台没见过它。

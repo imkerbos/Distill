@@ -115,6 +115,54 @@ kubectl -n distill logs -f job/<生成的名字>
 在设置页配）。平台主服务存的是引用，没有任何一条把引用变成凭据的路径 ——
 解析只发生在这个进程里。
 
+#### 那个身份需要哪些权限
+
+采集是**读什么、要什么**，没有一条多余的。少给一类，那一类会记成一次
+`FORBIDDEN` 采集失败，整轮变成 `PARTIAL`：
+
+```yaml
+rules:
+  - apiGroups: [""]
+    resources: [namespaces, pods, nodes, services]
+    verbs: [get, list]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: [endpointslices]
+    verbs: [get, list]
+  - apiGroups: ["networking.k8s.io"]
+    resources: [networkpolicies, ingresses]
+    verbs: [get, list]
+  - apiGroups: ["apps"]
+    # 只为把 Pod 顺着 ownerRef 解到 Deployment，不落库。
+    resources: [replicasets]
+    verbs: [get, list]
+  - apiGroups: ["policy.networking.k8s.io"]
+    # 管理面策略。它带 Deny 且排在标准 NetworkPolicy 之前 —— 不读它，
+    # 平台会把一条其实被 ANP 拦住的连接解释成放行。
+    resources: [adminnetworkpolicies, baselineadminnetworkpolicies]
+    verbs: [get, list]
+```
+
+**另外两组是选配，但不给会让整个集群的判定降级。** 拉取式采集还会探测集群里
+有没有平台不解释的第二策略平面；探测不动时结论是「没查成」，而「没查过」与
+「确认有」在可信度上同一档，于是这个集群的每一条判定都会标成 `DEGRADED`：
+
+```yaml
+  - apiGroups: ["cilium.io"]
+    resources: [ciliumnetworkpolicies, ciliumclusterwidenetworkpolicies]
+    verbs: [get, list]
+  - apiGroups: ["crd.projectcalico.org"]
+    resources: [globalnetworkpolicies, networkpolicies]
+    verbs: [get, list]
+```
+
+集群没装对应 CRD 时这两组给了也无害 —— 授权与资源存不存在是两件事，见下面
+那张表。
+
+`selfsubjectaccessreviews` 不必显式授予：Kubernetes 默认把它给每一个通过认证
+的主体（`system:basic-user`）。采集器启动时用它自证不持有任何策略写权限。
+
+**升级时先更新权限，再滚二进制**，理由与 agent 那一节完全一样，见下文。
+
 ### 采集器跑在被采集集群内时：用 `tokenFile`，不要内嵌 token
 
 采集器与目标集群同处一个集群时，kubeconfig 应当**引用投影卷**，而不是内嵌一份
@@ -173,8 +221,9 @@ Pod 里额外声明。跨集群采集拿不到这条路径，那时才需要一�
 只读整个集群 + 一把锁。`leases` 的三个动词是这个 agent **唯一的写权限**，
 范围是一个 namespace 内的一个 Lease 对象 —— 碰不到任何工作负载、任何策略、任何 Secret。
 
-**升级时先更新 ClusterRole，再滚二进制。** 采集范围增加一类资源时，顺序反了会让每一轮
-采集都变成 `PARTIAL`。原因是 apiserver **先判 RBAC、再解析资源**：一个没有被授权的资源，
+**升级时先更新权限，再滚二进制 —— 两种接入形态都一样。** 采集范围增加一类资源时，
+顺序反了会让每一轮采集都变成 `PARTIAL`。推送式改的是这份 ClusterRole，拉取式改的是
+那份只读 kubeconfig 背后的身份。原因是 apiserver **先判 RBAC、再解析资源**：一个没有被授权的资源，
 即使集群里根本没装它的 CRD，返回的也是 403 而不是 404。
 
 采集器据此区分两件事，而这个区分正是它要保护的东西：

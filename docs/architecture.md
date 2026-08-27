@@ -54,6 +54,47 @@
 
 平台在最后一步**停下**。它推分支，不 apply。
 
+## 策略平面
+
+Kubernetes 的 NetworkPolicy 不是集群里唯一能决定连通性的东西。同一个集群上还可能
+跑着 AdminNetworkPolicy 一族、Cilium 的 CNP/CCNP、Calico 的私有策略 —— 它们**都带
+deny**，而标准 NetworkPolicy 没有。只按 NetworkPolicy 求值，会把一条其实被拦住的
+连接判成放行，而那正是会被写进一条放行建议、下发之后才断的方向。
+
+平台对此分三层处理：
+
+| 层 | 回答的问题 | 答不出时 |
+|---|---|---|
+| 探测 | 这个集群里**有没有**别的平面的对象 | 没查成 = 未知，判定整片降级 |
+| 声明 | 这个集群的 CNI **真的执行**哪些平面 | 默认一个都不声明 = 一个都不解释 |
+| 求值 | 那些对象**放行或拒绝了什么** | 只有 AdminNetworkPolicy 一族做到了这一层 |
+
+探测与声明必须分开，因为**装了 CRD 不等于执行**：实测原生 Calico v3.30.4 执行
+AdminNetworkPolicy，而 Cilium 1.19 完全不实现它 —— 两种集群上都可能躺着同样的对象。
+声明错的方向是危险的：按一个并不生效的平面求值，平台会以为某条连接被拦着、于是不
+生成放行规则，那条连接会在下发之后才真的断。所以声明默认为空，且要求写明理由。
+
+### AdminNetworkPolicy 的求值次序
+
+这一族与标准 NetworkPolicy 是**有序短路**，不是叠加：
+
+```
+ANP（按 priority 升序，同一策略内按规则顺序）
+  ├ Allow → 终局放行，压过 NetworkPolicy
+  ├ Deny  → 终局阻断
+  └ Pass  → 跳过剩余 ANP 规则，交给下一段
+NetworkPolicy（照常求值）
+BANP —— 只在主体没被任何 NetworkPolicy 选中时才轮到，只有 Allow / Deny
+```
+
+`Pass` 跳过的是**剩余的 ANP 规则**，不是 BANP：主体若没被任何 NetworkPolicy 选中，
+执行仍然会走到 BANP。
+
+平台还解释不了的部分一律判 `UNKNOWN`，不当作"不命中"：出向的 `nodes` peer 要节点
+标签（没采），两条同 priority 的 ANP 同时选中一个主体时集群行为按 API 定义就是未
+定义的。当作不命中会让一条 Deny 静默消失，而 ANP 是短路的 —— 跳过它，后面任何一条
+Allow 都会变成终局结论。
+
 ## 包结构
 
 ```
