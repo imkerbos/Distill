@@ -2,6 +2,8 @@ import { api } from '../api/client'
 import { RISK_CATEGORY_LABEL, type RiskPosition, type RiskyFlow, type SecurityReport } from '../api/types'
 import { useResource } from '../api/useResource'
 import DataSourceNotice from '../components/DataSourceNotice'
+import NoCollectionState from '../components/NoCollection'
+import { isNoUsableCollectionError } from './noCollectionView'
 import { VerdictBadge } from '../components/Verdict'
 import { Card, Chip, EmptyState, PageHeader, Section, Skeleton, TableCard } from '../components/ui'
 import { listTruncationView, type ListTruncationView } from './preconditionsView'
@@ -32,7 +34,7 @@ const POSITIONS: { key: RiskPosition; label: string; hint: string }[] = [
 ]
 
 export default function SecurityPage({ cluster }: { cluster: string }) {
-  const { data: rep, error, loading } = useResource(cluster, () => api.security(cluster))
+  const { data: rep, error, cause, loading } = useResource(cluster, () => api.security(cluster))
 
   // 标题与数据来源一起提到早退分支之前，理由见 DataSourceNotice：来源标识
   // 必须与内容同屏，包括这一屏读不到数据的时候（design doc 2026-08-17 §2）。
@@ -46,6 +48,9 @@ export default function SecurityPage({ cluster }: { cluster: string }) {
     </>
   )
 
+  // 「还没有可用的采集数据」是一个状态，不是一次读取故障。
+  // 渲染成红字，操作者读到的是"这一屏坏了"；而后端那句话还不说该去哪儿。
+  if (isNoUsableCollectionError(cause)) return <div>{head}<NoCollectionState /></div>
   if (error) return <div>{head}<p className="text-deny">{error}</p></div>
   if (loading || !rep) return <div>{head}<Skeleton /></div>
 

@@ -20,6 +20,8 @@ import {
 } from '../api/types'
 import { useResource } from '../api/useResource'
 import DataSourceNotice from '../components/DataSourceNotice'
+import NoCollectionState from '../components/NoCollection'
+import { isNoUsableCollectionError } from './noCollectionView'
 import { DryRunDetail } from './DryRunDetail'
 import { dryRunView, existingReliefView, type DryRunView, type ExistingReliefView } from './dryRunView'
 import { policyExportView, type PolicyExportView } from './policyExportView'
@@ -85,7 +87,7 @@ export default function PolicyPage({ cluster }: { cluster: string }) {
   // 可查询的目标"，直接跳过请求（见 useResource 的 `if (!key)` 分支）。
   // 拼上 refreshKey 之前先判空，否则 `":0"` 这类非空字符串会绕过那道
   // 门禁，在集群尚未选定时就拿着空 clusterID 发一次注定失败的请求。
-  const { data: pv, error, loading } = useResource(
+  const { data: pv, error, cause, loading } = useResource(
     cluster ? `${cluster}:${refreshKey}:${granularity}` : '',
     () => api.policyPreview(cluster, undefined, granularity),
   )
@@ -102,6 +104,9 @@ export default function PolicyPage({ cluster }: { cluster: string }) {
     </>
   )
 
+  // 「还没有可用的采集数据」是一个状态，不是一次读取故障。
+  // 渲染成红字，操作者读到的是"这一屏坏了"；而后端那句话还不说该去哪儿。
+  if (isNoUsableCollectionError(cause)) return <div>{head}<NoCollectionState /></div>
   if (error) return <div>{head}<p className="text-deny">{error}</p></div>
   if (loading || !pv) return <div>{head}<Skeleton /></div>
 

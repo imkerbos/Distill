@@ -6,6 +6,8 @@ import {
   TREND_HELP, TREND_NONE, trendRows,
 } from './reconcileView'
 import DataSourceNotice from '../components/DataSourceNotice'
+import NoCollectionState from '../components/NoCollection'
+import { isNoUsableCollectionError } from './noCollectionView'
 import { flowIngestView, isNeverIngestedError } from './flowIngestView'
 import { EmptyState, PageHeader, Section, Skeleton, StatTile, TableCard } from '../components/ui'
 
@@ -56,6 +58,9 @@ export default function QualityPage({ cluster }: { cluster: string }) {
       </div>
     )
   }
+  // 「还没有可用的采集数据」是一个状态，不是一次读取故障。
+  // 渲染成红字，操作者读到的是"这一屏坏了"；而后端那句话还不说该去哪儿。
+  if (isNoUsableCollectionError(cause)) return <div>{head}<NoCollectionState /></div>
   if (error) return <div>{head}<p className="text-deny">{error}</p></div>
   if (loading || !q) return <div>{head}<Skeleton /></div>
 

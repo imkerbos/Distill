@@ -63,6 +63,17 @@ const CLUSTER_WRITE_KEYS: string[] = (
   }
 ).keys.slice().sort()
 
+/**
+ * 一份刚好能通过必填校验的最小值。
+ *
+ * 单独取出来而不是散在各条用例里：必填校验排在其余校验之前，任何一条要测
+ * 「后面那些规则」的用例都得先越过它，而抄四遍的那一天只会是其中一处漏了
+ * 一项，症状是一条完全不相干的用例报「集群登记缺少 …」。
+ */
+const MINIMAL = {
+  id: 'c1', displayName: '集群一', podCidr: '10.4.0.0/14', nodeCidr: '10.128.0.0/20',
+}
+
 /* ---------------------------------------------------------------------- */
 /* 1. 两个资源，两份提交体                                                    */
 /* ---------------------------------------------------------------------- */
@@ -248,7 +259,9 @@ test('注册表单默认不声明 CCNP，但字段必须出现在提交体里', 
  * 前面有整行空白被跳过，过滤后的下标就和操作者盯着的表单对不上。
  */
 test('apiserver 半填的行按界面序号报错', () => {
-  const values = blankFormValues()
+  // 四项必填先填上：它们的校验排在 apiserver 之前，缺了就轮不到这一条 ——
+  // 这个顺序是刻意的，必填比一行半填的可选项更基础。
+  const values = { ...blankFormValues(), ...MINIMAL }
   values.apiServerRows = [
     { host: '', cidr: '', port: '' },
     { host: '', cidr: '10.9.0.0/28', port: '443' },
@@ -898,4 +911,45 @@ test('已声明的平面逐个显示，认不出的取值照原样显示', () =>
     // 丢弃它会让操作者以为自己没声明过，而平台其实正在按它求值。
     describeEnforcedPlanes({ enforcedPlanes: ['SOMETHING_NEW'] }).text,
     /SOMETHING_NEW/)
+})
+
+/* ---------------------------------------------------------------------- */
+/* 8. 必填走应用层，不走浏览器原生校验                                        */
+/* ---------------------------------------------------------------------- */
+
+/**
+ * 四项必填由 buildClusterWrite 拦下，且报错点名缺了哪几项。
+ *
+ * 在这之前它们靠输入框的 `required` 属性 —— 那弹的是浏览器原生气泡，
+ * 在一个全中文界面上说一句英文 Please fill out this field.，样式与这套
+ * 设计语言完全不搭，而且一次只提示第一个空框，要一个一个修。这张表单
+ * 其余每一条错误都是中文应用层提示，必填也该走同一条。
+ */
+test('四项必填在应用层被拦下，且点名是哪几项', () => {
+  const built = buildClusterWrite(blankFormValues())
+  assert.equal(built.ok, false)
+  if (built.ok) return
+  for (const label of ['集群 ID', '显示名', 'Pod CIDR', 'Node CIDR']) {
+    assert.match(built.error, new RegExp(label),
+      `报错没点名「${label}」—— 只说"有必填没填"等于让人自己一个个试`)
+  }
+})
+
+/** 只缺一项时只报那一项，不把已经填好的也列进去。 */
+test('必填报错只列真正缺的那几项', () => {
+  const values = { ...blankFormValues(), ...MINIMAL, nodeCidr: '  ' }
+  const built = buildClusterWrite(values)
+  assert.equal(built.ok, false)
+  if (built.ok) return
+  assert.match(built.error, /Node CIDR/)
+  for (const filled of ['集群 ID', '显示名', 'Pod CIDR']) {
+    assert.ok(!built.error.includes(filled),
+      `报错把已经填好的「${filled}」也列成了缺失`)
+  }
+})
+
+/** 全填齐时不再被必填校验挡住。 */
+test('四项填齐即可提交', () => {
+  const built = buildClusterWrite({ ...blankFormValues(), ...MINIMAL })
+  assert.equal(built.ok, true, built.ok ? '' : built.error)
 })

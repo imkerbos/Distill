@@ -430,7 +430,37 @@ export type BuildResult =
  * 事实，没有任何自动探测在维护它，而 PUT 是整体替换 —— 漏带一次，
  * 一个本该整体降级为 DEGRADED 的集群就会给出笃定的判定。
  */
+/**
+ * 注册与编辑都必须给出的四项。
+ *
+ * 前两项是这条记录的身份，后两项是求值层做网段分类的依据 —— 悄悄写空
+ * 网段会污染此后每一次判定（见 ClusterWrite 的注释）。
+ */
+const REQUIRED_CLUSTER_FIELDS: ReadonlyArray<[keyof ClusterFormValues, string]> = [
+  ['id', '集群 ID'],
+  ['displayName', '显示名'],
+  ['podCidr', 'Pod CIDR'],
+  ['nodeCidr', 'Node CIDR'],
+]
+
 export function buildClusterWrite(values: ClusterFormValues): BuildResult {
+  // 必填在这里拦，不靠输入框的 required 属性。
+  //
+  // 那个属性弹的是浏览器原生气泡，在一个全中文界面上说一句英文
+  // Please fill out this field.，而且一次只提示第一个空框。这张表单其余
+  // 每一条错误都是中文应用层提示 —— 一次提交里出现两套语言两种样式，
+  // 读的人会以为后一种是页面坏了。与 resolveGitRepo 同形。
+  const missing = REQUIRED_CLUSTER_FIELDS
+    .filter(([k]) => String(values[k]).trim() === '')
+    .map(([, label]) => label)
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      error: `集群登记缺少：${missing.join('、')}。这四项必填 —— 前两项是这条记录的身份，`
+        + '后两项是判定时做网段分类的依据，缺了它们，此后每一条判定都会拿错的网段去回答。',
+    }
+  }
+
   const servers = resolveApiServers(values.apiServerRows)
   if (!servers.ok) return { ok: false, error: servers.error }
 

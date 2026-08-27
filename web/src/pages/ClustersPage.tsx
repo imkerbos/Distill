@@ -682,6 +682,36 @@ function ClusterFields({ values, patch, mode }: {
       </FormGrid>
 
       {/*
+        余下的登记项收进一段可展开区。
+
+        它们全是可选的，而摊开之后这张表单有 1437px 高、21 个输入框，
+        必填只占最上面 87px —— 一个只想先把集群登进来的人，要从 21 个框里
+        自己判断"我最少要填什么"，还要滚过 16 个不填的框才够得着提交按钮
+        （实测最后一个必填框到按钮 1350px）。spec §17.1 要的是「高密度信息
+        先拆解再建立视觉秩序」，一条无分组的竖列正是没拆解。
+
+        注册时默认收起，编辑时默认展开：注册的人多半还没有这些信息，
+        而点开编辑的人是奔着其中某一项去的，收起只会多一次点击。
+
+        **收起不等于不提交。** 这些字段照旧被 buildClusterWrite 原样带上 ——
+        PUT 是整体替换，少带一项就是把它清空。收起的只有视觉。
+      */}
+      <Disclosure
+        defaultOpen={mode === 'edit'}
+        summary={(
+          <span className="text-sm">
+            其余登记项（可选）
+            <span className="block text-xs text-ink-muted">
+              apiserver、健康检查网段、metrics 抓取端、节点 agent、业务周期、
+              系统命名空间、CNI 执行的第二平面 —— 都可以之后再补。
+              已经填过的值即使收着也会照常保存。
+            </span>
+          </span>
+        )}
+      >
+      <div className="p-3">
+
+      {/*
         这一项不是技术开关，措辞也就不能写成技术开关。它声明的是「这个
         集群里还有别的东西在影响连通性」，而平台不求值 CCNP，因此凡是
         勾上的集群，回放判定一律降级为 DEGRADED——标签要说的是这个后果，
@@ -923,6 +953,8 @@ function ClusterFields({ values, patch, mode }: {
         />
       </div>
 
+      </div>
+      </Disclosure>
     </>
   )
 }
@@ -1308,6 +1340,15 @@ function ImportSection({ clusters, refreshKey, onChanged }: {
       setError('请先选择集群。')
       return
     }
+    // 空 YAML 走应用层提示，不靠 textarea 的 required 属性。
+    //
+    // 那个属性弹的是浏览器原生气泡，一句英文 Please fill out this field.，
+    // 而这张表单其余每一条错误都是中文（上面那句「请先选择集群」就是）。
+    // 同一次提交里出现两套语言两种样式，读的人会以为后一种是页面出错了。
+    if (yaml.trim() === '') {
+      setError('请粘贴要导入的 NetworkPolicy YAML。')
+      return
+    }
     // 来源与 commit 必须互相印证，与后端 registry.ValidatePolicyImport
     // 同一条规则。在这里先拦一道不是为了省一次请求，而是因为这个约束
     // 本身要在界面上说清楚：一条没有 commit 的 GIT 记录会被读成「与仓库
@@ -1413,7 +1454,6 @@ function ImportSection({ clusters, refreshKey, onChanged }: {
             value={yaml}
             onChange={(e) => setYaml(e.target.value)}
             rows={10}
-            required
           />
 
           {error && <ErrorNotice>{error}</ErrorNotice>}
@@ -1573,12 +1613,31 @@ function TextField({ label, value, onChange, required, mono, placeholder, readOn
   const inert = readOnly || disabled
   return (
     <label className="block">
-      <span style={fieldLabelStyle}>{label}</span>
+      <span style={fieldLabelStyle}>
+        {label}
+        {/*
+          必填要在填之前就看得出来，不能等提交之后才由报错告知。这张表单有
+          21 个输入框、其中 4 个必填，标签一模一样时"我最少要填什么"只能靠
+          点一次提交去问。
+
+          用「必填」两个字而不是一个星号：星号要另有图例才读得懂，而这一格
+          旁边没有图例。
+        */}
+        {required && (
+          <span className="ml-1 text-xs font-normal text-ink-muted">必填</span>
+        )}
+      </span>
       <input
         className="ctl w-full"
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        required={required}
+        // 刻意**不设** required 属性。
+        //
+        // 它触发的是浏览器原生校验气泡，在一个全中文界面上弹出一句英文
+        // Please fill out this field.，样式也与这套设计语言完全不搭；而且
+        // 一次只提示第一个空框，要一个一个修。这张表单其余每一条错误都是
+        // 中文应用层提示（buildClusterWrite / 服务端），必填也走同一条 ——
+        // 一套提示，不是两套。
         placeholder={placeholder}
         readOnly={readOnly}
         disabled={disabled}

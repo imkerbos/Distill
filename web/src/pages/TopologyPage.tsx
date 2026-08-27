@@ -6,6 +6,8 @@ import { api } from '../api/client'
 import type { Topology, TopologyLevel } from '../api/types'
 import { useResource } from '../api/useResource'
 import DataSourceNotice from '../components/DataSourceNotice'
+import NoCollectionState from '../components/NoCollection'
+import { isNoUsableCollectionError } from './noCollectionView'
 import TopologyGraph from '../components/TopologyGraph'
 import { Card, Chip, Field, Notice, PageHeader, Section, Select, Skeleton, TableCard, Toolbar } from '../components/ui'
 
@@ -13,7 +15,7 @@ export default function TopologyPage({ cluster }: { cluster: string }) {
   const [level, setLevel] = useState<TopologyLevel>('namespace')
   // key 里带上 level：粒度切换要触发重新取数，且旧粒度的响应必须被丢弃，
   // 否则会出现"选了 workload、看到的是 namespace"这种界面与数据不符。
-  const { data: topo, error, loading } = useResource(
+  const { data: topo, error, cause, loading } = useResource(
     `${cluster}:${level}`,
     () => api.topology(cluster, level),
   )
@@ -30,6 +32,9 @@ export default function TopologyPage({ cluster }: { cluster: string }) {
     </>
   )
 
+  // 「还没有可用的采集数据」是一个状态，不是一次读取故障。
+  // 渲染成红字，操作者读到的是"这一屏坏了"；而后端那句话还不说该去哪儿。
+  if (isNoUsableCollectionError(cause)) return <div>{head}<NoCollectionState /></div>
   if (error) return <div>{head}<p className="text-deny">{error}</p></div>
   if (loading || !topo) return <div>{head}<Skeleton /></div>
 
