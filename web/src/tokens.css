@@ -182,6 +182,37 @@ body {
   vertical-align: middle;
 }
 .dt tbody tr:last-child td { border-bottom: none; }
+
+/* 第一列钉住。
+ *
+ * 宽表格会横向滚动（见 ui.tsx 的 TableCard），而第一列装的是这一行的身份 ——
+ * 集群 ID、策略名、账号名。它跟着滚走之后，滚到右边去点「编辑」或「下线」的
+ * 人已经不知道自己在操作哪一行了。对一个会向生产集群下发策略的平台，
+ * 「点错了行」不是体验问题。
+ *
+ * 背景色必须显式给：sticky 元素本身不挡内容，下面滚过去的单元格会透上来。
+ * 悬停时跟着变，否则钉住的那一格会在整行高亮时留下一块不动的色斑。
+ *
+ * 不滚动的表格上这条是空操作 —— sticky 只在有滚动容器时才起作用。 */
+.dt thead th:first-child,
+.dt tbody td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--surface);
+  /* 一条比普通分隔线略重的边，标出「这里是钉住的边界」——
+     没有它，滚动时那一列看起来像是浮在内容上的一段乱码。 */
+  box-shadow: inset -1px 0 0 var(--border);
+}
+.dt thead th:first-child { background: var(--surface-sunken); z-index: 3; }
+.dt tbody tr:hover td:first-child { background: var(--surface-sunken); }
+/* 其余单元格压回钉住的那一列之下。
+ *
+ * 不设的话，带自己背景的东西（状态 chip、判定徽章）会从钉住的列底下漏出来 ——
+ * 它们各自建了层叠上下文，默认层序在 sticky 之上。症状是滚动时那一列里
+ * 露出半截别的行的内容，读起来像渲染坏了。 */
+.dt thead th:not(:first-child),
+.dt tbody td:not(:first-child) { position: relative; z-index: 0; }
 /* 所有行都给悬停反馈，不只是可点的：横向比对时手要跟着眼睛走，
    而一行没有反馈的表格会让人反复确认自己看的是哪一行。 */
 .dt tbody tr { transition: background-color 100ms ease; }
