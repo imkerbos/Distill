@@ -1,0 +1,4 @@
+# 前端构建产物（web/dist）在镜像构建时复制到这里。
+#
+# 这个文件让 //go:embed all:webui 在没跑过 npm build 的工作区也能编译 ——
+# 否则 `go build ./...` 会在一台没装 node 的机器上直接失败。

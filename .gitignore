@@ -74,3 +74,9 @@ coverage.*
 !.vscode/extensions.json
 *.swp
 *~
+
+# 前端产物在镜像构建时被复制到这里（build/Dockerfile.api）。
+# 占位的 .gitkeep 要入库 —— 没有它，//go:embed all:webui 在一台没跑过
+# npm build 的机器上直接编译失败。
+/cmd/distill-api/webui/*
+!/cmd/distill-api/webui/.gitkeep

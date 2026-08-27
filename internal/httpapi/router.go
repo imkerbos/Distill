@@ -18,6 +18,11 @@ import (
 // 显式结构体而非全局变量：测试可以只装配自己需要的部分，
 // 而不必让整个进程处于某种状态。
 type Deps struct {
+	// WebUI 是前端构建产物，挂在根路径上。
+	//
+	// 允许为 nil：那表示这次部署不带前端，`/` 照旧回 404。本机开发就是这种
+	// 形态 —— 前端跑在独立的 vite dev server 上，走 proxy 打这里。
+	WebUI WebUI
 	// Sessions 是会话存储。
 	Sessions *auth.SessionStore
 	// Verifier 校验登录凭证。
@@ -158,9 +163,16 @@ func NewRouter(d Deps) http.Handler {
 	// 漏掉的那一个就是会被挑中的那一个。新增一条**子树**时要记得声明，
 	// 而 TestEveryBodyTakingSubtreeIsAccountedFor 守着这件事。
 
-	r.NotFound(func(w http.ResponseWriter, _ *http.Request) {
+	// 前端挂在 NotFound 上，而不是 r.Handle("/*")：API 路由必须先被匹配，
+	// 兜底才轮到前端。反过来会让一条写错的 API 路径拿到一份 index.html，
+	// 而调用方要到 JSON 解析失败时才知道出了事。
+	notFound := func(w http.ResponseWriter, _ *http.Request) {
 		response.WriteSystem(w, http.StatusNotFound, response.CodeNotFound)
-	})
+	}
+	if d.WebUI != nil {
+		notFound = mountWebUI(d.WebUI)
+	}
+	r.NotFound(notFound)
 	r.MethodNotAllowed(func(w http.ResponseWriter, _ *http.Request) {
 		response.WriteSystem(w, http.StatusMethodNotAllowed, response.CodeInvalidParam)
 	})

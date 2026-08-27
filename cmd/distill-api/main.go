@@ -118,6 +118,9 @@ func run(configPath string) error {
 	r := chi.NewRouter()
 	r.Mount("/healthz", newHealthHandler())
 	r.Mount("/", httpapi.NewRouter(httpapi.Deps{
+		// 前端与 API 同源、同端口、同一份 TLS。分开部署会把开发时特意
+		// 绕开的跨源问题搬进生产：会话 cookie 是 HttpOnly + SameSite。
+		WebUI:    webUI(),
 		Sessions: auth.NewSessionStore(bootSetting.SessionTTL, nil),
 		// 引导账号是文件里唯一的账号，也是首次登录的入口；账号表跟着一起
 		// 传进去，因为角色要在每次判定时从账号记录现读，而引导账号本身

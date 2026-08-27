@@ -2,6 +2,25 @@
 #
 # 与 Dockerfile.dev 是两回事，不是它的变体：那个装的是完整 Go 工具链与 air，
 # 因为热更新要在容器内重新编译。这个只需要跑一个已经编译好的进程。
+
+# 前端产物打进二进制，与 API 同源、同端口、同一份 TLS。
+#
+# **本机开发不经过这一段**：那时前端跑在独立的 vite dev server 上、走 proxy
+# 打后端（CLAUDE.md 的本地开发形态）。正因为开发形态永远碰不到根路径，
+# "生产镜像里没有前端" 这件事一直没被发现 —— 部署上去打开首页，拿到的是
+# 一句 JSON 的「请求的资源不存在」。
+#
+# 分开部署一个 nginx 也能服务前端，但那会把开发时特意绕开的跨源问题搬进
+# 生产：会话 cookie 是 HttpOnly + SameSite，跨源要额外配 CORS 与
+# SameSite=None，还要为前端再配一次证书。
+FROM node:22-slim AS web
+WORKDIR /web
+# 先只拷 package 清单：依赖没变时这一层命中缓存。
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ ./
+RUN npm run build
+
 FROM golang:1.25 AS build
 WORKDIR /src
 
@@ -10,6 +29,9 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
+# 前端产物放到 embed 指令找得到的位置。**必须在 go build 之前** ——
+# //go:embed 在编译期读文件，之后再放就进不去二进制了。
+COPY --from=web /web/dist/ ./cmd/distill-api/webui/
 
 # CGO_ENABLED=0 是必需的，不是习惯：运行阶段是 distroless static，里面没有 libc。
 # -trimpath 去掉构建机的绝对路径，那是部署布局信息。
