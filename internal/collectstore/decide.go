@@ -169,6 +169,29 @@ func (r *Reader) trafficOf(
 			opts = append(opts, replay.WithForeignPlane(true))
 		}
 	}
+	// 管理面策略只在集群**声明**了它的 CNI 真的执行 ANP 时才解释。
+	//
+	// 装了 CRD 不等于执行：实测原生 Calico v3.30.4 执行 ANP，而 Cilium 1.19
+	// 完全不实现它 —— 两种集群上都可能躺着 ANP 对象。按一个并不生效的平面
+	// 求值，平台会以为某条连接被拦着、于是不生成放行规则，那条连接会在下发
+	// 之后才真的断。所以默认不解释，要解释必须有人写明理由（EnforcedPlanes）。
+	//
+	// **这不改变置信度。** 探测到第二平面仍然整片降级 —— 那份降级里还含着
+	// CNP 与 Calico 私有策略，而探测结果只落了一个三态、没记下是哪几个平面，
+	// 现在还说不出"只剩 ANP 且它已被解释"。判定会因此更正确，置信度照旧
+	// 保守（verdict 与 confidence 是两个独立字段，CLAUDE.md §3）。
+	if c.Enforces(registry.PlaneAdminNetworkPolicy) {
+		stored, err := r.readAdminPoliciesAt(ctx, d)
+		if err != nil {
+			return traffic{}, err
+		}
+		anps, banp, err := parseAdminPolicies(stored)
+		if err != nil {
+			return traffic{}, err
+		}
+		opts = append(opts, replay.WithAdminPolicies(anps, banp))
+	}
+
 	return traffic{
 		described:  d,
 		eval:       replay.NewEvaluator(d.clusterID, parsed, namespaces, opts...),
