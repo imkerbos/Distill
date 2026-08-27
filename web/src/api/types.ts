@@ -227,6 +227,10 @@ export const UNKNOWN_REASON_LABEL: Record<string, string> = {
   EXTERNAL_NO_IDENTITY: '公网流量无可归属主体',
   NAMED_PORT_UNRESOLVED: '命名端口无法解析为具体端口号',
   LOG_SAMPLED_OUT: '日志采样或限流导致记录缺失',
+  // 这两条的处置方向相反，措辞必须让人一眼分得出该去改什么：
+  // 前者要去补平台的能力（策略本身完全合法），后者要去改策略。
+  ADMIN_POLICY_UNSUPPORTED: '这条管理面策略用到了平台还解释不了的字段',
+  ADMIN_PRIORITY_AMBIGUOUS: '两条 AdminNetworkPolicy 优先级相同，集群行为未定义',
   UNSPECIFIED: '未记录具体原因',
 }
 

@@ -70,6 +70,20 @@ const (
 	// CIDR 或 except 条目格式非法。与其它原因不同，这不是数据缺失，
 	// 而是策略写错了 —— 修复方式是改 YAML，不是补数据。
 	ReasonPolicyMalformed UnknownReason = "POLICY_MALFORMED"
+	// ReasonAdminPolicyUnsupported 表示这条管理面策略用到了平台还解释不了
+	// 的东西 —— 当前只有 egress 的 nodes peer，它要节点标签，而平台没采。
+	//
+	// 与 POLICY_MALFORMED 分开：那一条说的是策略写错了，处置是去改策略；
+	// 这一条说的是平台还不会读，策略本身完全合法，处置是去补平台的能力。
+	// 合成一条会把一批人送去审一份没有问题的 YAML。
+	ReasonAdminPolicyUnsupported UnknownReason = "ADMIN_POLICY_UNSUPPORTED"
+	// ReasonAdminPriorityAmbiguous 表示两条 AdminNetworkPolicy 用了同一个
+	// priority，且都选中了这个主体。
+	//
+	// 按 API 的原文，这时集群的行为是**未定义**的：谁先生效取决于实现。
+	// 平台不替它挑一个 —— 挑中的那一半时间会给出一个自信的错答案。
+	// 处置是去把其中一条的 priority 改开。
+	ReasonAdminPriorityAmbiguous UnknownReason = "ADMIN_PRIORITY_AMBIGUOUS"
 )
 
 // allUnknownReasons 是枚举的唯一登记处。新增原因必须同步登记，
@@ -85,6 +99,8 @@ var allUnknownReasons = []UnknownReason{
 	ReasonNamedPortUnresolved,
 	ReasonLogSampledOut,
 	ReasonPolicyMalformed,
+	ReasonAdminPolicyUnsupported,
+	ReasonAdminPriorityAmbiguous,
 }
 
 // AllUnknownReasons 返回全部已登记的未知原因。
@@ -122,6 +138,13 @@ func escalate(cur, next UnknownReason) UnknownReason {
 // unknownReasonRank 给本层可产出的原因排定优先级，未产出的一律为 0。
 func unknownReasonRank(r UnknownReason) int {
 	switch r {
+	// 这两条排在 POLICY_MALFORMED 之上：它们说的是「这一段根本没算」，
+	// 而 POLICY_MALFORMED 说的是「某条策略读不动、但别的还在算」。前者
+	// 一旦成立，后面两段该不该执行都无从谈起，是更根本的不知道。
+	case ReasonAdminPriorityAmbiguous:
+		return 5
+	case ReasonAdminPolicyUnsupported:
+		return 4
 	case ReasonPolicyMalformed:
 		return 3
 	case ReasonSnapshotMissing:

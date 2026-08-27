@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	networkingv1 "k8s.io/api/networking/v1"
+	npav1 "sigs.k8s.io/network-policy-api/apis/v1alpha1"
 )
 
 // Evaluator 对单个集群的策略集求值。
@@ -20,6 +21,13 @@ type Evaluator struct {
 	// 与 foreignPlane 并存：那个是"没查过/查不动"时的整片降级，这个是
 	// "查过了，范围是这些"时的精确降级。
 	foreignScopes []ForeignScope
+	// adminPolicies 是这个集群的 AdminNetworkPolicy，已按 priority 升序。
+	//
+	// 空切片表示「这个集群没有管理面策略」，求值退回只有 NetworkPolicy 的
+	// 老路径。是否该填由调用方按集群的 EnforcedPlanes 声明决定。
+	adminPolicies []npav1.AdminNetworkPolicy
+	// baselinePolicy 是集群级的 BaselineAdminNetworkPolicy 单例，可为 nil。
+	baselinePolicy *npav1.BaselineAdminNetworkPolicy
 }
 
 // Option 调整求值器的行为。
@@ -242,6 +250,21 @@ func IsUnmanaged(pod PodRef) bool {
 func (e *Evaluator) evaluateSide(subject PodRef, peer Endpoint, f Flow, dir Direction) Decision {
 	reason := NewReason(dir)
 
+	// 第一段：AdminNetworkPolicy。它在标准 NetworkPolicy **之前**求值，
+	// 且 Allow / Deny 都是终局的 —— 一条 ANP Allow 压得过一份 default-deny。
+	// 没有登记 ANP 时这一段是空转，走的是与从前逐字节相同的路径。
+	switch outcome, adminReason, code := e.evaluateAdmin(subject, peer, f, dir); outcome {
+	case adminAllow:
+		return Decision{Verdict: VerdictAllow, Confidence: ConfidenceTrusted, Reason: adminReason}
+	case adminDeny:
+		return Decision{Verdict: VerdictDeny, Confidence: ConfidenceTrusted, Reason: adminReason}
+	case adminUnknown:
+		return Decision{Verdict: VerdictUnknown, Confidence: ConfidenceTrusted,
+			Reason: adminReason, UnknownReason: code}
+	case adminPass, adminNoMatch:
+		// 两者在后面两段上表现完全一样：Pass 只是让剩余的 ANP 规则不再被看。
+	}
+
 	malformed := false
 	malformedDetail := ""
 	isIsolated := false
@@ -315,6 +338,21 @@ func (e *Evaluator) evaluateSide(subject PodRef, peer Endpoint, f Flow, dir Dire
 			Reason: reason, UnknownReason: unresolved}
 	}
 	if !isIsolated {
+		// 第三段：BaselineAdminNetworkPolicy，**只有主体没被任何
+		// NetworkPolicy 选中时才轮到它**（CRD 里 action 字段的原文）。
+		// 被选中却没有规则放行的主体，结论已经是 DENY，BANP 不该再有机会
+		// 把它改成 ALLOW —— 那会让一份 default-deny 被兜底策略架空。
+		switch outcome, baseReason, code := e.evaluateBaseline(subject, peer, f, dir); outcome {
+		case adminAllow:
+			return Decision{Verdict: VerdictAllow, Confidence: ConfidenceTrusted, Reason: baseReason}
+		case adminDeny:
+			return Decision{Verdict: VerdictDeny, Confidence: ConfidenceTrusted, Reason: baseReason}
+		case adminUnknown:
+			return Decision{Verdict: VerdictUnknown, Confidence: ConfidenceTrusted,
+				Reason: baseReason, UnknownReason: code}
+		case adminPass, adminNoMatch:
+			// BANP 没有 Pass；没命中就是默认放行。
+		}
 		return Decision{Verdict: VerdictAllow, Confidence: ConfidenceTrusted, Reason: reason}
 	}
 	return Decision{Verdict: VerdictDeny, Confidence: ConfidenceTrusted, Reason: reason}
