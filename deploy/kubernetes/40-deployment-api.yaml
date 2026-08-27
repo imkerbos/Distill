@@ -41,6 +41,9 @@ spec:
             - secretRef: {name: distill-api-secrets}
           volumeMounts:
             - {name: config, mountPath: /etc/distill, readOnly: true}
+            # 服务端证书。kubernetes.io/tls 类型的 Secret 就是 tls.crt +
+            # tls.key 两个键，路径与 ConfigMap 里那两行对上。
+            - {name: tls, mountPath: /etc/distill-tls, readOnly: true}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -56,17 +59,19 @@ spec:
           startupProbe:
             # 启动时要跑迁移，第一次可能要几十秒。用 startupProbe 兜住，
             # 就不必把 liveness 的阈值放宽到失去意义。
-            httpGet: {path: /healthz, port: http}
+            httpGet: {path: /healthz, port: http, scheme: HTTPS}
             periodSeconds: 5
             failureThreshold: 24
           livenessProbe:
-            httpGet: {path: /healthz, port: http}
+            httpGet: {path: /healthz, port: http, scheme: HTTPS}
             periodSeconds: 10
           readinessProbe:
             # /healthz 只回答"进程活着"，**不检查数据库**。数据库断了这个探针
             # 仍然是绿的 —— 这是已知的空缺，不要据此认为链路健康。
-            httpGet: {path: /healthz, port: http}
+            httpGet: {path: /healthz, port: http, scheme: HTTPS}
             periodSeconds: 10
       volumes:
         - name: config
           configMap: {name: distill-api-config}
+        - name: tls
+          secret: {secretName: distill-api-tls}

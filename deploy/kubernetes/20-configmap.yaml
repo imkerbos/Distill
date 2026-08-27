@@ -12,5 +12,17 @@ data:
   config.yaml: |
     server:
       addr: ":10100"
+      # 集群内那一跳也要 TLS。**HTTPS 不需要公网、不需要公共 CA、不需要
+      # Ingress** —— 它只是 TCP 上跑 TLS，证书 SAN 写成
+      # distill-api.distill.svc 就成立；agent 用 -ca-file 信任签它的 CA。
+      #
+      # 不开的后果不是"内网所以还好"：agent 只接受 https 地址，唯一的替代
+      # 是给它开 -allow-plaintext，那等于让 token 明文过集群网络，同集群
+      # 任何能抓包的东西都看得见。
+      #
+      # 两项必须同时给或同时不给 —— 只给一半会在启动时被拒，因为它最坏的
+      # 落法是静默退回明文监听。
+      tls_cert_file: /etc/distill-tls/tls.crt
+      tls_key_file: /etc/distill-tls/tls.key
     log:
       level: INFO

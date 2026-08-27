@@ -292,3 +292,76 @@ func TestDemoConfigLoads(t *testing.T) {
 		t.Error("demo config has no bootstrap user — the dev stack cannot be logged into")
 	}
 }
+
+// withTLS 造一份带 TLS 路径的完整配置。
+//
+// 不在 minimalYAML 后面再追加一个 server 段：YAML 不允许重复的映射键，
+// 那样拼出来的是一份根本解析不了的文件，而用例会因为"解析失败"通过 ——
+// 一个测不到任何东西的绿灯。
+func withTLS(cert, key string) string {
+	out := "\nserver:\n  addr: \":10100\"\n"
+	if cert != "" {
+		out += "  tls_cert_file: " + cert + "\n"
+	}
+	if key != "" {
+		out += "  tls_key_file: " + key + "\n"
+	}
+	return out + `
+auth:
+  bootstrap_user:
+    username: demo
+    password_hash: "$2a$10$abcdefghijklmnopqrstuv"
+database:
+  dsn: "root:x@tcp(mysql:3306)/distill?parseTime=true&loc=UTC"
+log:
+  level: INFO
+`
+}
+
+// 证书与私钥必须同时给出。
+//
+// 只给一半是配置写了一半，而它最坏的落法是**静默退回明文监听** —— 一个
+// 以为自己在跑 TLS 的部署，agent token 却在明文过网。配置错误要在启动时
+// 暴露，不能等到有人抓包才发现。
+func TestTLSCertAndKeyMustBeGivenTogether(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		yaml string
+		ok   bool
+	}{
+		{"两个都不给：明文监听，本机开发用", minimalYAML, true},
+		{"两个都给", withTLS("/tls/tls.crt", "/tls/tls.key"), true},
+		{"只给证书", withTLS("/tls/tls.crt", ""), false},
+		{"只给私钥", withTLS("", "/tls/tls.key"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := config.Load(writeYAML(t, tc.yaml))
+			if tc.ok {
+				if err != nil {
+					t.Fatalf("Load() = %v, want it to succeed", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("只写了一半的 TLS 配置被接受了；它会静默退回明文监听")
+			}
+			if !errors.Is(err, config.ErrInvalidConfig) {
+				t.Errorf("err = %v, want ErrInvalidConfig", err)
+			}
+			if !strings.Contains(err.Error(), "plaintext") {
+				t.Errorf("err = %v，希望它说清后果是退回明文", err)
+			}
+		})
+	}
+}
+
+// 两项都给出时要读得进来，否则 main 那边永远走不到 TLS 分支。
+func TestTLSPathsAreRead(t *testing.T) {
+	cfg, err := config.Load(writeYAML(t, withTLS("/tls/tls.crt", "/tls/tls.key")))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Server.TLSCertFile != "/tls/tls.crt" || cfg.Server.TLSKeyFile != "/tls/tls.key" {
+		t.Errorf("TLS 路径 = %q / %q，没有被读进来", cfg.Server.TLSCertFile, cfg.Server.TLSKeyFile)
+	}
+}

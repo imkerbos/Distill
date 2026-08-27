@@ -163,6 +163,22 @@ rules:
 
 **升级时先更新权限，再滚二进制**，理由与 agent 那一节完全一样，见下文。
 
+### 平台自己监听 TLS，不必依赖 Ingress
+
+`server.tls_cert_file` 与 `server.tls_key_file` 同时给出时，`distill-api` 直接以
+TLS 监听。**集群内通信同样可以、而且应该是 HTTPS** —— 它不需要公网、不需要公共
+CA、不需要 Ingress，证书的 SAN 写成 `distill-api.distill.svc` 就成立，agent 那边
+用 `-ca-file` 信任签它的那份。
+
+这两项存在的理由是让「平台自己就能被安全访问」不依赖集群里装了什么。靠 Ingress
+终结意味着这套部署多一个必须存在的组件，而 agent 只接受 https 地址 —— 没有它就
+只剩下 `-allow-plaintext`，那等于让 agent token 明文过集群网络。
+
+**两项必须同时给或同时不给。** 只写一半会在启动时被拒：它最坏的落法是静默退回
+明文监听，一个以为自己在跑 TLS 的部署，token 却在明文过网。
+
+留空即明文监听，那只该出现在本机开发里。
+
 ### 采集器跑在被采集集群内时：用 `tokenFile`，不要内嵌 token
 
 采集器与目标集群同处一个集群时，kubeconfig 应当**引用投影卷**，而不是内嵌一份

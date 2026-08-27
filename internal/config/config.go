@@ -30,6 +30,19 @@ var ErrInvalidConfig = errors.New("invalid config")
 type ServerConfig struct {
 	// Addr 是监听地址。
 	Addr string `koanf:"addr"`
+	// TLSCertFile 与 TLSKeyFile 给出服务端证书，两者同时给出时服务以 TLS 监听。
+	//
+	// **集群内通信同样可以、而且应该是 TLS。** HTTPS 不需要公网、不需要公共
+	// CA、不需要 Ingress —— 它只是 TCP 上跑 TLS，证书的 SAN 写成
+	// `distill-api.distill.svc` 就成立。自签一套 CA，agent 用 -ca-file 信任它。
+	//
+	// 这两项存在的理由是让「平台自己就能被安全访问」不依赖集群里装了什么：
+	// 靠 Ingress 终结意味着这套部署多一个必须存在的组件，而 agent 只接受
+	// https 地址 —— 没有它就只剩下让 token 明文过集群网络这一条路。
+	//
+	// 留空表示明文监听。那只该出现在本机开发里。
+	TLSCertFile string `koanf:"tls_cert_file"`
+	TLSKeyFile  string `koanf:"tls_key_file"`
 }
 
 // User 是一个本地账号。
@@ -211,6 +224,15 @@ func (c *Config) validate() error {
 	}
 	if c.Database.DSN == "" {
 		return fmt.Errorf("%w: database.dsn is required", ErrInvalidConfig)
+	}
+	// 证书与私钥必须同时给出。只给一半是配置写了一半，而它的失败方向是
+	// **静默退回明文监听** —— 一个以为自己在跑 TLS 的部署，token 却在明文
+	// 过网。配置错误要在启动时暴露（CLAUDE.md §8）。
+	if (c.Server.TLSCertFile == "") != (c.Server.TLSKeyFile == "") {
+		return fmt.Errorf(
+			"%w: server.tls_cert_file and server.tls_key_file must be given together; "+
+				"one without the other would silently fall back to plaintext",
+			ErrInvalidConfig)
 	}
 	return nil
 }

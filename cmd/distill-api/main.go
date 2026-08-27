@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -187,10 +188,24 @@ func run(configPath string) error {
 		ReadTimeout:  bootSetting.HTTPReadTimeout,
 		WriteTimeout: bootSetting.HTTPWriteTimeout,
 	}
+	serveTLS := cfg.Server.TLSCertFile != ""
+	if serveTLS {
+		// 下限钉在 1.2：agent 那一侧的客户端已经要求 1.2（sink.go），
+		// 服务端不设下限的话，协商结果由对端决定 —— 而 token 正是从那条
+		// 连接上过去的。
+		srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+	logger.Info("http server listening", "addr", cfg.Server.Addr, "tls", serveTLS)
 
 	errCh := make(chan error, 1)
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		var err error
+		if serveTLS {
+			err = srv.ListenAndServeTLS(cfg.Server.TLSCertFile, cfg.Server.TLSKeyFile)
+		} else {
+			err = srv.ListenAndServe()
+		}
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
 	}()
