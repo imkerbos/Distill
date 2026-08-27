@@ -154,7 +154,9 @@ func NewRouter(d Deps) http.Handler {
 	r.Use(Recoverer(d.Logger))
 	// 安全头在 Recoverer 之内：头在进入 handler 前就写进 w，因此
 	// 500、404、405 这些不经过 handler 的响应同样带着它们。
-	r.Use(SecurityHeaders)
+	// CSP 要按这次部署带不带前端选：只产出 JSON 时 default-src 'none' 是
+	// 精确描述，而把它照搬到带前端的部署上会把自己的脚本样式全挡掉。
+	r.Use(SecurityHeaders(d.WebUI != nil))
 	// 请求体上限**按子树装**，不装在根部：agent 子树的报文与人的子树差三个
 	// 数量级（一次流量摄入 1–2 MB，一次登录几百字节），装在根部只能取小的
 	// 那个，而那会让摄入过不去。见 MaxAgentRequestBytes 的说明。

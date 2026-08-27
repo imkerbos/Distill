@@ -13,7 +13,10 @@
 # 分开部署一个 nginx 也能服务前端，但那会把开发时特意绕开的跨源问题搬进
 # 生产：会话 cookie 是 HttpOnly + SameSite，跨源要额外配 CORS 与
 # SameSite=None，还要为前端再配一次证书。
-FROM node:22-slim AS web
+# --platform=$BUILDPLATFORM：这一段跑在**构建机自己的架构**上，不进模拟层。
+# 产物是平台无关的 JS/CSS，跨架构消费完全成立；而 vite 的打包器是原生二进制，
+# 在 QEMU 里会直接段错误（在 arm64 上构建 amd64 镜像时实测 exit 139）。
+FROM --platform=$BUILDPLATFORM node:22-slim AS web
 WORKDIR /web
 # 先只拷 package 清单：依赖没变时这一层命中缓存。
 COPY web/package.json web/package-lock.json ./
@@ -21,7 +24,9 @@ RUN npm ci
 COPY web/ ./
 RUN npm run build
 
-FROM golang:1.25 AS build
+# 同样跑在构建机架构上：Go 靠 GOARCH 交叉编译，不需要模拟层，而模拟一个
+# 完整的编译过程既慢又多一处会出意外的地方。
+FROM --platform=$BUILDPLATFORM golang:1.25 AS build
 WORKDIR /src
 
 # 先只拷 go.mod/go.sum：依赖没变时这一层命中缓存，不必每次重拉 k8s.io。
