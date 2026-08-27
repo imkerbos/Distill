@@ -7,6 +7,7 @@ import {
   type CNI, type PolicyImportItem, type RegisteredCluster,
 } from '../api/types'
 import { Checkbox, Disclosure } from '../components/radix'
+import { useConfirm } from '../components/useConfirm'
 import { useResource } from '../api/useResource'
 import {
   blankFormValues, blankGitValues, buildClusterWrite, describePathVerifyOutcome,
@@ -80,29 +81,43 @@ function ClusterListSection({ clusters, repos, reposError, error, loading, onCha
   const [busyId, setBusyId] = useState<string | null>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [agentsId, setAgentsId] = useState<string | null>(null)
+  const [confirm, confirmDialog] = useConfirm()
+  const [actionError, setActionError] = useState('')
 
   async function offboard(id: string) {
-    // 二次确认必须说清后果，与本页其它两处、以及仓库页那一处同一条纪律
-    // （「仍被集群绑定的仓库不会被删除…」「该集群将不再有策略仓库…」）。
-    // 这一处原先只有一句「确认下线集群 X？」——它问的是"你确定吗"，
-    // 而操作者需要知道的是"确定之后会怎样"。
-    //
-    // 三句话都要，且顺序是刻意的：先说不可逆（那是唯一一件事后补不回来的），
+    // 三段后果，顺序是刻意的：先说不可逆（那是唯一一件事后补不回来的），
     // 再说凭据（那是会立刻停止工作的东西），最后说数据（那是会被误以为
     // 一并消失、其实还在的东西）。
-    if (!window.confirm(
-      `确认下线集群 ${id}？\n\n`
-      + '这个动作没有恢复入口：下线之后它会从每一屏消失，平台没有把它重新上线的路径。\n'
-      + `已经签发给 ${id} 的 agent 凭据会立刻失效并标记为已吊销 —— 装在那个集群里的 `
-      + 'agent 会开始被拒绝，要重新接入需要重新登记、重新签发、重新滚一次 DaemonSet。\n'
-      + '已经采到的历史数据保留在库里，但不再更新，也不会再出现在任何一屏上。',
-    )) return
+    if (!await confirm({
+      title: `确认下线集群 ${id}？`,
+      confirmLabel: '下线集群',
+      detail: (
+        <>
+          <p className="mt-0 mb-2">
+            <strong>这个动作没有恢复入口。</strong>
+            下线之后它会从每一屏消失，平台没有把它重新上线的路径。
+          </p>
+          <p className="my-2">
+            已经签发给 {id} 的 agent 凭据会立刻失效并标记为已吊销 —— 装在那个集群里的
+            agent 会开始被拒绝，要重新接入需要重新登记、重新签发、重新滚一次 DaemonSet。
+          </p>
+          <p className="mt-2 mb-0">
+            已经采到的历史数据保留在库里，但不再更新，也不会再出现在任何一屏上。
+          </p>
+        </>
+      ),
+    })) return
+    setActionError('')
     setBusyId(id)
     try {
       await api.deleteCluster(id)
       onChanged()
     } catch (err) {
-      window.alert(err instanceof ApiError ? err.msg : '下线失败，请稍后重试')
+      // 页内提示，不用 window.alert：那同样是一个原生浮层，外观由操作系统
+      // 决定，也同样阻塞渲染进程。而这条消息里往往带着服务端说清的拒绝理由
+      // （「仍被集群绑定的仓库不会被删除…」那一类），值得留在页面上让人看完，
+      // 而不是点掉之后就再也找不回来。
+      setActionError(err instanceof ApiError ? err.msg : '下线失败，请稍后重试')
     } finally {
       setBusyId(null)
     }
@@ -114,6 +129,10 @@ function ClusterListSection({ clusters, repos, reposError, error, loading, onCha
       description="Git 绑定为空时显式写「未绑定」——空单元格会被读成「加载中」或「未知」，两者都不是这里想表达的事实。"
       meta={clusters ? `${clusters.length} 个` : undefined}
     >
+      {/* 走 Portal，放这里只是为了让它和触发它的那几个按钮在同一个组件里 ——
+          确认框的文案要能读到 id 这类局部变量。 */}
+      {confirmDialog}
+      {actionError && <ErrorNotice>{actionError}</ErrorNotice>}
       {/*
         仓库清单没拉到时必须说出来：下面那一格要靠它把 repoId 翻成地址，
         缺了它界面只能显示一个光秃秃的 ID，而读者无从判断这是「仓库没
@@ -995,6 +1014,7 @@ function GitBindingForm({ cluster, repos, onChanged }: {
   const [outcome, setOutcome] = useState<VerifyOutcomeView | null>(null)
   const [saved, setSaved] = useState(false)
   const [busy, setBusy] = useState<'' | 'save' | 'unbind'>('')
+  const [confirm, confirmDialog] = useConfirm()
 
   const patch = (p: Partial<GitFormValues>) => setValues((v) => ({ ...v, ...p }))
 
@@ -1034,9 +1054,12 @@ function GitBindingForm({ cluster, repos, onChanged }: {
   }
 
   async function unbind() {
-    if (!window.confirm(
-      `确认解除 ${cluster.id} 的 Git 绑定？该集群将不再有策略仓库，平台不会再向它下发策略。`,
-    )) return
+    if (!await confirm({
+      title: `确认解除 ${cluster.id} 的 Git 绑定？`,
+      confirmLabel: '解除绑定',
+      detail: '该集群将不再有策略仓库，平台不会再向它下发策略。'
+        + '仓库本身不受影响 —— 它是一个独立资源，可能还被别的集群绑着。',
+    })) return
     setError('')
     setOutcome(null)
     setSaved(false)
@@ -1059,6 +1082,7 @@ function GitBindingForm({ cluster, repos, onChanged }: {
 
   return (
     <Card className="my-3 p-4">
+      {confirmDialog}
       <form onSubmit={submit}>
         <SubHeading>
           {cluster.id} 的 Git 绑定 —— 这是一次独立提交，不会改动上面的登记信息，也不会改动仓库。
@@ -1326,6 +1350,7 @@ function ImportSection({ clusters, refreshKey, onChanged }: {
   const [yaml, setYaml] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [confirm, confirmDialog] = useConfirm()
 
   const importsKey = selected ? `imports:${selected}:${refreshKey}` : ''
   const { data: imports, error: listError, loading } = useResource(
@@ -1379,12 +1404,21 @@ function ImportSection({ clusters, refreshKey, onChanged }: {
 
   async function remove(importId: string) {
     if (!selected) return
-    if (!window.confirm('确认删除该导入记录？')) return
+    // 这一处原先也只有一句「确认删除该导入记录？」，同样没说后果。
+    // 它比另外三处轻，但轻不等于不用说：删掉的是一份被当作现状基线的策略
+    // 原文，而 dry-run 正是拿基线去比对的。
+    if (!await confirm({
+      title: '确认删除这条导入记录？',
+      confirmLabel: '删除记录',
+      detail: '这条记录里的 YAML 会从库里移除。如果它当前被用作现状基线，'
+        + 'dry-run 此后会按少了这一份的集合去比对 —— 结论可能因此变化。'
+        + '集群里真实生效的策略不受影响：这里删的是平台的一份记录，不是集群上的对象。',
+    })) return
     try {
       await api.deleteImport(selected, importId)
       onChanged()
     } catch (err) {
-      window.alert(err instanceof ApiError ? err.msg : '删除失败，请稍后重试')
+      setError(err instanceof ApiError ? err.msg : '删除失败，请稍后重试')
     }
   }
 
@@ -1393,6 +1427,7 @@ function ImportSection({ clusters, refreshKey, onChanged }: {
       title="策略导入"
       description="导入既有 NetworkPolicy YAML，作为现状基线或候选补充。本表单提交的记录一律标注「未经 Git 核对」——只有经漂移检测流水线比对过 commit 的记录才会显示已核对，该流水线不在本轮范围内。"
     >
+      {confirmDialog}
       <Card style={{ padding: 'var(--space-4)', marginBottom: 'var(--space-3)' }}>
         <form onSubmit={submit}>
           <FormGrid>

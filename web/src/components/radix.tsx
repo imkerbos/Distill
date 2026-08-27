@@ -169,6 +169,88 @@ export function Drawer({ open, onClose, title, children }: {
 }
 
 /**
+ * 二次确认。
+ *
+ * 换掉 window.confirm 有三个理由，按分量排：
+ *
+ * 一、**它只能显示一行纯文本**。这个平台的不可逆动作要说清后果 —— 下线一个
+ * 集群会让它的 agent 凭据立刻失效、且没有恢复入口 —— 而那不是一句话能讲完
+ * 的事。塞进原生对话框的结果是一大段挤在一起的文字，读的人只会按回车。
+ *
+ * 二、**它长得不属于这个产品**。四处确认里最重的那几个，外观由操作系统决定，
+ * 与卡片、表格、按钮的质感完全对不上（spec §17.1：组件系统规整）。
+ *
+ * 三、**它阻塞整个渲染进程**。这不是理论问题：本仓库的浏览器自动化就是被它
+ * 挂死的 —— 一个没人应答的原生对话框会让页面此后再也不响应任何脚本。
+ *
+ * confirmLabel 要写动作名（「下线集群」），不写「确定」：一段说明后果的文字
+ * 底下摆一个「确定」，读的人会条件反射地点它，而按钮上的字是他关掉这个框
+ * 之前看到的最后一样东西。
+ *
+ * 默认焦点落在取消上，不落在确认上：这几个动作都是不可逆的，回车不该正好
+ * 落在那一侧。
+ */
+export function ConfirmDialog({ open, title, detail, confirmLabel, onConfirm, onCancel }: {
+  open: boolean
+  title: string
+  detail: ReactNode
+  confirmLabel: string
+  onConfirm: () => void
+  onCancel: () => void
+}) {
+  return (
+    <RadixDialog.Root open={open} onOpenChange={(o) => { if (!o) onCancel() }}>
+      <RadixDialog.Portal>
+        <RadixDialog.Overlay className="fixed inset-0 z-30 bg-[rgba(28,28,26,.36)]" />
+        <RadixDialog.Content
+          onOpenAutoFocus={(e) => {
+            // 自己接管首个焦点：Radix 默认落在内容里第一个可聚焦的元素上，
+            // 而这个框里那正是「确认」。
+            e.preventDefault()
+            const el = e.currentTarget as HTMLElement
+            el.querySelector<HTMLButtonElement>('[data-confirm-cancel]')?.focus()
+          }}
+          className="fixed left-1/2 top-1/2 z-40 w-[520px] max-w-[calc(100vw-2rem)]
+                     -translate-x-1/2 -translate-y-1/2 rounded-card border border-line
+                     bg-surface p-4 shadow-[0_8px_32px_rgba(28,28,26,.18)]"
+        >
+          <RadixDialog.Title
+            className="m-0 mb-2 text-base text-ink"
+            style={{ fontWeight: 'var(--weight-section)' }}
+          >
+            {title}
+          </RadixDialog.Title>
+          {/* Description 而不是随便一个 <p>：Radix 会把它接到 aria-describedby
+              上，读屏器打开这个框时会连后果一起念出来，而后果正是这个框存在
+              的理由。 */}
+          <RadixDialog.Description className="mt-0 mb-4 text-sm leading-relaxed text-ink-2">
+            {detail}
+          </RadixDialog.Description>
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              data-confirm-cancel
+              onClick={onCancel}
+              className="rounded-chip border border-line bg-surface px-3 py-1.5 text-sm text-ink-2
+                         hover:border-line-strong hover:text-ink"
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              onClick={onConfirm}
+              className="rounded-chip border border-line-strong bg-ink px-3 py-1.5 text-sm text-bg"
+            >
+              {confirmLabel}
+            </button>
+          </div>
+        </RadixDialog.Content>
+      </RadixDialog.Portal>
+    </RadixDialog.Root>
+  )
+}
+
+/**
  * 下拉框。
  *
  * 原生 `<select>` 在 macOS 与 Windows 上外观差异很大，与卡片、表格的质感

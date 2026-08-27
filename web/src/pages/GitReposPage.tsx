@@ -4,6 +4,7 @@ import type { GitRepo } from '../api/types'
 import { useResource } from '../api/useResource'
 import { VerifyBadge, VerifyOutcomeNote } from '../components/Verdict'
 import { Button, Card, EmptyState, ErrorNotice, PageHeader, Section, Skeleton, TableCard } from '../components/ui'
+import { useConfirm } from '../components/useConfirm'
 import {
   blankRepoValues, describeRepoVerifyOutcome, describeRepoVerifyStatus,
   repoFormValuesOf, resolveGitRepo, type RepoFormValues,
@@ -60,11 +61,15 @@ function RepoListSection({ repos, error, loading, onChanged }: {
   // 删除被拒的理由要留在屏幕上，不用一弹就消失的浏览器提示框：那句话是
   // 「先去解除某个集群的绑定」，操作者读完还得照着做。
   const [actionError, setActionError] = useState('')
+  const [confirm, confirmDialog] = useConfirm()
 
   async function remove(id: string) {
-    if (!window.confirm(
-      `确认下线策略仓库 ${id}？仍被集群绑定的仓库不会被删除，服务端会拒绝并说明该先解除哪一处绑定。`,
-    )) return
+    if (!await confirm({
+      title: `确认下线策略仓库 ${id}？`,
+      confirmLabel: '下线仓库',
+      detail: '仍被集群绑定的仓库不会被删除 —— 服务端会拒绝，并说明该先去解除哪一处绑定。'
+        + '仓库是共享资源，可能不止一个集群绑着它。',
+    })) return
     setActionError('')
     setBusyId(id)
     try {
@@ -87,6 +92,7 @@ function RepoListSection({ repos, error, loading, onChanged }: {
       description="没校验过的仓库写「仓库未校验」而不是留白 —— 空单元格会被读成「加载中」或「没什么要报告的」，而「从未校验过」与「校验通过」是相反的两件事实。「编辑」在行内展开：修改是整体替换，且服务端会把上一次的结论清成未校验（换了地址之后，旧的结论描述的是另一个仓库），要新结论请再点一次重新校验。"
       meta={repos ? `${repos.length} 个` : undefined}
     >
+      {confirmDialog}
       {actionError && <ErrorNotice>{actionError}</ErrorNotice>}
       {error ? (
         <p className="text-deny">{error}</p>
