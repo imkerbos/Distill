@@ -105,8 +105,18 @@ func (s *Store) RevokeClusterAgent(
 // 单独取名而不是各写一份：两处的列顺序必须一致，抄两份的那一天只会是
 // 其中一处新增了列而另一处没有，而错位的 token_hash 只会表现成
 // 「认证怎么都不过」，没有任何东西指向真正的成因。
-const agentColumns = `cluster_id, agent_id, token_hash, state, created_by,
-	                  created_at, last_seen_at, revoked_at`
+// 末列是 join 出来的「所属集群已下线」，两处都取：认证要据它拒绝，
+// 列表要据它告诉操作者这些凭据已经随集群一起作废。
+const agentColumns = `a.cluster_id, a.agent_id, a.token_hash, a.state, a.created_by,
+	                  a.created_at, a.last_seen_at, a.revoked_at,
+	                  (c.cluster_id IS NULL OR c.deleted_at IS NOT NULL)`
+
+// agentFrom 是两个读方法共用的 FROM 子句。
+//
+// LEFT JOIN 而非 INNER：集群行被硬删之后，agent 记录仍然要能被查出来并
+// 判成"集群没了"。INNER 会让它查不到，而查不到在认证层是「未知 agent」——
+// 与「集群已下线」是两条不同的日志，合并之后就再也分不出是哪一种。
+const agentFrom = `cluster_agent AS a LEFT JOIN cluster AS c ON c.cluster_id = a.cluster_id`
 
 // ClusterAgents 返回一个集群下的全部 agent，**含已吊销的**。
 //
@@ -115,7 +125,8 @@ const agentColumns = `cluster_id, agent_id, token_hash, state, created_by,
 func (s *Store) ClusterAgents(ctx context.Context, clusterID string) ([]registry.ClusterAgent, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+agentColumns+`
-		   FROM cluster_agent WHERE cluster_id = ? ORDER BY created_at DESC, agent_id`,
+		   FROM `+agentFrom+`
+		  WHERE a.cluster_id = ? ORDER BY a.created_at DESC, a.agent_id`,
 		clusterID)
 	if err != nil {
 		return nil, fmt.Errorf("read cluster agents: %w", err)
@@ -145,7 +156,7 @@ func (s *Store) ClusterAgents(ctx context.Context, clusterID string) ([]registry
 // 分辨「被吊销」与「不存在」，在这里过滤掉就把两者合并了。
 func (s *Store) ClusterAgentByID(ctx context.Context, agentID string) (registry.ClusterAgent, bool, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT `+agentColumns+` FROM cluster_agent WHERE agent_id = ?`, agentID)
+		`SELECT `+agentColumns+` FROM `+agentFrom+` WHERE a.agent_id = ?`, agentID)
 	a, err := scanClusterAgent(row.Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return registry.ClusterAgent{}, false, nil
@@ -182,7 +193,7 @@ func scanClusterAgent(scan func(...any) error) (registry.ClusterAgent, error) {
 		revokedAt sql.NullTime
 	)
 	if err := scan(&a.ClusterID, &a.AgentID, &a.TokenHash, &state,
-		&a.CreatedBy, &a.CreatedAt, &lastSeen, &revokedAt); err != nil {
+		&a.CreatedBy, &a.CreatedAt, &lastSeen, &revokedAt, &a.ClusterRetired); err != nil {
 		return registry.ClusterAgent{}, err
 	}
 	a.State = registry.AgentState(state)

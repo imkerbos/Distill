@@ -423,6 +423,16 @@ func (m *memRegistry) SoftDeleteCluster(_ context.Context, _ registry.Actor, id 
 		return registry.ErrNotFound
 	}
 	delete(m.clusters, id)
+	// 下线顺带吊销这个集群的 agent 凭据，与真实实现同一个事务里做的事。
+	// 假实现漏掉它，就会让「下线之后凭据仍是 ACTIVE」这件事在单测里
+	// 永远不成立，而它恰恰是要被测到的那一半。
+	for id2, a := range m.agents {
+		if a.ClusterID == id && a.State == registry.AgentActive {
+			a.State = registry.AgentRevoked
+			a.RevokedAt = time.Now().UTC()
+			m.agents[id2] = a
+		}
+	}
 	return nil
 }
 
@@ -1339,6 +1349,13 @@ func (m *memRegistry) ClusterAgentByID(_ context.Context, agentID string) (regis
 		return registry.ClusterAgent{}, false, m.failWith
 	}
 	a, ok := m.agents[agentID]
+	if ok {
+		// 与 mysqlregistry 一样，这一位是**算出来的**，不是存下来的：
+		// 存一份就有可能漂成"集群没了但这一位还说在"，而那正是这条检查
+		// 要挡住的情形。
+		_, alive := m.clusters[a.ClusterID]
+		a.ClusterRetired = !alive
+	}
 	return a, ok, nil
 }
 

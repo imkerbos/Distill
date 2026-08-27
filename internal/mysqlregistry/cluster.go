@@ -342,6 +342,23 @@ func (s *Store) SoftDeleteCluster(ctx context.Context, actor registry.Actor, id 
 				// 事务外的存在性检查看不到这一刻的状态。
 				return fmt.Errorf("%w: cluster %s", ErrNotFound, id)
 			}
+
+			// 连同这个集群的 agent 凭据一起作废，**同一个事务**。
+			//
+			// 下线之后这个集群从每一屏消失，它的 agent 面板也就再也打不开 ——
+			// 留着一批标着 ACTIVE 的 token，等于留下一批谁也看不见、谁也吊销
+			// 不了的凭据。认证层已经据 ClusterRetired 拒绝它们，这一步是不让
+			// 库里存着一句自相矛盾的话：一个不存在的集群有可用凭据。
+			//
+			// 分成两个事务的话，下线成功而吊销失败会留下正是上面那种状态，
+			// 且没有任何东西会再回来收拾它。
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE cluster_agent SET state = ?, revoked_at = ?
+				  WHERE cluster_id = ? AND state = ?`,
+				string(registry.AgentRevoked), s.now(), id, string(registry.AgentActive),
+			); err != nil {
+				return fmt.Errorf("revoke cluster agents on soft delete: %w", err)
+			}
 			return nil
 		})
 }

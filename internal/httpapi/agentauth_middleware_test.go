@@ -26,6 +26,22 @@ func bearerGet(t *testing.T, h http.Handler, token, path string) *httptest.Respo
 	return rec
 }
 
+// bearerPost 用 agent token 发一次写请求。
+//
+// 与 bearerGet 分开而不是加一个 method 参数：读路径与写路径各自挂中间件，
+// 用例要能分别打到它们 —— 「读被挡住」证明不了「写被挡住」。
+func bearerPost(t *testing.T, h http.Handler, token, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
 // cookieGet 用会话 Cookie 发一次请求，不带 Authorization。
 func cookieGet(t *testing.T, h http.Handler, cookie *http.Cookie, path string) *httptest.ResponseRecorder {
 	t.Helper()
@@ -308,3 +324,81 @@ func TestAgentLaneAcceptsOnlyTheBearerScheme(t *testing.T) {
 }
 
 var _ = registry.AgentActive
+
+// 集群下线之后，它的 agent 凭据必须立刻失效。
+//
+// 来自一次真实排查：建集群 → 签 token → 下线 → 用同一把 token，
+// /agent/config 照旧返回成功，一次完整的采集推送也照旧落库。而集群已经从
+// 每一屏消失，那些凭据没有任何界面可以看见或吊销 —— 影响是凭据、账单
+// （CLAUDE.md §5）与审计三条：库里会留下一行时间戳晚于下线操作的观测。
+//
+// 这一条走完整链路。**两道防线各自还有一条单独的用例**：它们互为兜底，
+// 只测这一条的话，杀掉其中任何一道都不会变红（实测如此）。
+func TestAgentLaneRejectsATokenWhoseClusterWasRetired(t *testing.T) {
+	reg := fixtureSource()
+	h, _, cookie := newTestRouterWithRegistry(t, fixtureReader(), reg)
+	_, token := issueAgent(t, h, cookie, "prod-asia-1")
+
+	if rec := bearerGet(t, h, token, "/api/v1/agent/config"); rec.Code != http.StatusOK {
+		t.Fatalf("fresh token status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if rec := authedDelete(t, h, cookie, "/api/v1/clusters/prod-asia-1"); rec.Code != http.StatusOK {
+		t.Fatalf("retire status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+
+	if rec := bearerGet(t, h, token, "/api/v1/agent/config"); rec.Code != http.StatusUnauthorized {
+		t.Errorf("config after retiring the cluster = %d, want 401: %s", rec.Code, rec.Body.String())
+	}
+	// 写路径单独打一次：两条路由各自挂中间件，漏挂一条不会有任何症状。
+	run := bearerPost(t, h, token, "/api/v1/agent/collection-runs", `{
+		"schemaVersion":1,"runId":"retired-run-1","status":"OK",
+		"startedAt":"2026-08-27T02:00:00Z","finishedAt":"2026-08-27T02:00:01Z",
+		"observedAt":"2026-08-27T02:00:00Z","observation":{"namespaces":[{"name":"default"}]}}`)
+	if run.Code != http.StatusUnauthorized {
+		t.Errorf("push after retiring the cluster = %d, want 401: %s", run.Code, run.Body.String())
+	}
+}
+
+// 防线一：认证层据集群状态拒绝，与这把 token 自己的状态无关。
+//
+// 这一道才是承重的那条：它对**所有**已签发的 token 生效，包括下线动作
+// 发生之前就发出去的、以及本次改动之前那些从未被吊销过的。这里刻意让
+// token 保持 ACTIVE —— 只有这样才测得到"拒绝来自集群，不来自吊销"。
+func TestAgentLaneRefusesAnActiveTokenOfAVanishedCluster(t *testing.T) {
+	reg := fixtureSource()
+	h, _, cookie := newTestRouterWithRegistry(t, fixtureReader(), reg)
+	agentID, token := issueAgent(t, h, cookie, "prod-asia-1")
+
+	// 只让集群消失，不碰 token：模拟一把下线之前就签出去的凭据。
+	delete(reg.clusters, "prod-asia-1")
+	if got := reg.agents[agentID].State; got != registry.AgentActive {
+		t.Fatalf("fixture 前提不成立：token 状态是 %q，这条用例要的是 ACTIVE", got)
+	}
+
+	if rec := bearerGet(t, h, token, "/api/v1/agent/config"); rec.Code != http.StatusUnauthorized {
+		t.Errorf("an ACTIVE token of a vanished cluster got %d, want 401: %s",
+			rec.Code, rec.Body.String())
+	}
+}
+
+// 防线二：下线顺带吊销这个集群的全部 token。
+//
+// 单独断言在注册表上，不经 HTTP：经 HTTP 的话防线一会先把请求挡掉，
+// 这一半永远不会被测到。它要保证的是库里不存着一句自相矛盾的话 ——
+// 一个不存在的集群有可用凭据 —— 因为那些凭据再也没有界面可以看见。
+func TestRetiringAClusterRevokesItsAgentTokens(t *testing.T) {
+	reg := fixtureSource()
+	h, _, cookie := newTestRouterWithRegistry(t, fixtureReader(), reg)
+	agentID, _ := issueAgent(t, h, cookie, "prod-asia-1")
+
+	if rec := authedDelete(t, h, cookie, "/api/v1/clusters/prod-asia-1"); rec.Code != http.StatusOK {
+		t.Fatalf("retire status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if got := reg.agents[agentID].State; got != registry.AgentRevoked {
+		t.Errorf("token state after retiring the cluster = %q, want %q",
+			got, registry.AgentRevoked)
+	}
+	if reg.agents[agentID].RevokedAt.IsZero() {
+		t.Error("token was marked revoked without a revocation time")
+	}
+}

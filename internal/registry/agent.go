@@ -66,6 +66,17 @@ type ClusterAgent struct {
 	// 它是给操作者看的「这个 agent 还活着吗」，不是一条安全判定 ——
 	// 写它失败不该拒掉一次合法推送。
 	LastSeenAt time.Time
+	// ClusterRetired 表示这把 token 所属的集群**已经下线**。
+	//
+	// 一个关于集群的事实长在 agent 记录上，是为了保住认证路径「只查一次库」
+	// 这条性质：摄入是高频路径，为了问一句"这个集群还在吗"再查一次，等于
+	// 在最热的那条链上多一次往返。它由 ClusterAgentByID 一次 join 取回。
+	//
+	// **认证必须据此拒绝。** 下线只写 cluster.deleted_at，不动这张表；不查
+	// 它的话，一个已经从所有页面消失的集群仍然在收数据，而那些凭据没有任何
+	// 界面可以看见或吊销。人的读写路径每一条都带 deleted_at IS NULL，这条
+	// 链漏了它。
+	ClusterRetired bool
 	// RevokedAt 是吊销时刻；未吊销时为零值。
 	RevokedAt time.Time
 }

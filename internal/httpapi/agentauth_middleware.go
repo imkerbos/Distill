@@ -68,6 +68,16 @@ func RequireAgent(d Deps) func(http.Handler) http.Handler {
 				refuseAgent(w, r, d, "unknown agent", agentID)
 				return
 			}
+			// 集群已下线的检查排在吊销之前。
+			//
+			// 下线会顺带吊销这个集群的全部 token（registry.SoftDeleteCluster），
+			// 所以两个条件通常同时成立；排在后面的那个永远不会被记进日志。
+			// 而这两句话指向完全不同的处置：「有人在用一把该扔掉的凭据」要去
+			// 查那台机器，「一个已下线集群还在推数据」要去把它的 agent 关掉。
+			if agent.ClusterRetired {
+				refuseAgent(w, r, d, "retired cluster", agentID)
+				return
+			}
 			if agent.State != registry.AgentActive {
 				// 已吊销要在日志里与"未知"分开：有人正在用一把该扔掉的
 				// 凭据，那是一条要被看见的信号，不是一次打错字。

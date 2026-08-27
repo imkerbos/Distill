@@ -82,7 +82,21 @@ function ClusterListSection({ clusters, repos, reposError, error, loading, onCha
   const [agentsId, setAgentsId] = useState<string | null>(null)
 
   async function offboard(id: string) {
-    if (!window.confirm(`确认下线集群 ${id}？`)) return
+    // 二次确认必须说清后果，与本页其它两处、以及仓库页那一处同一条纪律
+    // （「仍被集群绑定的仓库不会被删除…」「该集群将不再有策略仓库…」）。
+    // 这一处原先只有一句「确认下线集群 X？」——它问的是"你确定吗"，
+    // 而操作者需要知道的是"确定之后会怎样"。
+    //
+    // 三句话都要，且顺序是刻意的：先说不可逆（那是唯一一件事后补不回来的），
+    // 再说凭据（那是会立刻停止工作的东西），最后说数据（那是会被误以为
+    // 一并消失、其实还在的东西）。
+    if (!window.confirm(
+      `确认下线集群 ${id}？\n\n`
+      + '这个动作没有恢复入口：下线之后它会从每一屏消失，平台没有把它重新上线的路径。\n'
+      + `已经签发给 ${id} 的 agent 凭据会立刻失效并标记为已吊销 —— 装在那个集群里的 `
+      + 'agent 会开始被拒绝，要重新接入需要重新登记、重新签发、重新滚一次 DaemonSet。\n'
+      + '已经采到的历史数据保留在库里，但不再更新，也不会再出现在任何一屏上。',
+    )) return
     setBusyId(id)
     try {
       await api.deleteCluster(id)

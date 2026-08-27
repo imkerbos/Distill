@@ -343,3 +343,144 @@ var _ interface {
 } = (*mysqlregistry.Store)(nil)
 
 var _ = sql.ErrNoRows
+
+// 下线集群之后，这个集群的 agent 记录必须同时说出两件事：
+// 凭据已吊销，且它所属的集群已经不在了。
+//
+// 两件事都要，而且要在**同一次查询**里拿到：认证路径只查一次库
+// （ClusterAgentByID 的注释），为了问一句"这个集群还在吗"再查一次，
+// 等于在最热的那条链上多一次往返。
+//
+// 用真库而不是内存假实现：这一位是 LEFT JOIN 算出来的，而 join 写错
+// 在假实现上永远测不出来。
+func TestRetiringAClusterRevokesItsAgentsAndMarksThemRetired(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newTestStore(t)
+	seedCluster(t, s)
+
+	a := sampleAgent("aabbccddeeff0011")
+	if err := s.IssueClusterAgent(ctx, registry.Actor{Username: "admin"}, a); err != nil {
+		t.Fatalf("IssueClusterAgent() error = %v", err)
+	}
+	before, ok, err := s.ClusterAgentByID(ctx, a.AgentID)
+	if err != nil || !ok {
+		t.Fatalf("ClusterAgentByID() = (_, %v, %v)", ok, err)
+	}
+	if before.ClusterRetired {
+		t.Fatal("一个还在册的集群被报成已下线，这条用例的前提不成立")
+	}
+
+	if err := s.SoftDeleteCluster(ctx, registry.Actor{Username: "admin"}, a.ClusterID); err != nil {
+		t.Fatalf("SoftDeleteCluster() error = %v", err)
+	}
+
+	got, ok, err := s.ClusterAgentByID(ctx, a.AgentID)
+	if err != nil {
+		t.Fatalf("ClusterAgentByID() after retiring = %v", err)
+	}
+	// 记录本身必须还查得到：查不到在认证层是「未知 agent」，与「集群已下线」
+	// 是两条不同的日志，合并之后就再也分不出是哪一种。
+	if !ok {
+		t.Fatal("下线之后 agent 记录整个查不到了；认证层需要它才能分辨拒绝的成因")
+	}
+	if !got.ClusterRetired {
+		t.Error("ClusterRetired = false，但它所属的集群已经下线 —— " +
+			"认证层据这一位拒绝，它为假就等于这个集群还在收数据")
+	}
+	if got.State != registry.AgentRevoked {
+		t.Errorf("State = %q, want %q —— 下线之后这个集群再也打不开 agent 面板，"+
+			"留着 ACTIVE 的凭据等于留下一批谁也看不见、谁也吊销不了的 token",
+			got.State, registry.AgentRevoked)
+	}
+	if got.RevokedAt.IsZero() {
+		t.Error("吊销了却没有吊销时刻：事后答不出这批凭据是什么时候失效的")
+	}
+}
+
+// 已经吊销过的 token 不该被下线再改一次时刻。
+//
+// 下线那条 UPDATE 带 state = ACTIVE 的条件，正是为此：不带的话，
+// 一把三个月前就被吊销的 token 会在今天被重新盖上今天的吊销时刻，
+// 而那个时刻是编出来的。
+func TestRetiringAClusterLeavesAlreadyRevokedTokensAlone(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newTestStore(t)
+	seedCluster(t, s)
+
+	a := sampleAgent("1122334455667788")
+	if err := s.IssueClusterAgent(ctx, registry.Actor{Username: "admin"}, a); err != nil {
+		t.Fatalf("IssueClusterAgent() error = %v", err)
+	}
+	if err := s.RevokeClusterAgent(ctx, registry.Actor{Username: "admin"},
+		a.ClusterID, a.AgentID); err != nil {
+		t.Fatalf("RevokeClusterAgent() error = %v", err)
+	}
+	revoked, _, err := s.ClusterAgentByID(ctx, a.AgentID)
+	if err != nil {
+		t.Fatalf("ClusterAgentByID() = %v", err)
+	}
+
+	if err := s.SoftDeleteCluster(ctx, registry.Actor{Username: "admin"}, a.ClusterID); err != nil {
+		t.Fatalf("SoftDeleteCluster() error = %v", err)
+	}
+	after, _, err := s.ClusterAgentByID(ctx, a.AgentID)
+	if err != nil {
+		t.Fatalf("ClusterAgentByID() after retiring = %v", err)
+	}
+	if !after.RevokedAt.Equal(revoked.RevokedAt) {
+		t.Errorf("RevokedAt 被下线改写了：%v → %v。已经吊销过的凭据，"+
+			"它失效的那一刻是一个事实，不该被后来的动作盖掉",
+			revoked.RevokedAt, after.RevokedAt)
+	}
+}
+
+// 集群行被硬删之后，agent 记录仍然要查得到，并且报「集群没了」。
+//
+// 这不是假想：迁移、清理脚本、以及任何绕过软删的运维动作都会留下这种孤儿
+// 记录。它必须与「未知 agent」分得开 —— 认证层对外只回一句话，但日志里
+// 那两条指向完全不同的处置：一条是有人拿着一把不存在的凭据在试，另一条是
+// 我们自己的库里躺着一批该被清掉的记录。
+//
+// 这一条正是 ClusterAgentByID 用 LEFT JOIN 而不是 INNER 的理由：INNER 会
+// 让这行整个查不到，于是它在认证层变成「未知 agent」。
+func TestAnAgentSurvivesItsClusterRowBeingDeleted(t *testing.T) {
+	ctx := context.Background()
+	s, db := newTestStore(t)
+	seedCluster(t, s)
+
+	a := sampleAgent("99887766554433aa")
+	if err := s.IssueClusterAgent(ctx, registry.Actor{Username: "admin"}, a); err != nil {
+		t.Fatalf("IssueClusterAgent() error = %v", err)
+	}
+	// 硬删集群行，绕开软删 —— 模拟一次清理之后留下的孤儿记录。
+	//
+	// 先删有外键指过来的子表。**cluster_agent 不在其中**：它没有指向
+	// cluster 的外键，所以这种孤儿记录是数据库允许存在的，而不是一个
+	// 只能靠想象构造出来的情形。
+	// 表名写死在各自的语句里，不拼字符串：拼接是 SQL 注入的形状，
+	// 即使这里的输入来自一个字面量数组。
+	for _, stmt := range []string{
+		`DELETE FROM cluster_apiserver WHERE cluster_id = ?`,
+		`DELETE FROM cluster_health_check_source WHERE cluster_id = ?`,
+	} {
+		if _, err := db.ExecContext(ctx, stmt, a.ClusterID); err != nil {
+			t.Fatalf("delete child rows: %v", err)
+		}
+	}
+	if _, err := db.ExecContext(ctx,
+		`DELETE FROM cluster WHERE cluster_id = ?`, a.ClusterID); err != nil {
+		t.Fatalf("delete the cluster row: %v", err)
+	}
+
+	got, ok, err := s.ClusterAgentByID(ctx, a.AgentID)
+	if err != nil {
+		t.Fatalf("ClusterAgentByID() = %v", err)
+	}
+	if !ok {
+		t.Fatal("集群行没了之后 agent 记录整个查不到；它在认证层会变成" +
+			"「未知 agent」，而那是另一件事")
+	}
+	if !got.ClusterRetired {
+		t.Error("ClusterRetired = false，但它所属的集群行根本不存在了")
+	}
+}
