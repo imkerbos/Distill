@@ -240,6 +240,19 @@ type agentWarningPayload struct {
 	Detail  string `json:"detail,omitempty"`
 }
 
+// agentAdminPolicyPayload 是 agent 上报的一条管理面策略。
+//
+// priority 与 priorityKnown 分两个字段：0 是合法且**最高**的 ANP 优先级，
+// 拿 0 兼表"没读到"，会把一条读不懂的策略排到所有策略之前。
+type agentAdminPolicyPayload struct {
+	Kind          string `json:"kind"`
+	Name          string `json:"name"`
+	UID           string `json:"uid,omitempty"`
+	Priority      int32  `json:"priority,omitempty"`
+	PriorityKnown bool   `json:"priorityKnown,omitempty"`
+	Manifest      string `json:"manifest"`
+}
+
 // agentObservationPayload 是一次采集观测到的全部资产。
 //
 // **每一类都要带上。** 少带一类不是「那一类没有数据」，而是平台落库时为它
@@ -253,7 +266,15 @@ type agentObservationPayload struct {
 	Endpoints  []agentEndpointsPayload `json:"endpoints,omitempty"`
 	Policies   []agentPolicyPayload    `json:"policies,omitempty"`
 	Gateways   []agentGatewayPayload   `json:"gateways,omitempty"`
-	Warnings   []agentWarningPayload   `json:"warnings,omitempty"`
+	// AdminPolicies 是 ANP 与 BANP 的原文。
+	//
+	// **必须带上，哪怕平台当前不解释它们。** 不带的后果不是"少一类数据"，
+	// 是平台记下一句假话：那一轮的资源计数会写 ADMINNETWORKPOLICY = 0，
+	// 而 0 的含义是「采过了，这个集群就是没有」——与「根本没送来」在库里
+	// 长得一模一样。这一族带 Deny，被当成不存在的方向是把一条其实被拦住
+	// 的连接判成放行。
+	AdminPolicies []agentAdminPolicyPayload `json:"adminPolicies,omitempty"`
+	Warnings      []agentWarningPayload     `json:"warnings,omitempty"`
 }
 
 // agentRunPayload 是一次上报的报文，形状与平台侧一一对应。
@@ -328,6 +349,12 @@ func (s *httpSink) Save(ctx context.Context, run snapshot.Run) error {
 			Name:      pol.Name,
 			UID:       pol.UID,
 			Manifest:  pol.Manifest,
+		})
+	}
+	for _, a := range run.Observation.AdminPolicies {
+		payload.Observation.AdminPolicies = append(payload.Observation.AdminPolicies, agentAdminPolicyPayload{
+			Kind: string(a.Kind), Name: a.Name, UID: a.UID,
+			Priority: a.Priority, PriorityKnown: a.PriorityKnown, Manifest: a.Manifest,
 		})
 	}
 	for _, g := range run.Observation.Gateways {

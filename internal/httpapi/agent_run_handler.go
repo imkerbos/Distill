@@ -81,6 +81,19 @@ type agentPodPayload struct {
 // 本轮只带 Pod：G1 要证明的是这条链路本身（身份、认证、归属判定、落库），
 // 其余资源类型跟着 G2 的分批上报一起加。少带一类的后果是那一类没有数据，
 // 而**不是**一个看起来完整的错误结果。
+// agentAdminPolicyPayload 是 agent 上报的一条管理面策略。
+//
+// priority 与 priorityKnown 分两个字段：0 是合法且**最高**的 ANP 优先级，
+// 拿 0 兼表"没读到"，会把一条读不懂的策略排到所有策略之前。
+type agentAdminPolicyPayload struct {
+	Kind          string `json:"kind"`
+	Name          string `json:"name"`
+	UID           string `json:"uid,omitempty"`
+	Priority      int32  `json:"priority,omitempty"`
+	PriorityKnown bool   `json:"priorityKnown,omitempty"`
+	Manifest      string `json:"manifest"`
+}
+
 type agentObservationPayload struct {
 	Namespaces []agentNamespacePayload `json:"namespaces,omitempty"`
 	Pods       []agentPodPayload       `json:"pods,omitempty"`
@@ -89,6 +102,12 @@ type agentObservationPayload struct {
 	Endpoints  []agentEndpointsPayload `json:"endpoints,omitempty"`
 	Policies   []agentPolicyPayload    `json:"policies,omitempty"`
 	Gateways   []agentGatewayPayload   `json:"gateways,omitempty"`
+	// AdminPolicies 是 ANP 与 BANP 的原文。
+	//
+	// 收下它，哪怕这个集群还没声明由平台解释这个平面：不收的后果不是
+	// "少一类数据"，是那一轮的资源计数写下 ADMINNETWORKPOLICY = 0 ——
+	// 而 0 的含义是「采过了，就是没有」，与「agent 根本没送」分不开。
+	AdminPolicies []agentAdminPolicyPayload `json:"adminPolicies,omitempty"`
 	// Warnings 是采集当时发现的、事实与登记不符的地方。
 	//
 	// 一并上报而不是丢掉：它们的条数与构成要进可见面与统计口径，而 agent
@@ -458,22 +477,34 @@ func (p agentRunPayload) toRun(clusterID string) snapshot.Run {
 		})
 	}
 
+	adminPolicies := make([]snapshot.AdminPolicy, 0, len(p.Observation.AdminPolicies))
+	for _, a := range p.Observation.AdminPolicies {
+		adminPolicies = append(adminPolicies, snapshot.AdminPolicy{
+			ClusterID: clusterID,
+			Kind:      snapshot.AdminPolicyKind(a.Kind),
+			Name:      a.Name, UID: a.UID,
+			Priority: a.Priority, PriorityKnown: a.PriorityKnown,
+			Manifest: a.Manifest,
+		})
+	}
+
 	return snapshot.Run{
 		Status:     snapshot.RunStatus(p.Status),
 		StartedAt:  p.StartedAt,
 		FinishedAt: p.FinishedAt,
 		Observation: snapshot.Observation{
-			ClusterID:  clusterID,
-			RunID:      p.RunID,
-			ObservedAt: p.ObservedAt,
-			Namespaces: namespaces,
-			Pods:       pods,
-			Nodes:      nodes,
-			Services:   services,
-			Endpoints:  endpoints,
-			Policies:   policies,
-			Gateways:   gateways,
-			Warnings:   warnings,
+			ClusterID:     clusterID,
+			RunID:         p.RunID,
+			ObservedAt:    p.ObservedAt,
+			Namespaces:    namespaces,
+			Pods:          pods,
+			Nodes:         nodes,
+			Services:      services,
+			Endpoints:     endpoints,
+			Policies:      policies,
+			Gateways:      gateways,
+			AdminPolicies: adminPolicies,
+			Warnings:      warnings,
 		},
 	}
 }
