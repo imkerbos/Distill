@@ -384,10 +384,12 @@ func (r *FixtureReader) PolicyPreviewAtGranularity(
 	// 造成的，而那正是这几个数字唯一要表达的东西。
 	run := func(policies []networkingv1.NetworkPolicy) predict.Report {
 		return predict.Run(predict.Input{
-			ClusterID:    clusterID,
-			Policies:     policies,
-			Namespaces:   c.Namespaces,
-			ForeignPlane: c.CCNPPresent,
+			ClusterID:  clusterID,
+			Policies:   policies,
+			Namespaces: c.Namespaces,
+			// 合成数据集只有 CCNP 这一个第二平面的概念，没有真集群的
+			// ANP —— 这里给的就是它的全部求值上下文。
+			EvalOptions:  []replay.Option{replay.WithForeignPlane(c.CCNPPresent)},
 			Observations: cs.observations,
 			// 展示名复用流量列表那一套，两个界面必须用同一个名字指同一个 Pod。
 			Label: endpointLabel,
@@ -614,7 +616,7 @@ func (r *FixtureReader) DeletionImpact(
 		ClusterID:    clusterID,
 		Policies:     kept,
 		Namespaces:   cs.cluster.Namespaces,
-		ForeignPlane: cs.cluster.CCNPPresent,
+		EvalOptions:  []replay.Option{replay.WithForeignPlane(cs.cluster.CCNPPresent)},
 		Observations: cs.observations,
 		Label:        endpointLabel,
 	})

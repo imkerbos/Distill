@@ -301,10 +301,13 @@ func (r *Reader) generate(
 // TRUSTED、一份写着 DEGRADED 时没有人知道该信哪一份。
 func (cs candidateSet) predictWith(policies []networkingv1.NetworkPolicy) predict.Report {
 	return degradeByCompleteness(cs.completeness, predict.Run(predict.Input{
-		ClusterID:    cs.clusterID,
-		Policies:     policies,
-		Namespaces:   cs.namespaces,
-		ForeignPlane: cs.registered.EffectivePlanes().Degrades(),
+		ClusterID:  cs.clusterID,
+		Policies:   policies,
+		Namespaces: cs.namespaces,
+		// 与 /flows 那一屏用同一份选项，不在这里重拼一次。重拼过一次的
+		// 后果是 dry-run 看不见 AdminNetworkPolicy，而且那份降级也粗一档：
+		// 判定那侧接的是精确到主体的 ForeignScope，这里只有一个整片布尔。
+		EvalOptions:  cs.evalOpts,
 		Observations: cs.observations,
 		// 展示名复用流量列表那一套，两个界面必须用同一个名字指同一个 Pod。
 		Label: cs.previewLabel,

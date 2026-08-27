@@ -31,6 +31,13 @@ type traffic struct {
 	// 解释，拿今天的策略集回答昨天会得出一个答得出、又不报错的错误结论
 	// （CLAUDE.md §4）。
 	eval *replay.Evaluator
+	// evalOpts 是构造 eval 用的那一份选项，原样留着给 dry-run 用。
+	//
+	// 留一份而不是让 dry-run 自己再拼一次：那正是它此前看不见
+	// AdminNetworkPolicy 的原因 —— 判定这一侧接了 ANP 与精确降级范围，
+	// dry-run 那一侧只拼了一个 ForeignPlane 布尔，于是同一个集群被两套模型
+	// 解释，而 WOULD_BREAK 是写回门禁的判据。
+	evalOpts []replay.Option
 	// pods 是锚点那一刻的 Pod，按 (namespace, name) 索引。
 	//
 	// 标签只存在于快照里 —— 区间表存的是主体，不是主体的属性，而 selector
@@ -192,15 +199,11 @@ func (r *Reader) trafficOf(
 		opts = append(opts, replay.WithAdminPolicies(anps, banp))
 	}
 
-	return traffic{
-		described:  d,
-		eval:       replay.NewEvaluator(d.clusterID, parsed, namespaces, opts...),
-		pods:       byKey,
-		policies:   parsed,
-		namespaces: namespaces,
-		registered: c,
-		fleet:      fleet,
-	}, nil
+	t := newTraffic(d, parsed, namespaces, opts)
+	t.pods = byKey
+	t.registered = c
+	t.fleet = fleet
+	return t, nil
 }
 
 // attributed 是一条连接归属解析与判定之后的全部结果。
@@ -516,4 +519,23 @@ func (r *Reader) currentImports(
 		out = append(out, parsed.Policy)
 	}
 	return out, nil
+}
+
+// newTraffic 把求值器与它用的那份选项一起装好。
+//
+// 存在的理由只有一条：**它们两个不能分叉**。eval 是判定那一屏走的路，
+// evalOpts 是 dry-run 走的路，各自赋值就给了「其中一处忘了改」一个位置 ——
+// 而那正是 dry-run 此前看不见 AdminNetworkPolicy 的形状：判定这一侧接了它，
+// dry-run 那一侧还在用一个旧布尔。一个构造函数让这件事只有一个落点。
+func newTraffic(
+	d described, policies []networkingv1.NetworkPolicy,
+	namespaces []replay.NamespaceRef, opts []replay.Option,
+) traffic {
+	return traffic{
+		described:  d,
+		eval:       replay.NewEvaluator(d.clusterID, policies, namespaces, opts...),
+		evalOpts:   opts,
+		policies:   policies,
+		namespaces: namespaces,
+	}
 }

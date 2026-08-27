@@ -1,5 +1,6 @@
 import { api } from '../api/client'
-import { UNKNOWN_REASON_LABEL } from '../api/types'
+import { UNKNOWN_REASON_LABEL, type DecisionReason } from '../api/types'
+import { isAdminPlane, policyRefView } from '../pages/policyRefView'
 import { useResource } from '../api/useResource'
 import { Drawer } from './radix'
 import { CrossClusterMark, UnmanagedMark, VerdictBadge } from './Verdict'
@@ -61,12 +62,7 @@ export default function DecisionDrawer({ flowID, onClose }: { flowID: string; on
 
               {d.verdict === 'ALLOW' && d.reason.matchedPolicy && (
                 <Block label="被哪条规则放行">
-                  <div style={{ fontFamily: 'var(--mono)', fontSize: 'var(--text-xs)' }}>
-                    {d.reason.matchedPolicy}
-                  </div>
-                  <div style={{ fontSize: 'var(--text-sm)', color: 'var(--text-muted)', marginTop: 4 }}>
-                    第 {d.reason.matchedRuleIdx} 条规则
-                  </div>
+                  <MatchedPolicy reason={d.reason} />
                 </Block>
               )}
 
@@ -82,12 +78,23 @@ export default function DecisionDrawer({ flowID, onClose }: { flowID: string; on
 
               {d.verdict === 'DENY' && (
                 <Block label="为什么阻断">
-                  <div className="text-sm">
-                    {d.reason.isolated
-                      ? `${d.reason.direction === 'EGRESS' ? '出向' : '入向'}已被策略隔离，且没有任何规则匹配这条流量。`
-                      : '策略判定为阻断。'}
-                    {d.crossCluster && ' 跨集群对端只能靠 ipBlock 匹配，当前没有覆盖它的规则。'}
-                  </div>
+                  {/*
+                    被管理面策略拦下时必须点名是哪一条。NetworkPolicy 的 DENY
+                    还能从「已被策略隔离」推断出该去看哪个命名空间，而 ANP 的
+                    DENY 此前只显示一句「策略判定为阻断。」—— 一个操作者看到它，
+                    没有任何线索指向那条集群级策略，只会去翻自己命名空间里的
+                    YAML，而那里没有东西可改。
+                  */}
+                  {d.reason.matchedPolicy ? (
+                    <MatchedPolicy reason={d.reason} />
+                  ) : (
+                    <div className="text-sm">
+                      {d.reason.isolated
+                        ? `${d.reason.direction === 'EGRESS' ? '出向' : '入向'}已被策略隔离，且没有任何规则匹配这条流量。`
+                        : '策略判定为阻断。'}
+                      {d.crossCluster && ' 跨集群对端只能靠 ipBlock 匹配，当前没有覆盖它的规则。'}
+                    </div>
+                  )}
                 </Block>
               )}
 
@@ -111,6 +118,40 @@ export default function DecisionDrawer({ flowID, onClose }: { flowID: string; on
           )}
         </div>
     </Drawer>
+  )
+}
+
+/**
+ * 命中的那条策略：名字、第几条规则、它属于哪个平面。
+ *
+ * 放行与阻断共用一个组件：两处各写一份，其中一处迟早会漏掉平面那一行，
+ * 而那正是这个组件要修的缺陷 —— 一条 ANP 的命中读起来像一条命名空间里的
+ * NetworkPolicy。
+ */
+function MatchedPolicy({ reason }: { reason: DecisionReason }) {
+  const ref = policyRefView(reason.matchedPolicy)
+  return (
+    <>
+      <div style={{ fontFamily: 'var(--mono)', fontSize: 'var(--text-xs)' }}>
+        {ref.name}
+      </div>
+      <div style={{ fontSize: 'var(--text-sm)', color: 'var(--text-muted)', marginTop: 4 }}>
+        {ref.planeLabel} · 第 {reason.matchedRuleIdx} 条规则
+      </div>
+      {/* 平面之间的次序关系只在它不是普通 NetworkPolicy 时才说：对那一种，
+          多一句「命名空间级策略」是噪声。 */}
+      {isAdminPlane(reason.matchedPolicy) && (
+        <div style={{ fontSize: 'var(--text-sm)', color: 'var(--text-muted)', marginTop: 6 }}>
+          {ref.precedence}
+        </div>
+      )}
+      {reason.detail && (
+        <div style={{
+          marginTop: 8, fontFamily: 'var(--mono)', fontSize: 'var(--text-xs)',
+          color: 'var(--text-secondary)',
+        }}>{reason.detail}</div>
+      )}
+    </>
   )
 }
 

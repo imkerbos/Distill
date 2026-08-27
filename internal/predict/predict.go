@@ -113,9 +113,19 @@ type Input struct {
 	Policies []networkingv1.NetworkPolicy
 	// Namespaces 是该集群的命名空间快照。
 	Namespaces []replay.NamespaceRef
-	// ForeignPlane 表示该集群可能存在平台不解释的其它策略平面、或平台没能
-	// 确认有没有；两者都让预测结论降级（design doc 2026-08-25 §2）。
-	ForeignPlane bool
+	// EvalOptions 是「这个集群该怎么求值」的完整描述，由调用方一次算出。
+	//
+	// 收成一份选项而不是几个布尔，是因为 dry-run 与 /flows 那一屏必须用
+	// **同一个模型**解释同一个集群。此前这里是一个 ForeignPlane 布尔，而
+	// 判定那一侧还额外接了精确降级范围与 AdminNetworkPolicy —— 两边各自
+	// 拼装，dry-run 就此看不见 ANP：一条被 ANP Deny 拦着的连接，/flows 说
+	// DENY，dry-run 的基线说 ALLOW，于是 WOULD_BREAK 算的是一次不存在的
+	// 中断，而那个数是写回门禁的判据。
+	//
+	// 代码里那句「对账器与读栈同源」要的正是这件事：两条路必须走同一个引擎。
+	// 传选项让它在类型上成立 —— 少传一项的调用方会看见自己少传了什么，
+	// 而不是少传了一个没人记得的布尔。
+	EvalOptions []replay.Option
 	// Observations 是带当前判定的观测流量。
 	Observations []policygen.Observation
 	// Label 把端点渲染成展示名；为空时用 IP。
@@ -127,8 +137,7 @@ type Input struct {
 
 // Run 回放候选策略并给出变化预测。纯函数。
 func Run(in Input) Report {
-	ev := replay.NewEvaluator(in.ClusterID, in.Policies, in.Namespaces,
-		replay.WithForeignPlane(in.ForeignPlane))
+	ev := replay.NewEvaluator(in.ClusterID, in.Policies, in.Namespaces, in.EvalOptions...)
 
 	rep := Report{
 		Changes:            map[ChangeKind][]ChangedFlow{},
