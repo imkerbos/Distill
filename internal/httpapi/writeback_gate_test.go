@@ -303,3 +303,95 @@ type noWindowReader struct {
 func (noWindowReader) DefaultWindow(context.Context, string) (store.TimeWindow, error) {
 	return store.TimeWindow{}, collectstore.ErrNoFlowIngest
 }
+
+// injectUnattachedReader 往"挂不上 workload 的暴露"清单里塞一条。
+//
+// 包一层而不是改 fixture：合成数据集里每个暴露型 Service 都挂得上，而门禁
+// 必须在挂不上的那种形态下挡住 —— 那正是本轮存在的理由。
+type injectUnattachedReader struct {
+	store.Reader
+	namespace string
+}
+
+func (r injectUnattachedReader) PolicyPreviewAtGranularity(
+	ctx context.Context, clusterID, namespace string, w store.TimeWindow,
+	g policygen.Granularity,
+) (store.PolicyPreview, error) {
+	pv, err := r.Reader.PolicyPreviewAtGranularity(ctx, clusterID, namespace, w, g)
+	if err != nil {
+		return pv, err
+	}
+	pv.UnattachedBaselines = append(pv.UnattachedBaselines, policygen.UnattachedBaselineRule{
+		Kind: baseline.KindExposedIngress, Namespace: r.namespace, Name: "orphan-lb",
+		Reason: policygen.UnattachedBaselineNoSuchWorkload,
+	})
+	return pv, nil
+}
+
+// 挂不上 workload 的暴露必须挡住写回。
+//
+// MissingBaselines 是 kind 粒度的：这个 namespace 里另一个 Service 正常挂上
+// 了，EXPOSED_INGRESS 就算"齐备"，门禁于是放行 —— 而 orphan-lb 背后的
+// workload 拿到的是 policyTypes:[Ingress] 加零条放行，集群一个真实的对外
+// 入口在 Argo 合并之后无声中断。这正是本轮要防的那件事，而它偏偏从唯一
+// 拦得住它的那道门走了过去（spec §6.2）。
+func TestPlanIsRefusedWhenAPushedExposureCannotAttach(t *testing.T) {
+	f := newWritebackFixture(t)
+	reader := injectUnattachedReader{Reader: f.reader, namespace: "payment"}
+	h, _, cookie := buildTestRouterWithLog(t, reader, f.reg, f.verifier, f.writer, nil, "ERROR", f.logs,
+		&stubObservedSince{observedSince: time.Now().Add(-365 * 24 * time.Hour)})
+
+	rec := authedPostJSON(t, h, cookie, writebackPlanPath, map[string]any{})
+	code, msg := refusal(t, rec.Body.String())
+	if code == 0 {
+		t.Fatalf("一条挂不上 workload 的对外暴露没有挡住计划: %s", rec.Body.String())
+	}
+	if !strings.Contains(msg, "orphan-lb") {
+		t.Errorf("拒绝文案没有点名那个 Service: %q", msg)
+	}
+	if f.writer.calls != 0 {
+		t.Error("被拒的计划仍然写到了仓库")
+	}
+}
+
+// 同一道门必须挡住推送：计划出不来的集群，推送更不该有路径进去。
+func TestPushIsRefusedWhenAPushedExposureCannotAttach(t *testing.T) {
+	f := newWritebackFixture(t)
+	reader := injectUnattachedReader{Reader: f.reader, namespace: "payment"}
+	h, _, cookie := buildTestRouterWithLog(t, reader, f.reg, f.verifier, f.writer, nil, "ERROR", f.logs,
+		&stubObservedSince{observedSince: time.Now().Add(-365 * 24 * time.Hour)})
+
+	rec := authedPostJSON(t, h, cookie, writebackPushPath, map[string]any{
+		"branch": "distill/prod-asia-1-20260818T090000Z", "fingerprint": "whatever",
+	})
+	code, msg := refusal(t, rec.Body.String())
+	if code == 0 {
+		t.Fatalf("挂不上的暴露没有挡住推送: %s", rec.Body.String())
+	}
+	// 必须是**门禁**拒的，不是指纹对不上拒的：后者会让这条用例在门禁被删掉
+	// 之后照样绿。门禁排在指纹比对之前，因此文案里必须有那个 Service。
+	if !strings.Contains(msg, "orphan-lb") {
+		t.Errorf("推送被拒了，但不是这道门拒的: %q", msg)
+	}
+	if f.writer.calls != 0 {
+		t.Error("被拒的推送仍然写到了仓库")
+	}
+}
+
+// 判的是这次真的会被写进文件的那些 namespace，与 missingInPushedNamespaces
+// 同一条纪律：没有策略落进去的 namespace 不会获得 default-deny，也就不会被
+// 打断；把它算进来等于让一个与本次推送无关的缺口永久挡住所有推送，而一道
+// 永远在挡的门会被整体绕开。
+func TestAnUnattachedExposureOutsideTheFileDoesNotBlockThePush(t *testing.T) {
+	f := newWritebackFixture(t)
+	// quarantine 不在候选策略里 —— 这份文件不会给它下发任何东西。
+	reader := injectUnattachedReader{Reader: f.reader, namespace: "quarantine"}
+	h, _, cookie := buildTestRouterWithLog(t, reader, f.reg, f.verifier, f.writer, nil, "ERROR", f.logs,
+		&stubObservedSince{observedSince: time.Now().Add(-365 * 24 * time.Hour)})
+
+	rec := authedPostJSON(t, h, cookie, writebackPlanPath, map[string]any{})
+	code, msg := refusal(t, rec.Body.String())
+	if code != 0 {
+		t.Fatalf("计划被一个它根本不写入的 namespace 拒了: %s", msg)
+	}
+}
