@@ -2,6 +2,7 @@ package collect
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -386,6 +387,104 @@ func TestCollectSkipsTheBackendCheckWhenEitherSideFailed(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// LoadBalancer 的入口地址与源地址范围必须采回来。
+//
+// 入口地址是判定「这个入口面向公网还是只在 VPC 内」的唯一依据（spec §2）——
+// 不采它，平台只能去读云厂商注解，而那是每接一朵云就要改一次的代码，
+// 漏掉一个键的后果是把内部 LB 当成公网入口、开一条 0.0.0.0/0。
+func TestServiceSnapshotCarriesLoadBalancerExposure(t *testing.T) {
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "uat-kafka", Name: "kafka-0-external"},
+		Spec: corev1.ServiceSpec{
+			Type:                     corev1.ServiceTypeLoadBalancer,
+			Selector:                 map[string]string{"app.kubernetes.io/name": "kafka"},
+			LoadBalancerSourceRanges: []string{"10.0.0.0/8", "172.16.0.0/16"},
+			Ports: []corev1.ServicePort{{
+				Name: "tcp-kafka", Port: 9094, Protocol: corev1.ProtocolTCP,
+				TargetPort: intstr.FromString("kafka-external"),
+			}},
+		},
+		Status: corev1.ServiceStatus{
+			LoadBalancer: corev1.LoadBalancerStatus{
+				Ingress: []corev1.LoadBalancerIngress{{IP: "10.170.48.193"}},
+			},
+		},
+	}
+	c, _ := newTestCollector(t, svc)
+
+	var obs snapshot.Observation
+	if err := c.collectServices(context.Background(), &obs); err != nil {
+		t.Fatalf("collectServices() = %v", err)
+	}
+	if len(obs.Services) != 1 {
+		t.Fatalf("采到 %d 个 Service，want 1", len(obs.Services))
+	}
+	got := obs.Services[0]
+	if !reflect.DeepEqual(got.LoadBalancerIngressIPs, []string{"10.170.48.193"}) {
+		t.Errorf("LoadBalancerIngressIPs = %v, want [10.170.48.193]", got.LoadBalancerIngressIPs)
+	}
+	if !reflect.DeepEqual(got.LoadBalancerSourceRanges, []string{"10.0.0.0/8", "172.16.0.0/16"}) {
+		t.Errorf("LoadBalancerSourceRanges = %v", got.LoadBalancerSourceRanges)
+	}
+}
+
+// 没有入口地址的 Service（ClusterIP、NodePort、LB 尚未就绪）两个字段都为空，
+// **不是零值填充**：spec §3.3 第 4 条要靠「取不到入口 IP」这个事实报缺口，
+// 填一个空串会让它看起来像取到了。
+func TestServiceWithoutLoadBalancerCarriesNoExposure(t *testing.T) {
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "g32-game", Name: "backend-tcp"},
+		Spec: corev1.ServiceSpec{
+			Type:     corev1.ServiceTypeNodePort,
+			Selector: map[string]string{"app.kubernetes.io/name": "backend"},
+			Ports:    []corev1.ServicePort{{Port: 8080, Protocol: corev1.ProtocolTCP, TargetPort: intstr.FromInt32(8080)}},
+		},
+	}
+	c, _ := newTestCollector(t, svc)
+
+	var obs snapshot.Observation
+	if err := c.collectServices(context.Background(), &obs); err != nil {
+		t.Fatalf("collectServices() = %v", err)
+	}
+	if len(obs.Services[0].LoadBalancerIngressIPs) != 0 {
+		t.Errorf("NodePort 却带了入口地址: %v", obs.Services[0].LoadBalancerIngressIPs)
+	}
+	if len(obs.Services[0].LoadBalancerSourceRanges) != 0 {
+		t.Errorf("NodePort 却带了源地址范围: %v", obs.Services[0].LoadBalancerSourceRanges)
+	}
+}
+
+// 入口条目只有主机名、没有 IP 时不得记进去。
+//
+// AWS 的 ELB 恒是这个形态（status.loadBalancer.ingress[].hostname），而主机名
+// 判不出网段归属。留一个空串进去，推导层会把它当成「取到了入口地址」，于是
+// 一个判不出暴露范围的 Service 被当成公网入口 —— 而正确的结果是它落进缺口
+// 清单，由人来决定放行范围（design doc 2026-08-28 §6）。
+func TestServiceWithHostnameOnlyIngressCarriesNoIngressIP(t *testing.T) {
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "api-lb"},
+		Spec: corev1.ServiceSpec{
+			Type:     corev1.ServiceTypeLoadBalancer,
+			Selector: map[string]string{"app.kubernetes.io/name": "api"},
+			Ports:    []corev1.ServicePort{{Port: 8080, Protocol: corev1.ProtocolTCP, TargetPort: intstr.FromInt32(8080)}},
+		},
+		Status: corev1.ServiceStatus{
+			LoadBalancer: corev1.LoadBalancerStatus{
+				Ingress: []corev1.LoadBalancerIngress{{Hostname: "a1b2.elb.amazonaws.com"}},
+			},
+		},
+	}
+	c, _ := newTestCollector(t, svc)
+
+	var obs snapshot.Observation
+	if err := c.collectServices(context.Background(), &obs); err != nil {
+		t.Fatalf("collectServices() = %v", err)
+	}
+	if len(obs.Services[0].LoadBalancerIngressIPs) != 0 {
+		t.Errorf("只有主机名却记了入口地址: %v", obs.Services[0].LoadBalancerIngressIPs)
 	}
 }
 

@@ -25,6 +25,21 @@ type Service struct {
 	ClusterIP string
 	// Ports 是 Service 暴露的端口。
 	Ports []ServicePort
+	// LoadBalancerIngressIPs 是 LoadBalancer 实际分配到的入口地址。
+	//
+	// **它是判定暴露范围的依据**：地址落在已登记网段内说明这个入口只在
+	// VPC 内可达，落在网段之外说明它面向公网（design doc 2026-08-28 §2）。
+	// 取它而不是读云厂商注解 —— GKE 用 networking.gke.io/load-balancer-type，
+	// AWS、阿里云各不相同，而漏掉一个键的后果是把内部 LB 当成公网入口。
+	//
+	// 为空表示这个 Service 没有 LoadBalancer 入口：ClusterIP、NodePort，
+	// 或者 LB 尚未就绪。三者在这里不区分，由推导层按 Type 分流。
+	LoadBalancerIngressIPs []string
+	// LoadBalancerSourceRanges 是 Service 声明的允许来源网段。
+	//
+	// 声明过就用它，优先于按入口地址推出来的范围：运维显式写下的范围比
+	// 平台推导的更准，而两者不一致时推导的那个只会更宽。
+	LoadBalancerSourceRanges []string
 }
 
 // ServicePort 是 Service 的一个端口映射。
