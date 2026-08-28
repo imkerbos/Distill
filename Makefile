@@ -66,20 +66,29 @@ conformance-down:
 IMAGE_REGISTRY ?= REPLACE_ME
 VERSION ?= $(shell git rev-parse --short HEAD)
 
+# 目标平台钉死。开发机是 Apple Silicon（arm64），被管集群的节点是 amd64：
+# 不指定平台时 docker 按本机架构构建，产出的镜像在本地一切正常，推上去
+# 之后唯一的症状是集群里的 CrashLoopBackOff 与一行
+# "exec /app/distill-api: exec format error"。
+#
+# 也就是说这个错误在本机没有任何信号，只在已经推到集群之后才出现——把它
+# 留给构建者去记得，代价是一次线上不可用。
+IMAGE_PLATFORM ?= linux/amd64
+
 .PHONY: image-api image-collector image-agent images
 
 image-api:
-	docker build -f build/Dockerfile.api --build-arg VERSION=$(VERSION) \
+	docker build --platform $(IMAGE_PLATFORM) -f build/Dockerfile.api --build-arg VERSION=$(VERSION) \
 	  -t $(IMAGE_REGISTRY)/distill-api:$(VERSION) .
 
 image-collector:
-	docker build -f build/Dockerfile.collector --build-arg VERSION=$(VERSION) \
+	docker build --platform $(IMAGE_PLATFORM) -f build/Dockerfile.collector --build-arg VERSION=$(VERSION) \
 	  -t $(IMAGE_REGISTRY)/distill-collector:$(VERSION) .
 
 # agent 装进别人的集群，与上面两个不是同一类东西：它的镜像是 scratch，
 # 且有一条门禁守着它不得链接平台状态库（make purity）。
 image-agent: purity
-	docker build -f build/Dockerfile.agent --build-arg VERSION=$(VERSION) \
+	docker build --platform $(IMAGE_PLATFORM) -f build/Dockerfile.agent --build-arg VERSION=$(VERSION) \
 	  -t $(IMAGE_REGISTRY)/distill-agent:$(VERSION) .
 
 images: image-api image-collector image-agent
