@@ -1,6 +1,7 @@
 package baseline
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/imkerbos/Distill/internal/replay"
@@ -163,6 +164,29 @@ func TestDeriveNodeAgentSkipsWhenNodeCIDRUnregistered(t *testing.T) {
 	a.Registry.NodeCIDR = ""
 	if rules := deriveNodeAgent(a); len(rules) != 0 {
 		t.Errorf("deriveNodeAgent returned %d rules without a node CIDR, want 0", len(rules))
+	}
+}
+
+// 双栈登记（逗号分隔的多段，见 cluster.ParsePrefixes）必须摊成一段一条
+// ipBlock。原样塞进 IPBlock.CIDR 会产出 `cidr: "10.128.0.0/20,fd00::/64"`
+// —— 一个 NetworkPolicy 不认的值，而候选策略在被 apply 之前谁都不会发现。
+func TestDeriveNodeAgentSplitsDualStackNodeCIDR(t *testing.T) {
+	a := infraAssets()
+	a.Registry.NodeCIDR = "10.128.0.0/20,fd00:10:128::/64"
+	rules := deriveNodeAgent(a)
+	if len(rules) != 1 {
+		t.Fatalf("deriveNodeAgent returned %d rules, want 1", len(rules))
+	}
+	var got []string
+	for _, p := range rules[0].Ingress.From {
+		if p.IPBlock == nil {
+			t.Fatalf("peer without an ipBlock: %+v", p)
+		}
+		got = append(got, p.IPBlock.CIDR)
+	}
+	want := []string{"10.128.0.0/20", "fd00:10:128::/64"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("peers = %v, want %v", got, want)
 	}
 }
 
