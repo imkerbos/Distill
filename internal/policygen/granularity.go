@@ -71,14 +71,30 @@ type ExposureWidening struct {
 	Service string `json:"service"`
 	// Workload 是规则实际挂靠的 workload，即 podSelector 的标签值。
 	Workload string `json:"workload"`
-	// SelectedPods 是 Service selector 在当前 Pod 名册里实际选中的 Pod 数。
+	// SelectedPods 是 WorkloadPods 那批 Pod 里，同时满足 Service 完整
+	// selector 的 Pod 数——只在 WorkloadPods 这批里数，不是在整个 Pod 名册
+	// 里单独数一遍。Service selector 可能命中 WorkloadPods 之外的 Pod（键
+	// 不同、或压根不相关的对象），那些命中不算进来：这个字段回答的是
+	// 「podSelector 已经覆盖的这批里，Service 点到了几个」，不是「Service
+	// 在全集群点到了几个」。
+	//
+	// 这样定义是刻意的，不是简化。只有把 SelectedPods 圈定成 WorkloadPods
+	// 的子集，ExtraPods = WorkloadPods − SelectedPods 才是一次真正的集合
+	// 差，不可能是负数——无论 Service selector 用的键与 workload 归属键
+	// 是不是同一个（design review TI1，2026-08-28：两者各自独立扫一遍
+	// Pod 名册再相减，在 StatefulSet/Helm 标签迁移期就会算出负数：一批
+	// 还没迁移到赢家键、Service selector 却仍在用旧键选中的 Pod，会被
+	// 算进"Service 选中了"却算不进"workload 覆盖了"）。
 	SelectedPods int `json:"selectedPods"`
 	// WorkloadPods 是候选策略的 podSelector（只用 workload 归属键一个键）
-	// 选中的 Pod 数——也就是这条规则实际下发后会覆盖到的范围。
+	// 选中的 Pod 数——这条规则实际下发后会覆盖到的范围，也是 SelectedPods
+	// 的分母：先圈定这批，才谈得上其中有几个被 Service 点了名。
 	WorkloadPods int `json:"workloadPods"`
-	// ExtraPods 是 WorkloadPods − SelectedPods：折算成候选策略之后
-	// 多放行的 Pod 数。为 0 表示 Service selector 与 workload 归属键选中的
-	// 是同一批 Pod，这次挂靠无损。
+	// ExtraPods 是 WorkloadPods − SelectedPods：podSelector 覆盖到、却没
+	// 被 Service selector 点名的 Pod 数。因为 SelectedPods 恒为
+	// WorkloadPods 的子集（见 SelectedPods 的注释），这个差值从结构上就
+	// 不可能是负数。为 0 表示 WorkloadPods 里每一个 Pod 都被 Service 点了
+	// 名，这次挂靠无损。
 	ExtraPods int `json:"extraPods"`
 }
 
