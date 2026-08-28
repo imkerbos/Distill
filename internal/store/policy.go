@@ -162,6 +162,20 @@ type PolicyPreview struct {
 	// 不随 namespace 裁剪，与 UnattachedImports/Ungeneratable/
 	// ExcludedWorkloads 同理。
 	UnattachedBaselines []policygen.UnattachedBaselineRule `json:"unattachedBaselines"`
+	// ExposureWidenings 是每一条挂上了 workload 的暴露型规则，在 Service
+	// selector 与 workload podSelector 之间放宽了多少个 Pod。
+	//
+	// Service selector 可以点名单个 Pod（StatefulSet 的
+	// statefulset.kubernetes.io/pod-name），候选策略却是 workload 粒度的——
+	// 生成的规则覆盖这个 workload 的全部 Pod。不报出来，操作者读到的是
+	// 「按 Service 放行」，实际下发的是「按 workload 放行」。
+	//
+	// 不随 namespace 裁剪，与 UnattachedBaselines 同理；namespace 折叠也不
+	// 改变某个 Service 当初点没点名单个 Pod，因此两种粒度下取的是同一份。
+	//
+	// **恒为非 nil**，理由同 UnattachedBaselines：空清单是"算过，没有一条
+	// 放宽"，null 是"没人算过"。
+	ExposureWidenings []policygen.ExposureWidening `json:"exposureWidenings"`
 	// ExcludedNamespaces 是**整片**没有生成候选策略的命名空间。
 	//
 	// 今天唯一的原因是"这是 Kubernetes 内置系统命名空间"：候选集会给每个
@@ -487,6 +501,7 @@ func (r *FixtureReader) PolicyPreviewAtGranularity(
 		Ungeneratable:          gen.Ungeneratable,
 		UnattachedImports:      gen.UnattachedImports,
 		UnattachedBaselines:    gen.UnattachedBaselines,
+		ExposureWidenings:      gen.ExposureWidenings,
 		ExcludedWorkloads:      gen.ExcludedWorkloads,
 		Prediction:             report,
 		PredictionWithExisting: reportWithExisting,

@@ -177,6 +177,25 @@ func TestPolicyPreviewMissingBaselinesFilteredForDisplayOnly(t *testing.T) {
 
 // 三块产物必须同时非空/可解释：只给候选策略而不给缺口，
 // 界面就会把一份残缺的推荐显示成完整方案。
+// ExposureWidenings 恒为非 nil，与 gen.ExposureWidenings 同一条纪律
+// （policygen.Result 的注释）：空清单是"算过，没有一条挂靠得比 Service
+// selector 宽"，null 是"这个 Reader 没把它带过来"。fixture 集群目前没有
+// 触发放宽的 Service，因此这里只能验证"非 nil"，不能验证内容——但那正是
+// 这条断言要守住的那条线：把 PolicyPreviewAtGranularity 里
+// `ExposureWidenings: gen.ExposureWidenings` 那一行删掉，pv.ExposureWidenings
+// 会从"空切片"变成"nil"，这条断言会跟着变红。
+func TestPolicyPreviewExposureWideningsIsNonNil(t *testing.T) {
+	r := reader()
+	pv, err := r.PolicyPreview(context.Background(), "prod-asia-1", "", fullWindow(r))
+	if err != nil {
+		t.Fatalf("PolicyPreview() error = %v", err)
+	}
+	if pv.ExposureWidenings == nil {
+		t.Error("ExposureWidenings 是 nil —— 它会序列化成 null，而空清单要读作" +
+			"「算过，没有一条挂靠得比 Service selector 宽」，不是「没算过」")
+	}
+}
+
 func TestPolicyPreviewReturnsAllFourBlocks(t *testing.T) {
 	r := reader()
 	pv, err := r.PolicyPreview(context.Background(), "prod-asia-1", "", fullWindow(r))

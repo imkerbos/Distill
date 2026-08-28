@@ -99,6 +99,19 @@ type Result struct {
 	// 放行都没有，且没有任何信号。这正是候选策略下发后入口悄悄断掉、
 	// dry-run 也看不出来的那个方向（design review NC1/NC2，2026-08-28）。
 	UnattachedBaselines []UnattachedBaselineRule `json:"unattachedBaselines"`
+	// ExposureWidenings 是每一条挂上了 workload 的暴露型规则，在 Service
+	// selector 与 workload podSelector 之间放宽了多少个 Pod。
+	//
+	// Service selector 可以点名单个 Pod（StatefulSet 的
+	// statefulset.kubernetes.io/pod-name），候选策略却是 workload 粒度的——
+	// 生成的规则覆盖这个 workload 的全部 Pod。不报出来，操作者读到的是
+	// 「按 Service 放行」，实际下发的是「按 workload 放行」，UAT 上三个
+	// zookeeper Pod 各自有 LB、union 恰好相同只是这一个集群的巧合，不是
+	// 这条规则的性质（design review NI4，2026-08-28）。
+	//
+	// 恒为非 nil，理由同 UnattachedBaselines：空清单是"算过，没有一条放宽"，
+	// null 是"没人算过"。
+	ExposureWidenings []ExposureWidening `json:"exposureWidenings"`
 }
 
 // UnattachedBaselineReason 是一条 Baseline 规则挂不上任何 workload 的原因。
@@ -274,6 +287,7 @@ func Generate(in Input) Result {
 	// 恒为切片而不是 nil，同 UnattachedImports 的理由：Generate 一定跑过
 	// 这一段，"一条都没有"是一个算过的空集，不是没算过。
 	unattachedBaselines := []UnattachedBaselineRule{}
+	exposureWidenings := []ExposureWidening{}
 	for ns := range nsWithWorkload {
 		set := baseline.Derive(in.Assets, ns, in.UnassessedBaselines)
 		baselineSetByNS[ns] = set
@@ -331,6 +345,10 @@ func Generate(in Input) Result {
 				continue
 			}
 			baselineBySubject[target] = append(baselineBySubject[target], rule)
+			// 挂上了，但挂靠的粒度比 Service 实际点名的范围粗——数一遍
+			// 才知道粗了多少，见 ExposureWidening 的注释。
+			exposureWidenings = append(exposureWidenings, exposureWideningFor(
+				in.Pods, in.ClusterID, ns, serviceNameOf(br), wl, winKey, br.Subject))
 		}
 	}
 	sort.Slice(unattachedBaselines, func(i, j int) bool {
@@ -339,6 +357,19 @@ func Generate(in Input) Result {
 			return a.Namespace < b.Namespace
 		}
 		return a.Name < b.Name
+	})
+	// 比较到 Workload 为止：同一个 Service 理论上只解出一个 workload，
+	// 写出来是为了不让确定性又一次悄悄依赖 map 遍历顺序（同 res.Policies
+	// 那条排序器的注释）。
+	sort.Slice(exposureWidenings, func(i, j int) bool {
+		a, b := exposureWidenings[i], exposureWidenings[j]
+		if a.Namespace != b.Namespace {
+			return a.Namespace < b.Namespace
+		}
+		if a.Service != b.Service {
+			return a.Service < b.Service
+		}
+		return a.Workload < b.Workload
 	})
 
 	// 导入并进名册**之后**：一条挂到集群里并不存在的 workload 上的导入，
@@ -351,6 +382,7 @@ func Generate(in Input) Result {
 		UnattachedImports:   unattached,
 		UnattachedBaselines: unattachedBaselines,
 		ExcludedNamespaces:  sortedExcludedNamespaces(excludedNS),
+		ExposureWidenings:   exposureWidenings,
 	}
 	for s := range workloads {
 		rules := append([]Rule{}, byWorkload[s]...)
@@ -488,6 +520,47 @@ func serviceNameOf(br baseline.Rule) string {
 		}
 	}
 	return ""
+}
+
+// exposureWideningFor 数出一条已挂上 workload 的暴露型规则，在 Service
+// selector 与 workload podSelector 之间放宽了多少个 Pod。
+//
+// 两个计数都直接扫 Input.Pods，不复用 workloads 名册：那份名册只按
+// (namespace, workload, 归属键) 记是否存在，不记数量，答不出"选中了几个"
+// 这个问题。Service selector 可能比归属键精确得多（StatefulSet 的
+// statefulset.kubernetes.io/pod-name），而候选策略的 podSelector 只用
+// 归属键一个键——两次计数之间的落差正是这条规则要报的东西。
+func exposureWideningFor(
+	pods []replay.PodRef, clusterID, namespace, service, workload, labelKey string,
+	selector map[string]string,
+) ExposureWidening {
+	selected, all := 0, 0
+	for _, p := range pods {
+		if p.ClusterID != clusterID || p.Namespace != namespace {
+			continue
+		}
+		if p.Labels[labelKey] == workload {
+			all++
+		}
+		if labelsMatch(p.Labels, selector) {
+			selected++
+		}
+	}
+	return ExposureWidening{
+		Namespace: namespace, Service: service, Workload: workload,
+		SelectedPods: selected, WorkloadPods: all, ExtraPods: all - selected,
+	}
+}
+
+// labelsMatch 报告 labels 是否包含 selector 里的每一个键值——与 Kubernetes
+// 的 selector 语义一致，空 selector 匹配一切。
+func labelsMatch(labels, selector map[string]string) bool {
+	for k, v := range selector {
+		if labels[k] != v {
+			return false
+		}
+	}
+	return true
 }
 
 // baselineRule 把一条 Baseline 包装成候选策略里的规则。
