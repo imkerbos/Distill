@@ -559,21 +559,42 @@ func windowsCover(windows []flow.Window, queried flow.Window) bool {
 
 // readConnections 读出与窗口相交的连接。
 //
-// 直接按 (cluster_id, window_start) 前缀查，不 join 运行表：连接表按 spec §7
-// 的量级是百万行起步，一次范围查询上再叠一个 join 没有收益。窗口列在写入时
-// 就冗余了一份，正是为了这条查询。
+// **先问运行表哪几次摄入与窗口相交，再按摄入取连接。** 直觉上多一层子查询
+// 更慢，实测相反、而且差着两个数量级（UAT，2026-08-27）：
+//
+//	按窗口列直接查   18.78s   扫描 1,199,456 行
+//	先问运行表        0.10s   扫描       ~9,000 行
+//
+// 成因在主键形状：主键是 (cluster_id, window_start, ingest_run_id, seq)，而
+// `window_start < 查询末端` 里的末端是最近一次摄入的末端 —— 那个条件等价于
+// "这个集群从接入到现在的每一行"。`window_end` 不在索引里，收窄不了。于是
+// 一次一分钟窗口的查询变成一次全表范围扫，**代价随表线性增长**：这个集群
+// 每天新增一千三百万行，第二天同一屏就是分钟级。
+//
+// 换成按 ingest_run_id 取之后走的是既有的 fk_connection_ingest_run
+// (cluster_id, ingest_run_id)，而相交的摄入只有十几次（每节点一次），代价
+// 与表有多大无关。
+//
+// **两种写法取到的是同一批行**：连接行上的窗口列是从它所属摄入上冗余下来的，
+// 因此"这一行的窗口与查询相交"与"它所属摄入的窗口与查询相交"恒等
+// （TestConnectionsOfOneIngestAreTakenAsAWhole 守着这个恒等）。相交判据
+// 与 readIngestEvidence 逐字相同，两处必须一致：一处多算一次摄入、另一处
+// 少算，会让完整度与连接来自两个不同的窗口集合。
 func (s *Store) readConnections(
 	ctx context.Context, clusterID string, window flow.Window,
 ) ([]flow.Connection, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT src_ip, src_kind, src_namespace, src_workload, src_identity_confidence,
-		        dst_ip, dst_kind, dst_namespace, dst_workload, dst_identity_confidence,
-		        protocol, port, observed_count, verdict_observed
-		   FROM observed_connection
-		  WHERE cluster_id = ? AND window_start < ? AND window_end > ?
-		  ORDER BY window_start, ingest_run_id, seq
+		`SELECT c.src_ip, c.src_kind, c.src_namespace, c.src_workload, c.src_identity_confidence,
+		        c.dst_ip, c.dst_kind, c.dst_namespace, c.dst_workload, c.dst_identity_confidence,
+		        c.protocol, c.port, c.observed_count, c.verdict_observed
+		   FROM observed_connection AS c
+		  WHERE c.cluster_id = ?
+		    AND c.ingest_run_id IN (
+		          SELECT r.run_id FROM flow_ingest_run AS r
+		           WHERE r.cluster_id = ? AND r.window_start < ? AND r.window_end > ?)
+		  ORDER BY c.window_start, c.ingest_run_id, c.seq
 		  LIMIT ?`,
-		clusterID, window.To, window.From, maxWindowConnections+1)
+		clusterID, clusterID, window.To, window.From, maxWindowConnections+1)
 	if err != nil {
 		return nil, fmt.Errorf("snapshotstore: read connections: %w", err)
 	}

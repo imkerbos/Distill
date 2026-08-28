@@ -674,3 +674,99 @@ func TestTooManyConnectionsIsARecognisableRefusal(t *testing.T) {
 		t.Errorf("observed_connection holds %d rows after the refusal, want 0", n)
 	}
 }
+
+// ingestRunIn 造一次落在指定窗口上的摄入，供窗口相交语义的用例使用。
+//
+// 与 ingestRun 分开而不是加参数：那个函数被十几个用例用着，它们关心的都不是
+// 窗口边界，多一个参数只会让每一处都要读一遍才知道"这里传的是默认值"。
+func ingestRunIn(
+	t *testing.T, clusterID, runID string, w flow.Window, conns ...flow.Connection,
+) snapshotstore.IngestRun {
+	t.Helper()
+	res, err := flow.NewIngestResult(flow.SourceHubble, w, w, conns)
+	if err != nil {
+		t.Fatalf("NewIngestResult() error = %v", err)
+	}
+	return snapshotstore.IngestRun{
+		ClusterID: clusterID, RunID: runID,
+		StartedAt: w.From, FinishedAt: w.To,
+		Status: snapshotstore.IngestOK,
+		Result: res.WithSampleRate(1).WithDropped(0),
+	}
+}
+
+// **读一个窗口，取的是与它相交的全部摄入，边界为左闭右开。**
+//
+// 这条语义此前没有任何测试守着，而它决定了每一屏看到的是哪一批连接：多取
+// 一次摄入会让一条别的窗口的连接出现在这一屏，少取一次会让一段真实流量
+// 凭空消失 —— 而后者会被下游读成"覆盖它的规则没有流量、可以收紧"。
+//
+// 六种位置关系一次列全，包括恰好贴边的两种：贴边是最容易在改写查询时被
+// 顺手改掉的地方，而它在库里与真正的相交长得很像。
+func TestAWindowTakesExactlyTheIngestsThatIntersectIt(t *testing.T) {
+	s, _ := newTestStore(t)
+	// 查询窗口：09:00 ~ 10:00（winFrom ~ winTo）。
+	cases := []struct {
+		name     string
+		from, to time.Time
+		want     bool
+	}{
+		{"完全在前，不沾边", winFrom.Add(-2 * time.Hour), winFrom.Add(-time.Hour), false},
+		{"末端恰好等于查询起点", winFrom.Add(-time.Hour), winFrom, false},
+		{"末端刚过查询起点", winFrom.Add(-time.Hour), winFrom.Add(time.Minute), true},
+		{"完全落在窗口内", winFrom.Add(time.Minute), winFrom.Add(2 * time.Minute), true},
+		{"跨过整个窗口", winFrom.Add(-time.Hour), winTo.Add(time.Hour), true},
+		{"起点刚好在查询末端之前", winTo.Add(-time.Minute), winTo.Add(time.Hour), true},
+		{"起点恰好等于查询末端", winTo, winTo.Add(time.Hour), false},
+		{"完全在后，不沾边", winTo.Add(time.Hour), winTo.Add(2 * time.Hour), false},
+	}
+
+	wantIPs := map[string]bool{}
+	for i, c := range cases {
+		// 每次摄入带一条自己独有的连接，读回来才分得清是哪一次进来的。
+		ip := "10.9.0." + string(rune('1'+i))
+		runID := "win-case-" + string(rune('a'+i))
+		mustSaveIngest(t, s, ingestRunIn(t, clusterA, runID,
+			flow.Window{From: c.from, To: c.to},
+			connection(ip, "10.4.0.21", 8080)))
+		if c.want {
+			wantIPs[ip] = true
+		}
+	}
+
+	conns, _ := mustReadWindow(t, s, clusterA, window).Connections()
+	gotIPs := map[string]bool{}
+	for _, c := range conns {
+		gotIPs[c.Source.IP] = true
+	}
+
+	for i, c := range cases {
+		ip := "10.9.0." + string(rune('1'+i))
+		switch {
+		case c.want && !gotIPs[ip]:
+			t.Errorf("%s：该取到却没取到 —— 一段真实流量会凭空消失，"+
+				"而下游会把它读成「覆盖它的规则没有流量、可以收紧」", c.name)
+		case !c.want && gotIPs[ip]:
+			t.Errorf("%s：不该取到却取到了 —— 别的窗口的连接会出现在这一屏", c.name)
+		}
+	}
+}
+
+// 同一次摄入里的连接要么全在、要么全不在：按摄入取，不按逐行的窗口列取。
+//
+// 两者今天恒等（连接行的窗口是从它所属摄入上冗余下来的），而这条用例守的正是
+// 那个恒等 —— 一旦哪天写入侧让两者漂了，这里会红，而不是等到某一屏少了半批
+// 连接才被发现。
+func TestConnectionsOfOneIngestAreTakenAsAWhole(t *testing.T) {
+	s, _ := newTestStore(t)
+	w := flow.Window{From: winFrom.Add(-time.Hour), To: winFrom.Add(time.Minute)}
+	mustSaveIngest(t, s, ingestRunIn(t, clusterA, "whole-run", w,
+		connection("10.8.0.1", "10.4.0.21", 8080),
+		connection("10.8.0.2", "10.4.0.21", 8081),
+		connection("10.8.0.3", "10.4.0.21", 8082)))
+
+	conns, _ := mustReadWindow(t, s, clusterA, window).Connections()
+	if len(conns) != 3 {
+		t.Fatalf("取到 %d 条，want 3 —— 一次摄入被拆开了半批", len(conns))
+	}
+}
