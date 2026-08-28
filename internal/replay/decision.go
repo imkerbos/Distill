@@ -62,6 +62,13 @@ const (
 	ReasonNATTranslated UnknownReason = "NAT_TRANSLATED"
 	// ReasonExternalNoIdentity 表示公网流量无可归属主体。
 	ReasonExternalNoIdentity UnknownReason = "EXTERNAL_NO_IDENTITY"
+	// ReasonLBIngressAddress 表示这一端是一个 LoadBalancer 入口地址。
+	//
+	// NetworkPolicy 里它只能是 ipBlock 对端，没有 Pod 主体可解 ——
+	// **这是一个结论，不是一次弃权**（同 NOT_COVERED 那条注释）。
+	// 与 SNAPSHOT_MISSING 分开：后者说的是「我们数据里缺了一块」，
+	// 会把人引去查采集，而这里根本没有什么该采而没采的东西。
+	ReasonLBIngressAddress UnknownReason = "LB_INGRESS_ADDRESS"
 	// ReasonNamedPortUnresolved 表示命名端口无法解析为具体端口号。
 	ReasonNamedPortUnresolved UnknownReason = "NAMED_PORT_UNRESOLVED"
 	// ReasonLogSampledOut 表示日志采样或限流导致记录缺失。
@@ -96,6 +103,7 @@ var allUnknownReasons = []UnknownReason{
 	ReasonCCNPPresent,
 	ReasonNATTranslated,
 	ReasonExternalNoIdentity,
+	ReasonLBIngressAddress,
 	ReasonNamedPortUnresolved,
 	ReasonLogSampledOut,
 	ReasonPolicyMalformed,

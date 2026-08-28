@@ -63,6 +63,14 @@ type traffic struct {
 	registered registry.Cluster
 	// fleet 是当前的网段登记，用来认出跨集群与出公网的对端。
 	fleet *cluster.Registry
+	// lbIngressIPs 是锚点那一刻各 Service 的 LoadBalancer 入口地址集合。
+	//
+	// 一个 LoadBalancer 入口地址天生没有 Pod 主体 —— 它是外部世界进集群的
+	// 门，不是集群里的一个成员。按 (namespace, name) 才对得上 observed_service
+	// 的粒度，这里只要一份"这个地址是不是入口"的集合，因此收窄成 map。
+	// 取自锚点而不是最新一次采集，理由与 pods/policies/namespaces 相同
+	// （CLAUDE.md §4）：一条历史连接要用当时的入口地址集合解释。
+	lbIngressIPs map[string]bool
 }
 
 // readTraffic 解析一段窗口的事实，并把做判定要用的资产一并装好。
@@ -144,6 +152,10 @@ func (r *Reader) trafficOf(
 	if err != nil {
 		return traffic{}, err
 	}
+	services, err := r.readServicesAt(ctx, d)
+	if err != nil {
+		return traffic{}, err
+	}
 	fleet, err := r.fleetRegistry(ctx)
 	if err != nil {
 		return traffic{}, err
@@ -203,7 +215,23 @@ func (r *Reader) trafficOf(
 	t.pods = byKey
 	t.registered = c
 	t.fleet = fleet
+	t.lbIngressIPs = lbIngressIPsOf(services)
 	return t, nil
+}
+
+// lbIngressIPsOf 把一批 Service 的 LoadBalancer 入口地址拍平成一份集合。
+//
+// 不按 Service 分——unknownReasonFor 只需要回答"这个地址是不是入口"，不需要
+// 回答"是哪个 Service 的入口"；界面上要说清楚是哪一个时，走的是 baseline
+// 那条推导路径（internal/baseline/derive_exposed.go），不是这里。
+func lbIngressIPsOf(services []snapshot.Service) map[string]bool {
+	out := make(map[string]bool, len(services))
+	for _, svc := range services {
+		for _, ip := range svc.LoadBalancerIngressIPs {
+			out[ip] = true
+		}
+	}
+	return out
 }
 
 // attributed 是一条连接归属解析与判定之后的全部结果。
@@ -306,6 +334,11 @@ func (t traffic) attribute(c flow.Connection) attributed {
 // 集群内的缺口压过公网：两端一个在集群内解不开、一个在公网时，前者是我们
 // 数据里一个真实的洞，后者只是"对端本来就没有主体"。报前者，SNAPSHOT_MISSING
 // 的统计口径才仍然只数真正的快照缺口。
+//
+// LB 入口地址压过集群内缺口：一个 LoadBalancer 入口地址落在 node_cidr
+// 里，按地址段它看起来就是一个"该有 Pod 却解不出来"的缺口 —— 而它本来就
+// 没有 Pod 主体（design doc 2026-08-28 §1 症状二）。这条检查必须排在
+// inClusterGap 前面，否则网段判定先给出结论，这一支永远到不了。
 func (t traffic) unknownReasonFor(a attributed) replay.UnknownReason {
 	// HOST_NETWORK 是**解出来了**的一种：那一端不在 Pod 网络里，策略选不中
 	// 它 —— 这是一个结论，不是一次弃权（同 NOT_COVERED 那条注释）。把它当成
@@ -320,6 +353,8 @@ func (t traffic) unknownReasonFor(a attributed) replay.UnknownReason {
 	switch {
 	case a.srcOutcome == identity.OutcomeAmbiguous || a.dstOutcome == identity.OutcomeAmbiguous:
 		return replay.ReasonIPAmbiguous
+	case t.lbIngressIPs[a.conn.Source.IP] || t.lbIngressIPs[a.conn.Dest.IP]:
+		return replay.ReasonLBIngressAddress
 	case inClusterGap(a.srcOutcome, a.conn.Source.IP) || inClusterGap(a.dstOutcome, a.conn.Dest.IP):
 		return replay.ReasonSnapshotMissing
 	case !resolved(a.srcOutcome) || !resolved(a.dstOutcome):
