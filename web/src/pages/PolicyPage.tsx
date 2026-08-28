@@ -8,13 +8,16 @@ import {
 import {
   IMPORTED_BASIS, isImported, UNATTACHED_HELP, UNATTACHED_NONE, unattachedRows,
 } from './importedView.ts'
+import {
+  UNATTACHED_BASELINE_HELP, UNATTACHED_BASELINE_NONE, unattachedBaselineNote, unattachedBaselineRows,
+} from './unattachedBaselineView.ts'
 import { api, ApiError } from '../api/client'
 import {
   RISK_CATEGORY_LABEL, overriddenPredictionWithExisting,
   type CandidatePolicy, type CandidateRule, type ChangeKind, type ExcludedWorkload,
   type Granularity, type Kind, type MissingBaseline, type OverrideDecision, type Widening,
   type RuleEvidence, type RuleOrigin, type RuleOverride, type StaleOverride,
-  type ExcludedNamespace, type UnattachedImport,
+  type ExcludedNamespace, type UnattachedBaselineRule, type UnattachedImport,
   type UngeneratableItem, type UngeneratableReason, type WorkloadExclusionReason,
   type WritebackPlanResult, type WritebackPushResult,
 } from '../api/types'
@@ -185,6 +188,13 @@ export default function PolicyPage({ cluster }: { cluster: string }) {
           不成规则"，前者说的是"这条人写下来的规则没挂上任何主体"。两者的
           处置完全不同 —— 前者要改导入的 YAML，后者要改平台或改集群。 */}
       <UnattachedImportSection items={pv.unattachedImports ?? []} />
+      {/* 挂不上的 Baseline 单独成节，不并进上面那栏：unattachedImports 是
+          操作者自己补的东西没挂上，这一栏是集群里已经真实存在的对外暴露
+          没挂上——后者的默认状态是"这个入口现在什么放行都没有"，处置更
+          迫切。items 原样传入，不用 `?? []` 收口：这个字段恒为非 nil，
+          真拿到 null 是一份老响应，必须显示成"服务端没回答"而不是悄悄
+          读成"都挂上了"。 */}
+      <UnattachedBaselineSection items={pv.unattachedBaselines} />
       {/* 接管排在候选策略之后：先看"平台推荐加什么"，再看"集群里旧的还需
           不需要"。反过来读，操作者会在还不知道新策略长什么样的时候就去删旧的。 */}
       <RetirementSection cluster={cluster} />
@@ -1827,6 +1837,51 @@ function UnattachedImportSection({ items }: { items: UnattachedImport[] }) {
           <tbody>
             {rows.map((row) => (
               <tr key={row.importId}>
+                <td className="mono">{row.label}</td>
+                <td>{row.reason}</td>
+              </tr>
+            ))}
+          </tbody>
+        </TableCard>
+      )}
+    </Section>
+  )
+}
+
+/**
+ * 推导出来、却挂不到任何 workload 上的对外暴露 Baseline。
+ *
+ * **`null` 与 `[]` 必须渲染成不同的东西。** 这个字段恒为非 nil——`[]`
+ * 是"算过，都挂上了"，`null` 是"没人算过"。把 null 折进 `?? []` 会让
+ * 这一栏在服务端没回答的时候显示成"全部对外暴露都已挂上"，而这里描述
+ * 的正是集群已经真实存在、下发之后会悄悄断掉入口的那类暴露——dry-run
+ * 也看不出来，它只评估见过的连接。三种状态因此分开处理：null 只显示
+ * 一句"服务端没回答"；`[]` 显示结论性的空状态；非空才上表格。
+ */
+function UnattachedBaselineSection({ items }: { items: UnattachedBaselineRule[] | null }) {
+  const note = unattachedBaselineNote(items)
+  const rows = unattachedBaselineRows(items)
+  return (
+    <Section
+      title="没有挂上的对外暴露"
+      description={UNATTACHED_BASELINE_HELP}
+      meta={items == null ? '未知' : `${rows.length} 条`}
+    >
+      {note !== '' && <Notice>{note}</Notice>}
+      {items == null ? null : rows.length === 0 ? (
+        <EmptyState
+          message={UNATTACHED_BASELINE_NONE}
+          detail="挂上的暴露与其它候选规则并列显示在候选策略里，来源标为 BASELINE。"
+        />
+      ) : (
+        <TableCard>
+          <thead>
+            <tr><th>类型</th><th>对象</th><th>原因与处置</th></tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.key}>
+                <td><Chip strong>{row.kind}</Chip></td>
                 <td className="mono">{row.label}</td>
                 <td>{row.reason}</td>
               </tr>
