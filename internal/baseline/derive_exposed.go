@@ -47,6 +47,16 @@ func deriveExposedIngress(a snapshot.Assets, namespace string) []Rule {
 		if len(svc.Ports) == 0 {
 			continue
 		}
+		if len(svc.Selector) == 0 {
+			// 没有 selector 是手工维护 Endpoints 的合法形态（外部后端），
+			// 但这样一来没有任何 workload 可挂——生成一条 Subject 为空的
+			// 规则会被下游读成"广播"，把 peers=[0.0.0.0/0] 发给这个
+			// namespace 里毫不相干的 workload，正是 NC1 复现的那个 bug。
+			// 不生成，把这个 Service 交给 UnresolvedExposureSubjects：
+			// 这仍然是一次真实的暴露，得由调用方（policygen）报成看得见
+			// 的缺口，不能悄悄消失（design review NC1，2026-08-28）。
+			continue
+		}
 
 		peers, peerDerivations, ok := exposedPeers(a, svc)
 		if !ok {
@@ -264,4 +274,42 @@ func classifyIngressIPs(reg snapshot.ClusterRegistry, ips []string) (ingressVerd
 		}
 	}
 	return verdict, true
+}
+
+// UnattachableExposure 是一个暴露型 Service：EXPOSED_INGRESS 能推出它的
+// 放行范围，但因为它没有 selector，推不出该挂在哪个 workload 上。
+type UnattachableExposure struct {
+	// Namespace 是该 Service 所在命名空间。
+	Namespace string
+	// Name 是该 Service 名。
+	Name string
+}
+
+// UnresolvedExposureSubjects 返回指定 namespace 里、因为没有 selector 而
+// 被 deriveExposedIngress 跳过的暴露型 Service。
+//
+// **这不是 Missing() 的第二套机制。** Missing() 回答的是"这个 namespace
+// 缺不缺 EXPOSED_INGRESS"，是 kind 粒度的；这里回答的是 Missing() 答不出
+// 的下一个问题——"具体是哪个 Service"，在同一个 namespace 里有另一个正常
+// Service 也生成了 EXPOSED_INGRESS 规则时，Missing() 会显示"齐备"，而这个
+// 没有 selector 的 Service 依然什么都没有（design review NC1/NC2，
+// 2026-08-28）。调用方（policygen）拿着这份名单负责把它报成看得见的缺口。
+func UnresolvedExposureSubjects(a snapshot.Assets, namespace string) []UnattachableExposure {
+	var out []UnattachableExposure
+	for _, svc := range a.Services {
+		if svc.Namespace != namespace {
+			continue
+		}
+		if svc.Type != serviceTypeLoadBalancer && svc.Type != serviceTypeNodePort {
+			continue
+		}
+		if len(svc.Ports) == 0 {
+			continue
+		}
+		if len(svc.Selector) > 0 {
+			continue
+		}
+		out = append(out, UnattachableExposure{Namespace: svc.Namespace, Name: svc.Name})
+	}
+	return out
 }

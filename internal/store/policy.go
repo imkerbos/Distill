@@ -150,6 +150,18 @@ type PolicyPreview struct {
 	// 灾备链路），"以为补上了"比"知道没补上"危险得多，因为 dry-run 报不出
 	// 这个缺口：它只评估见过的连接。
 	UnattachedImports []policygen.UnattachedImport `json:"unattachedImports"`
+	// UnattachedBaselines 是推导出来、却挂不到任何 workload 上的带 Subject
+	// 的 Baseline 规则（今天只有 EXPOSED_INGRESS 会产生）。
+	//
+	// 与 UnattachedImports 同一条纪律，理由更迫切：这里描述的是集群
+	// **已经真实存在**的对外暴露，不是操作者自己补的东西。MissingBaselines
+	// 是 kind 粒度的——同一个 namespace 里只要有一个 Service 正常挂上了，
+	// 这个 kind 就不再"缺失"，而另一个判不出主体的 Service 依然什么放行
+	// 都没有，且没有任何信号（design review NC1/NC2，2026-08-28）。
+	//
+	// 不随 namespace 裁剪，与 UnattachedImports/Ungeneratable/
+	// ExcludedWorkloads 同理。
+	UnattachedBaselines []policygen.UnattachedBaselineRule `json:"unattachedBaselines"`
 	// ExcludedNamespaces 是**整片**没有生成候选策略的命名空间。
 	//
 	// 今天唯一的原因是"这是 Kubernetes 内置系统命名空间"：候选集会给每个
@@ -474,6 +486,7 @@ func (r *FixtureReader) PolicyPreviewAtGranularity(
 		NotAssessedBaselines:   []baseline.Kind{},
 		Ungeneratable:          gen.Ungeneratable,
 		UnattachedImports:      gen.UnattachedImports,
+		UnattachedBaselines:    gen.UnattachedBaselines,
 		ExcludedWorkloads:      gen.ExcludedWorkloads,
 		Prediction:             report,
 		PredictionWithExisting: reportWithExisting,

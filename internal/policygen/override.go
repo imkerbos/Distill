@@ -100,6 +100,10 @@ func Apply(base Result, overrides []Override) (Result, []StaleOverride) {
 		// 改不了"这条导入挂没挂上主体"。丢掉它，覆盖之后那一份预览会显示
 		// 成"全部导入都挂上了"—— 一份凭空好看起来的清单。
 		UnattachedImports: base.UnattachedImports,
+		// 同理：人工覆盖改不了"这条 Baseline 规则挂没挂上 workload"这件
+		// 事实。丢掉它，覆盖之后那一份预览会显示成候选集完整，而一个真实
+		// 存在的暴露依然没有任何放行、也没有任何信号。
+		UnattachedBaselines: base.UnattachedBaselines,
 		// 与上面几栏同理：人工覆盖改的是"哪几条规则算启用"，改不了
 		// "哪一片命名空间平台默认不碰"。丢掉它，覆盖之后那一份预览会显示成
 		// "全部命名空间都在候选集里"——一份凭空完整起来的清单。

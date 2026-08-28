@@ -411,3 +411,42 @@ func TestExposedIngressNotApplicableWhenOnlyExposedByAnIngressWithClusterIPBacke
 		t.Errorf("EXPOSED_INGRESS 落进了永远补不上的 Missing(): %v", set.Missing())
 	}
 }
+
+// --- Fix round 2 (design review 2026-08-28) ---
+
+// NC1: 没有 selector 的 LoadBalancer Service（手工维护 Endpoints 的合法
+// 形态，常见于外部后端）不能生成一条 Subject 为空的规则——那会被 policygen
+// 读成"广播"，把 peers=[0.0.0.0/0] 发给这个 namespace 里完全无关的
+// workload，正是修复前 C1 的原样复现。deriveExposedIngress 必须直接跳过，
+// 不生成任何规则。
+func TestExposedIngressSkipsServiceWithoutSelector(t *testing.T) {
+	svc := svcLB("shop", "external-backend", []string{"34.150.1.177"}, nil, port("", 8080))
+	svc.Selector = nil
+	a := assetsWith(svc)
+	rules := deriveExposedIngress(a, "shop")
+	if len(rules) != 0 {
+		t.Errorf("没有 selector 的 Service 生成了 %d 条规则，want 0", len(rules))
+	}
+}
+
+// NC1 的另一半：跳过不等于消失。UnresolvedExposureSubjects 必须把这个
+// Service 报出来，policygen 据此生成看得见的缺口（TestUnattachedBaselines*
+// 系列在 policygen 包里验证端到端行为）。
+func TestUnresolvedExposureSubjectsNamesTheSelectorlessService(t *testing.T) {
+	svc := svcLB("shop", "external-backend", []string{"34.150.1.177"}, nil, port("", 8080))
+	svc.Selector = nil
+	a := assetsWith(svc)
+	got := UnresolvedExposureSubjects(a, "shop")
+	if len(got) != 1 || got[0].Namespace != "shop" || got[0].Name != "external-backend" {
+		t.Errorf("UnresolvedExposureSubjects = %+v, want 一条 shop/external-backend", got)
+	}
+}
+
+// 有 selector 的 Service 不该出现在 UnresolvedExposureSubjects 里——它有
+// 主体可挂，不是这份清单要报的那种缺口。
+func TestUnresolvedExposureSubjectsExcludesNormalServices(t *testing.T) {
+	a := assetsWith(svcLB("shop", "api-lb", []string{"34.150.1.177"}, nil, port("", 8080)))
+	if got := UnresolvedExposureSubjects(a, "shop"); len(got) != 0 {
+		t.Errorf("有 selector 的 Service 出现在 UnresolvedExposureSubjects 里: %+v", got)
+	}
+}
