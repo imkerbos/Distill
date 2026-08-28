@@ -383,7 +383,7 @@ func TestValidateGitRepoAcceptsTheSSHFormsThePlatformDials(t *testing.T) {
 
 // 双栈登记：逗号分隔的多段必须被接受。
 //
-// **校验与 fleet.parsePrefixes 必须同一套判据**：一条这里放行、那边却解析
+// **校验与 cluster.ParsePrefixes 必须同一套判据**：一条这里放行、那边却解析
 // 不出来的登记，会安静地落进「网段登记坏掉」而不是在提交时被拒 —— 而那时
 // 症状是那个集群的 IP 归属全部退化成 UNKNOWN，成因在几天前的一次提交里。
 func TestValidateClusterAcceptsDualStackCIDRs(t *testing.T) {

@@ -350,9 +350,9 @@ func checkCIDR(field, value string) error {
 	// 支持逗号分隔的多段：双栈集群的每个 Pod 有两个地址，一个 IPv4、
 	// 一个 IPv6。只登记得下一个的话，走另一个协议族的连接会落进 EXTERNAL，
 	// 平台据此生成 ipBlock 规则而不是 selector 规则，放行面宽得多
-	// （fleet.parsePrefixes 是同一套解析）。
+	// （cluster.ParsePrefixes 是同一套解析）。
 	//
-	// **这里的判据必须与 fleet.parsePrefixes 一致**：一条这里放行、那边
+	// **这里的判据必须与 cluster.ParsePrefixes 一致**：一条这里放行、那边
 	// 却解析不出来的登记，会安静地落进「网段登记坏掉」而不是在提交时被拒。
 	for _, part := range strings.Split(value, ",") {
 		seg := strings.TrimSpace(part)
