@@ -327,3 +327,50 @@ func TestClassifyKeepsTrustedAllowOnACompleteWindow(t *testing.T) {
 		}
 	}
 }
+
+// 解不开主体的连接必须报 IDENTITY_UNKNOWN 并带上真正的原因，
+// **不是** DEGRADED_EVIDENCE。
+//
+// 这两条判据的顺序曾经反过来：IdentityTrusted 只在求值跑过时才被赋值，
+// 而解不开主体的那些在求值之前就返回了，字段停在零值 false。先判它，
+// 每一条"我不知道这个地址是谁"都会被报成"mesh 或 CCNP 干扰"——于是
+// ReasonIdentityUnknown 整个取值不可达，而运维拿到的是一句指向错误子系统
+// 的话。UAT 上实测：5763 条全部报成 mesh 干扰，而那个集群 other_planes=NONE、
+// 一共只有 3 个 in-mesh Pod。
+func TestUnresolvedIdentityIsNotBlamedOnTheMesh(t *testing.T) {
+	o := Observation{
+		FlowID: "f1",
+		// 求值没跑过，因此这个字段是零值——正是当年那条缺陷的入口。
+		IdentityTrusted: false,
+		Decision: replay.Decision{
+			Verdict:       replay.VerdictUnknown,
+			UnknownReason: replay.ReasonSnapshotMissing,
+		},
+	}
+	_, bad := classify(o, "c1", nil)
+	if len(bad) != 1 {
+		t.Fatalf("got %d items, want 1: %+v", len(bad), bad)
+	}
+	if bad[0].Reason != ReasonIdentityUnknown {
+		t.Errorf("reason = %q, want %q —— 身份解不开被算到了 mesh 头上",
+			bad[0].Reason, ReasonIdentityUnknown)
+	}
+	if bad[0].Detail != string(replay.ReasonSnapshotMissing) {
+		t.Errorf("detail = %q, want %q —— 真正的原因被那句 mesh 文案盖住了",
+			bad[0].Detail, replay.ReasonSnapshotMissing)
+	}
+}
+
+// 反方向：两端都解开了、求值跑过了、判定不是 UNKNOWN，此时 IdentityTrusted
+// 才是一句有依据的话，mesh 干扰仍然要报 DEGRADED_EVIDENCE。
+func TestResolvedButUntrustedIdentityStillReportsDegradedEvidence(t *testing.T) {
+	o := Observation{
+		FlowID:          "f2",
+		IdentityTrusted: false,
+		Decision:        replay.Decision{Verdict: replay.VerdictAllow},
+	}
+	_, bad := classify(o, "c1", nil)
+	if len(bad) != 1 || bad[0].Reason != ReasonDegradedEvidence {
+		t.Fatalf("got %+v, want one DEGRADED_EVIDENCE", bad)
+	}
+}

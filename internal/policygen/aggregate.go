@@ -187,21 +187,34 @@ func classify(
 ) ([]keyed, []UngeneratableItem) {
 	// 整条流量级别的排除先做：这两类与方向无关，逐侧判会重复报两次。
 	//
-	// **只有身份不可信才整条排除。** mesh / CCNP 之后源地址不代表真实主体，
-	// 学出的规则会挂到错的主体上 —— 那不是"证据不够"，是"证据指向错的对象"。
-	// 窗口证明不了完整是另一回事：身份是准的，只是可能没看全，那类走
+	// 两类各自的含义，**顺序不能反**（见下）：判不出主体是"我不知道这个
+	// 地址是谁"，身份不可信是"我知道是谁，但 mesh / CCNP 之后这个身份不
+	// 代表真实主体"。后者学出的规则会挂到错的主体上——那不是"证据不够"，
+	// 是"证据指向错的对象"。
+	//
+	// 窗口证明不了完整是第三件事：身份是准的，只是可能没看全，那类走
 	// EvidenceIncompleteWindow 生成、默认不启用
 	// （design doc 2026-08-18-learn-from-incomplete-evidence §2）。
-	if !o.IdentityTrusted {
-		return nil, []UngeneratableItem{{
-			FlowID: o.FlowID, Reason: ReasonDegradedEvidence,
-			Detail: "mesh 或 CCNP 干扰，结论不得作为策略推荐依据",
-		}}
-	}
+	// **判不出来的先答判不出来。** IdentityTrusted 只在求值真的跑过时才有
+	// 意义：解不开主体的那些连接在 attribute() 里提前返回，那个字段停在零值
+	// false，于是先判它等于把每一条"我不知道这个地址是谁"都报成
+	// "mesh 或 CCNP 干扰"——一句关于第二策略平面的话，而事实是身份没解开。
+	//
+	// 代价是 ReasonIdentityUnknown 整个取值不可达，运维照着满屏
+	// DEGRADED_EVIDENCE 去查 mesh，而真正要查的 SNAPSHOT_MISSING /
+	// EXTERNAL_NO_IDENTITY / LB_INGRESS_ADDRESS 一条都不显示。封闭枚举里
+	// 一个永远产不出的取值，比没有这个取值更糟（CLAUDE.md §3）。
 	if o.Decision.Verdict == replay.VerdictUnknown {
 		return nil, []UngeneratableItem{{
 			FlowID: o.FlowID, Reason: ReasonIdentityUnknown,
 			Detail: string(o.Decision.UnknownReason),
+		}}
+	}
+	// 到这里两端都解开了、求值跑过了，IdentityTrusted 才是一句有依据的话。
+	if !o.IdentityTrusted {
+		return nil, []UngeneratableItem{{
+			FlowID: o.FlowID, Reason: ReasonDegradedEvidence,
+			Detail: "mesh 或 CCNP 干扰，结论不得作为策略推荐依据",
 		}}
 	}
 
