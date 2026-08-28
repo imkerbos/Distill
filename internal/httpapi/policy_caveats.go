@@ -109,13 +109,25 @@ func renderPolicyCaveats(pv store.PolicyPreview, line func(format string, args .
 			return w.Namespace + "（" + strconv.Itoa(w.Rules) + " 条规则，多放行 " + strconv.Itoa(w.ExtraGrants) + " 组）"
 		})
 	}
-	if n := len(pv.ExposureWidenings); n > 0 {
-		say("暴露放宽: %d 个 Service —— Service 选择器覆盖到了本 workload 之外的 Pod，"+
-			"放行范围比这个 workload 大。", n)
+	// **只报 ExtraPods > 0 的。** pv.ExposureWidenings 是每条已挂上的暴露
+	// 规则一行的全账，不是放宽清单：ExtraPods = WorkloadPods − SelectedPods，
+	// 为 0 意味着生成的 podSelector 覆盖的正好就是 Service 暴露的那一批，
+	// 一个 Pod 都没多放。把它也写成"放宽"，是在这份文件里断言一件没发生
+	// 的事——与漏报同样是假的，方向还相反。
+	widened := make([]policygen.ExposureWidening, 0, len(pv.ExposureWidenings))
+	for _, e := range pv.ExposureWidenings {
+		if e.ExtraPods > 0 {
+			widened = append(widened, e)
+		}
+	}
+	if n := len(widened); n > 0 {
+		say("暴露放宽: %d 个 Service —— 生成的 podSelector 覆盖到了 Service 并没有"+
+			"暴露的 Pod，放行范围比 Service 本身大。", n)
 		listEach(line, n, func(i int) string {
-			e := pv.ExposureWidenings[i]
+			e := widened[i]
 			return e.Namespace + "/" + e.Service + " → " + e.Workload +
-				"（选中 " + strconv.Itoa(e.SelectedPods) + " 个 Pod，其中 " + strconv.Itoa(e.ExtraPods) + " 个不属于它）"
+				"（规则覆盖 " + strconv.Itoa(e.WorkloadPods) + " 个 Pod，其中 " +
+				strconv.Itoa(e.ExtraPods) + " 个 Service 并没有暴露）"
 		})
 	}
 

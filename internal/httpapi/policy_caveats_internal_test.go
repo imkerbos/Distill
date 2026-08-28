@@ -127,3 +127,35 @@ func TestUngeneratableNeverCarriesFreeText(t *testing.T) {
 		t.Errorf("要按封闭枚举归并并给出条数:\n%s", text)
 	}
 }
+
+// ExposureWidenings 是每条暴露规则一行的全账，不是放宽清单。ExtraPods 为 0
+// 的那些不是放宽——把它们也报出来，是在一份会被应用到生产集群的文件里断言
+// 一件没发生的事。
+func TestExposureWideningReportsOnlyActualWidening(t *testing.T) {
+	pv := store.PolicyPreview{ExposureWidenings: []policygen.ExposureWidening{
+		{Namespace: "shop", Service: "api-lb", Workload: "api",
+			SelectedPods: 3, WorkloadPods: 3, ExtraPods: 0},
+	}}
+	text := joined(renderedLines(func(line func(string, ...any)) { renderPolicyCaveats(pv, line) }))
+	if strings.Contains(text, "暴露放宽") {
+		t.Errorf("ExtraPods=0 不是放宽，不该出现在缺口里:\n%s", text)
+	}
+	if !strings.Contains(text, "没有其他缺口") {
+		t.Errorf("唯一那条不是放宽，整体就该是没有缺口:\n%s", text)
+	}
+
+	pv.ExposureWidenings = append(pv.ExposureWidenings, policygen.ExposureWidening{
+		Namespace: "shop", Service: "admin-lb", Workload: "admin",
+		SelectedPods: 1, WorkloadPods: 4, ExtraPods: 3,
+	})
+	text = joined(renderedLines(func(line func(string, ...any)) { renderPolicyCaveats(pv, line) }))
+	if !strings.Contains(text, "暴露放宽: 1 个 Service") {
+		t.Errorf("只有一条是真放宽，计数要是 1 而不是 2:\n%s", text)
+	}
+	if !strings.Contains(text, "规则覆盖 4 个 Pod，其中 3 个 Service 并没有暴露") {
+		t.Errorf("放宽的方向说反了或数错了:\n%s", text)
+	}
+	if strings.Contains(text, "api-lb") {
+		t.Errorf("没放宽的那条不该被列出来:\n%s", text)
+	}
+}
