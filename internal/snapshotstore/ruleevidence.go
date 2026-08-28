@@ -2,7 +2,9 @@ package snapshotstore
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -112,40 +114,120 @@ func (s *Store) RecordRuleEvidence(
 	return tx.Commit()
 }
 
-// RuleEvidenceOf 读出一个集群全部规则的证据，按 EvidenceKey 索引。
+// LastRuleEvidenceWindowEnd 报告这个集群的证据记到了哪个窗口末端。
+//
+// 第二个返回值为 false 表示这个集群一条证据都没有 —— 与"记到了零值时刻"
+// 必须分得开：零值早于任何真实窗口，塌成一个会让第一个窗口被当成"已经记过"
+// 而永远跳过，于是这个集群的证据永远停在 0。
+//
+// 取 MAX(last_seen) 而不是另立一张记账进度表：last_seen 的写法就是
+// `GREATEST(last_seen, VALUES(last_seen))`（见 RecordRuleEvidence），它的最大值
+// 天然等于最后记进去的那个窗口末端。多一张表就多一个可以与证据本身分歧的
+// 位置，而两者分歧时没有任何东西说得出该信哪一个。
+func (s *Store) LastRuleEvidenceWindowEnd(
+	ctx context.Context, clusterID string,
+) (time.Time, bool, error) {
+	var last sql.NullTime
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT MAX(last_seen) FROM rule_evidence WHERE cluster_id = ?`,
+		clusterID).Scan(&last); err != nil {
+		return time.Time{}, false, fmt.Errorf(
+			"snapshotstore: read the furthest accounted evidence window of cluster %s: %w",
+			clusterID, err)
+	}
+	if !last.Valid {
+		return time.Time{}, false, nil
+	}
+	return last.Time.UTC(), true, nil
+}
+
+// EvidenceRef 点名一条候选规则：主体加规则指纹。
+//
+// 三个字段一起才是键。指纹只覆盖规则内容（policygen.FingerprintOf），
+// 「egress 到 kube-dns:53」在每个 workload 上都是同一个指纹 —— 只按指纹取，
+// 一条规则会把集群里所有 workload 的同名证据都拖回来。
+type EvidenceRef struct {
+	Namespace   string
+	Workload    string
+	Fingerprint string
+}
+
+// evidenceReadChunk 是一条查询里最多点名多少条规则。
+//
+// 分批不是为了绕过 SQL 的参数上限（离得很远），是为了让单条语句的大小与
+// 候选集规模脱钩：一个 workload 上万条规则的集群不该产出一条几 MB 的 SQL。
+const evidenceReadChunk = 500
+
+// RuleEvidenceOf 读出**这一批候选规则**的证据，按 EvidenceKey 索引。
+//
+// **按候选取，不是取整个集群。** 这张表只供展示、不解锁任何门禁
+// （design doc 2026-08-25 §4），因此它绝不该有能力让策略预览失败 —— 而
+// 此前它有：行数过上限就整个报错，而调用方正是 PolicyPreview。更糟的是
+// 记账本身要先算一次预览，于是表一旦过线，预览失败 → 记不了账 → 没有任何
+// 东西会让表变小，那个集群的策略页永久打不开，只能手工进库救。
+//
+// 按候选取之后，返回行数被候选数钉住，与表有多大无关；顺带也不再把预览
+// 根本不会显示的证据拖进内存。
 //
 // 一次全取而不是按指纹逐条查：候选集一屏就是几十上百条规则，逐条查会把
 // 一次预览变成上百次往返（规范 §24）。
 func (s *Store) RuleEvidenceOf(
-	ctx context.Context, clusterID string,
+	ctx context.Context, clusterID string, refs []EvidenceRef,
 ) (map[string]RuleEvidence, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT fingerprint, namespace, workload, first_seen, last_seen,
-		        windows, complete_windows, observations
-		   FROM rule_evidence WHERE cluster_id = ? LIMIT ?`,
-		clusterID, maxRuleEvidenceRows+1)
+	out := map[string]RuleEvidence{}
+	if len(refs) == 0 {
+		return out, nil
+	}
+	for start := 0; start < len(refs); start += evidenceReadChunk {
+		end := min(start+evidenceReadChunk, len(refs))
+		if err := s.readEvidenceChunk(ctx, clusterID, refs[start:end], out); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// readEvidenceChunk 取一批规则的证据，结果并进 out。
+func (s *Store) readEvidenceChunk(
+	ctx context.Context, clusterID string, refs []EvidenceRef, out map[string]RuleEvidence,
+) error {
+	var (
+		placeholders strings.Builder
+		args         = make([]any, 0, 1+3*len(refs))
+	)
+	args = append(args, clusterID)
+	for i, ref := range refs {
+		if i > 0 {
+			placeholders.WriteString(",")
+		}
+		placeholders.WriteString("(?,?,?)")
+		args = append(args, ref.Namespace, ref.Workload, ref.Fingerprint)
+	}
+	// 拼的只有占位符，取值一概走参数。
+	//nolint:gosec // placeholders 只由 "(?,?,?)" 拼成，不含任何调用方数据
+	query := `SELECT fingerprint, namespace, workload, first_seen, last_seen,
+	                 windows, complete_windows, observations
+	            FROM rule_evidence
+	           WHERE cluster_id = ?
+	             AND (namespace, workload, fingerprint) IN (` + placeholders.String() + `)`
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("snapshotstore: read rule evidence: %w", err)
+		return fmt.Errorf("snapshotstore: read rule evidence: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	out := map[string]RuleEvidence{}
 	for rows.Next() {
 		var e RuleEvidence
 		if err := rows.Scan(&e.Fingerprint, &e.Namespace, &e.Workload,
 			&e.FirstSeen, &e.LastSeen, &e.Windows, &e.CompleteWindows,
 			&e.Observations); err != nil {
-			return nil, fmt.Errorf("snapshotstore: scan rule evidence: %w", err)
+			return fmt.Errorf("snapshotstore: scan rule evidence: %w", err)
 		}
 		out[EvidenceKey(e.Namespace, e.Workload, e.Fingerprint)] = e
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("snapshotstore: iterate rule evidence: %w", err)
+		return fmt.Errorf("snapshotstore: iterate rule evidence: %w", err)
 	}
-	if len(out) > maxRuleEvidenceRows {
-		return nil, fmt.Errorf(
-			"snapshotstore: cluster %s holds more than %d rule evidence rows",
-			clusterID, maxRuleEvidenceRows)
-	}
-	return out, nil
+	return nil
 }
