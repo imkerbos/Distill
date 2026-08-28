@@ -176,6 +176,13 @@ type PolicyPreview struct {
 	// **恒为非 nil**，理由同 UnattachedBaselines：空清单是"算过，没有一条
 	// 放宽"，null 是"没人算过"。
 	ExposureWidenings []policygen.ExposureWidening `json:"exposureWidenings"`
+	// UnobservedRules 是从累积证据并进来、但**本次求值窗口内没有出现**的规则。
+	//
+	// 单独一栏而不是混进候选集：dry-run 的四类计数报不出它们——那几个数比较
+	// 的是观测到的流量在两套策略下的判定，而这些规则放行的流量本窗口里根本
+	// 没出现，不产生任何 change kind。于是策略集放行的比本窗口证据支持的多，
+	// 而没有一个数字会动（design doc 2026-08-29 §3.4）。
+	UnobservedRules []policygen.UnobservedRule `json:"unobservedRules"`
 	// ExcludedNamespaces 是**整片**没有生成候选策略的命名空间。
 	//
 	// 今天唯一的原因是"这是 Kubernetes 内置系统命名空间"：候选集会给每个

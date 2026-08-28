@@ -170,6 +170,29 @@ func renderPolicyCaveats(pv store.PolicyPreview, line func(format string, args .
 			return r + "：" + strconv.Itoa(byReason[policygen.UngeneratableReason(r)]) + " 条"
 		})
 	}
+	// **这一栏最要紧,因为四类计数报不出它。** 其余每一栏描述的都是"平台没
+	// 看到什么",而这一栏描述的是"策略里有些东西本窗口没见过"——它放行的
+	// 流量本窗口内不存在,不产生任何 change kind,于是 WOULD_OPEN 一动不动,
+	// 而策略集实际放行的比这个窗口的证据支持的多(design doc 2026-08-29 §3.4)。
+	if n := len(pv.UnobservedRules); n > 0 {
+		oldest := pv.UnobservedRules[0].LastSeen
+		for _, u := range pv.UnobservedRules {
+			if u.LastSeen.Before(oldest) {
+				oldest = u.LastSeen
+			}
+		}
+		say("来自累积证据的规则: %d 条 —— 它们在本次求值窗口内没有出现，"+
+			"放行范围因此大于这个窗口的证据所能支持的。"+
+			"上面四类 dry-run 计数**算不到它们**：那几个数比较的是观测到的流量，"+
+			"而这些规则放行的流量本窗口里根本没有。最早一条上次出现在 %s。",
+			n, oldest.UTC().Format(time.RFC3339))
+		listEach(line, n, func(i int) string {
+			u := pv.UnobservedRules[i]
+			return u.Namespace + "/" + u.Workload +
+				"（上次出现 " + u.LastSeen.UTC().Format(time.RFC3339) + "）"
+		})
+	}
+
 	if n := len(pv.StaleOverrides); n > 0 {
 		say("失效的人工决定: %d 条 —— 曾经有人对这些规则做过决定，而规则已经变了，"+
 			"那个决定没有落在本文件上。", n)

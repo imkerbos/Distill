@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	networkingv1 "k8s.io/api/networking/v1"
 
@@ -42,6 +43,11 @@ type candidateSet struct {
 	// 与 notAssessed 是两件事：那一栏说"我们没看过"，这一栏说"看过了、
 	// 不需要"，而后者是一次有记录的人工判断（登记在集群上，写审计）。
 	inapplicable []baseline.Kind
+	// unobserved 是从累积证据并进来、但本窗口没有出现的规则。
+	//
+	// 必须一路带到界面与导出注释头：dry-run 的四类计数报不出它们
+	// （design doc 2026-08-29 §3.4）。
+	unobserved []policygen.UnobservedRule
 }
 
 // PolicyPreview 用真实采集到的资产与流量生成候选策略并回放预测。
@@ -206,6 +212,7 @@ func (r *Reader) PolicyPreviewAtGranularity(
 		UnattachedImports:      gen.UnattachedImports,
 		UnattachedBaselines:    gen.UnattachedBaselines,
 		ExposureWidenings:      gen.ExposureWidenings,
+		UnobservedRules:        cs.unobserved,
 		ExcludedNamespaces:     gen.ExcludedNamespaces,
 		ExcludedWorkloads:      gen.ExcludedWorkloads,
 		Prediction:             report,
@@ -323,28 +330,96 @@ func (r *Reader) generate(
 		return candidateSet{}, err
 	}
 
+	res := policygen.Generate(policygen.Input{
+		ClusterID: clusterID,
+		Assets:    assets, Namespaces: t.namespaces,
+		// Pods 必须传入：候选策略按 workload 花名册生成而非按流量生成，
+		// 缺了它，流量全 DEGRADED（mesh 内）或全 UNKNOWN（策略写坏）的
+		// workload 会从候选集里悄悄消失，连带绕过它们的强制 Baseline 注入。
+		Pods:                t.roster(),
+		Observations:        obs,
+		UnassessedBaselines: notAssessed,
+		Imports:             imports,
+		// 系统命名空间默认整片不生成（policygen.systemNamespaces）：
+		// 一份下发到 kube-dns 的 default-deny 会让全集群失去 DNS。
+		// 要纳入必须在集群登记里显式声明并写下理由。
+		ManagedSystemNamespaces: c.ManagedSystemNamespaces,
+	})
+
+	// 把跨窗口累积的规则并进来。
+	//
+	// **窗口决定 dry-run 算在哪段流量上，累积决定策略集里有哪些规则。**
+	// 分开之前，观测多久都没用：窗口能开多大有硬上界（maxWindowConnections），
+	// 在 UAT 上约等于 2 分钟，而 nacos:8848 的调用方 90 秒看得见 45 个、
+	// 6 小时 222 个，曲线远未收敛（design doc 2026-08-29 §1.1）。
+	//
+	// 读失败就整次失败，不降级成"没有累积"：静默丢掉会让一份缺了大半调用方
+	// 的策略集看起来完整，而 dry-run 报不出这个缺口——它只评估见过的连接。
+	// 与上面 candidateImports 那条是同一个理由。
+	learned, err := r.learnedRulesFor(ctx, c, t)
+	if err != nil {
+		return candidateSet{}, err
+	}
+	merged, unobserved := policygen.MergeLearned(res, learned)
+
 	return candidateSet{
 		traffic:         t,
 		trafficObserved: trafficObserved,
 		observations:    obs,
-		result: policygen.Generate(policygen.Input{
-			ClusterID: clusterID,
-			Assets:    assets, Namespaces: t.namespaces,
-			// Pods 必须传入：候选策略按 workload 花名册生成而非按流量生成，
-			// 缺了它，流量全 DEGRADED（mesh 内）或全 UNKNOWN（策略写坏）的
-			// workload 会从候选集里悄悄消失，连带绕过它们的强制 Baseline 注入。
-			Pods:                t.roster(),
-			Observations:        obs,
-			UnassessedBaselines: notAssessed,
-			Imports:             imports,
-			// 系统命名空间默认整片不生成（policygen.systemNamespaces）：
-			// 一份下发到 kube-dns 的 default-deny 会让全集群失去 DNS。
-			// 要纳入必须在集群登记里显式声明并写下理由。
-			ManagedSystemNamespaces: c.ManagedSystemNamespaces,
-		}),
-		notAssessed:  notAssessed,
-		inapplicable: inapplicableBaselines(c),
+		result:          merged,
+		notAssessed:     notAssessed,
+		inapplicable:    inapplicableBaselines(c),
+		unobserved:      unobserved,
 	}, nil
+}
+
+// defaultRuleRetention 是没有登记业务周期时的保留期。
+//
+// 取 24 小时而不是更长：保留期越长，一个已经下线的服务的规则在策略里留得越久。
+// 它是自动的兜底，真正的判据是每条规则带着的 LastSeen——那一项要给人看
+// （design doc 2026-08-29 §3.5）。
+const defaultRuleRetention = 24 * time.Hour
+
+// learnedRulesFor 取回保留期内累积下来的规则。
+//
+// 保留期取集群登记的业务周期：那正是"看全一轮流量要多久"这个问题的答案
+// （registry.Cluster.BusinessCycle）。没登记时退回 defaultRuleRetention。
+func (r *Reader) learnedRulesFor(
+	ctx context.Context, c registry.Cluster, t traffic,
+) ([]policygen.LearnedRule, error) {
+	retention := c.BusinessCycle
+	if retention <= 0 {
+		retention = defaultRuleRetention
+	}
+	// 保留期从**窗口末端**往回算，不从当下往回算：回看一段很久以前的窗口时，
+	// 按当下算会把那之后学到的规则一并并进去，而那是拿现在解释过去
+	// （CLAUDE.md §4）。
+	since := t.window.To.Add(-retention)
+
+	stored, err := r.facts.LearnedRulesSince(ctx, t.clusterID, since)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]policygen.LearnedRule, 0, len(stored))
+	for _, l := range stored {
+		rule, err := policygen.UnmarshalRule(l.Body)
+		if err != nil {
+			// **整次失败，不跳过这一条。** 一条还原不出来的规则等于策略集里
+			// 少一条放行，而少放行的方向是阻断；跳过它会让一份缺了放行的
+			// 策略集看起来完整，且 dry-run 报不出来——它只评估见过的连接。
+			//
+			// 正常写入路径产不出这种行（写的时候过 MarshalRule），所以它出现
+			// 就意味着库被别的东西改过，那是该有人知道的事。
+			return nil, fmt.Errorf(
+				"collectstore: cannot restore learned rule %s/%s/%s of cluster %s: %w",
+				l.Namespace, l.Workload, l.Fingerprint, t.clusterID, err)
+		}
+		out = append(out, policygen.LearnedRule{
+			Namespace: l.Namespace, Workload: l.Workload, Fingerprint: l.Fingerprint,
+			LastSeen: l.LastSeen, Observations: l.Observations, Rule: rule,
+		})
+	}
+	return out, nil
 }
 
 // predictWith 用给定的策略集回放一次预测，并把窗口完整度传导上去。

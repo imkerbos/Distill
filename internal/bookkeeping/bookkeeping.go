@@ -82,6 +82,19 @@ func (r Recorder) RecordWindow(ctx context.Context, clusterID string, from, to t
 		for _, rule := range c.Rules {
 			// 被否决的规则也记：操作者取消确认之后，那条规则的证据不该
 			// 从零开始重数 —— 它一直在被观测，只是没有被采纳。
+			// 规则体一并记下。没有它，这张表只有指纹，而指纹是单向的——
+			// 于是"跨窗口累积的规则集"取不回来，平台学了一天、导出时只
+			// 拿得到最后一个窗口里跑过的那些（design doc 2026-08-29 §1）。
+			//
+			// 序列化失败**只跳过这一条的规则体、不中断记账**：计数仍然要记，
+			// 否则一条规则体有问题的规则会把整个窗口的证据一起吞掉。
+			body, err := policygen.MarshalRule(rule)
+			if err != nil {
+				r.logger.Warn("cannot persist a rule body; its counters are still recorded",
+					"cluster", clusterID, "namespace", c.Namespace,
+					"workload", c.Workload, "fingerprint", rule.Fingerprint, "err", err)
+				body = nil
+			}
 			rules = append(rules, snapshotstore.RuleEvidence{
 				Fingerprint: rule.Fingerprint,
 				Namespace:   c.Namespace,
@@ -89,6 +102,7 @@ func (r Recorder) RecordWindow(ctx context.Context, clusterID string, from, to t
 				// FlowCount 是这条规则在**这个窗口**里的观测次数；
 				// 跨窗口的累计由落库层做。
 				Observations: int64(rule.FlowCount),
+				Body:         body,
 			})
 		}
 	}
