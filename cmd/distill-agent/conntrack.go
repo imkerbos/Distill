@@ -37,6 +37,9 @@ type conntrackOptions struct {
 	interval  time.Duration
 	// maxConnections 是去重后允许携带的上限；非正时用 conntrack 包的默认。
 	maxConnections int
+	// procRoot 是 /proc 的位置，供完整度取证读内核计数与超时配置。
+	// 空表示 defaultProcRoot；可替换只为测试。
+	procRoot string
 }
 
 // flowSink 是这一侧要的那一个方法。
@@ -116,12 +119,24 @@ func conntrackOnce(
 		interval = defaultPollInterval
 	}
 
+	root := opts.procRoot
+	if root == "" {
+		root = defaultProcRoot
+	}
+	// 窗口开始前先采一次丢弃计数：完整度看的是**这个窗口内新增**的丢弃，
+	// 不是开机以来的累计。拿累计数作答，一个跑了一周、早期丢过一次的节点
+	// 会永远说自己不完整。
+	statsBefore, statsBeforeOK := readStats(root)
+	shortestLifetime := shortestEntryLifetime(root)
+
 	startedAt := time.Now().UTC()
 	counts := map[connKey]int{}
 	var order []connKey
 	var dropped uint64
 	truncated := false
 	var readErr error
+	succeeded := 0
+	cutShort := false
 
 	for i := range polls {
 		if i > 0 {
@@ -130,6 +145,7 @@ func conntrackOnce(
 				// 上下文结束不算失败：已经轮询过的那几次是真的观测。
 				// 窗口如实收在这一刻。
 				readErr = nil
+				cutShort = true
 				goto done
 			case <-time.After(interval):
 			}
@@ -162,6 +178,7 @@ func conntrackOnce(
 			logger.Warn("conntrack lines that could not be read",
 				"cluster", opts.clusterID, "count", tbl.SkippedMalformed)
 		}
+		succeeded++
 		for _, c := range tbl.Connections {
 			k := connKey{src: c.Source.IP, dst: c.Dest.IP, proto: string(c.Protocol), port: c.Port}
 			if _, seen := counts[k]; !seen {
@@ -207,12 +224,57 @@ done:
 			ObservedCount: counts[k],
 		})
 	}
-	// **只在真的截断时才报 dropped。** 报 0 等于宣称"一条没漏"，而轮询
-	// conntrack 永远说不出那句话（design doc §5）。
 	if truncated {
 		payload.Dropped = &dropped
 		logger.Warn("the conntrack table did not fit in one ingest",
 			"cluster", opts.clusterID, "runId", runID, "dropped", dropped)
+	}
+
+	// **"这个窗口没漏"要么被证明，要么不说。**
+	//
+	// 轮询 conntrack 本身说不出这句话——表是当前连接的快照、不是日志，两次
+	// 轮询之间来了又走的连接不出现在任何一次快照里。但这不是一个永远无法
+	// 回答的问题，而是一个有前提的问题：只要表项的最短存活时间长过轮询
+	// 间隔，任何一条连接都必然落在至少一次轮询的视野里，"没漏"就是可证的。
+	//
+	// 于是这里把那几条前提逐个去内核里取实测值，全部成立才填这三个字段。
+	// 任一条不成立——读不到配置、超时太短、有一次轮询没成功、窗口内有丢弃、
+	// 表快满了——就照旧什么都不说，完整度落回 UNKNOWN，与这段代码不存在时
+	// 完全一样。**默认答案仍然是"证明不了"，改变的只是它现在可以被推翻。**
+	statsAfter, statsAfterOK := readStats(root)
+	count, max := readTableUsage(root)
+	cov := conntrack.Coverage{
+		PollInterval:          interval,
+		ShortestEntryLifetime: shortestLifetime,
+		PollsPlanned:          polls,
+		PollsSucceeded:        succeeded,
+		CutShort:              cutShort,
+		Truncated:             truncated,
+		TableCount:            count,
+		TableMax:              max,
+	}
+	if statsBeforeOK && statsAfterOK {
+		cov.DropsDuringWindow = statsAfter.Total() - statsBefore.Total()
+	} else {
+		// 读不到计数就当作"有丢弃"：说不出丢没丢，与说得出没丢，在可信度上
+		// 不是一档。给一个非零值让 ProvesNoMiss 走到那一条上。
+		cov.DropsDuringWindow = 1
+	}
+	if proven, why := cov.ProvesNoMiss(); proven {
+		covered := windowPayload{From: startedAt, To: finishedAt}
+		rate := 1.0
+		var none uint64
+		payload.CoveredWindow = &covered
+		// 轮询整张表，不抽样。
+		payload.SampleRate = &rate
+		payload.Dropped = &none
+		logger.Info("this window is provably complete",
+			"cluster", opts.clusterID, "runId", runID,
+			"pollInterval", interval, "shortestEntryLifetime", shortestLifetime,
+			"tableUsage", fmt.Sprintf("%d/%d", count, max))
+	} else {
+		logger.Info("this window cannot be proven complete",
+			"cluster", opts.clusterID, "runId", runID, "reason", why)
 	}
 
 	if err := sink.SaveFlowIngest(ctx, payload); err != nil {
