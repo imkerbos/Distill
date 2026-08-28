@@ -502,6 +502,7 @@ func (r *FixtureReader) PolicyPreviewAtGranularity(
 		UnattachedImports:      gen.UnattachedImports,
 		UnattachedBaselines:    gen.UnattachedBaselines,
 		ExposureWidenings:      gen.ExposureWidenings,
+		ExcludedNamespaces:     gen.ExcludedNamespaces,
 		ExcludedWorkloads:      gen.ExcludedWorkloads,
 		Prediction:             report,
 		PredictionWithExisting: reportWithExisting,
