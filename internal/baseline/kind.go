@@ -26,12 +26,20 @@ const (
 	KindControlPlane Kind = "CONTROL_PLANE"
 	// KindNodeAgent 是节点级 agent 入向。
 	KindNodeAgent Kind = "NODE_AGENT"
+	// KindExposedIngress 是暴露型 Service 的入站放行。
+	//
+	// LoadBalancer / NodePort 声明的对外暴露，其入站来源**学不出来**：
+	// UAT 上 istio 入口网关一小时内有 4440 个源地址，那是一份每天都在变的
+	// /32 清单。不生成它的后果是入口网关拿到一份零放行的 default-deny，
+	// 应用即切断全集群外部入口（design doc 2026-08-28 §1）。
+	KindExposedIngress Kind = "EXPOSED_INGRESS"
 )
 
 // allKinds 是枚举的唯一登记处。新增类型必须同步登记，
 // 否则 Valid 会拒绝它，且 Missing 不会把它算进齐备性校验。
 var allKinds = []Kind{
 	KindDNS, KindLBHealth, KindMetrics, KindControlPlane, KindNodeAgent,
+	KindExposedIngress,
 }
 
 // AllKinds 返回全部已登记的必备 Baseline 类型。
