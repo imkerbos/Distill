@@ -135,6 +135,15 @@ type Pod struct {
 	IPScopeReason cluster.Reason
 	// Labels 是 Pod 标签，用于恢复历史 selector 语义。
 	Labels map[string]string
+	// NamedPorts 是这个 Pod 声明的**命名**容器端口。
+	//
+	// NetworkPolicy 的 ports 可以写端口名，由 CNI 对着 Pod 解析。求值时
+	// 我们必须做同一件事，否则一条合法的命名端口规则在这里判不出来
+	// （replay.resolveNamedPort 要的正是这份数据）。
+	//
+	// **只收有名字的那些**：无名端口在 NetworkPolicy 里只能写数字，
+	// 而数字不需要解析。全都收进来只会让这一列在大集群上白白变长。
+	NamedPorts []NamedPort
 	// HostNetwork 表示该 Pod 使用宿主网络，不受 NetworkPolicy 管控。
 	HostNetwork bool
 	// NodeName 是所在节点。
@@ -291,4 +300,17 @@ type Warning struct {
 	Subject string
 	// Detail 是补充说明，仅供操作者阅读，不参与统计。
 	Detail string
+}
+
+// NamedPort 是一个命名的容器端口。
+type NamedPort struct {
+	// Name 是端口名，非空。
+	Name string
+	// Port 是它对应的数字端口。
+	Port int32
+	// Protocol 取值 TCP / UDP / SCTP。
+	//
+	// 必须带上：NetworkPolicy 的命名端口按 (名字, 协议) 解析，同名不同协议
+	// 是两个端口，只按名字匹配会解到错的那一个。
+	Protocol string
 }

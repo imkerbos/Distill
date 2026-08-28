@@ -54,6 +54,25 @@ func (c *Collector) toPod(p *corev1.Pod, rsOwners map[string]ownerRef) (snapshot
 		})
 	}
 
+	// 只收有名字的：无名端口在 NetworkPolicy 里只能写数字，不需要解析。
+	var namedPorts []snapshot.NamedPort
+	for _, ctr := range p.Spec.Containers {
+		for _, cp := range ctr.Ports {
+			if cp.Name == "" {
+				continue
+			}
+			proto := string(cp.Protocol)
+			if proto == "" {
+				// Kubernetes 缺省是 TCP。留空会让求值时按 (名字, "") 找，
+				// 而快照里存的是 "TCP"，于是永远解不出来。
+				proto = string(corev1.ProtocolTCP)
+			}
+			namedPorts = append(namedPorts, snapshot.NamedPort{
+				Name: cp.Name, Port: cp.ContainerPort, Protocol: proto,
+			})
+		}
+	}
+
 	snap := snapshot.Pod{
 		ClusterID:         c.clusterID,
 		Namespace:         p.Namespace,
@@ -63,6 +82,7 @@ func (c *Collector) toPod(p *corev1.Pod, rsOwners map[string]ownerRef) (snapshot
 		IP:                p.Status.PodIP,
 		ExtraIPs:          extraPodIPs(p),
 		Labels:            p.Labels,
+		NamedPorts:        namedPorts,
 		HostNetwork:       p.Spec.HostNetwork,
 		NodeName:          p.Spec.NodeName,
 		ServiceAccount:    p.Spec.ServiceAccountName,
