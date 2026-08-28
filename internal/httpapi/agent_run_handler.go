@@ -77,6 +77,24 @@ type agentPodPayload struct {
 	OwnerName      string                  `json:"ownerName,omitempty"`
 	WorkloadKind   string                  `json:"workloadKind,omitempty"`
 	WorkloadName   string                  `json:"workloadName,omitempty"`
+
+	// ExtraIPs 是双栈 Pod 的第二个地址，**只有地址，没有归属**：归属由
+	// collect.Classify 在收下这份观测之后逐个算（design doc §3.4），agent
+	// 声明不了。少了它，第二个地址上的连接还原不出主体，判成 UNKNOWN，
+	// 于是学不出规则——而 default-deny 一应用，那条链路就断了。
+	ExtraIPs []string `json:"extraIps,omitempty"`
+
+	// mesh 三件套是这个 Pod 的实际状态，不是 namespace 的配置。求值引擎按
+	// 它把结论降级（replay.confidenceFor）：sidecar 拦下来的连接，conntrack
+	// 看到的对端不是策略意义上的那个对端。恒为 false 会让本该 DEGRADED 的
+	// 结论变成 Trusted，方向是放宽的那一侧。
+	InMesh     bool   `json:"inMesh,omitempty"`
+	MeshSource string `json:"meshSource,omitempty"`
+	MeshDetail string `json:"meshDetail,omitempty"`
+
+	// ScrapeAnnotations 决定这个 Pod 是不是抓取目标，METRICS_SCRAPE 基线
+	// 据此推导。
+	ScrapeAnnotations map[string]string `json:"scrapeAnnotations,omitempty"`
 }
 
 // agentNamedPortPayload 是一个命名的容器端口。
@@ -484,6 +502,11 @@ func (p agentRunPayload) toRun(clusterID string) snapshot.Run {
 				Protocol: np.Protocol,
 			})
 		}
+		var extraIPs []snapshot.PodAddress
+		for _, ip := range in.ExtraIPs {
+			// 只填地址：Scope/Reason 留空，由 collect.Classify 算出来。
+			extraIPs = append(extraIPs, snapshot.PodAddress{IP: ip})
+		}
 		pods = append(pods, snapshot.Pod{
 			ClusterID:      clusterID,
 			Namespace:      in.Namespace,
@@ -500,6 +523,12 @@ func (p agentRunPayload) toRun(clusterID string) snapshot.Run {
 			OwnerName:      in.OwnerName,
 			WorkloadKind:   in.WorkloadKind,
 			WorkloadName:   in.WorkloadName,
+
+			ExtraIPs:          extraIPs,
+			InMesh:            in.InMesh,
+			MeshSource:        cluster.MeshSource(in.MeshSource),
+			MeshDetail:        in.MeshDetail,
+			ScrapeAnnotations: in.ScrapeAnnotations,
 		})
 	}
 	namespaces := make([]snapshot.Namespace, 0, len(p.Observation.Namespaces))

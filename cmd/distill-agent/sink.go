@@ -180,6 +180,24 @@ type agentPodPayload struct {
 	OwnerName      string                  `json:"ownerName,omitempty"`
 	WorkloadKind   string                  `json:"workloadKind,omitempty"`
 	WorkloadName   string                  `json:"workloadName,omitempty"`
+
+	// ExtraIPs 只带地址，**不带归属**：归属是平台的判定（design doc §3.4），
+	// 与主地址 IP 那一列同一个规矩。平台收下之后 collect.Classify 会逐个
+	// 地址分类，双栈的两个地址各判各的。
+	ExtraIPs []string `json:"extraIps,omitempty"`
+
+	// mesh 三件套是 Pod 自己的实际状态（有没有 sidecar），不是所在 namespace
+	// 的配置——后者走 agentNamespacePayload，本来就在发。求值引擎按 Pod 的
+	// InMesh 把结论降级：sidecar 拦下来的连接，conntrack 看到的对端不是策略
+	// 意义上的那个对端。不发这三个字段，推送模式下每个 Pod 都是 InMesh=false，
+	// 于是本该 DEGRADED 的结论被判成 Trusted——朝放宽的方向错。
+	InMesh     bool   `json:"inMesh,omitempty"`
+	MeshSource string `json:"meshSource,omitempty"`
+	MeshDetail string `json:"meshDetail,omitempty"`
+
+	// ScrapeAnnotations 决定这个 Pod 是不是抓取目标，METRICS_SCRAPE 基线据此
+	// 推导。缺了它，推送模式下的集群一个抓取目标都看不见。
+	ScrapeAnnotations map[string]string `json:"scrapeAnnotations,omitempty"`
 }
 
 // agentNamedPortPayload 是一个命名的容器端口。
@@ -453,21 +471,30 @@ func (s *httpSink) Save(ctx context.Context, run snapshot.Run) error {
 				Protocol: np.Protocol,
 			})
 		}
+		var extraIPs []string
+		for _, a := range p.ExtraIPs {
+			extraIPs = append(extraIPs, a.IP)
+		}
 		payload.Observation.Pods = append(payload.Observation.Pods, agentPodPayload{
-			Namespace:      p.Namespace,
-			Name:           p.Name,
-			UID:            p.UID,
-			Phase:          p.Phase,
-			IP:             p.IP,
-			Labels:         p.Labels,
-			NamedPorts:     namedPorts,
-			HostNetwork:    p.HostNetwork,
-			NodeName:       p.NodeName,
-			ServiceAccount: p.ServiceAccount,
-			OwnerKind:      p.OwnerKind,
-			OwnerName:      p.OwnerName,
-			WorkloadKind:   p.WorkloadKind,
-			WorkloadName:   p.WorkloadName,
+			Namespace:         p.Namespace,
+			Name:              p.Name,
+			UID:               p.UID,
+			Phase:             p.Phase,
+			IP:                p.IP,
+			Labels:            p.Labels,
+			NamedPorts:        namedPorts,
+			HostNetwork:       p.HostNetwork,
+			NodeName:          p.NodeName,
+			ServiceAccount:    p.ServiceAccount,
+			OwnerKind:         p.OwnerKind,
+			OwnerName:         p.OwnerName,
+			WorkloadKind:      p.WorkloadKind,
+			ExtraIPs:          extraIPs,
+			InMesh:            p.InMesh,
+			MeshSource:        string(p.MeshSource),
+			MeshDetail:        p.MeshDetail,
+			ScrapeAnnotations: p.ScrapeAnnotations,
+			WorkloadName:      p.WorkloadName,
 		})
 	}
 	return s.post(ctx, payload)

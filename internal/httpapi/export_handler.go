@@ -14,7 +14,6 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/imkerbos/Distill/internal/collectstore"
-	"github.com/imkerbos/Distill/internal/predict"
 	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/response"
 	"github.com/imkerbos/Distill/internal/store"
@@ -196,36 +195,18 @@ func renderPolicyDocs(
 	if fileNamespace != "" {
 		line("本文件命名空间: %s", fileNamespace)
 	}
-	if pv.TrafficObserved {
-		line("时间窗: %s ~ %s",
-			pv.Window.From.UTC().Format(time.RFC3339), pv.Window.To.UTC().Format(time.RFC3339))
-		// 四类计数取应用人工决定之后的那一套，与文档同源：文件渲染的正是
-		// Overridden 那一份候选集，配上默认推荐的数字就又是轮 3 那条缺陷。
-		//
-		// 口径写明是"合并之后"：读这份文件的人要据此判断 apply 的影响，
-		// 而只跑候选集的那一份描述的是另一件事（把旧策略也清理掉）。
-		for _, k := range predict.AllChangeKinds() {
-			line("dry-run %s: %d", k, counts[k])
-		}
-	} else {
-		// **不印那四个 0。** 零条连接下它们全是 0，而这份文件会脱离平台
-		// 独自存在 —— 隔两天有人读到「dry-run WOULD_BREAK: 0」，读到的是
-		// 「应用它不会打断任何东西」，而事实是没有人评估过。
-		//
-		// 空缺本身也不行：一份少了那几行的文件与一份老格式的文件长得一样。
-		// 必须显式说出来。
-		line("时间窗: 无 —— 这个集群还没有任何流量观测")
-		line("dry-run: 没有做过。平台一条流量都没有观测到这个集群，因此")
-		line("  「应用这些策略会拦断什么」这个问题在这份文件里没有答案。")
-		line("下面的策略来自资产推导（Baseline），它们本身是真的；")
-		line("**但在有流量数据之前，不要把这份文件当作评估过的变更应用出去。**")
-	}
+	renderPolicyBasis(pv, counts, line)
+
 	line("策略文档: %d 份，启用规则: %d 条", len(docs), countEnabledRules(docs))
 	if fileNamespace != "" && pv.TrafficObserved {
 		// 数字给的是整集群口径，文件里就必须说出来。少了这一行，读者会把
 		// 它当成"本命名空间的影响"，而那是一句平台没有算过的话。
 		line("以上 dry-run 计数是整集群口径，不是本命名空间的影响。")
 	}
+	// 缺口在导出者/时刻之前：这几行是读者判断"能不能应用"的依据，排在
+	// 落款后面容易被当成附注跳过。
+	renderPolicyCaveats(pv, line)
+
 	line("导出者: %s", exporter)
 	line("导出时刻: %s", at.UTC().Format(time.RFC3339))
 	if pv.TrafficObserved {

@@ -41,10 +41,6 @@ const clusterIDExempt = "集群归属只来自 token（design doc §2），由�
 	"不从报文读。报文里带着这个字段会先在 decodeAgentRun 那一步就被 DisallowUnknownFields 拒绝，" +
 	"根本到不了 toRun。"
 
-const preExistingGapExempt = "既有缺口，与本轮改动（LoadBalancer 暴露判定、命名端口）无关：" +
-	"agent 报文本来就没有这个字段（见 cmd/distill-agent 那一侧的同一条豁免），" +
-	"toRun 自然也读不到它。本轮不补，先记下来。"
-
 func wireFanoutSites() []wireFanoutSite {
 	return []wireFanoutSite{
 		{
@@ -119,12 +115,7 @@ func wireFanoutSites() []wireFanoutSite {
 				"ClusterID": clusterIDExempt,
 				"IPScope": "归属是平台的判定（design doc §3.4），发生在 Classify() 里，" +
 					"不是从这次报文解码出来的——toRun 只负责把报文变成 Run，Classify 在它之后另外一步跑。",
-				"IPScopeReason":     "同 IPScope。",
-				"ExtraIPs":          preExistingGapExempt,
-				"InMesh":            preExistingGapExempt,
-				"MeshSource":        preExistingGapExempt,
-				"MeshDetail":        preExistingGapExempt,
-				"ScrapeAnnotations": preExistingGapExempt,
+				"IPScopeReason": "同 IPScope。",
 			},
 		},
 		{

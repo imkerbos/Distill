@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/imkerbos/Distill/internal/cluster"
 	"github.com/imkerbos/Distill/internal/collectrun"
 	"github.com/imkerbos/Distill/internal/response"
 	"github.com/imkerbos/Distill/internal/snapshot"
@@ -533,4 +534,51 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(buf[i:])
+}
+
+// 双栈第二地址、mesh 状态与抓取注解都必须过线。它们从来没过过线，而三者
+// 在平台侧各有一条真实后果：第二地址上的连接还原不出主体（判 UNKNOWN，
+// 学不出规则，default-deny 一应用就断），求值引擎按 Pod.InMesh 降级结论
+// （恒为 false 等于把本该 DEGRADED 的判成 Trusted，朝放宽的方向错），
+// METRICS_SCRAPE 基线看不见任何抓取目标。
+func TestSinkCarriesExtraAddressesMeshAndScrapeAnnotations(t *testing.T) {
+	var got captured
+	srv := stubPlatform(t, http.StatusOK, okReply, &got)
+	defer srv.Close()
+
+	run := sampleRunForPush()
+	p := &run.Observation.Pods[0]
+	p.ExtraIPs = []snapshot.PodAddress{{
+		IP: "fd00::5",
+		// 归属**故意填上**：下面钉的正是它不会跟着地址一起发出去。
+		Scope:  cluster.Scope("EXTRA_SCOPE_SENTINEL"),
+		Reason: cluster.Reason("EXTRA_REASON_SENTINEL"),
+	}}
+	p.InMesh = true
+	p.MeshSource = cluster.MeshSourceIstioSidecar
+	p.MeshDetail = "istio-proxy"
+	p.ScrapeAnnotations = map[string]string{"prometheus.io/scrape": "true"}
+
+	if err := newHTTPSink(srv.URL, "dstl_x_y").Save(context.Background(), run); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	for _, want := range []string{
+		"fd00::5",
+		`"inMesh":true`,
+		string(cluster.MeshSourceIstioSidecar),
+		"istio-proxy",
+		"prometheus.io/scrape",
+	} {
+		if !strings.Contains(got.rawGot, want) {
+			t.Errorf("推送的报文里没有 %q: %s", want, got.rawGot)
+		}
+	}
+
+	// 第二地址与主地址同一个规矩：只发地址，归属是平台的判定。
+	for _, leak := range []string{"EXTRA_SCOPE_SENTINEL", "EXTRA_REASON_SENTINEL"} {
+		if strings.Contains(got.rawGot, leak) {
+			t.Errorf("第二地址把归属也发出去了（%s）: %s", leak, got.rawGot)
+		}
+	}
 }
