@@ -171,19 +171,59 @@ func TestExposedIngressPortsComeFromTargetPort(t *testing.T) {
 }
 
 // 每条规则必须带推导依据 —— NewRule 拒绝空依据，这里断言依据指到了字段。
+//
+// 断言的是"依据里包含一条指向入口地址的 SourceService"，不是"全部依据都是
+// SourceService"——后者会锁死 I5 的修复：命中已登记网段时还应该有一条
+// SourceClusterRegistry 指向具体命中的那个字段（见下面的
+// TestExposedIngressRegisteredMatchAlsoCitesTheRegistryField）。
 func TestExposedIngressCarriesItsDerivation(t *testing.T) {
 	a := assetsWith(svcLB("istio-system", "uat-istio-ingressgateway-extra",
 		[]string{"34.150.1.177"}, nil, port("", 443)))
 	rules := deriveExposedIngress(a, "istio-system")
-	var fields []string
+	var found bool
 	for _, d := range rules[0].Derivations {
-		if d.SourceKind != SourceService {
-			t.Errorf("依据来源 = %s, want SERVICE", d.SourceKind)
+		if d.SourceKind == SourceService && d.Field == "status.loadBalancer.ingress" {
+			found = true
 		}
-		fields = append(fields, d.Field)
 	}
-	if !slices.Contains(fields, "status.loadBalancer.ingress") {
-		t.Errorf("依据没有指向入口地址那一行: %v", fields)
+	if !found {
+		t.Errorf("依据没有一条 SourceService 指向入口地址那一行: %+v", rules[0].Derivations)
+	}
+}
+
+// I5：命中已登记网段时，那个 CIDR 实际来自 ClusterRegistry 的哪个字段，
+// 推导依据要能指到那一行——不能只写"入口地址"，审计的人会被送到错的地方
+// （derive_infra.go 的 deriveNodeAgent/deriveLBHealth 对 SourceClusterRegistry
+// 是同一条纪律）。
+func TestExposedIngressRegisteredMatchAlsoCitesTheRegistryField(t *testing.T) {
+	a := assetsWith(svcLB("rocketmq", "rocketmq-nameserver",
+		[]string{"10.170.48.55"}, nil, port("", 9876)))
+	rules := deriveExposedIngress(a, "rocketmq")
+	var found bool
+	for _, d := range rules[0].Derivations {
+		if d.SourceKind == SourceClusterRegistry && d.Field == "nodeCIDR" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("命中 node_cidr 却没有 SourceClusterRegistry/nodeCIDR 依据: %+v", rules[0].Derivations)
+	}
+}
+
+// NodePort 的对端来自 a.Registry.NodeCIDR，推导依据必须指到 nodeCIDR 这
+// 个字段，不能只写 spec.type——spec.type 说明的是"为什么走节点网段"，
+// 不是那个 CIDR 值的出处。
+func TestExposedIngressNodePortAlsoCitesTheRegistryField(t *testing.T) {
+	a := assetsWith(svcNodePort("metersphere2", "selenium-hub", port("", 4444)))
+	rules := deriveExposedIngress(a, "metersphere2")
+	var found bool
+	for _, d := range rules[0].Derivations {
+		if d.SourceKind == SourceClusterRegistry && d.Field == "nodeCIDR" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("NodePort 却没有 SourceClusterRegistry/nodeCIDR 依据: %+v", rules[0].Derivations)
 	}
 }
 
@@ -259,5 +299,115 @@ func TestLBHealthCheckResolvesNamedTargetPorts(t *testing.T) {
 				t.Fatal("LB 健康检查指向端口 0 —— 命名端口没被解析，规则永远匹配不上")
 			}
 		}
+	}
+}
+
+// --- Fix round 1 (design review 2026-08-28) ---
+
+// C1: 每条规则的 Subject 必须来自 Service 的 selector，不能是空——空
+// Subject 在 policygen 那一侧会被读成"广播给整个 namespace"，把这条规则
+// 发给 shop/worker 这种没有暴露对象的 workload。
+func TestExposedIngressCarriesSubjectFromServiceSelector(t *testing.T) {
+	a := assetsWith(svcLB("shop", "api-lb",
+		[]string{"34.150.1.177"}, nil, port("", 8080)))
+	rules := deriveExposedIngress(a, "shop")
+	if len(rules) != 1 {
+		t.Fatalf("生成 %d 条规则，want 1", len(rules))
+	}
+	if !reflect.DeepEqual(rules[0].Subject, map[string]string{"app": "api-lb"}) {
+		t.Errorf("Subject = %v，want Service 的 selector {app: api-lb}", rules[0].Subject)
+	}
+}
+
+// I8: 用一个落在 pod_cidr（而非 node_cidr）的入口地址钉住"命中的是哪一个
+// 网段"这件事本身被测到了。此前把 registeredCIDRContaining 的返回值
+// 硬改成恒返回 node_cidr，三个包的测试全绿——因为②号用例恰好落在
+// node_cidr、③号用例哪个都不命中，从没有一条用例走到 pod_cidr 那条分支
+// （design review I8）。
+func TestExposedIngressUsesPodCIDRWhenTheIngressIPFallsThere(t *testing.T) {
+	a := assetsWith(svcLB("batch", "batch-lb",
+		[]string{"172.16.4.9"}, nil, port("", 8080)))
+	rules := deriveExposedIngress(a, "batch")
+	if len(rules) != 1 {
+		t.Fatalf("生成 %d 条规则，want 1", len(rules))
+	}
+	if got := cidrsOf(rules[0]); !reflect.DeepEqual(got, []string{"172.16.0.0/16"}) {
+		t.Errorf("对端 = %v，want [172.16.0.0/16]（入口地址落在 pod_cidr）", got)
+	}
+}
+
+// I3: 多个入口地址（双栈、多可用区）落在不同的范围时，两个方向都危险——
+// 认内网的那个会切断真实公网入口，认公网的那个会开一个不该开的
+// 0.0.0.0/0。没有依据选哪个，因此不生成，报缺口；顺序不能改变这个结论，
+// 这里两种顺序都测，钉住"不是取列表第一个"。
+func TestExposedIngressDisagreeingIngressIPsGenerateNothing(t *testing.T) {
+	for _, ips := range [][]string{
+		{"10.170.48.9", "34.150.1.177"},
+		{"34.150.1.177", "10.170.48.9"},
+	} {
+		a := assetsWith(svcLB("shop", "api-lb", ips, nil, port("", 8080)))
+		rules := deriveExposedIngress(a, "shop")
+		if len(rules) != 0 {
+			t.Errorf("ips=%v: 生成了 %d 条规则，入口地址判定不一致时 want 0", ips, len(rules))
+		}
+	}
+}
+
+// I3 反面：多个入口地址一致时，正常生成——不能因为修了"不一致就报缺口"
+// 而把"一致的多地址"也一起挡住了。
+func TestExposedIngressAgreeingIngressIPsUseThatCIDR(t *testing.T) {
+	a := assetsWith(svcLB("rocketmq", "rocketmq-nameserver",
+		[]string{"10.170.48.55", "10.170.48.56"}, nil, port("", 9876)))
+	rules := deriveExposedIngress(a, "rocketmq")
+	if len(rules) != 1 {
+		t.Fatalf("生成 %d 条规则，want 1（两个地址一致）", len(rules))
+	}
+	if got := cidrsOf(rules[0]); !reflect.DeepEqual(got, []string{"10.170.48.0/24"}) {
+		t.Errorf("对端 = %v，want [10.170.48.0/24]", got)
+	}
+}
+
+// I4: 入口地址本身解析不了，不是"不在任何注册网段"的证据——判不出就是
+// 判不出，不能退化成 0.0.0.0/0。
+func TestExposedIngressUnparsableIngressIPGeneratesNothing(t *testing.T) {
+	a := assetsWith(svcLB("shop", "api-lb",
+		[]string{"not-an-ip"}, nil, port("", 8080)))
+	rules := deriveExposedIngress(a, "shop")
+	if len(rules) != 0 {
+		t.Errorf("生成了 %d 条规则，入口地址解析失败时 want 0", len(rules))
+	}
+}
+
+// I4: 登记的网段本身写错了（不是合法 CIDR），同样判不出——不能把"这段
+// 解析不了"读成"这个地址不在这段里"从而落到"哪个都不命中 → 公网"。
+// 一个打错的 node_cidr 不该把这个集群里每一个内部 LB 都变成 0.0.0.0/0。
+func TestExposedIngressMalformedRegistryCIDRGeneratesNothing(t *testing.T) {
+	a := assetsWith(svcLB("shop", "api-lb",
+		[]string{"8.8.8.8"}, nil, port("", 8080)))
+	a.Registry.NodeCIDR = "not-a-cidr"
+	rules := deriveExposedIngress(a, "shop")
+	if len(rules) != 0 {
+		t.Errorf("生成了 %d 条规则，node_cidr 登记畸形时 want 0（判不出，不是"+
+			"「不在这段里」）", len(rules))
+	}
+}
+
+// I7: exposedByLBOrNodePortService 只认 LoadBalancer/NodePort Service，
+// 不像 exposed() 那样把 Gateway 也算进来——一个跑 ingress controller、
+// 后端是 ClusterIP 的 namespace，EXPOSED_INGRESS 推不出规则（deriveExposedIngress
+// 根本不处理 Gateway），若判据仍是 exposed()，这个 namespace 会永久卡在
+// Missing() 里，永远补不上（design review I7）。
+func TestExposedIngressNotApplicableWhenOnlyExposedByAnIngressWithClusterIPBackend(t *testing.T) {
+	a := assetsWith(svcClusterIP("web", "web-api", port("", 8080)))
+	a.Gateways = []snapshot.Gateway{{
+		ClusterID: "c1", Namespace: "web", Name: "web-ingress",
+		Kind: "Ingress", BackendService: "web-api",
+	}}
+	set := Derive(a, "web", nil)
+	if !slices.Contains(set.NotApplicable, KindExposedIngress) {
+		t.Errorf("只有 Ingress+ClusterIP 后端却没判成不适用: %v", set.NotApplicable)
+	}
+	if slices.Contains(set.Missing(), KindExposedIngress) {
+		t.Errorf("EXPOSED_INGRESS 落进了永远补不上的 Missing(): %v", set.Missing())
 	}
 }

@@ -225,13 +225,44 @@ func Generate(in Input) Result {
 	for s := range workloads {
 		nsWithWorkload[s.namespace] = true
 	}
+	// baselineByNS 是广播规则（Subject 为空，既有五类的形态）：整个
+	// namespace 里的每个 workload 都要有它们。baselineBySubject 是带
+	// Subject 的规则（目前只有 EXPOSED_INGRESS）：只挂给 Service selector
+	// 实际选中的那一个 workload，不广播——广播的后果是一个没有暴露对象的
+	// workload 也拿到一条 EXPOSED_INGRESS peers=[0.0.0.0/0]
+	// （design review C1，2026-08-28）。
 	baselineByNS := map[string][]Rule{}
+	baselineBySubject := map[subject][]Rule{}
 	baselineSetByNS := map[string]baseline.Set{}
 	for ns := range nsWithWorkload {
 		set := baseline.Derive(in.Assets, ns, in.UnassessedBaselines)
 		baselineSetByNS[ns] = set
 		for _, br := range set.Rules {
-			baselineByNS[ns] = append(baselineByNS[ns], baselineRule(br))
+			rule := baselineRule(br)
+			if len(br.Subject) == 0 {
+				baselineByNS[ns] = append(baselineByNS[ns], rule)
+				continue
+			}
+			// 用同一套 workload-label 归属判据把 selector 解成
+			// (workload 取值)，再用 winners 查出这个 (namespace, workload)
+			// 当前的赢家标签键——不是重新在 selector 上跑一遍优先级判定，
+			// 那样在 Service selector 与 Pod 标签用的键不一致时（选中同一个
+			// workload 但走了不同的约定键）会漏挂；而是复用 resolveWinningKeys
+			// 已经算好的赢家，这样只要 workload 取值对得上，就一定挂得上
+			// 花名册里那唯一一条 subject。
+			_, wl, ok := resolveWorkloadLabel(br.Subject)
+			if !ok {
+				continue
+			}
+			winKey, ok := winners[nsWorkload{namespace: ns, workload: wl}]
+			if !ok {
+				continue
+			}
+			target := subject{namespace: ns, workload: wl, labelKey: winKey}
+			if !workloads[target] {
+				continue
+			}
+			baselineBySubject[target] = append(baselineBySubject[target], rule)
 		}
 	}
 
@@ -248,6 +279,7 @@ func Generate(in Input) Result {
 	for s := range workloads {
 		rules := append([]Rule{}, byWorkload[s]...)
 		rules = append(rules, baselineByNS[s.namespace]...)
+		rules = append(rules, baselineBySubject[s]...)
 		rules = append(rules, imported[s]...)
 		sortRules(rules)
 		res.Policies = append(res.Policies, CandidatePolicy{
@@ -368,7 +400,10 @@ func cloneLabels(labels map[string]string) map[string]string {
 
 // baselineRule 把一条 Baseline 包装成候选策略里的规则。
 //
-// Baseline 恒为 Enabled：它们是必备项，不是建议项。
+// Baseline 恒为 Enabled：它们是必备项，不是建议项——即便它命中风险端口
+// 清单（比如 istio-ingressgateway-inner 暴露的 6379/8848，见 spec §3.6）。
+// 那条规则描述的是集群**已经**在暴露的东西，不生成它等于切断现有流量；
+// Risk 标注要做的是让它在界面上跟一条普通放行区分开，不是把它禁用掉。
 func baselineRule(br baseline.Rule) Rule {
 	kind := br.Kind
 	r := Rule{
@@ -376,8 +411,33 @@ func baselineRule(br baseline.Rule) Rule {
 		Direction: br.Direction, Enabled: true,
 		Ingress: br.Ingress, Egress: br.Egress,
 	}
+	if br.Ingress != nil {
+		r.Risk = riskOfPorts(br.Ingress.Ports)
+	} else if br.Egress != nil {
+		r.Risk = riskOfPorts(br.Egress.Ports)
+	}
 	r.describe()
 	return r
+}
+
+// riskOfPorts 在一组 NetworkPolicy 端口里命中风险清单时返回该端口信息。
+//
+// 只查数字端口：命名端口在这一步还没解析成具体数字（那需要 Pod 的容器
+// 端口声明），没有依据就不猜它是不是风险端口。一条规则里有多个端口时取
+// 第一个命中的——界面上这个标注要传达的是"这条规则里有风险"，不是逐端口
+// 枚举，与 learnedRule 每条规则只对应一个端口的形态不同（Baseline 的一条
+// 规则可以像 EXPOSED_INGRESS 那样一次带多个端口）。
+func riskOfPorts(ports []networkingv1.NetworkPolicyPort) *risk.Port {
+	for _, p := range ports {
+		if p.Port == nil || p.Port.Type != intstr.Int {
+			continue
+		}
+		if rp, ok := risk.Lookup(p.Port.IntVal); ok {
+			copied := rp
+			return &copied
+		}
+	}
+	return nil
 }
 
 // sortRules 给规则定序：Baseline 在前，其后按方向、证据、端口、协议、对端。

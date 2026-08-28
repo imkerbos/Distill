@@ -117,6 +117,18 @@ type Rule struct {
 	Egress *networkingv1.NetworkPolicyEgressRule `json:"-"`
 	// Derivations 是推导依据，构造时保证非空。
 	Derivations []Derivation `json:"derivations"`
+	// Subject 是这条规则要挂靠的 workload selector；为空表示广播到整个
+	// namespace 里的每个 workload（既有五类的形态：DNS、control plane 等
+	// 是命名空间级的基础设施事实，理应对每个 workload 生效）。
+	//
+	// 非空时——目前只有 EXPOSED_INGRESS 会填它——调用方（policygen）只把
+	// 这条规则挂给 selector 实际选中的那一个 workload，用的是判定
+	// podSelector 归属的同一套 workload-label 解析，不为 Baseline 另起
+	// 第二套机制。广播这类规则的后果是「shop/worker 这种没有暴露对象的
+	// workload 也拿到一条 EXPOSED_INGRESS peers=[0.0.0.0/0]」（design review
+	// C1，2026-08-28）：Baseline 描述的是 Service 声明的暴露范围，不是
+	// namespace 的整体事实。
+	Subject map[string]string `json:"-"`
 }
 
 // NewRule 构造一条 Baseline 规则，拒绝没有推导依据的规则。

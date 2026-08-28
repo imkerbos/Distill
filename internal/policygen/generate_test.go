@@ -15,6 +15,7 @@ import (
 	"github.com/imkerbos/Distill/internal/policygen"
 	"github.com/imkerbos/Distill/internal/replay"
 	"github.com/imkerbos/Distill/internal/risk"
+	"github.com/imkerbos/Distill/internal/snapshot"
 )
 
 // observe 用真实 fixture 数据与真实求值引擎构造观测集，
@@ -965,5 +966,111 @@ func TestSplitPoliciesCarryEveryRule(t *testing.T) {
 	if gotIngress != wantIngress || gotEgress != wantEgress {
 		t.Errorf("拆分后规则条数 ingress=%d egress=%d，拆分前 ingress=%d egress=%d",
 			gotIngress, gotEgress, wantIngress, wantEgress)
+	}
+}
+
+// --- Fix round 1 (design review 2026-08-28) ---
+
+// C1: EXPOSED_INGRESS 只挂给 Service selector 实际选中的那个 workload，
+// 不广播给整个 namespace。之前的实现把 Baseline 无条件追加给 namespace
+// 里的每个 workload——那条规则对既有五类（DNS、control plane 等）是对的，
+// 因为它们本来就是 namespace 级的基础设施事实，但对 EXPOSED_INGRESS 是错的：
+// shop/worker 没有任何暴露对象，却因为同 namespace 里的 shop/edge 有一个
+// LoadBalancer Service，也拿到了一条 EXPOSED_INGRESS peers=[0.0.0.0/0]
+// enabled=true（design review C1，2026-08-28，复现于真实生成结果）。
+func TestExposedIngressBaselineOnlyAttachesToTheExposedWorkload(t *testing.T) {
+	pods := []replay.PodRef{
+		{ClusterID: "c1", Namespace: "shop", Name: "worker-1", IP: "10.4.0.1",
+			Labels: map[string]string{"app": "worker"}},
+		{ClusterID: "c1", Namespace: "shop", Name: "edge-1", IP: "10.4.0.2",
+			Labels: map[string]string{"app": "edge"}},
+	}
+	assets := snapshot.Assets{
+		ClusterID: "c1",
+		Services: []snapshot.Service{{
+			ClusterID: "c1", Namespace: "shop", Name: "edge-lb", Type: "LoadBalancer",
+			Selector: map[string]string{"app": "edge"},
+			Ports: []snapshot.ServicePort{
+				{Name: "https", Port: 443, TargetPort: 443, Protocol: "TCP"},
+			},
+			LoadBalancerIngressIPs: []string{"34.150.1.177"},
+		}},
+	}
+	res := policygen.Generate(policygen.Input{ClusterID: "c1", Pods: pods, Assets: assets})
+
+	kindsFor := func(workload string) []baseline.Kind {
+		var kinds []baseline.Kind
+		for _, p := range res.Policies {
+			if p.Namespace != "shop" || p.Workload != workload {
+				continue
+			}
+			for _, r := range p.Rules {
+				if r.Baseline != nil {
+					kinds = append(kinds, *r.Baseline)
+				}
+			}
+		}
+		return kinds
+	}
+
+	for _, k := range kindsFor("worker") {
+		if k == baseline.KindExposedIngress {
+			t.Fatalf("shop/worker 没有暴露对象，却拿到了 EXPOSED_INGRESS: %v", kindsFor("worker"))
+		}
+	}
+	var edgeHasIt bool
+	for _, k := range kindsFor("edge") {
+		if k == baseline.KindExposedIngress {
+			edgeHasIt = true
+		}
+	}
+	if !edgeHasIt {
+		t.Error("shop/edge 是真正被 LoadBalancer 暴露的 workload，却没拿到 EXPOSED_INGRESS")
+	}
+}
+
+// I9（spec §3.6）：EXPOSED_INGRESS 命中风险端口清单时，候选规则要带上
+// Risk 标注,且保持 Enabled——它描述的是集群已经在暴露的东西，不生成等于
+// 切断现有流量；标注只是让它在界面上跟普通放行区分开。
+// istio-ingressgateway-inner 暴露 6379（Redis）正是这个真实形态。
+func TestExposedIngressRiskyPortIsAnnotatedButStillEnabled(t *testing.T) {
+	pods := []replay.PodRef{
+		{ClusterID: "c1", Namespace: "istio-system", Name: "inner-1", IP: "10.4.0.5",
+			Labels: map[string]string{"app": "istio-ingressgateway-inner"}},
+	}
+	assets := snapshot.Assets{
+		ClusterID: "c1",
+		Services: []snapshot.Service{{
+			ClusterID: "c1", Namespace: "istio-system", Name: "istio-ingressgateway-inner",
+			Type:     "LoadBalancer",
+			Selector: map[string]string{"app": "istio-ingressgateway-inner"},
+			Ports: []snapshot.ServicePort{
+				{Name: "redis", Port: 6379, TargetPort: 6379, Protocol: "TCP"},
+			},
+			LoadBalancerIngressIPs: []string{"10.170.48.55"},
+		}},
+		Registry: snapshot.ClusterRegistry{ClusterID: "c1", NodeCIDR: "10.170.48.0/24"},
+	}
+	res := policygen.Generate(policygen.Input{ClusterID: "c1", Pods: pods, Assets: assets})
+
+	var found *policygen.Rule
+	for _, p := range res.Policies {
+		if p.Namespace != "istio-system" || p.Workload != "istio-ingressgateway-inner" {
+			continue
+		}
+		for i, r := range p.Rules {
+			if r.Baseline != nil && *r.Baseline == baseline.KindExposedIngress {
+				found = &p.Rules[i]
+			}
+		}
+	}
+	if found == nil {
+		t.Fatal("istio-system/istio-ingressgateway-inner 没有生成 EXPOSED_INGRESS 规则")
+	}
+	if found.Risk == nil || found.Risk.Category != risk.Database {
+		t.Errorf("Risk = %+v，want 命中 Redis(6379)/DATABASE", found.Risk)
+	}
+	if !found.Enabled {
+		t.Error("风险端口的暴露规则被禁用了——它描述的是现状，禁用会切断真实流量")
 	}
 }
