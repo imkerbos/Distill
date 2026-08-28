@@ -142,3 +142,65 @@ func TestExposureWideningSurvivesNamespaceFold(t *testing.T) {
 			folded.ExposureWidenings[0], res.ExposureWidenings[0])
 	}
 }
+
+// mixedLabelKeyZookeeperPods 是 Helm 迁移中期的形态：三个 Pod 还在用旧的
+// app 标签，一个 Pod 已经迁移到 app.kubernetes.io/name（resolveWinningKeys
+// 判定的赢家键，优先级更高）。这不是构造出来的边界情况——
+// resolveWinningKeys 的文档注释原话就是这个场景（滚动更新期间新旧
+// ReplicaSet 各用一套标签）。
+func mixedLabelKeyZookeeperPods() []replay.PodRef {
+	return []replay.PodRef{
+		{ClusterID: "c1", Namespace: "devops", Name: "zookeeper-0", IP: "10.4.3.1",
+			Labels: map[string]string{"app": "zookeeper"}},
+		{ClusterID: "c1", Namespace: "devops", Name: "zookeeper-1", IP: "10.4.3.2",
+			Labels: map[string]string{"app": "zookeeper"}},
+		{ClusterID: "c1", Namespace: "devops", Name: "zookeeper-2", IP: "10.4.3.3",
+			Labels: map[string]string{"app": "zookeeper"}},
+		{ClusterID: "c1", Namespace: "devops", Name: "zookeeper-3", IP: "10.4.3.4",
+			Labels: map[string]string{"app.kubernetes.io/name": "zookeeper"}},
+	}
+}
+
+// zkLegacyKeyLBService 是一个还没跟上迁移的 LoadBalancer：它的 selector
+// 仍然用旧的 app 键，而 resolveWinningKeys 已经把这个 workload 的赢家键
+// 判给了 app.kubernetes.io/name（因为至少一个 Pod 已经迁移、且优先级更高）。
+// selector 键与 podSelector 实际会用的键因此不是同一个。
+func zkLegacyKeyLBService() snapshot.Service {
+	return snapshot.Service{
+		ClusterID: "c1", Namespace: "devops", Name: "zk-legacy-lb", Type: "LoadBalancer",
+		Selector: map[string]string{"app": "zookeeper"},
+		Ports: []snapshot.ServicePort{
+			{Name: "client", Port: 2181, TargetPort: 2181, Protocol: "TCP"},
+		},
+		LoadBalancerIngressIPs: []string{"34.150.1.179"},
+	}
+}
+
+// TI1（design review 2026-08-28）：Service selector 的键与 podSelector 实际
+// 会用的赢家键不是同一个键时，ExtraPods 不能算出负数。
+//
+// 早前的实现分别数了两遍——一遍按 Service selector 的字面键扫全体 Pod，
+// 一遍按赢家键扫全体 Pod——再相减。这里 selector 命中的是三个还没迁移的
+// 旧标签 Pod（SelectedPods=3），而赢家键只命中一个已迁移的 Pod
+// （WorkloadPods=1），相减得到 -2：一个比不报这个字段更糟的读数，因为它
+// 看起来是权威结论。
+//
+// 正确的问法是"podSelector 真正覆盖的那一批里，Service 没点到的有几个"——
+// 这里 podSelector 只覆盖 zookeeper-3（唯一命中赢家键的 Pod），而它并不
+// 满足 Service 那条还停留在旧键上的 selector，所以 SelectedPods=0、
+// WorkloadPods=1、ExtraPods=1，不可能是负数。
+func TestExposureWideningStaysNonNegativeUnderMixedLabelKeys(t *testing.T) {
+	res := generateWith(t, mixedLabelKeyZookeeperPods(), zkLegacyKeyLBService())
+
+	if len(res.ExposureWidenings) != 1 {
+		t.Fatalf("报了 %d 条放宽，want 1", len(res.ExposureWidenings))
+	}
+	w := res.ExposureWidenings[0]
+	if w.ExtraPods < 0 {
+		t.Fatalf("ExtraPods = %d，负数是一个比不报这个字段更糟的读数", w.ExtraPods)
+	}
+	if w.SelectedPods != 0 || w.WorkloadPods != 1 || w.ExtraPods != 1 {
+		t.Errorf("放宽 = 选中 %d / 共 %d / 多出 %d，want 0/1/1",
+			w.SelectedPods, w.WorkloadPods, w.ExtraPods)
+	}
+}

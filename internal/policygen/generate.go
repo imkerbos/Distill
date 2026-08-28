@@ -525,30 +525,44 @@ func serviceNameOf(br baseline.Rule) string {
 // exposureWideningFor 数出一条已挂上 workload 的暴露型规则，在 Service
 // selector 与 workload podSelector 之间放宽了多少个 Pod。
 //
-// 两个计数都直接扫 Input.Pods，不复用 workloads 名册：那份名册只按
-// (namespace, workload, 归属键) 记是否存在，不记数量，答不出"选中了几个"
-// 这个问题。Service selector 可能比归属键精确得多（StatefulSet 的
-// statefulset.kubernetes.io/pod-name），而候选策略的 podSelector 只用
-// 归属键一个键——两次计数之间的落差正是这条规则要报的东西。
+// **SelectedPods 只在 WorkloadPods 的集合内部数，不是两个独立算出来的计数
+// 相减。** winKey——生成出来的 podSelector 实际会用的键——与 Service
+// selector 里 resolveWorkloadLabel 解出来的键可以是两个不同的键
+// （resolveWorkloadLabel(br.Subject) 在上面那一行就把解出来的键丢了，只留
+// 取值；调用方传进来的 labelKey 是 winners 另算出来的、这个 workload 在
+// 整个 namespace 里当前的赢家键，见 resolveWinningKeys 那条 Helm 迁移期两
+// 标签并存的注释）。若各自独立数一遍 selector 命中与 winKey 命中再相减，
+// 一批还没迁移到赢家键、Service selector 却仍在用旧键选中的 Pod
+// 会被算进"Service 选中了"却算不进"workload 覆盖了"，ExtraPods 相减后
+// 变成负数——一个比无这个字段更糟的读数，因为它看起来像权威结论
+// （design review TI1，2026-08-28）。
+//
+// 因此先圈定 podSelector 真正会覆盖的那一批（Labels[labelKey] == workload），
+// **只在这批里再数一遍**有多少同时满足 Service 的完整 selector。
+// ExtraPods = WorkloadPods − SelectedPods 从结构上就不可能是负数：
+// SelectedPods 天生是 WorkloadPods 的子集，不是另一次独立扫描的结果。
 func exposureWideningFor(
 	pods []replay.PodRef, clusterID, namespace, service, workload, labelKey string,
 	selector map[string]string,
 ) ExposureWidening {
-	selected, all := 0, 0
+	covered, selected := 0, 0
 	for _, p := range pods {
 		if p.ClusterID != clusterID || p.Namespace != namespace {
 			continue
 		}
-		if p.Labels[labelKey] == workload {
-			all++
+		if p.Labels[labelKey] != workload {
+			// 不在 podSelector 的命中范围内——这条规则下发后根本不会覆盖
+			// 它，不计入分母，也不该被数进分子。
+			continue
 		}
+		covered++
 		if labelsMatch(p.Labels, selector) {
 			selected++
 		}
 	}
 	return ExposureWidening{
 		Namespace: namespace, Service: service, Workload: workload,
-		SelectedPods: selected, WorkloadPods: all, ExtraPods: all - selected,
+		SelectedPods: selected, WorkloadPods: covered, ExtraPods: covered - selected,
 	}
 }
 
