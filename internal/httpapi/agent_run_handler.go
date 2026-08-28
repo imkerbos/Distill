@@ -108,6 +108,33 @@ type agentAdminPolicyPayload struct {
 	Manifest      string `json:"manifest"`
 }
 
+// agentForeignScopePayload 是一条平台**不解释**的策略所覆盖的主体范围。
+//
+// 收下它而不是让平台自己去探：agent 跑在被管集群里，是唯一看得见那一刻的人。
+// 不收的后果不是"少一份范围"，是 foreign_scopes_complete 恒为零值 ——
+// 而零值即"范围不完整"，判定于是整片降级，每条观测被丢成 DEGRADED_EVIDENCE，
+// 这个集群一条学到的规则都产不出（design review RI2，2026-08-28）。
+type agentForeignScopePayload struct {
+	Namespace   string            `json:"namespace,omitempty"`
+	MatchLabels map[string]string `json:"matchLabels,omitempty"`
+}
+
+// agentFailurePayload 是一类资源的采集失败记录。
+//
+// **必须收下。** 它落进 collection_run_failure，而 collectstore 的
+// `cameBack = enumerated && !failed` 读的正是那张表：不收，那张表在推送模式
+// 下恒空、failed 恒为 false，于是"Service 列表被 403 拒了"被读成"我们看过
+// 了，这个集群就是没有 Service"。顺着这条读法，DNS / LB_HEALTH_CHECK /
+// EXPOSED_INGRESS / METRICS_SCRAPE 会被判成不适用、掉出 Missing()，
+// Enforcing 门禁于是放行 —— 一次采集失败变成一次放行，方向恰好是错的那一侧
+// （design review SC1，2026-08-28）。
+type agentFailurePayload struct {
+	// Resource 与 Reason 都是封闭枚举，在 decodeAgentRun 里校验。
+	Resource string `json:"resource"`
+	Reason   string `json:"reason"`
+	Detail   string `json:"detail,omitempty"`
+}
+
 type agentObservationPayload struct {
 	Namespaces []agentNamespacePayload `json:"namespaces,omitempty"`
 	Pods       []agentPodPayload       `json:"pods,omitempty"`
@@ -128,6 +155,12 @@ type agentObservationPayload struct {
 	// 是唯一看见过那一刻的人。归属判定产生的告警由平台在 Classify 里另外
 	// 追加，两批合在一起才是这次运行的全貌。
 	Warnings []agentWarningPayload `json:"warnings,omitempty"`
+	// ForeignScopes 与 ForeignScopesComplete 见 agentForeignScopePayload。
+	//
+	// complete 缺席读成 false，而 false 是保守的那一侧（整片降级）——
+	// 一个还不会上报这一项的旧 agent 因此不会拿到它没证明过的置信度。
+	ForeignScopes         []agentForeignScopePayload `json:"foreignScopes,omitempty"`
+	ForeignScopesComplete bool                       `json:"foreignScopesComplete,omitempty"`
 }
 
 // 以下各类的字段与 internal/snapshot 一一对应，唯独**一律没有 ClusterID**：
@@ -222,6 +255,8 @@ type agentRunPayload struct {
 	FinishedAt  time.Time               `json:"finishedAt"`
 	ObservedAt  time.Time               `json:"observedAt"`
 	Observation agentObservationPayload `json:"observation"`
+	// Failures 是这一轮各类资源的采集失败记录。见 agentFailurePayload。
+	Failures []agentFailurePayload `json:"failures,omitempty"`
 }
 
 // handleAgentCollectionRun 收下一次由集群自己推上来的资产采集结果。
@@ -383,12 +418,55 @@ func decodeAgentRun(
 		// **一轮没能开始的运行不可能带着资产。** 两者同时出现说明报文自相
 		// 矛盾，而收下它会让一份「失败但有数据」的运行进库 —— 之后没有
 		// 任何一屏知道该信哪一半。
-		if len(payload.Observation.Pods) != 0 || payload.Status != string(snapshot.RunFailed) {
+		//
+		// 失败记录也一样：ErrorReason 说的是"一个资源都没被尝试过"，
+		// 而一条失败记录说的是"这一类尝试了、没成"（snapshot.Run 的注释）。
+		// 两者同时出现，报文自己在说两句互相否定的话。
+		if len(payload.Observation.Pods) != 0 || len(payload.Failures) != 0 ||
+			payload.Status != string(snapshot.RunFailed) {
+			response.WriteBusiness(w, response.CodeInvalidParam)
+			return agentRunPayload{}, false
+		}
+	}
+	// 失败记录的两个字段都落进 collection_run_failure 的 VARCHAR 列，而那两
+	// 列的封闭性只由 Go 侧保证（CLAUDE.md §3）—— 取值来自别人集群里的进程。
+	// 放一个不认识的字符串进去，统计口径上就再也看不出有一类原因被漏登记了。
+	for _, f := range payload.Failures {
+		if !validResourceKind(f.Resource) || !validFailureReason(f.Reason) {
+			d.Logger.Warn("an agent reported a failure outside the closed enums",
+				"cluster", clusterID, "request_id", RequestIDFrom(r.Context()))
 			response.WriteBusiness(w, response.CodeInvalidParam)
 			return agentRunPayload{}, false
 		}
 	}
 	return payload, true
+}
+
+// validResourceKind 判断上报的资源类型是否在封闭枚举内。
+//
+// 用显式 switch 而非查表，理由同 validRunStatus：新增取值却忘了加进这里，
+// switch 让这处遗漏在 review 时是看得见的一行。
+func validResourceKind(s string) bool {
+	switch snapshot.ResourceKind(s) {
+	case snapshot.ResourceNamespace, snapshot.ResourcePod, snapshot.ResourceNode,
+		snapshot.ResourceReplicaSet, snapshot.ResourceService,
+		snapshot.ResourceEndpointSlice, snapshot.ResourceNetworkPolicy,
+		snapshot.ResourceIngress, snapshot.ResourceAdminNetworkPolicy:
+		return true
+	default:
+		return false
+	}
+}
+
+// validFailureReason 判断上报的失败原因是否在封闭枚举内。
+func validFailureReason(s string) bool {
+	switch snapshot.FailureReason(s) {
+	case snapshot.FailureForbidden, snapshot.FailureNotFound, snapshot.FailureTimeout,
+		snapshot.FailureUnavailable, snapshot.FailureOther:
+		return true
+	default:
+		return false
+	}
 }
 
 // toRun 把上报的报文变成一次采集运行。
@@ -518,10 +596,28 @@ func (p agentRunPayload) toRun(clusterID string) snapshot.Run {
 		})
 	}
 
+	foreignScopes := make([]snapshot.ForeignScope, 0, len(p.Observation.ForeignScopes))
+	for _, in := range p.Observation.ForeignScopes {
+		foreignScopes = append(foreignScopes, snapshot.ForeignScope{
+			Namespace:   in.Namespace,
+			MatchLabels: in.MatchLabels,
+		})
+	}
+
+	failures := make([]snapshot.Failure, 0, len(p.Failures))
+	for _, in := range p.Failures {
+		failures = append(failures, snapshot.Failure{
+			Resource: snapshot.ResourceKind(in.Resource),
+			Reason:   snapshot.FailureReason(in.Reason),
+			Detail:   in.Detail,
+		})
+	}
+
 	return snapshot.Run{
 		Status:     snapshot.RunStatus(p.Status),
 		StartedAt:  p.StartedAt,
 		FinishedAt: p.FinishedAt,
+		Failures:   failures,
 		Observation: snapshot.Observation{
 			ClusterID:     clusterID,
 			RunID:         p.RunID,
@@ -535,6 +631,9 @@ func (p agentRunPayload) toRun(clusterID string) snapshot.Run {
 			Gateways:      gateways,
 			AdminPolicies: adminPolicies,
 			Warnings:      warnings,
+
+			ForeignScopes:         foreignScopes,
+			ForeignScopesComplete: p.Observation.ForeignScopesComplete,
 		},
 	}
 }

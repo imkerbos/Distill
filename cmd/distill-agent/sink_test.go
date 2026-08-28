@@ -383,6 +383,111 @@ func TestSinkEncodesTheExposureFields(t *testing.T) {
 	}
 }
 
+// TestSinkEncodesTheCollectionFailures 是往返测试的发送侧一半：证明一次
+// 「Service 被 403 拒了」真的以失败记录的形态过线。
+//
+// 不过线的后果不是"少一条记录"，是平台把它读成一句相反的话：
+// collection_run_failure 恒空 → collectstore 的 cameBack 恒为真 →
+// 「我们看过了，这个集群就是没有 Service」→ EXPOSED_INGRESS 判成不适用 →
+// Enforcing 门禁放行（design review SC1，2026-08-28）。
+func TestSinkEncodesTheCollectionFailures(t *testing.T) {
+	var got captured
+	srv := stubPlatform(t, http.StatusOK, okReply, &got)
+	defer srv.Close()
+
+	run := sampleRunForPush()
+	run.Status = snapshot.RunPartial
+	run.Failures = []snapshot.Failure{{
+		Resource: snapshot.ResourceService,
+		Reason:   snapshot.FailureForbidden,
+		Detail:   "services is forbidden",
+	}}
+
+	if err := newHTTPSink(srv.URL, "dstl_x_y").Save(context.Background(), run); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	fails, _ := got.body["failures"].([]any)
+	if len(fails) != 1 {
+		t.Fatalf("failures = %v, want one record —— 一次被 403 拒掉的枚举就此"+
+			"读成「集群里就是没有」: %s", got.body["failures"], got.rawGot)
+	}
+	f, _ := fails[0].(map[string]any)
+	if f["resource"] != "SERVICE" || f["reason"] != "FORBIDDEN" {
+		t.Errorf("failures[0] = %v, want {resource:SERVICE reason:FORBIDDEN}: %s", f, got.rawGot)
+	}
+	if f["detail"] != "services is forbidden" {
+		t.Errorf("failure detail = %v —— 排查的人只有这一句话能看: %s", f["detail"], got.rawGot)
+	}
+}
+
+// TestSinkEncodesTheForeignPlaneScopes 是往返测试的发送侧一半：证明第二
+// 策略平面的覆盖范围与完整度标志真的过线。
+//
+// 不过线时接收端拿到的是零值，而零值即"范围不完整" —— 判定整片降级，每条
+// 观测被丢成 DEGRADED_EVIDENCE，这个集群一条学到的规则都产不出
+// （design review RI2，2026-08-28）。
+func TestSinkEncodesTheForeignPlaneScopes(t *testing.T) {
+	var got captured
+	srv := stubPlatform(t, http.StatusOK, okReply, &got)
+	defer srv.Close()
+
+	run := sampleRunForPush()
+	run.Observation.ForeignScopes = []snapshot.ForeignScope{
+		{Namespace: "shop", MatchLabels: map[string]string{"app": "web"}},
+	}
+	run.Observation.ForeignScopesComplete = true
+
+	if err := newHTTPSink(srv.URL, "dstl_x_y").Save(context.Background(), run); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	obs, ok := got.body["observation"].(map[string]any)
+	if !ok {
+		t.Fatalf("the payload has no observation: %s", got.rawGot)
+	}
+	// **完整度标志与范围要一起看。** 只发范围、丢掉标志，接收端读到的是
+	// "范围不完整"，那份范围于是一点用都没有。
+	if obs["foreignScopesComplete"] != true {
+		t.Errorf("foreignScopesComplete = %v, want true —— 平台会据此整片降级"+
+			"这个集群的判定: %s", obs["foreignScopesComplete"], got.rawGot)
+	}
+	scopes, _ := obs["foreignScopes"].([]any)
+	if len(scopes) != 1 {
+		t.Fatalf("foreignScopes = %v, want one record: %s", obs["foreignScopes"], got.rawGot)
+	}
+	sc, _ := scopes[0].(map[string]any)
+	labels, _ := sc["matchLabels"].(map[string]any)
+	if sc["namespace"] != "shop" || labels["app"] != "web" {
+		t.Errorf("foreignScopes[0] = %v, want {namespace:shop matchLabels:{app:web}}: %s",
+			sc, got.rawGot)
+	}
+}
+
+// 完整度为 false 时那个键**仍然要在报文里**：false 是一个结论
+// （"覆盖范围不完整，判定要整片降级"），不是"这一项没填"。让它随
+// omitempty 消失，等于把一句平台必须读到的话交给接收端的零值去猜。
+func TestSinkAlwaysStatesWhetherTheForeignScopesAreComplete(t *testing.T) {
+	var got captured
+	srv := stubPlatform(t, http.StatusOK, okReply, &got)
+	defer srv.Close()
+
+	// 零值：agent 当前不探测第二平面，这才是推送模式的常态形态。
+	if err := newHTTPSink(srv.URL, "dstl_x_y").Save(context.Background(), sampleRunForPush()); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	obs, _ := got.body["observation"].(map[string]any)
+	v, present := obs["foreignScopesComplete"]
+	if !present {
+		t.Fatalf("报文里没有 foreignScopesComplete 这个键 —— 它的 false 是一个结论，"+
+			"不是「没填」: %s", got.rawGot)
+	}
+	if v != false {
+		t.Errorf("foreignScopesComplete = %v, want false: %s", v, got.rawGot)
+	}
+}
+
 func TestSinkTranslatesTheCodesAnOperatorCanActOn(t *testing.T) {
 	// 这个进程的日志是运维在被管集群里唯一看得到的东西。「code 20008」
 	// 需要他去查平台才知道是什么意思，而那时他手上只有一个失败的 Pod。

@@ -272,6 +272,34 @@ type agentAdminPolicyPayload struct {
 	Manifest      string `json:"manifest"`
 }
 
+// agentForeignScopePayload 是一条平台不解释的策略所覆盖的主体范围。
+type agentForeignScopePayload struct {
+	// Namespace 为空表示集群级。
+	Namespace string `json:"namespace,omitempty"`
+	// MatchLabels 为空表示选中该范围内全部主体。
+	MatchLabels map[string]string `json:"matchLabels,omitempty"`
+}
+
+// agentFailurePayload 是一类资源的采集失败记录。
+//
+// **必须上报。** 平台用它写 collection_run_failure，而
+// collectstore/assessed.go 的 `cameBack = enumerated && !failed` 正是读那张
+// 表：不报，那张表在推送模式下恒空，failed 恒为 false，于是"Service 列表
+// 被 403 拒了"被读成"我们看过了，这个集群就是没有 Service"。顺着这条读法，
+// EXPOSED_INGRESS 之类的 Baseline 会被判成不适用、掉出 Missing()，
+// Enforcing 门禁于是放行（design review SC1，2026-08-28）。
+type agentFailurePayload struct {
+	Resource string `json:"resource"`
+	Reason   string `json:"reason"`
+	// Detail 是 apiserver 原样返回的补充说明，仅供操作者阅读、不参与统计。
+	//
+	// 上报它而不是只报封闭枚举：pull 模式下它就落进 collection_run_failure
+	// 供人排查，两条采集路径在这一列上不该有区别。它不进 agent 自己的日志
+	// （那份日志的终点是被管集群，规范 §19、§22），但走 TLS 交给平台与
+	// pull 模式直接落库是同一件事。
+	Detail string `json:"detail,omitempty"`
+}
+
 // agentObservationPayload 是一次采集观测到的全部资产。
 //
 // **每一类都要带上。** 少带一类不是「那一类没有数据」，而是平台落库时为它
@@ -294,6 +322,15 @@ type agentObservationPayload struct {
 	// 的连接判成放行。
 	AdminPolicies []agentAdminPolicyPayload `json:"adminPolicies,omitempty"`
 	Warnings      []agentWarningPayload     `json:"warnings,omitempty"`
+	// ForeignScopes 是平台**不解释**的那些策略平面覆盖到的主体范围。
+	ForeignScopes []agentForeignScopePayload `json:"foreignScopes,omitempty"`
+	// ForeignScopesComplete 表示上面那份范围是完整的。
+	//
+	// **不带 omitempty**：false 在这里是一个结论（"覆盖范围不完整，判定要
+	// 整片降级"），不是"这一项没填"。让它在报文里消失，等于把一句平台必须
+	// 读到的话交给接收端的零值去猜 —— 方向恰好一致纯属运气，而下一次改零值
+	// 语义的人看不到这里。
+	ForeignScopesComplete bool `json:"foreignScopesComplete"`
 }
 
 // agentRunPayload 是一次上报的报文，形状与平台侧一一对应。
@@ -306,6 +343,8 @@ type agentRunPayload struct {
 	FinishedAt    time.Time               `json:"finishedAt"`
 	ObservedAt    time.Time               `json:"observedAt"`
 	Observation   agentObservationPayload `json:"observation"`
+	// Failures 是这一轮里各类资源的采集失败记录。见 agentFailurePayload。
+	Failures []agentFailurePayload `json:"failures,omitempty"`
 }
 
 // Save 上报一次采集运行。
@@ -317,6 +356,18 @@ func (s *httpSink) Save(ctx context.Context, run snapshot.Run) error {
 		StartedAt:     run.StartedAt,
 		FinishedAt:    run.FinishedAt,
 		ObservedAt:    run.Observation.ObservedAt,
+	}
+	payload.Observation.ForeignScopesComplete = run.Observation.ForeignScopesComplete
+	for _, fs := range run.Observation.ForeignScopes {
+		payload.Observation.ForeignScopes = append(payload.Observation.ForeignScopes,
+			agentForeignScopePayload{Namespace: fs.Namespace, MatchLabels: fs.MatchLabels})
+	}
+	for _, f := range run.Failures {
+		payload.Failures = append(payload.Failures, agentFailurePayload{
+			Resource: string(f.Resource),
+			Reason:   string(f.Reason),
+			Detail:   f.Detail,
+		})
 	}
 	for _, n := range run.Observation.Namespaces {
 		payload.Observation.Namespaces = append(payload.Observation.Namespaces, agentNamespacePayload{
