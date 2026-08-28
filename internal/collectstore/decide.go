@@ -71,6 +71,13 @@ type traffic struct {
 	// 取自锚点而不是最新一次采集，理由与 pods/policies/namespaces 相同
 	// （CLAUDE.md §4）：一条历史连接要用当时的入口地址集合解释。
 	lbIngressIPs map[string]bool
+	// nodeIPs 是锚点那一刻各节点的内部地址。
+	//
+	// 与 lbIngressIPs 同一个用途：登记的 node 网段里有一批地址根本不是这个
+	// 集群的东西，按网段判会把它们当成"集群内解不出主体"，也就是一个并不
+	// 存在的快照缺口。有了实际节点清单，落在 node 网段但不在清单里的地址
+	// 就是外部对端。
+	nodeIPs map[string]bool
 }
 
 // readTraffic 解析一段窗口的事实，并把做判定要用的资产一并装好。
@@ -216,6 +223,11 @@ func (r *Reader) trafficOf(
 	t.registered = c
 	t.fleet = fleet
 	t.lbIngressIPs = lbIngressIPsOf(services)
+	nodeIPs, err := r.readNodeIPsAt(ctx, d)
+	if err != nil {
+		return traffic{}, err
+	}
+	t.nodeIPs = nodeIPs
 	return t, nil
 }
 
@@ -363,8 +375,29 @@ func (t traffic) unknownReasonFor(a attributed) replay.UnknownReason {
 	resolved := func(o identity.Outcome) bool {
 		return o == identity.OutcomeResolved || o == identity.OutcomeHostNetwork
 	}
+	// 落在登记 node 网段、却不在实际节点清单里的地址不是缺口：它是同子网里
+	// 的另一台机器（数据库、跳板机、别的集群的节点），本来就没有 Pod 主体。
+	// 把它算成缺口，运维会照着 SNAPSHOT_MISSING 去查"哪次采集漏了快照"，
+	// 而根本没有这回事——与 lbIngressIPs 那一条是同一形状的错。
+	//
+	// 只在 node 网段内这么判：Pod 网段里解不出主体是真的缺口，那一支不能动。
+	notThisClustersNode := func(ip string) bool {
+		// **清单为空时退回按网段判。** 空是"我不知道哪些是节点"，不是
+		// "一个节点都没有"——读不到节点、或这一刻还没采到，据此把整个 node
+		// 网段判成外部，等于用一次读取失败换掉一整类真实缺口的可见性。
+		// 宁可多报缺口也不许少报。
+		if len(t.nodeIPs) == 0 {
+			return false
+		}
+		if ip == "" || t.nodeIPs[ip] {
+			return false
+		}
+		c, err := t.fleet.Classify(ip)
+		return err == nil && c.Scope == cluster.ScopeNode
+	}
 	inClusterGap := func(outcome identity.Outcome, ip string) bool {
-		return !resolved(outcome) && !t.externalAddress(ip) && !t.lbIngressIPs[ip]
+		return !resolved(outcome) && !t.externalAddress(ip) &&
+			!t.lbIngressIPs[ip] && !notThisClustersNode(ip)
 	}
 	// 解出来了的那一端不算，哪怕它确实是个 LB 入口地址：这一支说的是
 	// "这一端没有主体可解"，而它已经解出来了。
