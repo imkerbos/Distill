@@ -326,6 +326,63 @@ func TestSinkPushesEveryResourceKind(t *testing.T) {
 	}
 }
 
+// TestSinkEncodesTheExposureFields 是往返测试的发送侧一半：证明
+// LoadBalancerIngressIPs / LoadBalancerSourceRanges / NamedPorts 真的被
+// Save() 编码进了报文，而不是加了 snapshot 字段、加了 payload 字段，却漏了
+// 中间那一步赋值——那正是本次要关的口子：agent 采到了，报文却把它们丢在
+// 半路，PUSH 模式下每一个 LoadBalancer 都会显得没有入口地址。
+func TestSinkEncodesTheExposureFields(t *testing.T) {
+	var got captured
+	srv := stubPlatform(t, http.StatusOK, okReply, &got)
+	defer srv.Close()
+
+	run := sampleRunForPush()
+	run.Observation.Services = []snapshot.Service{{
+		Namespace:                "shop",
+		Name:                     "web",
+		Type:                     "LoadBalancer",
+		LoadBalancerIngressIPs:   []string{"203.0.113.9"},
+		LoadBalancerSourceRanges: []string{"10.0.0.0/8"},
+	}}
+	run.Observation.Pods[0].NamedPorts = []snapshot.NamedPort{{Name: "http", Port: 8080, Protocol: "TCP"}}
+
+	if err := newHTTPSink(srv.URL, "dstl_x_y").Save(context.Background(), run); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	obs, ok := got.body["observation"].(map[string]any)
+	if !ok {
+		t.Fatalf("the payload has no observation: %s", got.rawGot)
+	}
+	svcs, _ := obs["services"].([]any)
+	if len(svcs) != 1 {
+		t.Fatalf("services = %v, want one record: %s", obs["services"], got.rawGot)
+	}
+	svc, _ := svcs[0].(map[string]any)
+	if ips, _ := svc["loadBalancerIngressIps"].([]any); len(ips) != 1 || ips[0] != "203.0.113.9" {
+		t.Errorf("loadBalancerIngressIps = %v, want [203.0.113.9] — 入口地址丢在了半路，"+
+			"这个 Service 在推送式接入下会永远显得没有 LB 入口: %s", svc["loadBalancerIngressIps"], got.rawGot)
+	}
+	if ranges, _ := svc["loadBalancerSourceRanges"].([]any); len(ranges) != 1 || ranges[0] != "10.0.0.0/8" {
+		t.Errorf("loadBalancerSourceRanges = %v, want [10.0.0.0/8]: %s",
+			svc["loadBalancerSourceRanges"], got.rawGot)
+	}
+
+	pods, _ := obs["pods"].([]any)
+	if len(pods) != 1 {
+		t.Fatalf("pods = %v, want one record: %s", obs["pods"], got.rawGot)
+	}
+	pod, _ := pods[0].(map[string]any)
+	ports, _ := pod["namedPorts"].([]any)
+	if len(ports) != 1 {
+		t.Fatalf("namedPorts = %v, want one entry: %s", pod["namedPorts"], got.rawGot)
+	}
+	np, _ := ports[0].(map[string]any)
+	if np["name"] != "http" || np["port"] != float64(8080) || np["protocol"] != "TCP" {
+		t.Errorf("namedPorts[0] = %v, want {name:http port:8080 protocol:TCP}: %s", np, got.rawGot)
+	}
+}
+
 func TestSinkTranslatesTheCodesAnOperatorCanActOn(t *testing.T) {
 	// 这个进程的日志是运维在被管集群里唯一看得到的东西。「code 20008」
 	// 需要他去查平台才知道是什么意思，而那时他手上只有一个失败的 Pod。

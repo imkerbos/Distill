@@ -21,11 +21,14 @@ func fullRunBody() string {
 	                   "inMesh":true,"meshSource":"NAMESPACE_INJECTION",
 	                   "meshDetail":"istio-injection=enabled"}],
 	    "pods":[{"namespace":"shop","name":"web-1","uid":"u-1","phase":"Running",
-	             "ip":"10.128.0.5","hostNetwork":true,"nodeName":"node-a"}],
+	             "ip":"10.128.0.5","hostNetwork":true,"nodeName":"node-a",
+	             "namedPorts":[{"name":"http","port":8080,"protocol":"TCP"}]}],
 	    "nodes":[{"name":"node-a","podCidrs":["10.4.1.0/24"],"internalIps":["10.128.0.5"]}],
-	    "services":[{"namespace":"shop","name":"web","type":"ClusterIP",
+	    "services":[{"namespace":"shop","name":"web","type":"LoadBalancer",
 	                 "selector":{"app":"web"},"clusterIp":"10.8.0.7",
-	                 "ports":[{"name":"http","port":80,"targetPort":8080,"protocol":"TCP"}]}],
+	                 "ports":[{"name":"http","port":80,"targetPort":8080,"protocol":"TCP"}],
+	                 "loadBalancerIngressIps":["203.0.113.9"],
+	                 "loadBalancerSourceRanges":["10.0.0.0/8"]}],
 	    "endpoints":[{"namespace":"shop","name":"web","addresses":["10.4.0.9"],"ports":[8080]}],
 	    "policies":[{"namespace":"shop","name":"deny-all","uid":"p-1",
 	                 "manifest":"apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\n"}],
@@ -93,6 +96,19 @@ func TestIngestKeepsTheFieldsTheEvaluationLayerReads(t *testing.T) {
 	}
 	if len(obs.Services[0].Ports) != 1 || obs.Services[0].Ports[0].TargetPort != 8080 {
 		t.Errorf("service ports = %+v — 规则生成用的是 targetPort", obs.Services[0].Ports)
+	}
+	// 往返测试的接收侧一半：证明 LoadBalancer 暴露判定依据没有在解码这一步
+	// 丢掉。发送侧那一半见 cmd/distill-agent 的 TestSinkEncodesTheExposureFields。
+	if got := obs.Services[0].LoadBalancerIngressIPs; len(got) != 1 || got[0] != "203.0.113.9" {
+		t.Errorf("service loadBalancerIngressIps = %v, want [203.0.113.9] — "+
+			"这个 Service 在推送式接入下会永远显得没有 LB 入口", got)
+	}
+	if got := obs.Services[0].LoadBalancerSourceRanges; len(got) != 1 || got[0] != "10.0.0.0/8" {
+		t.Errorf("service loadBalancerSourceRanges = %v, want [10.0.0.0/8]", got)
+	}
+	if got := obs.Pods[0].NamedPorts; len(got) != 1 || got[0] != (snapshot.NamedPort{Name: "http", Port: 8080, Protocol: "TCP"}) {
+		t.Errorf("pod namedPorts = %+v, want one {http 8080 TCP} — "+
+			"命名端口规则在求值层会解不出这个端口", got)
 	}
 	if len(obs.Endpoints[0].Addresses) != 1 {
 		t.Errorf("endpoint addresses = %v — 一个没有后端的 Service 会生成指向空集的规则",

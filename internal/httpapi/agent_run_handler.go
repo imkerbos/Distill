@@ -61,19 +61,33 @@ type FleetSource func(ctx context.Context) (*cluster.Registry, error)
 // 而字段不存在，agent 就连声称一个归属的语法都没有 —— 比收下再覆盖更强：
 // 后者依赖覆盖那一步不被谁删掉。
 type agentPodPayload struct {
-	Namespace      string            `json:"namespace"`
-	Name           string            `json:"name"`
-	UID            string            `json:"uid"`
-	Phase          string            `json:"phase"`
-	IP             string            `json:"ip"`
-	Labels         map[string]string `json:"labels,omitempty"`
-	HostNetwork    bool              `json:"hostNetwork,omitempty"`
-	NodeName       string            `json:"nodeName,omitempty"`
-	ServiceAccount string            `json:"serviceAccount,omitempty"`
-	OwnerKind      string            `json:"ownerKind,omitempty"`
-	OwnerName      string            `json:"ownerName,omitempty"`
-	WorkloadKind   string            `json:"workloadKind,omitempty"`
-	WorkloadName   string            `json:"workloadName,omitempty"`
+	Namespace string            `json:"namespace"`
+	Name      string            `json:"name"`
+	UID       string            `json:"uid"`
+	Phase     string            `json:"phase"`
+	IP        string            `json:"ip"`
+	Labels    map[string]string `json:"labels,omitempty"`
+	// NamedPorts 是这个 Pod 声明的命名容器端口，供求值层解析命名端口规则
+	// （replay.resolveNamedPort 要的正是这份数据）。理由同 snapshot.Pod。
+	NamedPorts     []agentNamedPortPayload `json:"namedPorts,omitempty"`
+	HostNetwork    bool                    `json:"hostNetwork,omitempty"`
+	NodeName       string                  `json:"nodeName,omitempty"`
+	ServiceAccount string                  `json:"serviceAccount,omitempty"`
+	OwnerKind      string                  `json:"ownerKind,omitempty"`
+	OwnerName      string                  `json:"ownerName,omitempty"`
+	WorkloadKind   string                  `json:"workloadKind,omitempty"`
+	WorkloadName   string                  `json:"workloadName,omitempty"`
+}
+
+// agentNamedPortPayload 是一个命名的容器端口。
+//
+// 与 agentServicePortPayload 分开定义，即便字段形状相同：两者代表完全不同
+// 的两个 Kubernetes 对象，合并会把"改 Service 端口顺手改了 Pod 端口"这种
+// 编译期就该拦住的错误放过去。
+type agentNamedPortPayload struct {
+	Name     string `json:"name"`
+	Port     int32  `json:"port"`
+	Protocol string `json:"protocol"`
 }
 
 // agentObservationPayload 是一次采集观测到的资产。
@@ -151,6 +165,11 @@ type agentServicePayload struct {
 	Selector  map[string]string         `json:"selector,omitempty"`
 	ClusterIP string                    `json:"clusterIp,omitempty"`
 	Ports     []agentServicePortPayload `json:"ports,omitempty"`
+	// LoadBalancerIngressIPs 与 LoadBalancerSourceRanges 是判定这个 Service
+	// 面向公网还是只在 VPC 内可达的依据（design doc 2026-08-28 §2）。理由
+	// 同 snapshot.Service：不带上，这一判定在推送式接入下永远得不出结论。
+	LoadBalancerIngressIPs   []string `json:"loadBalancerIngressIps,omitempty"`
+	LoadBalancerSourceRanges []string `json:"loadBalancerSourceRanges,omitempty"`
 }
 
 type agentEndpointsPayload struct {
@@ -379,6 +398,14 @@ func decodeAgentRun(
 func (p agentRunPayload) toRun(clusterID string) snapshot.Run {
 	pods := make([]snapshot.Pod, 0, len(p.Observation.Pods))
 	for _, in := range p.Observation.Pods {
+		namedPorts := make([]snapshot.NamedPort, 0, len(in.NamedPorts))
+		for _, np := range in.NamedPorts {
+			namedPorts = append(namedPorts, snapshot.NamedPort{
+				Name:     np.Name,
+				Port:     np.Port,
+				Protocol: np.Protocol,
+			})
+		}
 		pods = append(pods, snapshot.Pod{
 			ClusterID:      clusterID,
 			Namespace:      in.Namespace,
@@ -387,6 +414,7 @@ func (p agentRunPayload) toRun(clusterID string) snapshot.Run {
 			Phase:          in.Phase,
 			IP:             in.IP,
 			Labels:         in.Labels,
+			NamedPorts:     namedPorts,
 			HostNetwork:    in.HostNetwork,
 			NodeName:       in.NodeName,
 			ServiceAccount: in.ServiceAccount,
@@ -429,13 +457,15 @@ func (p agentRunPayload) toRun(clusterID string) snapshot.Run {
 			})
 		}
 		services = append(services, snapshot.Service{
-			ClusterID: clusterID,
-			Namespace: in.Namespace,
-			Name:      in.Name,
-			Type:      in.Type,
-			Selector:  in.Selector,
-			ClusterIP: in.ClusterIP,
-			Ports:     ports,
+			ClusterID:                clusterID,
+			Namespace:                in.Namespace,
+			Name:                     in.Name,
+			Type:                     in.Type,
+			Selector:                 in.Selector,
+			ClusterIP:                in.ClusterIP,
+			Ports:                    ports,
+			LoadBalancerIngressIPs:   in.LoadBalancerIngressIPs,
+			LoadBalancerSourceRanges: in.LoadBalancerSourceRanges,
 		})
 	}
 	endpoints := make([]snapshot.Endpoints, 0, len(p.Observation.Endpoints))

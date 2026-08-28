@@ -164,19 +164,33 @@ func loadCAPool(caFile string) (*x509.CertPool, error) {
 // **没有 ipScope 字段**：归属是平台的判定（design doc §3.4），这一侧连
 // 声称它的语法都不该有。也**没有 clusterId**：归属只来自 token（§2）。
 type agentPodPayload struct {
-	Namespace      string            `json:"namespace"`
-	Name           string            `json:"name"`
-	UID            string            `json:"uid"`
-	Phase          string            `json:"phase"`
-	IP             string            `json:"ip"`
-	Labels         map[string]string `json:"labels,omitempty"`
-	HostNetwork    bool              `json:"hostNetwork,omitempty"`
-	NodeName       string            `json:"nodeName,omitempty"`
-	ServiceAccount string            `json:"serviceAccount,omitempty"`
-	OwnerKind      string            `json:"ownerKind,omitempty"`
-	OwnerName      string            `json:"ownerName,omitempty"`
-	WorkloadKind   string            `json:"workloadKind,omitempty"`
-	WorkloadName   string            `json:"workloadName,omitempty"`
+	Namespace string            `json:"namespace"`
+	Name      string            `json:"name"`
+	UID       string            `json:"uid"`
+	Phase     string            `json:"phase"`
+	IP        string            `json:"ip"`
+	Labels    map[string]string `json:"labels,omitempty"`
+	// NamedPorts 是这个 Pod 声明的命名容器端口，供求值层解析命名端口规则
+	// （replay.resolveNamedPort 要的正是这份数据）。理由同 snapshot.Pod。
+	NamedPorts     []agentNamedPortPayload `json:"namedPorts,omitempty"`
+	HostNetwork    bool                    `json:"hostNetwork,omitempty"`
+	NodeName       string                  `json:"nodeName,omitempty"`
+	ServiceAccount string                  `json:"serviceAccount,omitempty"`
+	OwnerKind      string                  `json:"ownerKind,omitempty"`
+	OwnerName      string                  `json:"ownerName,omitempty"`
+	WorkloadKind   string                  `json:"workloadKind,omitempty"`
+	WorkloadName   string                  `json:"workloadName,omitempty"`
+}
+
+// agentNamedPortPayload 是一个命名的容器端口。
+//
+// 与 agentServicePortPayload 分开定义，即便字段形状相同：两者代表完全不同
+// 的两个 Kubernetes 对象，合并会把"改 Service 端口顺手改了 Pod 端口"这种
+// 编译期就该拦住的错误放过去。
+type agentNamedPortPayload struct {
+	Name     string `json:"name"`
+	Port     int32  `json:"port"`
+	Protocol string `json:"protocol"`
 }
 
 // 以下各类与平台侧的报文结构一一对应，唯独**一律没有 ClusterID**：
@@ -211,6 +225,11 @@ type agentServicePayload struct {
 	Selector  map[string]string         `json:"selector,omitempty"`
 	ClusterIP string                    `json:"clusterIp,omitempty"`
 	Ports     []agentServicePortPayload `json:"ports,omitempty"`
+	// LoadBalancerIngressIPs 与 LoadBalancerSourceRanges 是判定这个 Service
+	// 面向公网还是只在 VPC 内可达的依据（design doc 2026-08-28 §2）。理由
+	// 同 snapshot.Service：不带上，这一判定在推送式接入下永远得不出结论。
+	LoadBalancerIngressIPs   []string `json:"loadBalancerIngressIps,omitempty"`
+	LoadBalancerSourceRanges []string `json:"loadBalancerSourceRanges,omitempty"`
 }
 
 type agentEndpointsPayload struct {
@@ -327,12 +346,14 @@ func (s *httpSink) Save(ctx context.Context, run snapshot.Run) error {
 			})
 		}
 		payload.Observation.Services = append(payload.Observation.Services, agentServicePayload{
-			Namespace: svc.Namespace,
-			Name:      svc.Name,
-			Type:      svc.Type,
-			Selector:  svc.Selector,
-			ClusterIP: svc.ClusterIP,
-			Ports:     ports,
+			Namespace:                svc.Namespace,
+			Name:                     svc.Name,
+			Type:                     svc.Type,
+			Selector:                 svc.Selector,
+			ClusterIP:                svc.ClusterIP,
+			Ports:                    ports,
+			LoadBalancerIngressIPs:   svc.LoadBalancerIngressIPs,
+			LoadBalancerSourceRanges: svc.LoadBalancerSourceRanges,
 		})
 	}
 	for _, e := range run.Observation.Endpoints {
@@ -373,6 +394,14 @@ func (s *httpSink) Save(ctx context.Context, run snapshot.Run) error {
 		})
 	}
 	for _, p := range run.Observation.Pods {
+		var namedPorts []agentNamedPortPayload
+		for _, np := range p.NamedPorts {
+			namedPorts = append(namedPorts, agentNamedPortPayload{
+				Name:     np.Name,
+				Port:     np.Port,
+				Protocol: np.Protocol,
+			})
+		}
 		payload.Observation.Pods = append(payload.Observation.Pods, agentPodPayload{
 			Namespace:      p.Namespace,
 			Name:           p.Name,
@@ -380,6 +409,7 @@ func (s *httpSink) Save(ctx context.Context, run snapshot.Run) error {
 			Phase:          p.Phase,
 			IP:             p.IP,
 			Labels:         p.Labels,
+			NamedPorts:     namedPorts,
 			HostNetwork:    p.HostNetwork,
 			NodeName:       p.NodeName,
 			ServiceAccount: p.ServiceAccount,
