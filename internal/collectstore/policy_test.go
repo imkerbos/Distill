@@ -224,7 +224,7 @@ func TestAnIncompleteWindowDegradesTheWholePrediction(t *testing.T) {
 	t.Run("窗口漏过记录时整份预测不可信", func(t *testing.T) {
 		pv := seed(t, false)
 		for name, rep := range map[string]predict.Report{
-			"Prediction": pv.Prediction, "Overridden.Prediction": pv.Overridden.Prediction,
+			"Prediction": pv.Prediction, "Overridden.Prediction": pv.OverriddenPrediction(),
 		} {
 			if rep.TotalEvaluated != 2 {
 				t.Fatalf("%s.TotalEvaluated = %d, want 2: both observed connections must be predicted, "+

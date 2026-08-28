@@ -10,7 +10,7 @@ import {
 } from './importedView.ts'
 import { api, ApiError } from '../api/client'
 import {
-  RISK_CATEGORY_LABEL,
+  RISK_CATEGORY_LABEL, overriddenPredictionWithExisting,
   type CandidatePolicy, type CandidateRule, type ChangeKind, type ExcludedWorkload,
   type Granularity, type Kind, type MissingBaseline, type OverrideDecision, type Widening,
   type RuleEvidence, type RuleOrigin, type RuleOverride, type StaleOverride,
@@ -139,7 +139,7 @@ export default function PolicyPage({ cluster }: { cluster: string }) {
           两者的差额单独成一句（existingReliefView）。 */}
       <DryRunSection
         view={dryRunView(
-          pv.predictionWithExisting, pv.overridden.predictionWithExisting, overrides.length)}
+          pv.predictionWithExisting, overriddenPredictionWithExisting(pv), overrides.length)}
         relief={existingReliefView(pv.prediction, pv.predictionWithExisting)}
         overrideCount={overrides.length}
         // 窗口完整度是后端说出来的事实，页面不再拿 degradedCount ===
@@ -154,7 +154,7 @@ export default function PolicyPage({ cluster }: { cluster: string }) {
         // overridden **且并入已有策略**（writebackCounts 取的正是
         // Overridden.PredictionWithExisting）。任一维取错，都会报出一个与
         // 集群无关的假差异，而假差异重复几次之后，真的那次也不会有人看。
-        pageCounts={pv.overridden.predictionWithExisting.counts}
+        pageCounts={overriddenPredictionWithExisting(pv).counts}
       />
       {/* 访问关系摆在候选策略之前：那 728 条规则本身就是一张「谁访问谁」，
           而逐条读表格读不出这件事。 */}

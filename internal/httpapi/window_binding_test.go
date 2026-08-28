@@ -129,7 +129,7 @@ func (p *windowProbeReader) PolicyPreviewAtGranularity(
 					Ingress: []networkingv1.NetworkPolicyIngressRule{{}},
 				},
 			}},
-			Prediction: predict.Report{Counts: map[predict.ChangeKind]int{}},
+			Prediction: &predict.Report{Counts: map[predict.ChangeKind]int{}},
 		},
 	}, nil
 }

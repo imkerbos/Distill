@@ -415,15 +415,45 @@ export interface StaleOverride {
 /** 应用人工决定之后的候选策略与预测，与默认推荐并列展示。 */
 export interface OverriddenView {
   candidates: CandidatePolicy[]
-  prediction: PredictionReport
+  /**
+   * 应用人工决定后、只跑候选集的四类变化。
+   *
+   * **没有任何人工确认时服务端不下发这个字段。** 缺席的含义是「与
+   * PolicyPreview.prediction 恒等」——那时 policygen.Apply 只是把候选集深拷贝
+   * 一份，两者逐字段相同，而重复下发一遍占掉了整份响应的 46%（UAT 实测
+   * 15.4 MB 的预览里 7.1 MB 是这两份重复的明细）。
+   *
+   * **缺席不是「零拦断」。** 取数一律走 overriddenPrediction()，不要直接点
+   * 这个字段：`?? { counts: {} }` 之类的兜底会把「与默认恒等」读成「什么都
+   * 不会断」，而那是这一屏最不能给出的错觉。
+   */
+  prediction?: PredictionReport
   /**
    * 应用人工决定后、并入集群已有策略的四类变化。
    *
    * **服务端的写回计数取的正是这一份**（writebackCounts），因此页面拿它去
    * 比对计划里那套重算后的数字；取只跑候选集的那一份会报出一个与集群无关
    * 的假差异。
+   *
+   * 缺席规则同 prediction，取数走 overriddenPredictionWithExisting()。
    */
-  predictionWithExisting: PredictionReport
+  predictionWithExisting?: PredictionReport
+}
+
+/**
+ * 应用人工决定之后、只跑候选集的那一份预测。
+ *
+ * 缺席时回落到默认那一份 —— 服务端省略它的含义就是「与默认恒等」
+ * （store.OverriddenView.Prediction）。回落只有这一个位置，页面各处不得
+ * 自己写 `?？` 兜底：两处兜底迟早会有一处兜成零值。
+ */
+export function overriddenPrediction(pv: PolicyPreview): PredictionReport {
+  return pv.overridden.prediction ?? pv.prediction
+}
+
+/** 应用人工决定之后、并入集群已有策略的那一份预测。缺席时回落到默认那一份。 */
+export function overriddenPredictionWithExisting(pv: PolicyPreview): PredictionReport {
+  return pv.overridden.predictionWithExisting ?? pv.predictionWithExisting
 }
 
 /**

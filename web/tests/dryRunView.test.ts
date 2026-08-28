@@ -153,10 +153,18 @@ test('负差额不渲染成结论', () => {
 // 页面必须把并入已有策略的那一对喂给 dry-run，且写回比对同口径。
 test('页面默认用合并之后那一份', () => {
   const page = readFileSync(new URL('../src/pages/PolicyPage.tsx', import.meta.url), 'utf8')
-  assert.match(page, /pv\.predictionWithExisting, pv\.overridden\.predictionWithExisting/)
-  assert.match(page, /pageCounts=\{pv\.overridden\.predictionWithExisting\.counts\}/)
+  // 取数走 overriddenPredictionWithExisting(pv)：没有人工确认时服务端不下发
+  // overridden 那两份（与默认恒等，见 OverriddenView），直接点字段会拿到
+  // undefined。回落只有那一个位置，页面不得自己兜。
+  assert.match(page, /pv\.predictionWithExisting, overriddenPredictionWithExisting\(pv\)/)
+  assert.match(page, /pageCounts=\{overriddenPredictionWithExisting\(pv\)\.counts\}/)
   assert.doesNotMatch(
-    page, /pageCounts=\{pv\.overridden\.prediction\.counts\}/,
+    page, /pageCounts=\{overriddenPrediction\(pv\)\.counts\}/,
     '写回比对用了只跑候选集那一份，会报出与集群无关的假差异',
+  )
+  // 直接点字段等于绕开回落：那时拿到的是 undefined，而不是默认那一份。
+  assert.doesNotMatch(
+    page, /pv\.overridden\.prediction/,
+    '页面直接点了 overridden 的预测字段，没有人工确认时它不存在',
   )
 })

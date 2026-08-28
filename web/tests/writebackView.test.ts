@@ -344,13 +344,15 @@ test('计数不一致时渲染 drift.warning', () => {
 // 任一维取错都会报出一个与集群无关的假差异，而假差异重复几次之后，
 // 真的那次也不会有人看。
 test('页面侧的计数与服务端写回口径一致', () => {
-  assert.match(PAGE_SOURCE, /pageCounts=\{pv\.overridden\.predictionWithExisting\.counts\}/,
+  assert.match(PAGE_SOURCE, /pageCounts=\{overriddenPredictionWithExisting\(pv\)\.counts\}/,
     '比对用的页面侧计数不是 overridden + withExisting：假差异会把真差异淹掉')
 
   // 与服务端那一行对齐：两处各写各的，迟早只有一处被改。
+  // 服务端同样走带回落的访问器 —— 没有人工确认时那一份缺席，直接点字段
+  // 会解引用一个 nil，而这条正是写回的取数路径。
   const handler = readFileSync(
     new URL('../../internal/httpapi/writeback_handler.go', import.meta.url), 'utf8')
-  assert.match(handler, /pv\.Overridden\.PredictionWithExisting\.Counts\[k\]/,
+  assert.match(handler, /pv\.OverriddenPredictionWithExisting\(\)\.Counts\[k\]/,
     '服务端的写回计数换了口径而页面没跟上')
 })
 

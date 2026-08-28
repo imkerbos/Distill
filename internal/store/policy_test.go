@@ -243,9 +243,15 @@ func TestOverriddenViewIsIdentityWithoutOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PolicyPreview() error = %v", err)
 	}
-	if !reflect.DeepEqual(pv.Prediction.Counts, pv.Overridden.Prediction.Counts) {
-		t.Errorf("counts differ with no overrides: %v vs %v",
-			pv.Prediction.Counts, pv.Overridden.Prediction.Counts)
+	// 没有覆盖时那一份**缺席**，含义就是「与默认那一份恒等」——
+	// 缺席比重复一遍更强：一份重复的明细在响应里占了 46%，而它永远与
+	// 上面那份逐字节相同（store.OverriddenView.Prediction）。
+	if pv.Overridden.Prediction != nil {
+		t.Errorf("没有覆盖却带上了覆盖后的预测：%v", pv.Overridden.Prediction.Counts)
+	}
+	if !reflect.DeepEqual(pv.Prediction.Counts, pv.OverriddenPrediction().Counts) {
+		t.Errorf("回落之后与默认那一份对不上: %v vs %v",
+			pv.Prediction.Counts, pv.OverriddenPrediction().Counts)
 	}
 	if !reflect.DeepEqual(pv.Candidates, pv.Overridden.Candidates) {
 		t.Error("candidates differ with no overrides")
@@ -296,6 +302,9 @@ func TestOverriddenViewReflectsAnEnabledRule(t *testing.T) {
 		t.Fatalf("PolicyPreview() error = %v", err)
 	}
 
+	if pv.Overridden.Prediction == nil {
+		t.Fatal("有人工确认，覆盖后的预测却缺席")
+	}
 	if reflect.DeepEqual(pv.Prediction.Counts, pv.Overridden.Prediction.Counts) {
 		t.Errorf("counts identical after enabling a rule: %v", pv.Prediction.Counts)
 	}

@@ -219,19 +219,53 @@ type PolicyPreview struct {
 	Overridden OverriddenView `json:"overridden"`
 }
 
+// OverriddenPrediction 返回应用人工决定之后、**只跑候选集**的那一份预测。
+//
+// 没有人工确认时 Overridden.Prediction 缺席，含义是「与顶层那一份恒等」，
+// 因此回落到 Prediction。**取数方必须走这两个方法，不得直接点字段** ——
+// 直接点会在没有覆盖时解引用一个 nil，而那两条路径正是导出与写回。
+func (p PolicyPreview) OverriddenPrediction() predict.Report {
+	if p.Overridden.Prediction != nil {
+		return *p.Overridden.Prediction
+	}
+	return p.Prediction
+}
+
+// OverriddenPredictionWithExisting 返回应用人工决定之后、并入集群已有策略的
+// 那一份预测 —— **写回的提交信息与导出的注释头取的就是它**。
+//
+// 缺席时回落到顶层的 PredictionWithExisting，理由同 OverriddenPrediction。
+func (p PolicyPreview) OverriddenPredictionWithExisting() predict.Report {
+	if p.Overridden.PredictionWithExisting != nil {
+		return *p.Overridden.PredictionWithExisting
+	}
+	return p.PredictionWithExisting
+}
+
 // OverriddenView 是应用人工决定之后的候选策略与预测。
 type OverriddenView struct {
 	// Candidates 是应用覆盖后的候选策略。
 	Candidates []policygen.CandidatePolicy `json:"candidates"`
 	// Prediction 是应用覆盖后的四类变化，**只跑候选集**。
-	Prediction predict.Report `json:"prediction"`
+	//
+	// **没有任何人工确认时为 nil、且不出现在 JSON 里。** 那时它与顶层的
+	// Prediction 恒等（policygen.Apply 对空覆盖只是深拷贝），照旧算一遍再
+	// 序列化一遍，等于把一次预览的预测量与响应体都翻倍 —— UAT 实测一份预览
+	// 15.4 MB，其中 46% 正是这两份重复的明细，而前端在没有覆盖时一条都不读。
+	// 与本结构体里 Enabled 标 json:"-" 是同一条理由。
+	//
+	// **缺席的含义是「与基础份恒等」，不是「零拦断」**，因此是指针而不是
+	// 零值：一份全零的预测读起来是「应用它什么都不会断」，那是这一屏最不能
+	// 给出的错觉。取数方必须显式回落到顶层那一份。
+	Prediction *predict.Report `json:"prediction,omitempty"`
 	// PredictionWithExisting 是应用覆盖后、并入集群已有策略的四类变化。
 	//
 	// **写回的提交信息与文件注释头取这一份**：它是合并之后的真实影响，
 	// 而评审人读到的就是那几个数字。取只跑候选集的那一份，会把旧策略额外
 	// 放行的部分算成"会被拦断"，让一次实际无害的写回看起来要断几十条连接
 	// —— 而反复出现的假警报，最终会让真的那次也没人看。
-	PredictionWithExisting predict.Report `json:"predictionWithExisting"`
+	// 与 Prediction 同：没有人工确认时为 nil，含义是「与顶层那一份恒等」。
+	PredictionWithExisting *predict.Report `json:"predictionWithExisting,omitempty"`
 	// Enabled 是 Candidates 里启用规则渲染成的 NetworkPolicy，供导出使用。
 	//
 	// 挂在这里而不是让导出端点自己再生成一次，是导出这件事唯一真正的风险
@@ -396,13 +430,20 @@ func (r *FixtureReader) PolicyPreviewAtGranularity(
 		})
 	}
 	enabled := gen.EnabledPolicies()
-	overriddenEnabled := overridden.EnabledPolicies()
 	report := run(enabled)
-	overriddenReport := run(overriddenEnabled)
 	// 合成数据集的"集群已有策略"就是它自己那份 Policies —— 与判定用的是
 	// 同一批（decide 走的正是 c.Policies 构造的求值器）。
 	reportWithExisting := run(predict.WithExisting(c.Policies, enabled))
-	overriddenWithExisting := run(predict.WithExisting(c.Policies, overriddenEnabled))
+
+	// 没有人工确认时不算、也不带：与上面两份恒等（见 OverriddenView.Prediction）。
+	// 两个 Reader 在这一点上必须一致 —— 前端只有一套取数逻辑。
+	var overriddenReport, overriddenWithExisting *predict.Report
+	if len(pgOverrides) > 0 {
+		overriddenEnabled := overridden.EnabledPolicies()
+		a := run(overriddenEnabled)
+		b := run(predict.WithExisting(c.Policies, overriddenEnabled))
+		overriddenReport, overriddenWithExisting = &a, &b
+	}
 
 	// 一份裁剪结果，两处使用：屏幕上的候选集与导出的文件必须是同一个
 	// 切片渲染出来的，各裁一次就又有了两个可以互相分歧的选择点。

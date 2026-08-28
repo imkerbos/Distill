@@ -42,8 +42,23 @@ type previewView struct {
 	Overrides  []registry.RuleOverride     `json:"overrides"`
 	Overridden struct {
 		Candidates []policygen.CandidatePolicy `json:"candidates"`
-		Prediction predict.Report              `json:"prediction"`
+		// **没有人工确认时这个字段不出现在 JSON 里**，含义是「与上面的
+		// Prediction 恒等」，不是「零拦断」。指针建模的正是这个区别：
+		// 解成零值会让一份 81 条会被拦断的导出，在断言里读成 0。
+		Prediction *predict.Report `json:"prediction"`
 	} `json:"overridden"`
+}
+
+// overriddenPrediction 是导出与写回该取的那一份。
+//
+// 缺席时回落到默认那一份。回落写在这里而不是调服务端那个访问器：这些用例
+// 断言的是**线上真的传给了前端的那份 JSON**，用被测代码去解自己的输出，
+// 一个字段被改成不序列化也照样绿。
+func (v previewView) overriddenPrediction() predict.Report {
+	if v.Overridden.Prediction != nil {
+		return *v.Overridden.Prediction
+	}
+	return v.Prediction
 }
 
 // fetchPreview 取一次预览响应，即操作者屏幕上那一份。
@@ -157,7 +172,7 @@ func TestPolicyExportRendersTheSameRuleSetThePreviewReported(t *testing.T) {
 
 			// 方向 3：注释头里的数字就是屏幕上那几个。
 			for _, k := range predict.AllChangeKinds() {
-				want := fmt.Sprintf("# dry-run %s: %d", k, pv.Overridden.Prediction.Counts[k])
+				want := fmt.Sprintf("# dry-run %s: %d", k, pv.overriddenPrediction().Counts[k])
 				if !strings.Contains(header, want) {
 					t.Errorf("header missing %q:\n%s", want, header)
 				}
@@ -280,7 +295,7 @@ func TestPolicyExportCarriesTheConfirmedOverrideIntoBothFileAndHeader(t *testing
 	}
 
 	// 先决条件一：两套计数确实不同，否则注释头那条断言无法失败。
-	if reflect.DeepEqual(pv.Prediction.Counts, pv.Overridden.Prediction.Counts) {
+	if reflect.DeepEqual(pv.Prediction.Counts, pv.overriddenPrediction().Counts) {
 		t.Fatalf("both computations report the same counts %v — this test cannot tell them apart",
 			pv.Prediction.Counts)
 	}
@@ -305,7 +320,7 @@ func TestPolicyExportCarriesTheConfirmedOverrideIntoBothFileAndHeader(t *testing
 	assertDocsMatchCandidates(t, docs, pv.Overridden.Candidates)
 	// 断言三：注释头里的四类计数是覆盖后的那一套。
 	for _, k := range predict.AllChangeKinds() {
-		want := fmt.Sprintf("# dry-run %s: %d", k, pv.Overridden.Prediction.Counts[k])
+		want := fmt.Sprintf("# dry-run %s: %d", k, pv.overriddenPrediction().Counts[k])
 		if !strings.Contains(header, want) {
 			t.Errorf("header missing %q — 头里的数字来自操作者没读过的那次计算:\n%s", want, header)
 		}

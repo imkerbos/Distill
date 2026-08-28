@@ -688,7 +688,7 @@ func writebackCounts(pv store.PolicyPreview) map[predict.ChangeKind]int {
 		// 因此真实影响必须按那一份算。只跑候选集的那一份会把旧策略额外
 		// 放行的部分算成"会被拦断"，让一次实际无害的写回看起来要断几十条
 		// 连接 —— 而反复出现的假警报，最终会让真的那次也没人看。
-		counts[k] = pv.Overridden.PredictionWithExisting.Counts[k]
+		counts[k] = pv.OverriddenPredictionWithExisting().Counts[k]
 	}
 	return counts
 }

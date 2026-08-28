@@ -17,6 +17,7 @@ import (
 	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/replay"
 	"github.com/imkerbos/Distill/internal/snapshot"
+	"github.com/imkerbos/Distill/internal/snapshotstore"
 	"github.com/imkerbos/Distill/internal/store"
 )
 
@@ -107,10 +108,19 @@ func (r *Reader) PolicyPreviewAtGranularity(
 	// 证据读在生成之后、返回之前：它按指纹关联，与这一批候选算出来的
 	// 指纹必须来自同一次生成。
 	//
+	// **只点名这一批候选自己的键，不取整个集群。** 证据表只供展示、不解锁
+	// 任何门禁，因此它绝不该有能力让这一屏失败 —— 而按集群全取时它有：
+	// 行数过上限就整个报错，而记账本身要先算一次预览，于是表一旦过线，
+	// 预览失败 → 记不了账 → 表再也不会变小（snapshotstore.RuleEvidenceOf）。
+	//
+	// 键取 cs.result 而不是 gen：gen 在 NAMESPACE 粒度下已经折叠过，而证据
+	// 一律记在 workload 粒度上（evidence.Recorder），拿折叠后的指纹去问会
+	// 一条都对不上。
+	//
 	// **读不到就是读不到，不降级成空 map。** 空 map 的含义是「记过，还没有
 	// 证据」，而查询失败时真实情况是「不知道」—— 把两者压平会让一条其实
 	// 已经观察了三周的规则显示成刚出现，从而被当作不可信而搁置。
-	stored2, err := r.facts.RuleEvidenceOf(ctx, clusterID)
+	stored2, err := r.facts.RuleEvidenceOf(ctx, clusterID, evidenceRefsOf(cs.result))
 	if err != nil {
 		return store.PolicyPreview{}, err
 	}
@@ -136,11 +146,28 @@ func (r *Reader) PolicyPreviewAtGranularity(
 	// "候选集加了规则"，而那正是这两个数字要区分的东西（CLAUDE.md §4：
 	// 禁止用当前状态解释历史数据）。
 	enabled := gen.EnabledPolicies()
-	overriddenEnabled := overridden.EnabledPolicies()
 	report := cs.predictWith(enabled)
-	overriddenReport := cs.predictWith(overriddenEnabled)
 	reportWithExisting := cs.predictWith(predict.WithExisting(cs.policies, enabled))
-	overriddenWithExisting := cs.predictWith(predict.WithExisting(cs.policies, overriddenEnabled))
+
+	// **一条人工确认都没有时，覆盖后的两份预测与上面两份必然相同** ——
+	// Apply 在没有覆盖时只是把候选集深拷贝一份，启用集因此逐条一致。
+	// 照旧算一遍等于把一次预览的预测量翻倍：每一份都要拿整批观测连接跑一遍
+	// 求值（UAT 实测一次预览 4311 条 × 4 份），而其中两份是精确副本，响应体里
+	// 也各带一份。
+	//
+	// 复用的是同一份 Report 值。它构造完就只读，两处都只是被序列化出去；
+	// 谁要在这之后改它，必须先想清楚改的是两个字段
+	// （TestWithoutOverridesTheOverriddenPredictionsMatchTheBaseOnes 守着
+	// "抄近路没有改变结果"，TestWithOverridesTheOverriddenPredictionDiverges
+	// 守着"有覆盖时不许抄"）。
+	// nil 表示「与上面那两份恒等」，由取数方显式回落（store.OverriddenView）。
+	var overriddenReport, overriddenWithExisting *predict.Report
+	if len(pgOverrides) > 0 {
+		overriddenEnabled := overridden.EnabledPolicies()
+		a := cs.predictWith(overriddenEnabled)
+		b := cs.predictWith(predict.WithExisting(cs.policies, overriddenEnabled))
+		overriddenReport, overriddenWithExisting = &a, &b
+	}
 
 	// 一份裁剪结果，两处使用：屏幕上的候选集与导出的文件必须是同一个切片
 	// 渲染出来的，各裁一次就又有了两个可以互相分歧的选择点。
@@ -193,6 +220,30 @@ func (r *Reader) PolicyPreviewAtGranularity(
 			Enabled: policygen.Result{Policies: overriddenCandidates}.EnabledPolicies(),
 		},
 	}, nil
+}
+
+// evidenceRefsOf 点出这一批候选里每一条规则的证据键。
+//
+// 去重：同一个 (namespace, workload, fingerprint) 在一批候选里只会出现一次，
+// 但重复的键会让查询白白变长，而这段的全部意义就是把查询规模钉在候选数上。
+func evidenceRefsOf(res policygen.Result) []snapshotstore.EvidenceRef {
+	seen := map[string]struct{}{}
+	refs := make([]snapshotstore.EvidenceRef, 0, len(res.Policies))
+	for _, c := range res.Policies {
+		for _, rule := range c.Rules {
+			key := snapshotstore.EvidenceKey(c.Namespace, c.Workload, rule.Fingerprint)
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+			refs = append(refs, snapshotstore.EvidenceRef{
+				Namespace:   c.Namespace,
+				Workload:    c.Workload,
+				Fingerprint: rule.Fingerprint,
+			})
+		}
+	}
+	return refs
 }
 
 // generate 解析窗口内的事实并跑一次候选策略生成。

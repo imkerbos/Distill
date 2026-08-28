@@ -89,8 +89,9 @@ var cleanupStatements = []string{
 // 不连库：本包要验证的是"按登记为 COLLECTED 的集群读采集数据"，而集群登记
 // 本身从哪张表读出来与此无关，那一半由 internal/mysqlregistry 的集成测试守。
 type stubSource struct {
-	clusters []registry.Cluster
-	imports  map[string][]registry.PolicyImport
+	clusters  []registry.Cluster
+	imports   map[string][]registry.PolicyImport
+	overrides map[string][]registry.RuleOverride
 }
 
 func (s stubSource) Clusters(context.Context) ([]registry.Cluster, error) { return s.clusters, nil }
@@ -104,8 +105,8 @@ func (s stubSource) Cluster(_ context.Context, id string) (registry.Cluster, boo
 	return registry.Cluster{}, false, nil
 }
 
-func (s stubSource) RuleOverrides(context.Context, string) ([]registry.RuleOverride, error) {
-	return nil, nil
+func (s stubSource) RuleOverrides(_ context.Context, clusterID string) ([]registry.RuleOverride, error) {
+	return s.overrides[clusterID], nil
 }
 
 // PolicyImports 交回登记的导入；用例不设时为空。
@@ -149,6 +150,19 @@ func ccnpSource() stubSource {
 func newTestReader(t *testing.T) (*collectstore.Reader, *snapshotstore.Store) {
 	t.Helper()
 	return newTestReaderWithSource(t, testSource())
+}
+
+// newTestReaderWithOverrides 同 newTestReader，但注册表里带上人工确认。
+//
+// 单独一个入口，理由同 newTestReaderWithImports：几十处用例挂在那份固定的
+// 注册表上，改它的形状等于同时改掉那些用例的前提。
+func newTestReaderWithOverrides(
+	t *testing.T, overrides map[string][]registry.RuleOverride,
+) (*collectstore.Reader, *snapshotstore.Store) {
+	t.Helper()
+	src := testSource()
+	src.overrides = overrides
+	return newTestReaderWithSource(t, src)
 }
 
 // newTestReaderWithImports 同 newTestReader，但注册表里带上导入策略。

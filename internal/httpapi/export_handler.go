@@ -186,7 +186,7 @@ func renderPolicyDocs(
 	// （design doc 2026-08-25-existing-policies §3）。文件注释头与提交信息
 	// 是同一批数字的两处呈现，取不同的两份会让下载下来的那份与 PR 上写的
 	// 对不上，而屏幕上没有任何迹象。
-	counts := pv.Overridden.PredictionWithExisting.Counts
+	counts := pv.OverriddenPredictionWithExisting().Counts
 	line := func(format string, args ...any) {
 		buf.WriteString("# " + headerSafe(fmt.Sprintf(format, args...)) + "\n")
 	}

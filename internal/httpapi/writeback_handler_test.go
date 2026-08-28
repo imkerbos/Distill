@@ -531,13 +531,13 @@ func TestCountsComeFromTheServerNotTheRequest(t *testing.T) {
 
 	pv := fetchPreview(t, f.h, f.cookie, "")
 	// 先决条件：两套计数确实不同。
-	if reflect.DeepEqual(pv.Prediction.Counts, pv.Overridden.Prediction.Counts) {
+	if reflect.DeepEqual(pv.Prediction.Counts, pv.overriddenPrediction().Counts) {
 		t.Fatalf("both computations report the same counts %v — this test cannot tell them apart",
 			pv.Prediction.Counts)
 	}
 	want := map[string]int{}
 	for _, k := range predict.AllChangeKinds() {
-		want[string(k)] = pv.Overridden.Prediction.Counts[k]
+		want[string(k)] = pv.overriddenPrediction().Counts[k]
 	}
 
 	plan := fetchPlan(t, f)
