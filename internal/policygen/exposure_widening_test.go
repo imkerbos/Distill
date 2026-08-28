@@ -16,6 +16,12 @@ func generateWith(t *testing.T, pods []replay.PodRef, svc snapshot.Service) poli
 	assets := snapshot.Assets{
 		ClusterID: "c1",
 		Services:  []snapshot.Service{svc},
+		// 网段登记必须填全：登记不全时 EXPOSED_INGRESS 判不出入口地址的
+		// 归属，一条规则都推不出来，这组用例会连它们要测的那条放宽都拿不到
+		// （derive_exposed.classifyIngressIP 的说明）。
+		Registry: snapshot.ClusterRegistry{
+			ClusterID: "c1", PodCIDR: "10.4.0.0/16", NodeCIDR: "10.170.48.0/24",
+		},
 	}
 	return policygen.Generate(policygen.Input{ClusterID: "c1", Pods: pods, Assets: assets})
 }

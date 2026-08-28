@@ -1047,6 +1047,11 @@ func TestExposedIngressBaselineOnlyAttachesToTheExposedWorkload(t *testing.T) {
 			},
 			LoadBalancerIngressIPs: []string{"34.150.1.177"},
 		}},
+		// 网段登记填全：登记不全时入口地址的归属判不出来，EXPOSED_INGRESS
+		// 一条规则都推不出，这条用例的前提就不成立了。
+		Registry: snapshot.ClusterRegistry{
+			ClusterID: "c1", PodCIDR: "10.4.0.0/16", NodeCIDR: "10.170.48.0/24",
+		},
 	}
 	res := policygen.Generate(policygen.Input{ClusterID: "c1", Pods: pods, Assets: assets})
 
@@ -1146,6 +1151,11 @@ func TestExposedIngressWithoutSelectorDoesNotBroadcastAndIsReported(t *testing.T
 			},
 			LoadBalancerIngressIPs: []string{"34.150.1.177"},
 		}},
+		// 网段登记填全：登记不全时入口地址的归属判不出来，EXPOSED_INGRESS
+		// 一条规则都推不出，这条用例的前提就不成立了。
+		Registry: snapshot.ClusterRegistry{
+			ClusterID: "c1", PodCIDR: "10.4.0.0/16", NodeCIDR: "10.170.48.0/24",
+		},
 	}
 	res := policygen.Generate(policygen.Input{ClusterID: "c1", Pods: pods, Assets: assets})
 
@@ -1195,6 +1205,11 @@ func TestExposedIngressSelectorMismatchWithWinningKeyIsReported(t *testing.T) {
 			},
 			LoadBalancerIngressIPs: []string{"34.150.1.177"},
 		}},
+		// 网段登记填全：登记不全时入口地址的归属判不出来，EXPOSED_INGRESS
+		// 一条规则都推不出，这条用例的前提就不成立了。
+		Registry: snapshot.ClusterRegistry{
+			ClusterID: "c1", PodCIDR: "10.4.0.0/16", NodeCIDR: "10.170.48.0/24",
+		},
 	}
 	res := policygen.Generate(policygen.Input{ClusterID: "c1", Pods: pods, Assets: assets})
 
@@ -1251,6 +1266,11 @@ func TestExposedIngressSelectorWithUnrecognizedLabelKeyIsReported(t *testing.T) 
 			},
 			LoadBalancerIngressIPs: []string{"34.150.1.177"},
 		}},
+		// 网段登记填全：登记不全时入口地址的归属判不出来，EXPOSED_INGRESS
+		// 一条规则都推不出，这条用例的前提就不成立了。
+		Registry: snapshot.ClusterRegistry{
+			ClusterID: "c1", PodCIDR: "10.4.0.0/16", NodeCIDR: "10.170.48.0/24",
+		},
 	}
 	res := policygen.Generate(policygen.Input{ClusterID: "c1", Pods: pods, Assets: assets})
 
@@ -1307,6 +1327,11 @@ func TestExposedIngressWinningKeyFromObservedOnlyPodIsReported(t *testing.T) {
 			},
 			LoadBalancerIngressIPs: []string{"34.150.1.177"},
 		}},
+		// 网段登记填全：登记不全时入口地址的归属判不出来，EXPOSED_INGRESS
+		// 一条规则都推不出，这条用例的前提就不成立了。
+		Registry: snapshot.ClusterRegistry{
+			ClusterID: "c1", PodCIDR: "10.4.0.0/16", NodeCIDR: "10.170.48.0/24",
+		},
 	}
 	res := policygen.Generate(policygen.Input{
 		ClusterID: "c1", Pods: pods, Observations: obs, Assets: assets,

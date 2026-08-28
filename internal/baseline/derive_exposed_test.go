@@ -450,3 +450,108 @@ func TestUnresolvedExposureSubjectsExcludesNormalServices(t *testing.T) {
 		t.Errorf("有 selector 的 Service 出现在 UnresolvedExposureSubjects 里: %+v", got)
 	}
 }
+
+// --- Final review fixes (2026-08-28) ---
+
+// C2：登记为空时不得判成面向公网。
+//
+// 空登记不是"查过、都不命中"，是根本没有判据。旧实现对空网段一个 continue
+// 跳过去，落到 addrPublic —— 于是 10.128.0.5 这样一个明明白白在 RFC1918
+// 节点网段里的入口地址被判成 0.0.0.0/0，一条把整个互联网放进来的规则。
+// 登记打错时（TestExposedIngressMalformedRegistryCIDRGeneratesNothing）
+// 已经按"判不出"处理，没登记是同一个危险更常见的版本。
+func TestExposedIngressEmptyRegistryGeneratesNothing(t *testing.T) {
+	a := assetsWith(svcLB("shop", "api-lb",
+		[]string{"10.128.0.5"}, nil, port("", 8080)))
+	a.Registry.PodCIDR, a.Registry.NodeCIDR = "", ""
+	rules := deriveExposedIngress(a, "shop")
+	if len(rules) != 0 {
+		t.Errorf("生成了 %d 条规则（对端 %v），空登记时 want 0 —— 判不出，"+
+			"不是「面向公网」", len(rules), cidrsOf(rules[0]))
+	}
+}
+
+// C2 的另一半：只缺一段登记同样判不出。
+//
+// node_cidr 没登记时，没有任何依据说 10.128.0.5 不是一个节点地址；
+// pod_cidr 命中不了只说明它不是 Pod。判据不全就不许答"面向公网"，
+// 与 internal/cluster 那条"登记不全时返回 UNKNOWN 而不假定它在集群外"
+// 是同一条纪律。
+func TestExposedIngressPartialRegistryGeneratesNothing(t *testing.T) {
+	a := assetsWith(svcLB("shop", "api-lb",
+		[]string{"10.128.0.5"}, nil, port("", 8080)))
+	a.Registry.NodeCIDR = ""
+	rules := deriveExposedIngress(a, "shop")
+	if len(rules) != 0 {
+		t.Errorf("生成了 %d 条规则（对端 %v），node_cidr 未登记时 want 0",
+			len(rules), cidrsOf(rules[0]))
+	}
+}
+
+// I3：双栈登记是逗号分隔的多段（cluster.ParsePrefixes），归属判定必须认它。
+//
+// 旧实现拿整串去调 netip.ParsePrefix，直接失败 —— 于是双栈集群上每一个
+// LoadBalancer 都推不出对端，报出一串并不存在的缺口。
+func TestExposedIngressClassifiesAgainstDualStackRegistry(t *testing.T) {
+	a := assetsWith(svcLB("shop", "api-lb",
+		[]string{"10.128.0.5"}, nil, port("", 8080)))
+	a.Registry.NodeCIDR = "10.128.0.0/20,fd00:10:128::/64"
+	rules := deriveExposedIngress(a, "shop")
+	if len(rules) != 1 {
+		t.Fatalf("生成 %d 条规则，want 1（入口地址落在双栈 node_cidr 的 v4 段里）",
+			len(rules))
+	}
+	// 命中的是那条登记，对端就是这条登记的全部段：一个 v4 入口与一个 v6
+	// 入口指的是同一片节点网络，按段拆开报只会让其中一半的流量落在规则外。
+	want := []string{"10.128.0.0/20", "fd00:10:128::/64"}
+	if got := cidrsOf(rules[0]); !reflect.DeepEqual(got, want) {
+		t.Errorf("对端 = %v，want %v", got, want)
+	}
+}
+
+// I3：双栈 LB 的两个入口地址（v4 一个、v6 一个）命中的是同一条登记，
+// 必须算"一致"。按网段字面量比会让它们互相不等，于是一条完全正常的
+// 双栈 LB 被 I3 那条"判定不一致就报缺口"误伤。
+func TestExposedIngressDualStackIngressIPsAgree(t *testing.T) {
+	a := assetsWith(svcLB("shop", "api-lb",
+		[]string{"10.128.0.5", "fd00:10:128::7"}, nil, port("", 8080)))
+	a.Registry.NodeCIDR = "10.128.0.0/20,fd00:10:128::/64"
+	rules := deriveExposedIngress(a, "shop")
+	if len(rules) != 1 {
+		t.Fatalf("生成 %d 条规则，want 1（两个入口地址命中同一条登记）", len(rules))
+	}
+}
+
+// I3：NodePort 的对端也来自同一条登记，同样不得把整串塞进 IPBlock.CIDR。
+//
+// `cidr: "10.128.0.0/20,fd00:10:128::/64"` 是一个 NetworkPolicy 不认的值，
+// 而候选策略在被 apply 之前谁都不会发现 —— 症状出现在 GitOps 合并之后。
+func TestNodePortPeersSplitDualStackRegistry(t *testing.T) {
+	a := assetsWith(svcNodePort("shop", "api-np", port("", 8080)))
+	a.Registry.NodeCIDR = "10.128.0.0/20,fd00:10:128::/64"
+	rules := deriveExposedIngress(a, "shop")
+	if len(rules) != 1 {
+		t.Fatalf("生成 %d 条规则，want 1", len(rules))
+	}
+	want := []string{"10.128.0.0/20", "fd00:10:128::/64"}
+	if got := cidrsOf(rules[0]); !reflect.DeepEqual(got, want) {
+		t.Errorf("对端 = %v，want %v（一段一条 ipBlock，不是整串）", got, want)
+	}
+}
+
+// M10：node_cidr 用不了时 NodePort 不生成规则。
+//
+// 少了这个判断，规则里是 `ipBlock: {cidr: ""}` —— 一条 apply 会被 API
+// server 拒掉的策略，而拒绝发生在 GitOps 合并之后，症状是"文件推不上去"，
+// 成因却在生成侧。这条守卫此前零覆盖：删掉它，全套测试仍然全绿。
+func TestNodePortWithoutUsableNodeCIDRGeneratesNothing(t *testing.T) {
+	for _, cidr := range []string{"", "not-a-cidr"} {
+		a := assetsWith(svcNodePort("shop", "api-np", port("", 8080)))
+		a.Registry.NodeCIDR = cidr
+		rules := deriveExposedIngress(a, "shop")
+		if len(rules) != 0 {
+			t.Errorf("node_cidr=%q 生成了 %d 条规则（对端 %v），want 0",
+				cidr, len(rules), cidrsOf(rules[0]))
+		}
+	}
+}

@@ -7,6 +7,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
+	"github.com/imkerbos/Distill/internal/cluster"
 	"github.com/imkerbos/Distill/internal/replay"
 	"github.com/imkerbos/Distill/internal/snapshot"
 )
@@ -95,26 +96,29 @@ func deriveExposedIngress(a snapshot.Assets, namespace string) []Rule {
 // 第三个返回值只标「判不出对端」，不是「判不出这个 Service 有没有暴露」——
 // NodePort 与 LoadBalancer 走到这里之前已经确认过 Type，因此这里的 false
 // 专指 §3.3 第 4 条：LoadBalancer 拿不到入口地址，或入口地址判不出归属
-// （地址解析失败、登记网段解析失败、或多个入口地址的判定结果不一致）。
+// （地址解析失败、没有一个可用的登记网段、或多个入口地址的判定结果不一致）。
 func exposedPeers(a snapshot.Assets, svc snapshot.Service) ([]networkingv1.NetworkPolicyPeer, []Derivation, bool) {
 	if svc.Type == serviceTypeNodePort {
 		// NodePort 没有入口地址，但流量经 kube-proxy 到达 Pod 时源地址被
 		// SNAT 成节点地址（externalTrafficPolicy 缺省为 Cluster）—— 对端
 		// 因而是确定的，不走「判不出」那条路径。
-		if a.Registry.NodeCIDR == "" {
+		// 登记用不了（没登记、或登记本身解析不出来）就推不出对端。判不出
+		// 时不生成，交给 Missing() 报缺口 —— 少了这个判断，peers 会变成
+		// 一条 ipBlock.cidr="" 的规则：`kubectl apply` 会拒，但那已经是在
+		// GitOps 合并之后，症状是一份推不上去的策略文件，而成因在这里。
+		nodes, ok := cluster.ParsePrefixes(a.Registry.NodeCIDR)
+		if !ok {
 			return nil, nil, false
 		}
-		return []networkingv1.NetworkPolicyPeer{{
-				IPBlock: &networkingv1.IPBlock{CIDR: a.Registry.NodeCIDR},
-			}}, []Derivation{
-				// spec.type 说明「为什么走节点网段」，nodeCIDR 才是那个值
-				// 实际的出处——两条缺一都会把审计的人指向错的地方（同
-				// deriveNodeAgent 对 hostNetwork agent 的两条溯源）。
-				{SourceKind: SourceService, Cluster: a.ClusterID, Namespace: svc.Namespace,
-					Name: svc.Name, Field: "spec.type"},
-				{SourceKind: SourceClusterRegistry, Cluster: a.ClusterID,
-					Name: a.ClusterID, Field: "nodeCIDR"},
-			}, true
+		return peersOf(nodes), []Derivation{
+			// spec.type 说明「为什么走节点网段」，nodeCIDR 才是那个值
+			// 实际的出处——两条缺一都会把审计的人指向错的地方（同
+			// deriveNodeAgent 对 hostNetwork agent 的两条溯源）。
+			{SourceKind: SourceService, Cluster: a.ClusterID, Namespace: svc.Namespace,
+				Name: svc.Name, Field: "spec.type"},
+			{SourceKind: SourceClusterRegistry, Cluster: a.ClusterID,
+				Name: a.ClusterID, Field: "nodeCIDR"},
+		}, true
 	}
 
 	// LoadBalancer，第 1 条：运维显式声明过的范围，比平台推出来的更准，
@@ -157,9 +161,23 @@ func exposedPeers(a snapshot.Assets, svc snapshot.Service) ([]networkingv1.Netwo
 			Name: a.ClusterID, Field: verdict.field,
 		})
 	}
-	return []networkingv1.NetworkPolicyPeer{{
-		IPBlock: &networkingv1.IPBlock{CIDR: verdict.cidr},
-	}}, derivations, true
+	return peersOf(verdict.prefixes), derivations, true
+}
+
+// peersOf 把一组网段摊成一组 ipBlock 对端，一段一条。
+//
+// 一条登记可以是逗号分隔的多段（双栈集群的两个协议族，见
+// cluster.ParsePrefixes）。原样把登记字符串塞进 IPBlock.CIDR 会产出
+// `cidr: "10.128.0.0/20,fd00:10:128::/64"` —— 一个 NetworkPolicy 不认的值，
+// 而候选策略在被 apply 之前谁都不会发现。
+func peersOf(prefixes []netip.Prefix) []networkingv1.NetworkPolicyPeer {
+	out := make([]networkingv1.NetworkPolicyPeer, 0, len(prefixes))
+	for _, p := range prefixes {
+		out = append(out, networkingv1.NetworkPolicyPeer{
+			IPBlock: &networkingv1.IPBlock{CIDR: p.String()},
+		})
+	}
+	return out
 }
 
 // ingressAddrStatus 是单个入口地址归属判定的三态结果。
@@ -170,31 +188,38 @@ func exposedPeers(a snapshot.Assets, svc snapshot.Service) ([]networkingv1.Netwo
 type ingressAddrStatus int
 
 const (
-	// addrUnknown 表示判不出——地址本身解析失败，或某个已登记网段本身
-	// 解析失败（因而无法排除该地址落在其中的可能）。
+	// addrUnknown 表示判不出——地址本身解析失败，或没有一个可用的已登记
+	// 网段（因而无法排除该地址落在某个内部网段里的可能）。
 	addrUnknown ingressAddrStatus = iota
-	// addrPublic 表示地址解析成功，且不在任何一个（可解析的）已登记网段内。
+	// addrPublic 表示地址解析成功，且不在任何一个（可用的）已登记网段内。
 	addrPublic
 	// addrRegistered 表示地址落在某个已登记网段内。
 	addrRegistered
 )
 
-// cidrField 是登记网段的一个字段名与它当前的取值，用于同时驱动匹配与
-// 推导依据的 Field——两者必须来自同一处，否则命中 pod_cidr 时依据却写着
-// node_cidr（design review I5）。
-type cidrField struct {
+// registeredCIDR 是登记里的一个网段字段名与它的原始取值。
+//
+// 名字与取值成对传递，是为了同时驱动匹配与推导依据的 Field —— 两者必须
+// 来自同一处，否则命中 pod_cidr 时依据却写着 node_cidr（design review I5）。
+type registeredCIDR struct {
 	field string
-	cidr  string
+	raw   string
 }
 
 // registryCIDRFields 按 §3.3 判定顺序列出 ClusterRegistry 里参与归属判定
 // 的两个网段。顺序即优先级：真实集群里两段不重叠，顺序不产生歧义，重叠
 // 只可能来自一次错误的登记（同 internal/cluster 的 scopeOf 注释）。
-func registryCIDRFields(reg snapshot.ClusterRegistry) []cidrField {
-	return []cidrField{
-		{field: "nodeCIDR", cidr: reg.NodeCIDR},
-		{field: "podCIDR", cidr: reg.PodCIDR},
+func registryCIDRFields(reg snapshot.ClusterRegistry) []registeredCIDR {
+	return []registeredCIDR{
+		{field: "nodeCIDR", raw: reg.NodeCIDR},
+		{field: "podCIDR", raw: reg.PodCIDR},
 	}
+}
+
+// cidrField 是命中的那个登记字段名，连同它解析出来的全部网段。
+type cidrField struct {
+	field    string
+	prefixes []netip.Prefix
 }
 
 // classifyIngressIP 判定单个入口地址落在哪个已登记网段，或面向公网，
@@ -204,27 +229,28 @@ func classifyIngressIP(reg snapshot.ClusterRegistry, ip string) (cidrField, ingr
 	if err != nil {
 		return cidrField{}, addrUnknown
 	}
-	sawMalformed := false
+	sawUnusable := false
 	for _, f := range registryCIDRFields(reg) {
-		if f.cidr == "" {
+		prefixes, ok := cluster.ParsePrefixes(f.raw)
+		if !ok {
+			// 这一段登记用不了：没登记，或登记本身解析不出来。两种都不是
+			// 「这个地址不在这段里」——是根本没有判据说它在不在。跳过去比较
+			// 下一段可以（那一段依然可信），但不能让「跳过」的后果变成
+			// 「都不命中 → 面向公网」：一个没登记 node_cidr 的集群会因此把
+			// 每一个 10.x 的内部 LB 都判成 0.0.0.0/0，而那是这个平台能犯的
+			// 最宽的错。**没登记与登记打错走同一条路**：后者当初就是按这条
+			// 理由判成 addrUnknown 的（design review I4），前者是同一个危险
+			// 更常见的版本，没有理由反着走。
+			sawUnusable = true
 			continue
 		}
-		prefix, err := netip.ParsePrefix(f.cidr)
-		if err != nil {
-			// 登记的网段本身解析不了：不是「这个地址不在这段里」，是这段
-			// 登记本身有问题，判不出这个地址落不落在它应该表示的范围内。
-			// 跳过去比较下一段是可以的（那一段依然是可信的判据），但不能
-			// 让「跳过」的后果变成「都不命中 → 面向公网」——一次打错的
-			// 登记会把这个集群里每一个真正内部的 LB 都判成 0.0.0.0/0
-			// （design review I4）。
-			sawMalformed = true
-			continue
-		}
-		if prefix.Contains(addr) {
-			return f, addrRegistered
+		for _, prefix := range prefixes {
+			if prefix.Contains(addr) {
+				return cidrField{field: f.field, prefixes: prefixes}, addrRegistered
+			}
 		}
 	}
-	if sawMalformed {
+	if sawUnusable {
 		return cidrField{}, addrUnknown
 	}
 	return cidrField{}, addrPublic
@@ -232,12 +258,16 @@ func classifyIngressIP(reg snapshot.ClusterRegistry, ip string) (cidrField, ingr
 
 // ingressVerdict 是一组入口地址达成一致后的判定结果。
 type ingressVerdict struct {
-	// cidr 是最终对端 CIDR：命中的注册网段，或 "0.0.0.0/0"。
-	cidr string
-	// field 是该 CIDR 对应的 ClusterRegistry 字段名；面向公网时为空——
+	// prefixes 是最终对端网段：命中的那个登记解析出来的全部段（双栈登记
+	// 是两段），或面向公网时的 0.0.0.0/0。
+	prefixes []netip.Prefix
+	// field 是该网段对应的 ClusterRegistry 字段名；面向公网时为空——
 	// 那不是从注册信息里查出来的值，没有第二条依据可指。
 	field string
 }
+
+// publicPrefix 是面向公网时的对端。
+var publicPrefix = netip.MustParsePrefix("0.0.0.0/0")
 
 // classifyIngressIPs 判定一组入口地址的归属，只在**全部地址给出同一个
 // 答案**时才采纳。
@@ -251,6 +281,12 @@ type ingressVerdict struct {
 //
 // 任意一个地址判不出（addrUnknown）也让整体判不出：与其在部分信息下拼出
 // 一个可能错的结论，不如照实报缺口，见 classifyIngressIP 的说明。
+//
+// **一致与否只比字段名**：命中同一个字段的两个地址，对端就是那个字段解析
+// 出来的同一组网段，比不出差别；面向公网的字段名恒为空，与任何命中都不
+// 相等。比字段名而不是比网段切片，也让这个判断不必依赖切片可比性。
+// 双栈 LB 的两个入口地址（一个 v4、一个 v6）因此仍然一致 —— 它们命中的是
+// 同一条 node_cidr 登记的两段。
 func classifyIngressIPs(reg snapshot.ClusterRegistry, ips []string) (ingressVerdict, bool) {
 	if len(ips) == 0 {
 		return ingressVerdict{}, false
@@ -261,15 +297,15 @@ func classifyIngressIPs(reg snapshot.ClusterRegistry, ips []string) (ingressVerd
 		if status == addrUnknown {
 			return ingressVerdict{}, false
 		}
-		v := ingressVerdict{cidr: "0.0.0.0/0"}
+		v := ingressVerdict{prefixes: []netip.Prefix{publicPrefix}}
 		if status == addrRegistered {
-			v = ingressVerdict{cidr: f.cidr, field: f.field}
+			v = ingressVerdict{prefixes: f.prefixes, field: f.field}
 		}
 		if i == 0 {
 			verdict = v
 			continue
 		}
-		if v != verdict {
+		if v.field != verdict.field {
 			return ingressVerdict{}, false
 		}
 	}
