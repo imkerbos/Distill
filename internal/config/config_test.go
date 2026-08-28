@@ -365,3 +365,60 @@ func TestTLSPathsAreRead(t *testing.T) {
 		t.Errorf("TLS 路径 = %q / %q，没有被读进来", cfg.Server.TLSCertFile, cfg.Server.TLSKeyFile)
 	}
 }
+
+// 证据记账周期缺省时补一个正值：推送式接入没有采集器那一轮循环可挂，
+// 缺省为零会让平台悄无声息地不记账，而症状是每条规则永远显示"刚观察到"。
+func TestEvidenceIntervalDefaultsToAPositiveValue(t *testing.T) {
+	cfg, err := config.Load(writeYAML(t, minimalYAML))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Evidence.Interval <= 0 {
+		t.Errorf("Evidence.Interval = %v, want a positive default", cfg.Evidence.Interval)
+	}
+}
+
+// 显式写 0 表示关掉，且必须与"没写"分得开。
+//
+// 部署里已经有一个拉取式采集器在记账时，操作者要有办法把平台这一侧关掉；
+// 而"没写"必须补默认值，否则升级上来的部署会静默地停止记账。
+func TestEvidenceIntervalCanBeTurnedOffExplicitly(t *testing.T) {
+	p := writeYAML(t, `
+server:
+  addr: ":10100"
+auth:
+  bootstrap_user:
+    username: admin
+    password_hash: "$2a$10$abcdefghijklmnopqrstuv"
+database:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/distill?parseTime=true"
+evidence:
+  interval: 0s
+`)
+	cfg, err := config.Load(p)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Evidence.Interval != 0 {
+		t.Errorf("Evidence.Interval = %v, want 0 —— 显式关掉被默认值盖住了", cfg.Evidence.Interval)
+	}
+}
+
+// 负数是写错了，不是"关掉"。启动时拒绝，不要留到运行期变成一个空转的 ticker。
+func TestEvidenceIntervalRejectsNegative(t *testing.T) {
+	p := writeYAML(t, `
+server:
+  addr: ":10100"
+auth:
+  bootstrap_user:
+    username: admin
+    password_hash: "$2a$10$abcdefghijklmnopqrstuv"
+database:
+  dsn: "user:pass@tcp(127.0.0.1:3306)/distill?parseTime=true"
+evidence:
+  interval: -1m
+`)
+	if _, err := config.Load(p); err == nil {
+		t.Fatal("负的记账周期被接受了")
+	}
+}

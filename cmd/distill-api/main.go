@@ -17,8 +17,10 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/imkerbos/Distill/internal/auth"
+	"github.com/imkerbos/Distill/internal/bookkeeping"
 	"github.com/imkerbos/Distill/internal/buildinfo"
 	"github.com/imkerbos/Distill/internal/cluster"
+	"github.com/imkerbos/Distill/internal/collectstore"
 	"github.com/imkerbos/Distill/internal/config"
 	"github.com/imkerbos/Distill/internal/fleet"
 	"github.com/imkerbos/Distill/internal/gitverify"
@@ -199,6 +201,38 @@ func run(configPath string) error {
 		srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 	}
 	logger.Info("http server listening", "addr", cfg.Server.Addr, "tls", serveTLS)
+
+	// 派生记账：证据（每条规则观察了多少个窗口）与对账（一致率趋势）。
+	//
+	// **推送式接入没有别的地方可以挂它们。** 资产与流量都由被管集群自己推
+	// 上来，落库即返回，而拉取式采集器那一轮循环在这种部署里不存在。两件事
+	// 因此都停在最后一次采集器运行留下的状态：证据表停在 windows=1，
+	// 对账历史一行都没有 —— 而趋势页对"一行都没有"的呈现是一份空曲线，
+	// 读起来是"这个集群还没对过账"（实测 UAT：2609 次推送之后两者皆然）。
+	//
+	// **不挂在推送的处理函数上**：15 个节点各推各的，一分钟就是 15 次，而
+	// 窗口数是逐次加一。挂上去之后，一个 15 节点的集群会比单节点集群快 15 倍
+	// 地"积累证据"，那个数字随即失去意义。周期必须是集群级的。
+	//
+	// 走**采集侧 Reader 而不是分派器**：分派器会把登记为 FIXTURE 的集群路由到
+	// 合成数据集，而合成数据长成的证据是这个平台能造成的最严重后果的那个形态。
+	// 采集侧那道来源门禁对 FIXTURE 答 ErrClusterNotFound，Accountant 自己还有
+	// 一道按 DataSource 的过滤 —— 两道独立，装配被拨反时仍然成立。
+	accountingReader := collectstore.New(db, reg)
+	accountingStore := snapshotstore.New(db)
+	go runBookkeeping(ctx, bookkeeping.NewAccountant(
+		reg, accountingReader, logger,
+		bookkeeping.Task{
+			Name:      "evidence",
+			Recorder:  bookkeeping.NewRecorder(accountingReader, accountingStore, logger),
+			Accounted: bookkeeping.AccountedFunc(accountingStore.LastRuleEvidenceWindowEnd),
+		},
+		bookkeeping.Task{
+			Name:      "agreement",
+			Recorder:  bookkeeping.NewAgreementRecorder(accountingReader, accountingStore, logger),
+			Accounted: bookkeeping.AccountedFunc(accountingStore.LastReconciliationWindowEnd),
+		},
+	), cfg.Evidence.Interval, logger)
 
 	errCh := make(chan error, 1)
 	go func() {

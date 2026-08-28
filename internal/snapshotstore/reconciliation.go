@@ -2,6 +2,7 @@ package snapshotstore
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"time"
 
@@ -29,6 +30,32 @@ type ReconciliationRun struct {
 	// 落下来才分得开"那段时间对不了账"与"那段时间一致率很低"。
 	SourceReports bool
 	Report        reconcile.Report
+}
+
+// LastReconciliationWindowEnd 报告这个集群的对账记到了哪个窗口末端。
+//
+// 第二个返回值为 false 表示这个集群一次都没对过账 —— 与"对到了零值时刻"
+// 必须分得开：零值早于任何真实窗口，塌成一个会让第一个窗口被当成"已经对过"
+// 而永远跳过，于是这个集群的趋势永远是空的。
+//
+// 取 MAX(window_to) 而不是另立一张记账进度表：多一张表就多一个可以与对账
+// 历史本身分歧的位置，而两者分歧时没有任何东西说得出该信哪一个
+// （同 LastRuleEvidenceWindowEnd 的理由）。
+func (s *Store) LastReconciliationWindowEnd(
+	ctx context.Context, clusterID string,
+) (time.Time, bool, error) {
+	var last sql.NullTime
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT MAX(window_to) FROM reconciliation_run WHERE cluster_id = ?`,
+		clusterID).Scan(&last); err != nil {
+		return time.Time{}, false, fmt.Errorf(
+			"snapshotstore: read the furthest reconciled window of cluster %s: %w",
+			clusterID, err)
+	}
+	if !last.Valid {
+		return time.Time{}, false, nil
+	}
+	return last.Time.UTC(), true, nil
 }
 
 // SaveReconciliation 落一次对账结果。

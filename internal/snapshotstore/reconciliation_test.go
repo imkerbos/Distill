@@ -252,3 +252,92 @@ func TestReconciliationSamplesArePersistedWithTheCounts(t *testing.T) {
 			got[0].Flow.Timestamp, at)
 	}
 }
+
+// LastReconciliationWindowEnd 报告这个集群的对账记到了哪个窗口末端。
+//
+// 推送式接入靠它避免把同一个窗口对两次账：记账周期与 agent 推送周期是两条
+// 独立的节奏，而趋势里同一个窗口出现两次会被读成"这段时间波动很大"。
+func TestLastReconciliationWindowEndReportsTheFurthestWindow(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	base := time.Date(2026, 8, 26, 10, 0, 0, 0, time.UTC)
+
+	// 一次都没对过账时必须说"没记过"，而不是答一个零值时刻 —— 零值早于任何
+	// 真实窗口，会让第一个窗口被当成"已经对过"而永远跳过。
+	if _, ok, err := s.LastReconciliationWindowEnd(ctx, clusterA); err != nil {
+		t.Fatalf("LastReconciliationWindowEnd() = %v", err)
+	} else if ok {
+		t.Error("一次都没对过账，却报告说对过了")
+	}
+
+	save := func(runID string, at time.Time) {
+		t.Helper()
+		if err := s.SaveReconciliation(ctx, snapshotstore.ReconciliationRun{
+			ClusterID: clusterA, RunID: runID,
+			WindowFrom: at, WindowTo: at.Add(time.Minute), ComputedAt: at.Add(time.Minute),
+			SourceReports: false,
+			Report:        reconcile.Report{},
+		}); err != nil {
+			t.Fatalf("SaveReconciliation(%s) = %v", runID, err)
+		}
+	}
+	// 先晚后早：取的必须是最远的那一端，不是最后写进去的那一条。
+	save("33333333333333333333333333333333", base.Add(2*time.Hour))
+	save("44444444444444444444444444444444", base)
+
+	got, ok, err := s.LastReconciliationWindowEnd(ctx, clusterA)
+	if err != nil {
+		t.Fatalf("LastReconciliationWindowEnd() = %v", err)
+	}
+	if !ok {
+		t.Fatal("对过两个窗口，却报告说没对过")
+	}
+	want := base.Add(2*time.Hour + time.Minute)
+	if !got.Equal(want) {
+		t.Errorf("LastReconciliationWindowEnd() = %v, want %v", got, want)
+	}
+
+	// 集群之间不得串。
+	if _, ok, err := s.LastReconciliationWindowEnd(ctx, clusterB); err != nil {
+		t.Fatalf("LastReconciliationWindowEnd(clusterB) = %v", err)
+	} else if ok {
+		t.Error("另一个集群的对账被当成了这个集群的")
+	}
+}
+
+// 来源不报判定时，一份没有逐主体明细的对账照样落得下去。
+//
+// conntrack 接入下每个主体都是 SOURCE_SILENT，几百行长得一模一样、零信息量，
+// 记账因此丢掉它们；但这一轮本身必须落得下来，否则趋势永远是空的，而空趋势
+// 读起来是"这个集群还没对过账"。
+func TestAReconciliationWithoutSubjectsIsStored(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	at := time.Date(2026, 8, 26, 10, 0, 0, 0, time.UTC)
+
+	if err := s.SaveReconciliation(ctx, snapshotstore.ReconciliationRun{
+		ClusterID: clusterA, RunID: "55555555555555555555555555555555",
+		WindowFrom: at, WindowTo: at.Add(time.Minute), ComputedAt: at.Add(time.Minute),
+		SourceReports: false,
+		Report: reconcile.Report{
+			Total:   42,
+			Overall: reconcile.Counts{reconcile.ClassSourceSilent: 42},
+		},
+	}); err != nil {
+		t.Fatalf("SaveReconciliation() = %v", err)
+	}
+
+	trend, err := s.ReconciliationTrend(ctx, clusterA, 10)
+	if err != nil {
+		t.Fatalf("ReconciliationTrend() = %v", err)
+	}
+	if len(trend) != 1 {
+		t.Fatalf("趋势里有 %d 个点，want 1 —— 空趋势会被读成「没问题」", len(trend))
+	}
+	if trend[0].SourceReports {
+		t.Error("落的是「来源不报判定」，读回来却说报")
+	}
+	if got := trend[0].Report.Overall[reconcile.ClassSourceSilent]; got != 42 {
+		t.Errorf("SOURCE_SILENT = %d, want 42", got)
+	}
+}

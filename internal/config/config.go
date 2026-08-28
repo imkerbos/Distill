@@ -103,7 +103,35 @@ type Config struct {
 	Log LogConfig `koanf:"log"`
 	// Database 是平台自身数据库参数。
 	Database DatabaseConfig `koanf:"database"`
+	// Evidence 是证据记账的周期。
+	Evidence EvidenceConfig `koanf:"evidence"`
 }
+
+// EvidenceConfig 是证据记账的周期。
+//
+// **它在配置文件而不是设置表里**，与其余运行期配置的归属不同：它描述的是
+// 这套部署的形态 —— 拉取式采集器自己就在每一轮里记账，推送式接入没有那一轮
+// 循环可挂，只能由平台按周期发起。哪一种形态成立，是部署时决定的，不是
+// 操作者在页面上会去调的东西。
+type EvidenceConfig struct {
+	// Interval 是两次记账之间的间隔。**显式写 0 表示关掉**，与"没写"分得开：
+	// 没写要补默认值，否则升级上来的部署会静默地停止记账，而症状是每条规则
+	// 永远显示"刚观察到"；而部署里已经有采集器在记账时，操作者要有办法关掉
+	// 平台这一侧。
+	//
+	// 记账一次要把整个集群的候选集算出来（实测 600 Pod 的集群约二十秒），
+	// 因此这个值必须远大于那个耗时；同时它决定了"这条规则观察了多少个窗口"
+	// 这个数的分辨率。
+	Interval time.Duration `koanf:"interval"`
+}
+
+// defaultEvidenceInterval 是证据记账的缺省周期。
+//
+// 五分钟是两条约束夹出来的：记账一次要把整个集群的候选集算出来（实测 600 Pod
+// 的集群约二十秒），周期必须远大于它；而这个数同时是"这条规则观察了多少个
+// 窗口"的分辨率，太长会让一条刚出现的规则和一条稳定存在了一小时的规则在
+// 屏幕上长得一样。
+const defaultEvidenceInterval = 5 * time.Minute
 
 // relocatedKey 是一个不再属于配置文件的键，以及它的去向。
 type relocatedKey struct {
@@ -169,7 +197,13 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("decode config: %w", err)
 	}
 
+	// 记账周期的默认值要知道这个键在文件里到底写没写：显式 0 是"关掉"，
+	// 没写是"用默认"，而两者解出来的都是零值。其余默认值不需要这一层 ——
+	// 它们的零值本来就不是一个操作者会选的取值。
 	cfg.applyDefaults()
+	if !k.Exists("evidence.interval") {
+		cfg.Evidence.Interval = defaultEvidenceInterval
+	}
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
@@ -228,6 +262,13 @@ func (c *Config) validate() error {
 	// 证书与私钥必须同时给出。只给一半是配置写了一半，而它的失败方向是
 	// **静默退回明文监听** —— 一个以为自己在跑 TLS 的部署，token 却在明文
 	// 过网。配置错误要在启动时暴露（CLAUDE.md §8）。
+	// 负数是写错了，不是"关掉"。留到运行期只会变成一个立刻自转的 ticker，
+	// 而那会让记账周期变成"每次循环一次"，windows 随即失去意义。
+	if c.Evidence.Interval < 0 {
+		return fmt.Errorf(
+			"%w: evidence.interval must not be negative; write 0s to turn accounting off",
+			ErrInvalidConfig)
+	}
 	if (c.Server.TLSCertFile == "") != (c.Server.TLSKeyFile == "") {
 		return fmt.Errorf(
 			"%w: server.tls_cert_file and server.tls_key_file must be given together; "+
