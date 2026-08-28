@@ -38,3 +38,32 @@ jobs:
         env:
           DISTILL_TEST_MYSQL_DSN: "root:distill-local@tcp(127.0.0.1:3306)/distill?parseTime=true&loc=UTC"
         run: go test ./... -race -count=1
+
+  # 前端单独一个 job：它不需要 MySQL，而挂在 check 里会让每一次前端改动
+  # 都去等一个数据库起来。分开也让红的时候一眼看得出是哪一侧。
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # 钉死大版本，理由同 golangci-lint：latest 会在上游发新版的那天
+          # 把一次无关的 PR 变成红的，而门禁必须是可复现的。
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # ci 而不是 install：install 会按需改写 lock 文件，于是 CI 装的依赖
+      # 与提交进来的那份不是同一套 —— 而两者的分歧不报错。
+      - name: Install
+        run: npm ci
+
+      # typecheck + lint + test 三项。**typecheck 走 `tsc -b`，不是
+      # `tsc --noEmit`**：web/tsconfig.json 是 solution 式的（"files": []），
+      # --noEmit 对着它检查零个文件、静默通过 —— 一道恒绿的门禁。
+      - name: Check
+        run: npm run check
