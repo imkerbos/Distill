@@ -132,8 +132,11 @@ func TestReadServicesAtCarriesExposureInformation(t *testing.T) {
 
 // 迁移之前写下的行读回来必须是 nil（没采过），不是 []（采过、是空的）。
 //
-// 混淆两者会让推导层把一批老快照当成"这个 LoadBalancer 没有入口地址"，
-// 报出一串本不存在的缺口（migrations/000032）。
+// **今天没有任何消费方分得开这两者**：推导层判的是 len(...) == 0，两条路
+// 都报成缺口。这条用例守的不是一个当下的行为差异，而是这份区分在存储层
+// 不被抹掉 —— 抹掉是不可逆的（migrations/000032），而它要承载的是还没写
+// 的那个判断：把老快照的缺口标成 DEGRADED 而不是缺失，需要的正是
+// "这一行到底采没采过"。读回来先变成 [] 的话，那个判断永远无从下手。
 func TestReadServicesAtKeepsPreMigrationRowsNil(t *testing.T) {
 	db := exposureTestDB(t)
 	saveExposureRun(t, db)
