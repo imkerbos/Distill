@@ -165,17 +165,6 @@ func TestIPv6EntriesAreParsed(t *testing.T) {
 	}
 }
 
-// **conntrack 不报放行/拒绝**，因此解析产物不得带 verdict。
-//
-// 编一个出来会让下游把「来源说这条通」当成事实，而 conntrack 从没说过。
-func TestConntrackNeverReportsAVerdict(t *testing.T) {
-	c := only(t, parse(t, `ipv4     2 tcp      6 100 ESTABLISHED src=10.244.1.5 dst=10.244.2.7 sport=1 dport=8080 src=10.244.2.7 dst=10.244.1.5 sport=8080 dport=1 mark=0 use=1
-`))
-	if v, ok := c.Verdict(); ok {
-		t.Errorf("carries verdict %q; conntrack does not report allow/deny", v)
-	}
-}
-
 // 超过上限：截断，且把丢掉的条数报出来。
 //
 // dropped 是"知道漏了 N 条"，比 UNKNOWN 那种"不知道漏没漏"更强的证据 ——
@@ -215,4 +204,47 @@ func TestNotTruncatingReportsNoDroppedCount(t *testing.T) {
 
 func itoa(i int) string {
 	return strconv.Itoa(i)
+}
+
+// TCP 条目要带上 ALLOWED：解析层已经丢掉了 [UNREPLIED]，留下的每一条握手
+// 都完成过，而握手完成意味着执行平面放行过它。
+//
+// 这是 conntrack 唯一能给出的判定，也是 dry-run 唯一的证伪手段——没有它，
+// 对账里每一条都落进 SOURCE_SILENT，平台永远答不出"我判得对不对"。
+// UAT 实测：接上之前 17331 条观测，一致率分子分母全为 0。
+func TestTCPEntriesCarryTheAllowedVerdict(t *testing.T) {
+	const table = `ipv4 2 tcp 6 100 ESTABLISHED src=10.244.1.5 dst=10.244.2.7 sport=1 dport=8080 src=10.244.2.7 dst=10.244.1.5 sport=8080 dport=1 mark=0 use=1
+`
+	tbl, err := conntrack.Parse(strings.NewReader(table), conntrack.Limit{})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if len(tbl.Connections) != 1 {
+		t.Fatalf("got %d connections, want 1", len(tbl.Connections))
+	}
+	v, reported := tbl.Connections[0].Verdict()
+	if !reported {
+		t.Fatal("TCP 条目没带判定 —— 对账会把它算成来源没报，一致率永远是空的")
+	}
+	if v != flow.VerdictAllowed {
+		t.Errorf("verdict = %q, want %q", v, flow.VerdictAllowed)
+	}
+}
+
+// **UDP 不报。** 没有握手，单向条目（syslog、statsd、metrics push）天然
+// unreplied 且被刻意保留——一条 UDP 条目证明不了对端收到过。报 ALLOWED
+// 等于拿"我发过"冒充"它通了"，而那个假证据会污染一致率。
+func TestUDPEntriesReportNoVerdict(t *testing.T) {
+	const table = `ipv4 2 udp 17 29 src=10.244.1.5 dst=10.96.0.10 sport=2 dport=53 src=10.244.0.3 dst=10.244.1.5 sport=5353 dport=2 mark=0 use=1
+`
+	tbl, err := conntrack.Parse(strings.NewReader(table), conntrack.Limit{})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if len(tbl.Connections) != 1 {
+		t.Fatalf("got %d connections, want 1", len(tbl.Connections))
+	}
+	if _, reported := tbl.Connections[0].Verdict(); reported {
+		t.Error("UDP 条目报了判定 —— 单向 UDP 证明不了对端收到过")
+	}
 }

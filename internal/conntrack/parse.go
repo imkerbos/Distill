@@ -118,15 +118,30 @@ func Parse(r io.Reader, limit Limit) (Table, error) {
 
 	tbl.Connections = make([]flow.Connection, 0, len(order))
 	for _, k := range order {
-		// 不附 verdict：conntrack 不报放行/拒绝。编一个出来会让下游把
-		// 「来源说这条通」当成事实，而 conntrack 从没说过。
-		tbl.Connections = append(tbl.Connections, flow.Connection{
+		c := flow.Connection{
 			Source:        flow.Endpoint{IP: k.src},
 			Dest:          flow.Endpoint{IP: k.dst},
 			Protocol:      k.proto,
 			Port:          k.port,
 			ObservedCount: counts[k],
-		})
+		}
+		// **TCP 报 ALLOWED，其余不报。** 上面已经把 [UNREPLIED] 的 TCP 条目
+		// 丢掉了，因此能走到这里的每一条 TCP 握手都完成过——而握手完成意味着
+		// 双向都通，任何一条 NetworkPolicy 拦下它都不可能有这个结果。
+		//
+		// 这是 conntrack 唯一给得出的判定，也是 dry-run 唯一的证伪手段：
+		// 平台判 DENY 而这里报 ALLOWED，就是 DISAGREE_UNDER_PERMISSIVE ——
+		// 平台以为这条本来就不通，于是不为它生成放行规则，候选集下发后它
+		// 从通变成不通，而 dry-run 把它算成 UNCHANGED（internal/reconcile）。
+		// 不报的话每一条都落进 SOURCE_SILENT，平台永远答不出自己判得对不对。
+		//
+		// **UDP / SCTP 不报。** 没有握手，单向条目（syslog、statsd、metrics
+		// push）天然 unreplied 且被刻意保留，证明不了对端收到过。报 ALLOWED
+		// 是拿"我发过"冒充"它通了"，那个假证据会污染一致率。
+		if k.proto == flow.ProtocolTCP {
+			c = c.WithVerdict(flow.VerdictAllowed)
+		}
+		tbl.Connections = append(tbl.Connections, c)
 	}
 	return tbl, nil
 }

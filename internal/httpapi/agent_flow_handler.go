@@ -53,8 +53,12 @@ type agentConnectionPayload struct {
 	// ObservedCount 是这个窗口内看到它多少次。它**不是**完整度：看见 3 次
 	// 只说明至少发生过 3 次。
 	ObservedCount int `json:"observedCount"`
-	// Verdict 是来源报告的实际放行/拒绝。空表示来源不报这件事（conntrack
-	// 就不报），非空则必须在封闭枚举内。
+	// Verdict 是来源报告的实际放行/拒绝。空表示来源不报这件事，非空则必须
+	// 在封闭枚举内。
+	//
+	// conntrack 只在 TCP 上报得出：解析层已经丢掉了 [UNREPLIED] 的 TCP 条目，
+	// 留下的每一条握手都完成过，而握手完成意味着执行平面放行过它。UDP 不报
+	// ——单向条目证明不了对端收到过。
 	Verdict string `json:"verdict,omitempty"`
 }
 
