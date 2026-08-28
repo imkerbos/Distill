@@ -369,13 +369,21 @@ func (t traffic) unknown(reason replay.UnknownReason, detail string) replay.Deci
 // ok 为 false 表示区间与快照对不上，调用方必须据此答 UNKNOWN，**不得**拿
 // 一个只有名字、没有标签的 Pod 去求值。
 //
-// NamedPorts 留空：采集层没有落容器端口，命名端口于是解析不出来。这不是
-// 遗漏而是如实 —— 求值引擎遇到解不开的命名端口会答 NAMED_PORT_UNRESOLVED，
-// 那是它自己登记的原因，比猜一个端口号安全。
+// NamedPorts 补自快照里的 observedPod.namedPorts（采集层现在落了容器端口，
+// migrations/000032）：求值引擎按 (名字, 协议) 解析命名端口规则，缺了这份
+// 数据，一条合法的规则只会判 NAMED_PORT_UNRESOLVED，即便集群里那个端口
+// 确实开着。协议在这里从快照的自由字符串转成 replay.Protocol —— 两个包
+// 的类型故意不共用，PodRef 是求值引擎收窄过的最小视图（见 replay.PodRef）。
 func (t traffic) podRefOf(id identity.Identity, ip string) (*replay.PodRef, bool) {
 	p, ok := t.pods[podKey{namespace: id.Namespace, name: id.PodName}]
 	if !ok {
 		return nil, false
+	}
+	namedPorts := make([]replay.NamedPort, 0, len(p.namedPorts))
+	for _, np := range p.namedPorts {
+		namedPorts = append(namedPorts, replay.NamedPort{
+			Name: np.Name, Port: np.Port, Protocol: replay.Protocol(np.Protocol),
+		})
 	}
 	return &replay.PodRef{
 		ClusterID:   t.clusterID,
@@ -385,6 +393,7 @@ func (t traffic) podRefOf(id identity.Identity, ip string) (*replay.PodRef, bool
 		Labels:      p.labels,
 		HostNetwork: id.HostNetwork,
 		InMesh:      id.InMesh,
+		NamedPorts:  namedPorts,
 	}, true
 }
 
