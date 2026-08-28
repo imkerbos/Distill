@@ -360,6 +360,40 @@ export interface UnattachedBaselineRule {
  */
 export type UnattachedBaselineReason = 'NO_SELECTOR' | 'NO_SUCH_WORKLOAD'
 
+/**
+ * 一条对外暴露的放行在 workload 粒度上多放开了多少个 Pod。
+ * 对应 policygen.ExposureWidening（design doc 2026-08-28-exposed-ingress §4）。
+ *
+ * UAT 上 `devops/zk-0-lb` 的 selector 含
+ * `statefulset.kubernetes.io/pod-name: zookeeper-0` —— 它点名**一个** Pod，
+ * 而生成的规则覆盖 zookeeper 的全部三个。三个 Pod 各有一个 LB、并集恰好
+ * 相等是那一个集群的巧合，不是这条规则的性质。
+ */
+export interface ExposureWidening {
+  namespace: string
+  /** 推出这条规则的 Service 名。 */
+  service: string
+  /** 规则实际挂靠的 workload，即 podSelector 的标签值。 */
+  workload: string
+  /**
+   * workloadPods 那批 Pod 里，同时满足 Service 完整 selector 的 Pod 数。
+   *
+   * 只在 workloadPods 这批里数 —— 因此它恒为 workloadPods 的子集，
+   * extraPods 不可能是负数。
+   */
+  selectedPods: number
+  /** 候选策略的 podSelector 选中的 Pod 数：规则下发后真正覆盖到的范围。 */
+  workloadPods: number
+  /**
+   * `workloadPods − selectedPods`：podSelector 覆盖到、却没被 Service
+   * selector 点名的 Pod 数。
+   *
+   * **为 0 也要报**：把无损的与真的放宽了的混在一起，操作者分不出哪几条
+   * 值得回到 Pod 粒度去看。
+   */
+  extraPods: number
+}
+
 /** LEARNED 规则的证据等级，决定是否默认启用。 */
 export type EvidenceClass =
   | 'TRUSTED_ALLOW' | 'TRUSTED_DENY' | 'INTERNET_EGRESS' | 'CROSS_CLUSTER'
@@ -1092,6 +1126,20 @@ export interface PolicyPreview {
    * 老响应或字段改了名，此时不能把它读成"全部对外暴露都挂上了"。
    */
   unattachedBaselines: UnattachedBaselineRule[] | null
+  /**
+   * 每一条挂上了 workload 的对外暴露，在 Service selector 与 workload
+   * podSelector 之间放宽了多少个 Pod。
+   *
+   * Service 的 selector 可以点名单个 Pod（StatefulSet 的
+   * `statefulset.kubernetes.io/pod-name`），而候选策略是 workload 粒度的 ——
+   * 生成的规则会覆盖这个 workload 的全部 Pod。不报出来，操作者读到的是
+   * 「按 Service 放行」，实际下发的是「按 workload 放行」
+   * （design doc 2026-08-28-exposed-ingress §4）。
+   *
+   * **恒为非 nil**，与 unattachedBaselines 同一条纪律：空清单是"算过，
+   * 没有一条暴露规则挂上"，null 是"没人算过"。
+   */
+  exposureWidenings: ExposureWidening[] | null
   /**
    * **整片**没有生成候选策略的命名空间。
    *
