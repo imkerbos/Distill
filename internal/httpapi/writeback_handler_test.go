@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -909,7 +910,36 @@ func TestWritebackCommitMessageIsSelfDescribingAndNothingMore(t *testing.T) {
 		"发起者: ",
 		"平台版本: ",
 		"以上 dry-run 结论算的是出计划那一刻的集群状态",
+		"命名空间筛选: ",
 		"", // 主题与正文之间那个空行
+
+		// 没观测到流量时 renderPolicyBasis 走的那一支：明说 dry-run 没做过，
+		// 而不是印四个 0。取值全是常量文字。
+		"dry-run: 没有做过。",
+		"  「应用这些策略会拦断什么」",
+		"下面的策略来自资产推导（Baseline）",
+		"**但在有流量数据之前",
+
+		// 缺口那几行（renderPolicyCaveats）。每一行的可变部分只有三类：
+		// 计数、封闭枚举取值、以及集群里的对象名（命名空间/workload/
+		// Service/策略名）。前两类不是内容；第三类本来就逐字写在这次提交
+		// 的 YAML 里 —— 说出"payment 这个命名空间的基线推不出来"，不比
+		// 提交一份 payment 的 NetworkPolicy 多暴露任何东西。
+		//
+		// 凭据、仓库地址与 host key 到不了这里：renderPolicyCaveats 的入参
+		// 只有 store.PolicyPreview，它里面根本没有这些字段。和函数注释里
+		// 那句一样，这是结构上的，不是靠渲染时记得不写。
+		"—— 以下是平台知道自己没看全的地方 ——",
+		"观测窗口完整度: ",
+		"规则粒度: ",
+		"参与推导的基线类别: ",
+		"基线推导不出: ", "基线不适用: ", "基线未评估: ",
+		"集群既有策略挂不上主体: ", "基线规则挂不上主体: ",
+		"规则被放宽: ", "暴露放宽: ",
+		"排除的命名空间: ", "排除的主体: ",
+		"生成不出规则的流: ", "失效的人工决定: ",
+		"除以上两项外，本次没有其他缺口",
+		"  - ", // 上面各项的逐条列举；形状由下面那条正向断言另行约束
 	}
 	for _, line := range strings.Split(strings.TrimSuffix(plan.Plan.CommitMessage, "\n"), "\n") {
 		known := false
@@ -929,6 +959,18 @@ func TestWritebackCommitMessageIsSelfDescribingAndNothingMore(t *testing.T) {
 			t.Errorf("commit message missing %q:\n%s", want, plan.Plan.CommitMessage)
 		}
 	}
+	// "  - " 是一条前缀通配，它一个人就能让任何东西过关——所以配一条正向
+	// 断言把那个洞补上：提交信息里一个 IP、一个 URL scheme 都不许出现。
+	//
+	// 这不是多余的：缺口那几行会把集群里的对象名插进这段文字，而"对象名"
+	// 与"内部地址"之间只隔着上游哪天往某个 Detail 字段里塞了个 endpoint。
+	// 逐条列举里带上自由文本正是这一版删掉的东西，这条断言是它的锁。
+	addrLike := regexp.MustCompile(`\b\d{1,3}(\.\d{1,3}){3}\b|[a-z][a-z0-9+.-]*://`)
+	if m := addrLike.FindString(plan.Plan.CommitMessage); m != "" {
+		t.Errorf("提交信息里出现了看起来像地址的 %q —— 这段文字会落进仓库历史，撤不回来:\n%s",
+			m, plan.Plan.CommitMessage)
+	}
+
 	// 反方向：仓库地址、凭据引用与主机名一个都不许出现在会被推出去的
 	// 任何一段文字里（规范 §19、§21）。
 	repo := boundRepo()

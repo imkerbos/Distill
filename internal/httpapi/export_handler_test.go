@@ -16,6 +16,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
 
+	"regexp"
+
 	"github.com/imkerbos/Distill/internal/fixture"
 	"github.com/imkerbos/Distill/internal/policygen"
 	"github.com/imkerbos/Distill/internal/predict"
@@ -414,6 +416,33 @@ func TestPolicyExportHeaderIsSelfDescribingAndNothingMore(t *testing.T) {
 		"# 导出时刻: ",
 		"# 以上 dry-run 结论算的是导出这一刻的集群状态",
 		"# 集群在此之后发生的变化不在其中",
+
+		// 没观测到流量时 renderPolicyBasis 走的那一支：明说 dry-run 没做过，
+		// 而不是印四个 0。取值全是常量文字。
+		"# dry-run: 没有做过。",
+		"#   「应用这些策略会拦断什么」",
+		"# 下面的策略来自资产推导（Baseline）",
+		"# **但在有流量数据之前",
+
+		// 缺口那几行（renderPolicyCaveats），与写回提交信息共用同一个实现。
+		// 每一行的可变部分只有三类：计数、封闭枚举取值、集群里的对象名。
+		// 前两类不是内容；第三类逐字写在这份文件下面的 YAML 里 —— 说出
+		// "payment 的基线推不出来"，不比同一份文件里那条 payment 的
+		// NetworkPolicy 多暴露任何东西。
+		//
+		// 凭据、仓库地址、host key 与哈希到不了这里：renderPolicyCaveats 的
+		// 入参只有 store.PolicyPreview，里面没有这些字段。
+		"# —— 以下是平台知道自己没看全的地方 ——",
+		"# 观测窗口完整度: ",
+		"# 规则粒度: ",
+		"# 参与推导的基线类别: ",
+		"# 基线推导不出: ", "# 基线不适用: ", "# 基线未评估: ",
+		"# 集群既有策略挂不上主体: ", "# 基线规则挂不上主体: ",
+		"# 规则被放宽: ", "# 暴露放宽: ",
+		"# 排除的命名空间: ", "# 排除的主体: ",
+		"# 生成不出规则的流: ", "# 失效的人工决定: ",
+		"# 除以上两项外，本次没有其他缺口",
+		"#   - ", // 逐条列举；形状由下面那条正向断言另行约束
 	}
 	for _, line := range strings.Split(strings.TrimSuffix(header, "\n"), "\n") {
 		known := false
@@ -427,6 +456,14 @@ func TestPolicyExportHeaderIsSelfDescribingAndNothingMore(t *testing.T) {
 			t.Errorf("header line %q is not on the list this test allows —— "+
 				"新增一行要先说明它不含凭据、host key、内部地址或哈希", line)
 		}
+	}
+
+	// "#   - " 是一条前缀通配，它一个人就能让任何东西过关——配一条正向断言
+	// 把那个洞补上：注释头里一个 IP、一个 URL scheme 都不许出现。这份文件
+	// 会脱离平台独自存在，注释头是唯一跟着它走的说明文字。
+	addrLike := regexp.MustCompile(`\b\d{1,3}(\.\d{1,3}){3}\b|[a-z][a-z0-9+.-]*://`)
+	if m := addrLike.FindString(header); m != "" {
+		t.Errorf("注释头里出现了看起来像地址的 %q:\n%s", m, header)
 	}
 
 	for _, want := range []string{

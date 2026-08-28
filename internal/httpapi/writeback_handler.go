@@ -465,7 +465,7 @@ func planWriteback(
 		Confirmed: confirmed,
 		Branch:    writebackBranch(clusterID, at),
 		CommitMessage: writebackCommitMessage(
-			clusterID, actor.Username, pv.Window, counts, deletions, confirmed, exclusions),
+			clusterID, actor.Username, pv, counts, deletions, confirmed, exclusions),
 		Counts: counts,
 		// 两份清单来自刚才那次枚举，不是留空：留空的那一份在界面上是一句
 		// 断言，而不是一个空集（design doc §4）。
@@ -709,7 +709,7 @@ func writebackCounts(pv store.PolicyPreview) map[predict.ChangeKind]int {
 // 让提交信息裂成看起来像另外几行的东西（规范 §26 的同一形状）。上游已经
 // 拒过不存在的集群与账号，这一层是纵深防御，不是它的替代。
 func writebackCommitMessage(
-	clusterID, actor string, window store.TimeWindow, counts map[predict.ChangeKind]int,
+	clusterID, actor string, pv store.PolicyPreview, counts map[predict.ChangeKind]int,
 	deletions []registry.WritebackDeletion, confirmed []string,
 	exclusions []registry.WritebackExclusion,
 ) string {
@@ -720,14 +720,20 @@ func writebackCommitMessage(
 	line("policy: distill 写回 %s", clusterID)
 	b.WriteString("\n")
 	line("集群: %s", clusterID)
-	line("时间窗: %s ~ %s",
-		window.From.UTC().Format(time.RFC3339), window.To.UTC().Format(time.RFC3339))
-	for _, k := range predict.AllChangeKinds() {
-		line("dry-run %s: %d", k, counts[k])
-	}
+	// 命名空间筛选进提交信息：一次只覆盖某一个命名空间的写回，与一次覆盖
+	// 整集群的写回，在 diff 上分辨不出来（没被涉及的命名空间只是没有文件）。
+	// 评审人要判断的第一件事就是这次动了多大范围。
+	line("命名空间筛选: %s", namespaceLabel(pv.Namespace))
+	renderPolicyBasis(pv, counts, line)
 	line("发起者: %s", actor)
 	line("平台版本: %s", buildinfo.Version())
 	line("以上 dry-run 结论算的是出计划那一刻的集群状态，合并前请重新核对。")
+
+	// 缺口与导出文件用同一个实现：评审人在合并请求上读到的、与下载下来
+	// 那份文件上写的，必须是同一段话。分开写就会漂移，而漂移了屏幕上不会
+	// 有任何迹象。
+	b.WriteString("\n")
+	renderPolicyCaveats(pv, line)
 
 	// 排除逐条列出：一份少了三个 workload 的策略集，不说明的话评审人读到的
 	// 就是"这个集群只有这些 workload"—— 而缺席恰恰意味着平台在那几个主体上
