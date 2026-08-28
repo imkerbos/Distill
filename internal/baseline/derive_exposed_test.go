@@ -40,6 +40,16 @@ func svcNodePort(namespace, name string, ports ...snapshot.ServicePort) snapshot
 	}
 }
 
+// svcClusterIP 造一个 ClusterIP Service —— 不对外暴露，EXPOSED_INGRESS 应当
+// 判它不适用而非缺失。
+func svcClusterIP(namespace, name string, ports ...snapshot.ServicePort) snapshot.Service {
+	return snapshot.Service{
+		ClusterID: "c1", Namespace: namespace, Name: name, Type: "ClusterIP",
+		Selector: map[string]string{"app": name},
+		Ports:    ports,
+	}
+}
+
 // port 造一个 Service 端口。name 非空时是命名端口（TargetPortName=name），
 // 否则 num 既是 Service port 也是数字 targetPort。
 func port(name string, num int32) snapshot.ServicePort {
@@ -174,5 +184,80 @@ func TestExposedIngressCarriesItsDerivation(t *testing.T) {
 	}
 	if !slices.Contains(fields, "status.loadBalancer.ingress") {
 		t.Errorf("依据没有指向入口地址那一行: %v", fields)
+	}
+}
+
+// Derive 必须把暴露型入站放行接出来。
+//
+// deriveExposedIngress 自己有测试，这一条守的是**调用方仍然在调它** ——
+// 摘掉 Derive 里那一行，上面那些照样全绿，而入口网关会重新拿到零放行。
+func TestDeriveIncludesExposedIngress(t *testing.T) {
+	a := assetsWith(svcLB("istio-system", "uat-istio-ingressgateway-extra",
+		[]string{"34.150.1.177"}, nil, port("", 443)))
+	set := Derive(a, "istio-system", nil)
+
+	var found bool
+	for _, r := range set.Rules {
+		if r.Kind == KindExposedIngress {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("Derive 没有产出 EXPOSED_INGRESS —— 入口网关会拿到零放行的 default-deny")
+	}
+}
+
+// 没有暴露对象的 namespace，这一类不适用，而不是「缺失」。
+//
+// 判成缺失会让每个内部 namespace 都挂上一条永远补不上的缺口。
+func TestExposedIngressIsNotApplicableWithoutAnyExposure(t *testing.T) {
+	a := assetsWith(svcClusterIP("shop", "api", port("", 8080)))
+	set := Derive(a, "shop", nil)
+	if !slices.Contains(set.NotApplicable, KindExposedIngress) {
+		t.Errorf("没有暴露对象却没判成不适用: %v", set.NotApplicable)
+	}
+}
+
+// 有暴露对象、却推不出放行规则（LoadBalancer 拿不到入口地址）：这一类要落进
+// Missing()，且不得落进 NotApplicable —— 这一对断言合起来才证明「这里确实
+// 有要暴露的东西，只是我们判不出它的放行范围」而不是「这里根本没有暴露面」。
+// Correction 1（Task 5）把这半条断言挪到了这里，因为它依赖 Derive 接线。
+func TestExposedIngressWithUnknownIngressIPIsMissingNotInapplicable(t *testing.T) {
+	a := assetsWith(svcLB("shop", "api-lb", nil, nil, port("", 8080)))
+	set := Derive(a, "shop", nil)
+
+	for _, r := range set.Rules {
+		if r.Kind == KindExposedIngress {
+			t.Error("取不到入口地址却生成了放行规则")
+		}
+	}
+	if slices.Contains(set.NotApplicable, KindExposedIngress) {
+		t.Error("有 LoadBalancer 却被判成「不适用」—— 缺口会就此消失")
+	}
+	if !slices.Contains(set.Missing(), KindExposedIngress) {
+		t.Errorf("取不到入口地址却没报缺口，Missing = %v", set.Missing())
+	}
+}
+
+// **既有缺陷同修**：LB 健康检查的端口在命名端口下写成了 0。
+//
+// intstr.FromInt32(p.TargetPort) 在 TargetPortName 非空时 TargetPort 是 0，
+// 而 0 是合法端口值 —— 一条指向端口 0 的规则永远匹配不上，外观完全正常。
+// UAT 的 kafka-0-external 正是这个形态。
+func TestLBHealthCheckResolvesNamedTargetPorts(t *testing.T) {
+	a := assetsWith(svcLB("uat-kafka", "kafka-0-external",
+		[]string{"10.170.48.193"}, nil, port("kafka-external", 9094)))
+	a.Registry.HealthCheckSources = []string{"35.191.0.0/16"}
+	set := Derive(a, "uat-kafka", nil)
+
+	for _, r := range set.Rules {
+		if r.Kind != KindLBHealth {
+			continue
+		}
+		for _, p := range r.Ingress.Ports {
+			if p.Port.String() == "0" {
+				t.Fatal("LB 健康检查指向端口 0 —— 命名端口没被解析，规则永远匹配不上")
+			}
+		}
 	}
 }

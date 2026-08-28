@@ -95,14 +95,19 @@ func TestPolicyPreviewMissingBaselinesContent(t *testing.T) {
 	// 其余 namespace 既没有暴露面也没有 Pod 声明要被抓 —— 它们没有健康检查
 	// 与抓取流量要放行，报缺就是误报。
 	//
-	// eu 的 partner 真缺 METRICS_SCRAPE：它有 Pod 声明要被抓，却没有抓取端
-	// 登记到它。**LB_HEALTH_CHECK 不再缺**：partner 有一个 type=LoadBalancer
-	// 的 Service，deriveLBHealth 现在直接从它推出健康检查放行（此前只认
-	// Ingress，会把它误报成缺失、让写回 gate 永久卡死这个 namespace）。
+	// eu 的 partner 真缺 METRICS_SCRAPE 与 EXPOSED_INGRESS：它有 Pod 声明要
+	// 被抓，却没有抓取端登记到它；它也有一个 type=LoadBalancer 的 Service，
+	// 却拿不到入口地址、也没有声明 loadBalancerSourceRanges，判不出放行范围
+	// （spec 2026-08-28 §6）。**LB_HEALTH_CHECK 不缺**：deriveLBHealth 直接从
+	// LoadBalancer Service 本身就能推出健康检查放行，不需要入口地址
+	// （此前只认 Ingress，会把它误报成缺失、让写回 gate 永久卡死这个
+	// namespace）。EXPOSED_INGRESS 与 LB_HEALTH_CHECK 判据不同：前者要放行
+	// 的是外部客户端流量，需要知道客户端从哪来；后者放行的是云厂商探测器，
+	// 来源网段是登记好的，不依赖这个 Service 具体分到了哪个入口地址。
 	want := map[string]map[string][]baseline.Kind{
 		"prod-asia-1": {},
 		"prod-eu-1": {
-			"partner": {baseline.KindMetrics},
+			"partner": {baseline.KindMetrics, baseline.KindExposedIngress},
 		},
 	}
 	r := reader()
@@ -133,10 +138,10 @@ func TestPolicyPreviewMissingBaselinesContent(t *testing.T) {
 		// 那些缺口是给"要下发策略"准备的，而这一片平台默认不下发。
 		// 它出现在 ExcludedNamespaces 里，不是悄悄消失。
 		wantNA := map[string][]baseline.Kind{
-			"batch":    {baseline.KindLBHealth, baseline.KindMetrics},
-			"checkout": {baseline.KindLBHealth, baseline.KindMetrics},
-			"legacy":   {baseline.KindLBHealth, baseline.KindMetrics},
-			"payment":  {baseline.KindLBHealth},
+			"batch":    {baseline.KindLBHealth, baseline.KindMetrics, baseline.KindExposedIngress},
+			"checkout": {baseline.KindLBHealth, baseline.KindMetrics, baseline.KindExposedIngress},
+			"legacy":   {baseline.KindLBHealth, baseline.KindMetrics, baseline.KindExposedIngress},
+			"payment":  {baseline.KindLBHealth, baseline.KindExposedIngress},
 		}
 		if !reflect.DeepEqual(na, wantNA) {
 			t.Errorf("%s: NotApplicableBaselines = %v, want %v", cluster, na, wantNA)

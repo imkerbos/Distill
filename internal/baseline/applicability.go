@@ -29,6 +29,12 @@ func notApplicable(a snapshot.Assets, namespace string, unassessed []Kind) []Kin
 	if !blind[KindLBHealth] && !exposed(a, namespace) {
 		out = append(out, KindLBHealth)
 	}
+	// EXPOSED_INGRESS 复用同一个 exposed() 判据：没有 Gateway/Ingress、
+	// 也没有 LoadBalancer/NodePort Service 的 namespace 根本没有对外入口，
+	// 判成缺失会给每个内部 namespace 挂一条永远补不上的缺口。
+	if !blind[KindExposedIngress] && !exposed(a, namespace) {
+		out = append(out, KindExposedIngress)
+	}
 	if !blind[KindMetrics] && !scrapeDeclared(a, namespace) {
 		out = append(out, KindMetrics)
 	}

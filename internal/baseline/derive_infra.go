@@ -79,10 +79,14 @@ func deriveLBHealth(a snapshot.Assets) []Rule {
 		svc := es.svc
 		// 端口取 targetPort 而非 Service port：健康检查直接打到 Pod，
 		// 放行 Service port 会放开一个后端没监听的端口，真正的检查仍被挡。
+		// 命名端口经 targetPortOf 原样写成字符串 —— intstr.FromInt32 在命名
+		// 端口下取到的是 TargetPort 的零值 0，而 0 是合法端口值，一条指向
+		// 端口 0 的规则永远匹配不上、外观却完全正常（UAT 的 kafka-0-external
+		// 正是这个形态）。
 		ports := make([]networkingv1.NetworkPolicyPort, 0, len(svc.Ports))
 		for _, p := range svc.Ports {
 			proto := corev1.Protocol(p.Protocol)
-			target := intstr.FromInt32(p.TargetPort)
+			target := targetPortOf(p)
 			ports = append(ports, networkingv1.NetworkPolicyPort{Protocol: &proto, Port: &target})
 		}
 		// 溯源：有 Gateway 就记 Gateway 那一跳；Service 与 Registry 始终记。
