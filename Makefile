@@ -1,4 +1,4 @@
-.PHONY: lint test build check dev dev-down test-integration conformance-up conformance conformance-down
+.PHONY: lint test build check web-check dev dev-down test-integration conformance-up conformance conformance-down
 
 lint:
 	golangci-lint run ./...
@@ -14,10 +14,22 @@ build:
 # DISTILL_CONFORMANCE_CONTEXT 时 `test` 里的那个子测试也会自行跳过。
 # purity 与 lint / test 并列进 check：它守的是一条编译产物的性质
 # （装进客户集群的那个二进制不得链接状态库），而那种性质靠 review 守不住。
-check: lint test purity
+check: lint test purity web-check
 
 purity:
 	./scripts/check-push-purity.sh
+
+# 前端进门禁。此前它一次都没被自动跑过：CI 只有 golangci-lint 与 go test，
+# check 只有 lint/test/purity —— 于是前端的类型、lint 与那 30 多个测试文件
+# 全靠人记得手动跑。一个跑不起来的前端与一个跑得起来的前端在门禁上长得
+# 一模一样。
+#
+# **必须走 `npm run typecheck`（即 `tsc -b`），不能写成 `npx tsc --noEmit`。**
+# web/tsconfig.json 是 solution 式的（"files": []，只有 references），
+# --noEmit 对着它检查零个文件、静默返回 0 —— 一道恒绿的门禁比没有门禁更糟。
+web-check:
+	cd web && npm run check
+
 dev:
 	docker compose up --build
 

@@ -8,13 +8,20 @@ import {
 import {
   IMPORTED_BASIS, isImported, UNATTACHED_HELP, UNATTACHED_NONE, unattachedRows,
 } from './importedView.ts'
+import {
+  UNATTACHED_BASELINE_HELP, UNATTACHED_BASELINE_NONE, unattachedBaselineNote, unattachedBaselineRows,
+} from './unattachedBaselineView.ts'
+import {
+  EXPOSURE_WIDENING_HELP, EXPOSURE_WIDENING_NONE, exposureWideningNote, exposureWideningRows,
+} from './exposureWideningView.ts'
 import { api, ApiError } from '../api/client'
 import {
   RISK_CATEGORY_LABEL, overriddenPredictionWithExisting,
   type CandidatePolicy, type CandidateRule, type ChangeKind, type ExcludedWorkload,
   type Granularity, type Kind, type MissingBaseline, type OverrideDecision, type Widening,
   type RuleEvidence, type RuleOrigin, type RuleOverride, type StaleOverride,
-  type ExcludedNamespace, type UnattachedImport,
+  type ExcludedNamespace, type ExposureWidening,
+  type UnattachedBaselineRule, type UnattachedImport,
   type UngeneratableItem, type UngeneratableReason, type WorkloadExclusionReason,
   type WritebackPlanResult, type WritebackPushResult,
 } from '../api/types'
@@ -185,6 +192,18 @@ export default function PolicyPage({ cluster }: { cluster: string }) {
           不成规则"，前者说的是"这条人写下来的规则没挂上任何主体"。两者的
           处置完全不同 —— 前者要改导入的 YAML，后者要改平台或改集群。 */}
       <UnattachedImportSection items={pv.unattachedImports ?? []} />
+      {/* 挂不上的 Baseline 单独成节，不并进上面那栏：unattachedImports 是
+          操作者自己补的东西没挂上，这一栏是集群里已经真实存在的对外暴露
+          没挂上——后者的默认状态是"这个入口现在什么放行都没有"，处置更
+          迫切。items 原样传入，不用 `?? []` 收口：这个字段恒为非 nil，
+          真拿到 null 是一份老响应，必须显示成"服务端没回答"而不是悄悄
+          读成"都挂上了"。 */}
+      <UnattachedBaselineSection items={pv.unattachedBaselines} />
+      {/* 挂上了的暴露紧跟在挂不上的后面：两栏说的是同一批 Service 的两种
+          结局。上一栏是"这个入口什么放行都没有"，这一栏是"放行挂上了，
+          但覆盖的 Pod 比 Service 点名的多"。items 同样不用 `?? []` 收口，
+          理由与上一栏相同：这个字段恒为非 nil，真拿到 null 是一份老响应。 */}
+      <ExposureWideningSection items={pv.exposureWidenings} />
       {/* 接管排在候选策略之后：先看"平台推荐加什么"，再看"集群里旧的还需
           不需要"。反过来读，操作者会在还不知道新策略长什么样的时候就去删旧的。 */}
       <RetirementSection cluster={cluster} />
@@ -1829,6 +1848,100 @@ function UnattachedImportSection({ items }: { items: UnattachedImport[] }) {
               <tr key={row.importId}>
                 <td className="mono">{row.label}</td>
                 <td>{row.reason}</td>
+              </tr>
+            ))}
+          </tbody>
+        </TableCard>
+      )}
+    </Section>
+  )
+}
+
+/**
+ * 推导出来、却挂不到任何 workload 上的对外暴露 Baseline。
+ *
+ * **`null` 与 `[]` 必须渲染成不同的东西。** 这个字段恒为非 nil——`[]`
+ * 是"算过，都挂上了"，`null` 是"没人算过"。把 null 折进 `?? []` 会让
+ * 这一栏在服务端没回答的时候显示成"全部对外暴露都已挂上"，而这里描述
+ * 的正是集群已经真实存在、下发之后会悄悄断掉入口的那类暴露——dry-run
+ * 也看不出来，它只评估见过的连接。三种状态因此分开处理：null 只显示
+ * 一句"服务端没回答"；`[]` 显示结论性的空状态；非空才上表格。
+ */
+function UnattachedBaselineSection({ items }: { items: UnattachedBaselineRule[] | null }) {
+  const note = unattachedBaselineNote(items)
+  const rows = unattachedBaselineRows(items)
+  return (
+    <Section
+      title="没有挂上的对外暴露"
+      description={UNATTACHED_BASELINE_HELP}
+      meta={items == null ? '未知' : `${rows.length} 条`}
+    >
+      {note !== '' && <Notice>{note}</Notice>}
+      {items == null ? null : rows.length === 0 ? (
+        <EmptyState
+          message={UNATTACHED_BASELINE_NONE}
+          detail="挂上的暴露与其它候选规则并列显示在候选策略里，来源标为 BASELINE。"
+        />
+      ) : (
+        <TableCard>
+          <thead>
+            <tr><th>类型</th><th>对象</th><th>原因与处置</th></tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.key}>
+                <td><Chip strong>{row.kind}</Chip></td>
+                <td className="mono">{row.label}</td>
+                <td>{row.reason}</td>
+              </tr>
+            ))}
+          </tbody>
+        </TableCard>
+      )}
+    </Section>
+  )
+}
+
+
+/**
+ * 对外暴露的放行实际覆盖到几个 Pod（spec §4）。
+ *
+ * **零条放宽也要显示这一节**，与上一节同一条纪律：把无损的与真的放宽了的
+ * 混在一起，操作者分不出哪几条值得回到 Pod 粒度去看；而一个整节不渲染的
+ * 界面，与"平台没算过这件事"在屏幕上长得一样。
+ */
+function ExposureWideningSection({ items }: { items: ExposureWidening[] | null }) {
+  const note = exposureWideningNote(items)
+  const rows = exposureWideningRows(items)
+  const widened = rows.filter(r => r.extraPods > 0).length
+  return (
+    <Section
+      title="对外暴露的放行覆盖到哪些 Pod"
+      description={EXPOSURE_WIDENING_HELP}
+      meta={items == null ? '未知' : `${rows.length} 条，其中 ${widened} 条放宽了`}
+    >
+      {note !== '' && <Notice>{note}</Notice>}
+      {items == null ? null : rows.length === 0 ? (
+        <EmptyState
+          message={EXPOSURE_WIDENING_NONE}
+          detail="挂不上的那些单列在上一节；一个都没有则说明这个集群没有暴露型 Service。"
+        />
+      ) : (
+        <TableCard>
+          <thead>
+            <tr><th>Service</th><th>挂靠的 workload</th><th>点名 / 覆盖</th><th>放宽</th></tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.key}>
+                <td className="mono">{row.label}</td>
+                <td className="mono">{row.workload}</td>
+                <td className="mono">{row.coverage}</td>
+                <td>
+                  {row.extraPods > 0 && <Chip strong>{`+${row.extraPods}`}</Chip>}
+                  {' '}
+                  {row.note}
+                </td>
               </tr>
             ))}
           </tbody>

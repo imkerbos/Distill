@@ -202,6 +202,25 @@ func TestApplyDoesNotMutateInput(t *testing.T) {
 	}
 }
 
+// 人工覆盖改的是"哪几条规则算启用"，改不了 Service selector 当初点没点名
+// 单个 Pod 这件事实——Apply 必须原样带过 ExposureWidenings，否则覆盖之后
+// 那一份预览会显示成这条暴露从未放宽过。
+func TestApplyCarriesExposureWideningsThrough(t *testing.T) {
+	base := generateWith(t, threeZookeeperPods(), zk0LBService())
+	if len(base.ExposureWidenings) != 1 {
+		t.Fatalf("生成阶段先要有一条放宽，报了 %d 条", len(base.ExposureWidenings))
+	}
+
+	out, _ := policygen.Apply(base, nil)
+	if len(out.ExposureWidenings) != 1 {
+		t.Fatalf("Apply 之后 ExposureWidenings 丢了：报了 %d 条，want 1", len(out.ExposureWidenings))
+	}
+	if out.ExposureWidenings[0] != base.ExposureWidenings[0] {
+		t.Errorf("Apply 之后内容变了：%+v，want %+v",
+			out.ExposureWidenings[0], base.ExposureWidenings[0])
+	}
+}
+
 func TestApplyEnablesAndDisables(t *testing.T) {
 	base := policygen.Generate(observe(t, "prod-asia-1"))
 
@@ -349,8 +368,10 @@ func deepCopyResult(r policygen.Result) policygen.Result {
 		ExcludedWorkloads: cloneExcludedWorkloads(r.ExcludedWorkloads),
 		// nil 与"非 nil 但长度为 0"在 DeepEqual 下不相等，而 Generate 恒给
 		// 出一个空切片（那是"算过、没有"）—— 照抄原件的形状，不改写。
-		UnattachedImports:  append([]policygen.UnattachedImport{}, r.UnattachedImports...),
-		ExcludedNamespaces: append([]policygen.ExcludedNamespace{}, r.ExcludedNamespaces...),
+		UnattachedImports:   append([]policygen.UnattachedImport{}, r.UnattachedImports...),
+		UnattachedBaselines: append([]policygen.UnattachedBaselineRule{}, r.UnattachedBaselines...),
+		ExcludedNamespaces:  append([]policygen.ExcludedNamespace{}, r.ExcludedNamespaces...),
+		ExposureWidenings:   append([]policygen.ExposureWidening{}, r.ExposureWidenings...),
 	}
 	out.MissingBaselines = cloneMissing(r.MissingBaselines)
 	out.NotApplicableBaselines = cloneMissing(r.NotApplicableBaselines)

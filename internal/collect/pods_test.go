@@ -544,3 +544,61 @@ func TestToPodLeavesScrapeAnnotationsEmptyWhenThePodDeclaresNothing(t *testing.T
 		t.Errorf("ScrapeAnnotations = %v, want empty", got.ScrapeAnnotations)
 	}
 }
+
+// Pod 的容器端口必须采回来，命名端口才解析得出。
+//
+// UAT 的 kafka-0-external 的 targetPort 就是命名端口 kafka-external。
+// 没有这份数据，replay.resolveNamedPort 恒返回 false（NamedPorts 恒空，
+// 见 collectstore/decide.go 的说明），于是一条指向命名端口的规则
+// **我们自己的 dry-run 判不出来** —— 等于在这条规则上把 dry-run 关掉。
+func TestToPodCarriesNamedContainerPorts(t *testing.T) {
+	c := collectorWith(fleetRegistry(t))
+
+	p := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "uat-kafka", Name: "kafka-0"},
+		Spec: corev1.PodSpec{
+			NodeName: "node-a",
+			Containers: []corev1.Container{{
+				Name: "kafka",
+				Ports: []corev1.ContainerPort{
+					{Name: "kafka-external", ContainerPort: 9095, Protocol: corev1.ProtocolTCP},
+					{Name: "", ContainerPort: 9092, Protocol: corev1.ProtocolTCP},
+				},
+			}},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "172.16.5.7"},
+	}
+
+	got, _ := c.toPod(p, nil)
+	want := []snapshot.NamedPort{
+		{Name: "kafka-external", Port: 9095, Protocol: "TCP"},
+	}
+	if !reflect.DeepEqual(got.NamedPorts, want) {
+		t.Errorf("NamedPorts = %v, want %v —— 只收有名字的那些", got.NamedPorts, want)
+	}
+}
+
+// Kubernetes 里容器端口不写 Protocol 时缺省是 TCP。采集必须把这个缺省
+// 显式补上：留空会让快照里的 "" 与 NetworkPolicy 规则里解析出来的 "TCP"
+// 对不上，命名端口于是按 (名字, 协议) 找不到，退化成上面那条注释描述的
+// 同一种「dry-run 被关掉」。
+func TestToPodDefaultsNamedPortProtocolToTCP(t *testing.T) {
+	c := collectorWith(fleetRegistry(t))
+
+	p := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "uat-kafka", Name: "kafka-1"},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  "kafka",
+				Ports: []corev1.ContainerPort{{Name: "kafka-external", ContainerPort: 9095}},
+			}},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "172.16.5.8"},
+	}
+
+	got, _ := c.toPod(p, nil)
+	want := []snapshot.NamedPort{{Name: "kafka-external", Port: 9095, Protocol: "TCP"}}
+	if !reflect.DeepEqual(got.NamedPorts, want) {
+		t.Errorf("NamedPorts = %v, want %v —— 未写协议要落成 TCP", got.NamedPorts, want)
+	}
+}

@@ -219,6 +219,10 @@ export interface FlowFilter {
 export const UNKNOWN_REASON_LABEL: Record<string, string> = {
   POLICY_MALFORMED: '策略本身无法解析',
   SNAPSHOT_MISSING: '缺少对应时刻的资产快照',
+  // 这两条容易被读成同一件事，处置方向却相反：前者说"数据缺了一块"，
+  // 会把人引去查采集；后者是判完了的结论——这个地址本来就没有 Pod
+  // 主体，不存在一个"该采而没采"的东西，操作者不必再查。
+  LB_INGRESS_ADDRESS: '这一端是负载均衡入口地址，只能按 ipBlock 表达，没有 Pod 主体可解',
   IP_AMBIGUOUS: '同集群内 IP 复用，时间上不可区分',
   CLUSTER_AMBIGUOUS: '跨集群网段重叠，归属不唯一',
   IDENTITY_LOST_MESH: 'sidecar 导致源身份丢失',
@@ -328,6 +332,68 @@ export interface UnattachedImport {
 /** 导入挂不上主体的原因。封闭枚举，对应 policygen.UnattachedReason。 */
 export type UnattachedReason = 'NO_WORKLOAD_LABEL' | 'NO_RULES' | 'NO_SUCH_WORKLOAD'
 
+/**
+ * 一条推导出来、却挂不到任何 workload 上的带 Subject 的 Baseline 规则
+ * （今天只有 EXPOSED_INGRESS 会产生）。对应 policygen.UnattachedBaselineRule。
+ *
+ * **报出来而不是静默丢掉**，与 UnattachedImport 同一条纪律，理由更迫切：
+ * 这里描述的是集群**已经真实存在**的对外暴露，不是操作者自己补的东西。
+ * `MissingBaseline` 是 kind 粒度的——同一个 namespace 里只要有另一个 Service
+ * 正常挂上了，这个 kind 就不再"缺失"，而这一个真实存在的暴露依然什么
+ * 放行都没有、也没有任何信号，正是候选策略下发后入口悄悄断掉、dry-run
+ * 也看不出来的那个方向（design doc 2026-08-28-exposed-ingress §6.2）。
+ */
+export interface UnattachedBaselineRule {
+  kind: Kind
+  namespace: string
+  name: string
+  /** 封闭枚举，不是自由文本。 */
+  reason: UnattachedBaselineReason
+}
+
+/**
+ * Baseline 规则挂不上主体的原因。封闭枚举，对应 policygen.UnattachedBaselineReason。
+ *
+ * 只有两种成因：Service 没有 selector（没有 workload 可挂），或 selector
+ * 解出的 workload 不在候选花名册里（常见触发是 Helm 同时打 app 与
+ * app.kubernetes.io/name 两个不同取值）。
+ */
+export type UnattachedBaselineReason = 'NO_SELECTOR' | 'NO_SUCH_WORKLOAD'
+
+/**
+ * 一条对外暴露的放行在 workload 粒度上多放开了多少个 Pod。
+ * 对应 policygen.ExposureWidening（design doc 2026-08-28-exposed-ingress §4）。
+ *
+ * UAT 上 `devops/zk-0-lb` 的 selector 含
+ * `statefulset.kubernetes.io/pod-name: zookeeper-0` —— 它点名**一个** Pod，
+ * 而生成的规则覆盖 zookeeper 的全部三个。三个 Pod 各有一个 LB、并集恰好
+ * 相等是那一个集群的巧合，不是这条规则的性质。
+ */
+export interface ExposureWidening {
+  namespace: string
+  /** 推出这条规则的 Service 名。 */
+  service: string
+  /** 规则实际挂靠的 workload，即 podSelector 的标签值。 */
+  workload: string
+  /**
+   * workloadPods 那批 Pod 里，同时满足 Service 完整 selector 的 Pod 数。
+   *
+   * 只在 workloadPods 这批里数 —— 因此它恒为 workloadPods 的子集，
+   * extraPods 不可能是负数。
+   */
+  selectedPods: number
+  /** 候选策略的 podSelector 选中的 Pod 数：规则下发后真正覆盖到的范围。 */
+  workloadPods: number
+  /**
+   * `workloadPods − selectedPods`：podSelector 覆盖到、却没被 Service
+   * selector 点名的 Pod 数。
+   *
+   * **为 0 也要报**：把无损的与真的放宽了的混在一起，操作者分不出哪几条
+   * 值得回到 Pod 粒度去看。
+   */
+  extraPods: number
+}
+
 /** LEARNED 规则的证据等级，决定是否默认启用。 */
 export type EvidenceClass =
   | 'TRUSTED_ALLOW' | 'TRUSTED_DENY' | 'INTERNET_EGRESS' | 'CROSS_CLUSTER'
@@ -340,9 +406,10 @@ export type EvidenceClass =
    */
   | 'INCOMPLETE_WINDOW'
 
-/** BASELINE 规则的五类基础设施事实。 */
+/** BASELINE 规则的六类基础设施事实。 */
 export type Kind =
   | 'DNS' | 'LB_HEALTH_CHECK' | 'METRICS_SCRAPE' | 'CONTROL_PLANE' | 'NODE_AGENT'
+  | 'EXPOSED_INGRESS'
 
 /** 一条流量无法生成候选规则的封闭原因枚举。 */
 export type UngeneratableReason =
@@ -1043,6 +1110,36 @@ export interface PolicyPreview {
    * 它只评估见过的连接。
    */
   unattachedImports: UnattachedImport[] | null
+  /**
+   * 推导出来、却挂不到任何 workload 上的带 Subject 的 Baseline 规则
+   * （今天只有 EXPOSED_INGRESS 会产生）。
+   *
+   * 与 unattachedImports 同一条纪律，理由更迫切：这里描述的是集群**已经
+   * 真实存在**的对外暴露，不是操作者自己补的东西。missingBaselines 是
+   * kind 粒度的——同一个 namespace 里只要有另一个 Service 正常挂上了，
+   * 这个 kind 就不再"缺失"，而这一个真实存在的暴露依然什么放行都没有，
+   * 也没有任何信号：候选策略下发之后入口悄悄断掉，dry-run 也看不出来，
+   * 它只评估见过的连接（design doc 2026-08-28-exposed-ingress §6.2）。
+   *
+   * **恒为非 nil**（`[]`，不是 `null`）：空清单是"算过，都挂上了"，
+   * null 是"没人算过"，二者不得合并渲染——真拿到 null 说明这是一份
+   * 老响应或字段改了名，此时不能把它读成"全部对外暴露都挂上了"。
+   */
+  unattachedBaselines: UnattachedBaselineRule[] | null
+  /**
+   * 每一条挂上了 workload 的对外暴露，在 Service selector 与 workload
+   * podSelector 之间放宽了多少个 Pod。
+   *
+   * Service 的 selector 可以点名单个 Pod（StatefulSet 的
+   * `statefulset.kubernetes.io/pod-name`），而候选策略是 workload 粒度的 ——
+   * 生成的规则会覆盖这个 workload 的全部 Pod。不报出来，操作者读到的是
+   * 「按 Service 放行」，实际下发的是「按 workload 放行」
+   * （design doc 2026-08-28-exposed-ingress §4）。
+   *
+   * **恒为非 nil**，与 unattachedBaselines 同一条纪律：空清单是"算过，
+   * 没有一条暴露规则挂上"，null 是"没人算过"。
+   */
+  exposureWidenings: ExposureWidening[] | null
   /**
    * **整片**没有生成候选策略的命名空间。
    *

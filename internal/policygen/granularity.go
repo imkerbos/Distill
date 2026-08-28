@@ -54,6 +54,50 @@ type Widening struct {
 	ExtraGrants int `json:"extraGrants"`
 }
 
+// ExposureWidening 是一条暴露型放行在 workload 粒度上多放开了多少。
+//
+// Service 的 selector 可以点名单个 Pod（StatefulSet 的
+// statefulset.kubernetes.io/pod-name），而候选策略是 workload 粒度的 ——
+// 生成出来的规则会覆盖这个 workload 的全部 Pod。devops/zk-0-lb 只点名
+// zookeeper-0，候选策略却覆盖全部三个 zookeeper Pod：不报出来，操作者
+// 读到的是「按 Service 放行」，实际是「按 workload 放行」。
+//
+// **ExtraPods 为 0 也要报。** 把无损的与真的放宽了的混在一起，操作者分不出
+// 哪几条值得回到 Pod 粒度去看（同 Widening.ExtraGrants 那条注释）。
+type ExposureWidening struct {
+	// Namespace 是这条暴露规则所在的命名空间。
+	Namespace string `json:"namespace"`
+	// Service 是推出这条规则的 Service 名。
+	Service string `json:"service"`
+	// Workload 是规则实际挂靠的 workload，即 podSelector 的标签值。
+	Workload string `json:"workload"`
+	// SelectedPods 是 WorkloadPods 那批 Pod 里，同时满足 Service 完整
+	// selector 的 Pod 数——只在 WorkloadPods 这批里数，不是在整个 Pod 名册
+	// 里单独数一遍。Service selector 可能命中 WorkloadPods 之外的 Pod（键
+	// 不同、或压根不相关的对象），那些命中不算进来：这个字段回答的是
+	// 「podSelector 已经覆盖的这批里，Service 点到了几个」，不是「Service
+	// 在全集群点到了几个」。
+	//
+	// 这样定义是刻意的，不是简化。只有把 SelectedPods 圈定成 WorkloadPods
+	// 的子集，ExtraPods = WorkloadPods − SelectedPods 才是一次真正的集合
+	// 差，不可能是负数——无论 Service selector 用的键与 workload 归属键
+	// 是不是同一个（design review TI1，2026-08-28：两者各自独立扫一遍
+	// Pod 名册再相减，在 StatefulSet/Helm 标签迁移期就会算出负数：一批
+	// 还没迁移到赢家键、Service selector 却仍在用旧键选中的 Pod，会被
+	// 算进"Service 选中了"却算不进"workload 覆盖了"）。
+	SelectedPods int `json:"selectedPods"`
+	// WorkloadPods 是候选策略的 podSelector（只用 workload 归属键一个键）
+	// 选中的 Pod 数——这条规则实际下发后会覆盖到的范围，也是 SelectedPods
+	// 的分母：先圈定这批，才谈得上其中有几个被 Service 点了名。
+	WorkloadPods int `json:"workloadPods"`
+	// ExtraPods 是 WorkloadPods − SelectedPods：podSelector 覆盖到、却没
+	// 被 Service selector 点名的 Pod 数。因为 SelectedPods 恒为
+	// WorkloadPods 的子集（见 SelectedPods 的注释），这个差值从结构上就
+	// 不可能是负数。为 0 表示 WorkloadPods 里每一个 Pod 都被 Service 点了
+	// 名，这次挂靠无损。
+	ExtraPods int `json:"extraPods"`
+}
+
 // AtNamespaceGranularity 把候选集折叠成一个 namespace 一份策略，
 // 并报出折叠多放宽了多少。
 //
@@ -124,6 +168,23 @@ func (r Result) AtNamespaceGranularity() (Result, []Widening) {
 		NotApplicableBaselines: r.NotApplicableBaselines,
 		Ungeneratable:          r.Ungeneratable,
 		ExcludedWorkloads:      r.ExcludedWorkloads,
+		// UnattachedBaselines 讲的也是"这个集群缺什么"（一条真实暴露没有
+		// 挂上任何 workload），与主体粒度无关，必须原样带过来——namespace
+		// 粒度是界面默认视图，丢在这里等于丢在操作者实际会看的那条路径上，
+		// PolicyPreview 会把它序列化成 null，而这个字段的注释明确说 null
+		// 的含义是"这一栏没算过"（design review NI4，2026-08-28）。
+		//
+		// UnattachedImports 与 ExcludedNamespaces 在这里同样没有被带过来——
+		// 那是既有缺口，本轮不动它：本轮只保证新加的这一栏不重蹈覆辙，
+		// 不代表"原样带过来"这份清单现在是完整的。
+		UnattachedBaselines: r.UnattachedBaselines,
+		// ExposureWidenings 讲的是 Service selector 与 workload podSelector
+		// 之间的落差，与主体粒度无关——折叠成 namespace 并不改变某个
+		// Service 当初点没点名单个 Pod。同 UnattachedBaselines 那条纪律：
+		// 这里不写，namespace 粒度（前端默认视图）就会读到一个永远为空的
+		// 放宽清单，而这一栏的存在理由正是要在这个默认视图上看得见
+		// （本轮曾经发生过、Task 7 明确列为要检查的回归点）。
+		ExposureWidenings: r.ExposureWidenings,
 	}
 	var widening []Widening
 

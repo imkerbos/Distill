@@ -29,6 +29,17 @@ func notApplicable(a snapshot.Assets, namespace string, unassessed []Kind) []Kin
 	if !blind[KindLBHealth] && !exposed(a, namespace) {
 		out = append(out, KindLBHealth)
 	}
+	// EXPOSED_INGRESS **不能**复用 exposed()：那个判据把 Gateway/Ingress
+	// 也算成暴露，但 deriveExposedIngress 只处理 LoadBalancer/NodePort
+	// Service——一个跑 nginx-ingress 或 istio、后端是 ClusterIP 的
+	// namespace 会被 exposed() 判成「适用」，deriveExposedIngress 却永远
+	// 推不出规则，二者一叠加就是一条永久补不上的缺口，把这个 namespace
+	// 卡死在 Enforcing 门禁前（design review I7；design doc
+	// 2026-08-18-baseline-applicability §1 那句"永远在喊、且喊错的告警"）。
+	// 判据必须与推导能处理的范围对齐：只看 LoadBalancer/NodePort Service。
+	if !blind[KindExposedIngress] && !exposedByLBOrNodePortService(a, namespace) {
+		out = append(out, KindExposedIngress)
+	}
 	if !blind[KindMetrics] && !scrapeDeclared(a, namespace) {
 		out = append(out, KindMetrics)
 	}
@@ -60,6 +71,26 @@ func exposed(a snapshot.Assets, namespace string) bool {
 			return true
 		}
 	}
+	for _, svc := range a.Services {
+		if svc.Namespace != namespace {
+			continue
+		}
+		if svc.Type == serviceTypeLoadBalancer || svc.Type == serviceTypeNodePort {
+			return true
+		}
+	}
+	return false
+}
+
+// exposedByLBOrNodePortService 报告这个 namespace 里有没有
+// deriveExposedIngress 推得出规则的暴露对象。
+//
+// 只看 Service 类型，不算 Gateway/Ingress：那些的后端可能是 ClusterIP，
+// EXPOSED_INGRESS 推导本身就不处理它们（spec §3.1 "对每个暴露型 Service
+// （LoadBalancer / NodePort）推导一条入站放行"）。适用性判据必须与推导
+// 能处理的范围严格对齐，否则要么制造一条永远补不上的缺口（判成适用、推
+// 不出规则），要么制造一次静默放行（判成不适用、其实有暴露对象）。
+func exposedByLBOrNodePortService(a snapshot.Assets, namespace string) bool {
 	for _, svc := range a.Services {
 		if svc.Namespace != namespace {
 			continue

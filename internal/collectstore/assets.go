@@ -29,6 +29,10 @@ type observedPod struct {
 	// METRICS_SCRAPE Baseline 依据的一半（design doc 2026-08-18 §3）。
 	scrapeAnnotations map[string]string
 	hostNetwork       bool
+	// namedPorts 是这个 Pod 声明的命名容器端口。podRefOf 靠它把解出来的主体
+	// 补成求值引擎认的 replay.PodRef，命名端口规则才解析得出具体端口号——
+	// 缺了它，一条合法的规则在这里只会判 NAMED_PORT_UNRESOLVED。
+	namedPorts []snapshot.NamedPort
 }
 
 // podKey 按 (namespace, name) 索引一次快照里的 Pod。
@@ -118,7 +122,7 @@ func (r *Reader) readIntervals(
 // 且取的是**覆盖那一刻的那次运行**，不是最新一次。
 func (r *Reader) readPodsAt(ctx context.Context, d described) ([]observedPod, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT namespace, name, labels, scrape_annotations, host_network
+		`SELECT namespace, name, labels, scrape_annotations, host_network, named_ports
 		   FROM observed_pod
 		  WHERE cluster_id = ? AND observed_at = ?
 		  LIMIT ?`,
@@ -131,11 +135,12 @@ func (r *Reader) readPodsAt(ctx context.Context, d described) ([]observedPod, er
 	var out []observedPod
 	for rows.Next() {
 		var (
-			p         observedPod
-			raw       []byte
-			rawScrape []byte
+			p             observedPod
+			raw           []byte
+			rawScrape     []byte
+			rawNamedPorts sql.NullString
 		)
-		if err := rows.Scan(&p.namespace, &p.name, &raw, &rawScrape, &p.hostNetwork); err != nil {
+		if err := rows.Scan(&p.namespace, &p.name, &raw, &rawScrape, &p.hostNetwork, &rawNamedPorts); err != nil {
 			return nil, fmt.Errorf("collectstore: scan observed pod: %w", err)
 		}
 		if err := json.Unmarshal(raw, &p.labels); err != nil {
@@ -148,6 +153,15 @@ func (r *Reader) readPodsAt(ctx context.Context, d described) ([]observedPod, er
 		if err := json.Unmarshal(rawScrape, &p.scrapeAnnotations); err != nil {
 			return nil, fmt.Errorf(
 				"collectstore: decode pod scrape annotations of cluster %s: %w", d.clusterID, err)
+		}
+		// NULL 是迁移之前写下的行：那次采集根本没有落容器端口，与
+		// "落了、这个 Pod 没有命名端口"不是同一件事，因此留 nil 而不是
+		// 报错或补一个空数组（migrations/000032）。
+		if rawNamedPorts.Valid {
+			if err := json.Unmarshal([]byte(rawNamedPorts.String), &p.namedPorts); err != nil {
+				return nil, fmt.Errorf(
+					"collectstore: decode pod named ports of cluster %s: %w", d.clusterID, err)
+			}
 		}
 		out = append(out, p)
 	}
@@ -239,10 +253,10 @@ func (r *Reader) readNamespacesAt(ctx context.Context, d described) ([]replay.Na
 
 // readServicesAt 读出锚点那一次采集看到的 Service。
 //
-// 只取 Baseline 推导用得上的四列（安全规范 §20 / §35）：selector 是 DNS
-// 规则的 peer，ports 里的 targetPort 是健康检查规则的端口。ClusterIP 与
-// Type 不取 —— 它们只供展示，而 ClusterIP 恰恰是最容易被误当成 peer 的
-// 那个值（NetworkPolicy 的 peer 只能是 selector 或 ipBlock）。
+// 只取 Baseline 推导用得上的几列（安全规范 §20 / §35）：selector 是 DNS
+// 规则的 peer，ports 里的 targetPort 是健康检查规则的端口。ClusterIP 不取
+// —— 它只供展示，且恰恰是最容易被误当成 peer 的那个值（NetworkPolicy 的
+// peer 只能是 selector 或 ipBlock）。
 func (r *Reader) readServicesAt(ctx context.Context, d described) ([]snapshot.Service, error) {
 	rows, err := r.db.QueryContext(ctx,
 		// service_type 一并取回：它是 LB_HEALTH_CHECK 这一类适不适用的判据
@@ -250,7 +264,11 @@ func (r *Reader) readServicesAt(ctx context.Context, d described) ([]snapshot.Se
 		// type=LoadBalancer 的 Service —— 那种 namespace 一样有健康检查流量，
 		// 一样会被 default-deny 打断，而把它判成"不适用"会让门禁放行一次
 		// 入口中断（design doc 2026-08-18-baseline-applicability §4.1）。
-		`SELECT namespace, name, service_type, selector, ports
+		//
+		// lb_ingress_ips / lb_source_ranges 一并取回：它们是判定这个入口
+		// 面向公网还是只在 VPC 内的依据（design doc 2026-08-28 §2），
+		// 推导层要拿它们分流，不是只供展示的两列。
+		`SELECT namespace, name, service_type, selector, ports, lb_ingress_ips, lb_source_ranges
 		   FROM observed_service
 		  WHERE cluster_id = ? AND observed_at = ?
 		  LIMIT ?`,
@@ -264,7 +282,9 @@ func (r *Reader) readServicesAt(ctx context.Context, d described) ([]snapshot.Se
 	for rows.Next() {
 		s := snapshot.Service{ClusterID: d.clusterID}
 		var selector, ports []byte
-		if err := rows.Scan(&s.Namespace, &s.Name, &s.Type, &selector, &ports); err != nil {
+		var ingressIPs, sourceRanges sql.NullString
+		if err := rows.Scan(&s.Namespace, &s.Name, &s.Type, &selector, &ports,
+			&ingressIPs, &sourceRanges); err != nil {
 			return nil, fmt.Errorf("collectstore: scan observed service: %w", err)
 		}
 		// 坏掉的列整体报错，不当成"这个 Service 没有 selector"：后者会让
@@ -277,6 +297,21 @@ func (r *Reader) readServicesAt(ctx context.Context, d described) ([]snapshot.Se
 		if err := json.Unmarshal(ports, &s.Ports); err != nil {
 			return nil, fmt.Errorf(
 				"collectstore: decode service ports of cluster %s: %w", d.clusterID, err)
+		}
+		// NULL 是迁移之前写下的行：那次采集根本没有落暴露信息，与
+		// "落了、这个 Service 没有 LoadBalancer 入口"不是同一件事，因此
+		// 留 nil 而不是报错或补一个空数组（migrations/000032）。
+		if ingressIPs.Valid {
+			if err := json.Unmarshal([]byte(ingressIPs.String), &s.LoadBalancerIngressIPs); err != nil {
+				return nil, fmt.Errorf(
+					"collectstore: decode service lb ingress ips of cluster %s: %w", d.clusterID, err)
+			}
+		}
+		if sourceRanges.Valid {
+			if err := json.Unmarshal([]byte(sourceRanges.String), &s.LoadBalancerSourceRanges); err != nil {
+				return nil, fmt.Errorf(
+					"collectstore: decode service lb source ranges of cluster %s: %w", d.clusterID, err)
+			}
 		}
 		out = append(out, s)
 	}

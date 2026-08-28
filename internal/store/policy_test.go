@@ -95,14 +95,19 @@ func TestPolicyPreviewMissingBaselinesContent(t *testing.T) {
 	// 其余 namespace 既没有暴露面也没有 Pod 声明要被抓 —— 它们没有健康检查
 	// 与抓取流量要放行，报缺就是误报。
 	//
-	// eu 的 partner 真缺 METRICS_SCRAPE：它有 Pod 声明要被抓，却没有抓取端
-	// 登记到它。**LB_HEALTH_CHECK 不再缺**：partner 有一个 type=LoadBalancer
-	// 的 Service，deriveLBHealth 现在直接从它推出健康检查放行（此前只认
-	// Ingress，会把它误报成缺失、让写回 gate 永久卡死这个 namespace）。
+	// eu 的 partner 真缺 METRICS_SCRAPE 与 EXPOSED_INGRESS：它有 Pod 声明要
+	// 被抓，却没有抓取端登记到它；它也有一个 type=LoadBalancer 的 Service，
+	// 却拿不到入口地址、也没有声明 loadBalancerSourceRanges，判不出放行范围
+	// （spec 2026-08-28 §6）。**LB_HEALTH_CHECK 不缺**：deriveLBHealth 直接从
+	// LoadBalancer Service 本身就能推出健康检查放行，不需要入口地址
+	// （此前只认 Ingress，会把它误报成缺失、让写回 gate 永久卡死这个
+	// namespace）。EXPOSED_INGRESS 与 LB_HEALTH_CHECK 判据不同：前者要放行
+	// 的是外部客户端流量，需要知道客户端从哪来；后者放行的是云厂商探测器，
+	// 来源网段是登记好的，不依赖这个 Service 具体分到了哪个入口地址。
 	want := map[string]map[string][]baseline.Kind{
 		"prod-asia-1": {},
 		"prod-eu-1": {
-			"partner": {baseline.KindMetrics},
+			"partner": {baseline.KindMetrics, baseline.KindExposedIngress},
 		},
 	}
 	r := reader()
@@ -133,10 +138,10 @@ func TestPolicyPreviewMissingBaselinesContent(t *testing.T) {
 		// 那些缺口是给"要下发策略"准备的，而这一片平台默认不下发。
 		// 它出现在 ExcludedNamespaces 里，不是悄悄消失。
 		wantNA := map[string][]baseline.Kind{
-			"batch":    {baseline.KindLBHealth, baseline.KindMetrics},
-			"checkout": {baseline.KindLBHealth, baseline.KindMetrics},
-			"legacy":   {baseline.KindLBHealth, baseline.KindMetrics},
-			"payment":  {baseline.KindLBHealth},
+			"batch":    {baseline.KindLBHealth, baseline.KindMetrics, baseline.KindExposedIngress},
+			"checkout": {baseline.KindLBHealth, baseline.KindMetrics, baseline.KindExposedIngress},
+			"legacy":   {baseline.KindLBHealth, baseline.KindMetrics, baseline.KindExposedIngress},
+			"payment":  {baseline.KindLBHealth, baseline.KindExposedIngress},
 		}
 		if !reflect.DeepEqual(na, wantNA) {
 			t.Errorf("%s: NotApplicableBaselines = %v, want %v", cluster, na, wantNA)
@@ -172,6 +177,25 @@ func TestPolicyPreviewMissingBaselinesFilteredForDisplayOnly(t *testing.T) {
 
 // 三块产物必须同时非空/可解释：只给候选策略而不给缺口，
 // 界面就会把一份残缺的推荐显示成完整方案。
+// ExposureWidenings 恒为非 nil，与 gen.ExposureWidenings 同一条纪律
+// （policygen.Result 的注释）：空清单是"算过，没有一条挂靠得比 Service
+// selector 宽"，null 是"这个 Reader 没把它带过来"。fixture 集群目前没有
+// 触发放宽的 Service，因此这里只能验证"非 nil"，不能验证内容——但那正是
+// 这条断言要守住的那条线：把 PolicyPreviewAtGranularity 里
+// `ExposureWidenings: gen.ExposureWidenings` 那一行删掉，pv.ExposureWidenings
+// 会从"空切片"变成"nil"，这条断言会跟着变红。
+func TestPolicyPreviewExposureWideningsIsNonNil(t *testing.T) {
+	r := reader()
+	pv, err := r.PolicyPreview(context.Background(), "prod-asia-1", "", fullWindow(r))
+	if err != nil {
+		t.Fatalf("PolicyPreview() error = %v", err)
+	}
+	if pv.ExposureWidenings == nil {
+		t.Error("ExposureWidenings 是 nil —— 它会序列化成 null，而空清单要读作" +
+			"「算过，没有一条挂靠得比 Service selector 宽」，不是「没算过」")
+	}
+}
+
 func TestPolicyPreviewReturnsAllFourBlocks(t *testing.T) {
 	r := reader()
 	pv, err := r.PolicyPreview(context.Background(), "prod-asia-1", "", fullWindow(r))

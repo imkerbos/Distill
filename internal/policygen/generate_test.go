@@ -15,6 +15,7 @@ import (
 	"github.com/imkerbos/Distill/internal/policygen"
 	"github.com/imkerbos/Distill/internal/replay"
 	"github.com/imkerbos/Distill/internal/risk"
+	"github.com/imkerbos/Distill/internal/snapshot"
 )
 
 // observe 用真实 fixture 数据与真实求值引擎构造观测集，
@@ -148,13 +149,20 @@ func TestEveryPolicyCarriesBaselineRules(t *testing.T) {
 	}
 }
 
-// 风险规则必须生成、必须可见、必须默认不启用。
+// 学习来的风险规则必须生成、必须可见、必须默认不启用——平台猜出来的放行
+// 命中风险清单时，"这条值得看一眼"翻译成"先别自动生效"。
+//
+// **只看 OriginLearned。** 这条不变量是为学习来的规则写的，I9 之后
+// Baseline 侧会故意反过来：风险且启用（design review NI3，2026-08-28）。
+// 早先这里遍历全部 Origin，只是因为 prod-asia-1 这份 fixture 恰好没有
+// 任何一个 EXPOSED_INGRESS Service 暴露风险端口——加一个 6379/3306 就会
+// 让它变红，是一条巧合绿而非真的守住了这条不变量。
 func TestRiskyRulesAreGeneratedButDisabled(t *testing.T) {
 	res := policygen.Generate(observe(t, "prod-asia-1"))
 	risky, riskyEnabled := 0, 0
 	for _, p := range res.Policies {
 		for _, r := range p.Rules {
-			if r.Risk == nil {
+			if r.Origin != policygen.OriginLearned || r.Risk == nil {
 				continue
 			}
 			risky++
@@ -168,6 +176,51 @@ func TestRiskyRulesAreGeneratedButDisabled(t *testing.T) {
 	}
 	if riskyEnabled != 0 {
 		t.Errorf("%d risky rules enabled, want 0 — a risky rule must never enter the default set", riskyEnabled)
+	}
+}
+
+// Baseline 侧反过来：风险且启用，标注仍然要在。spec §3.6 是权威——一条
+// Baseline 暴露描述的是集群已经在公开的东西，禁用它等于切断现有流量；
+// 标注的作用只是让它在界面上跟一条普通放行区分开，不是把它挡下来。
+//
+// 不用 prod-asia-1 fixture：它没有暴露风险端口的 Service，一个断言"找到
+// 就检查、没找到就跳过"的用例在这份 fixture 上恒为跳过，等于没测——
+// 用手工构造的最小场景直接钉住这个形态。
+func TestBaselineRiskyRulesAreAnnotatedAndStayEnabled(t *testing.T) {
+	pods := []replay.PodRef{
+		{ClusterID: "c1", Namespace: "istio-system", Name: "inner-1", IP: "10.4.0.5",
+			Labels: map[string]string{"app": "istio-ingressgateway-inner"}},
+	}
+	assets := snapshot.Assets{
+		ClusterID: "c1",
+		Services: []snapshot.Service{{
+			ClusterID: "c1", Namespace: "istio-system", Name: "istio-ingressgateway-inner",
+			Type:     "LoadBalancer",
+			Selector: map[string]string{"app": "istio-ingressgateway-inner"},
+			Ports: []snapshot.ServicePort{
+				{Name: "redis", Port: 6379, TargetPort: 6379, Protocol: "TCP"},
+			},
+			LoadBalancerIngressIPs: []string{"10.170.48.55"},
+		}},
+		Registry: snapshot.ClusterRegistry{ClusterID: "c1", NodeCIDR: "10.170.48.0/24"},
+	}
+	res := policygen.Generate(policygen.Input{ClusterID: "c1", Pods: pods, Assets: assets})
+
+	var found bool
+	for _, p := range res.Policies {
+		for _, r := range p.Rules {
+			if r.Origin != policygen.OriginBaseline || r.Risk == nil {
+				continue
+			}
+			found = true
+			if !r.Enabled {
+				t.Errorf("%s/%s: baseline 风险规则被禁用了，它描述的是现状，"+
+					"禁用会切断真实流量", p.Namespace, p.Workload)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("没有生成任何带 Risk 标注的 baseline 规则，这条用例没跑到要测的形态")
 	}
 }
 
@@ -965,5 +1018,346 @@ func TestSplitPoliciesCarryEveryRule(t *testing.T) {
 	if gotIngress != wantIngress || gotEgress != wantEgress {
 		t.Errorf("拆分后规则条数 ingress=%d egress=%d，拆分前 ingress=%d egress=%d",
 			gotIngress, gotEgress, wantIngress, wantEgress)
+	}
+}
+
+// --- Fix round 1 (design review 2026-08-28) ---
+
+// C1: EXPOSED_INGRESS 只挂给 Service selector 实际选中的那个 workload，
+// 不广播给整个 namespace。之前的实现把 Baseline 无条件追加给 namespace
+// 里的每个 workload——那条规则对既有五类（DNS、control plane 等）是对的，
+// 因为它们本来就是 namespace 级的基础设施事实，但对 EXPOSED_INGRESS 是错的：
+// shop/worker 没有任何暴露对象，却因为同 namespace 里的 shop/edge 有一个
+// LoadBalancer Service，也拿到了一条 EXPOSED_INGRESS peers=[0.0.0.0/0]
+// enabled=true（design review C1，2026-08-28，复现于真实生成结果）。
+func TestExposedIngressBaselineOnlyAttachesToTheExposedWorkload(t *testing.T) {
+	pods := []replay.PodRef{
+		{ClusterID: "c1", Namespace: "shop", Name: "worker-1", IP: "10.4.0.1",
+			Labels: map[string]string{"app": "worker"}},
+		{ClusterID: "c1", Namespace: "shop", Name: "edge-1", IP: "10.4.0.2",
+			Labels: map[string]string{"app": "edge"}},
+	}
+	assets := snapshot.Assets{
+		ClusterID: "c1",
+		Services: []snapshot.Service{{
+			ClusterID: "c1", Namespace: "shop", Name: "edge-lb", Type: "LoadBalancer",
+			Selector: map[string]string{"app": "edge"},
+			Ports: []snapshot.ServicePort{
+				{Name: "https", Port: 443, TargetPort: 443, Protocol: "TCP"},
+			},
+			LoadBalancerIngressIPs: []string{"34.150.1.177"},
+		}},
+		// 网段登记填全：登记不全时入口地址的归属判不出来，EXPOSED_INGRESS
+		// 一条规则都推不出，这条用例的前提就不成立了。
+		Registry: snapshot.ClusterRegistry{
+			ClusterID: "c1", PodCIDR: "10.4.0.0/16", NodeCIDR: "10.170.48.0/24",
+		},
+	}
+	res := policygen.Generate(policygen.Input{ClusterID: "c1", Pods: pods, Assets: assets})
+
+	kindsFor := func(workload string) []baseline.Kind {
+		var kinds []baseline.Kind
+		for _, p := range res.Policies {
+			if p.Namespace != "shop" || p.Workload != workload {
+				continue
+			}
+			for _, r := range p.Rules {
+				if r.Baseline != nil {
+					kinds = append(kinds, *r.Baseline)
+				}
+			}
+		}
+		return kinds
+	}
+
+	for _, k := range kindsFor("worker") {
+		if k == baseline.KindExposedIngress {
+			t.Fatalf("shop/worker 没有暴露对象，却拿到了 EXPOSED_INGRESS: %v", kindsFor("worker"))
+		}
+	}
+	var edgeHasIt bool
+	for _, k := range kindsFor("edge") {
+		if k == baseline.KindExposedIngress {
+			edgeHasIt = true
+		}
+	}
+	if !edgeHasIt {
+		t.Error("shop/edge 是真正被 LoadBalancer 暴露的 workload，却没拿到 EXPOSED_INGRESS")
+	}
+}
+
+// I9（spec §3.6）：EXPOSED_INGRESS 命中风险端口清单时，候选规则要带上
+// Risk 标注,且保持 Enabled——它描述的是集群已经在暴露的东西，不生成等于
+// 切断现有流量；标注只是让它在界面上跟普通放行区分开。
+// istio-ingressgateway-inner 暴露 6379（Redis）正是这个真实形态。
+func TestExposedIngressRiskyPortIsAnnotatedButStillEnabled(t *testing.T) {
+	pods := []replay.PodRef{
+		{ClusterID: "c1", Namespace: "istio-system", Name: "inner-1", IP: "10.4.0.5",
+			Labels: map[string]string{"app": "istio-ingressgateway-inner"}},
+	}
+	assets := snapshot.Assets{
+		ClusterID: "c1",
+		Services: []snapshot.Service{{
+			ClusterID: "c1", Namespace: "istio-system", Name: "istio-ingressgateway-inner",
+			Type:     "LoadBalancer",
+			Selector: map[string]string{"app": "istio-ingressgateway-inner"},
+			Ports: []snapshot.ServicePort{
+				{Name: "redis", Port: 6379, TargetPort: 6379, Protocol: "TCP"},
+			},
+			LoadBalancerIngressIPs: []string{"10.170.48.55"},
+		}},
+		Registry: snapshot.ClusterRegistry{ClusterID: "c1", NodeCIDR: "10.170.48.0/24"},
+	}
+	res := policygen.Generate(policygen.Input{ClusterID: "c1", Pods: pods, Assets: assets})
+
+	var found *policygen.Rule
+	for _, p := range res.Policies {
+		if p.Namespace != "istio-system" || p.Workload != "istio-ingressgateway-inner" {
+			continue
+		}
+		for i, r := range p.Rules {
+			if r.Baseline != nil && *r.Baseline == baseline.KindExposedIngress {
+				found = &p.Rules[i]
+			}
+		}
+	}
+	if found == nil {
+		t.Fatal("istio-system/istio-ingressgateway-inner 没有生成 EXPOSED_INGRESS 规则")
+	}
+	if found.Risk == nil || found.Risk.Category != risk.Database {
+		t.Errorf("Risk = %+v，want 命中 Redis(6379)/DATABASE", found.Risk)
+	}
+	if !found.Enabled {
+		t.Error("风险端口的暴露规则被禁用了——它描述的是现状，禁用会切断真实流量")
+	}
+}
+
+// NC1: 没有 selector 的暴露型 Service（手工维护 Endpoints 的合法形态）不能
+// 广播——它没有 workload 可挂，广播的后果是把 EXPOSED_INGRESS
+// peers=[0.0.0.0/0] 发给这个 namespace 里完全无关的 workload，原样复现了
+// 修复前 C1 的症状。它必须变成一条看得见的缺口，指名具体是哪个 Service。
+func TestExposedIngressWithoutSelectorDoesNotBroadcastAndIsReported(t *testing.T) {
+	pods := []replay.PodRef{
+		{ClusterID: "c1", Namespace: "shop", Name: "worker-1", IP: "10.4.0.1",
+			Labels: map[string]string{"app": "worker"}},
+	}
+	assets := snapshot.Assets{
+		ClusterID: "c1",
+		Services: []snapshot.Service{{
+			ClusterID: "c1", Namespace: "shop", Name: "external-backend", Type: "LoadBalancer",
+			// 没有 Selector：手工维护 Endpoints 的外部后端就是这个形态。
+			Ports: []snapshot.ServicePort{
+				{Name: "https", Port: 443, TargetPort: 443, Protocol: "TCP"},
+			},
+			LoadBalancerIngressIPs: []string{"34.150.1.177"},
+		}},
+		// 网段登记填全：登记不全时入口地址的归属判不出来，EXPOSED_INGRESS
+		// 一条规则都推不出，这条用例的前提就不成立了。
+		Registry: snapshot.ClusterRegistry{
+			ClusterID: "c1", PodCIDR: "10.4.0.0/16", NodeCIDR: "10.170.48.0/24",
+		},
+	}
+	res := policygen.Generate(policygen.Input{ClusterID: "c1", Pods: pods, Assets: assets})
+
+	for _, p := range res.Policies {
+		for _, r := range p.Rules {
+			if r.Baseline != nil && *r.Baseline == baseline.KindExposedIngress {
+				t.Errorf("%s/%s 拿到了没有 selector 的 Service 广播出来的 EXPOSED_INGRESS: %+v",
+					p.Namespace, p.Workload, r)
+			}
+		}
+	}
+
+	var found bool
+	for _, u := range res.UnattachedBaselines {
+		if u.Kind == baseline.KindExposedIngress && u.Namespace == "shop" &&
+			u.Name == "external-backend" && u.Reason == policygen.UnattachedBaselineNoSelector {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("shop/external-backend 没有 selector，却没有出现在 UnattachedBaselines 里: %+v",
+			res.UnattachedBaselines)
+	}
+}
+
+// NC2：Helm 常见的两标签形态——Pod 同时带 app.kubernetes.io/name 与 app 两个
+// 不同取值，Service selector 只用 app。selector 解出的 workload 值与 Pod
+// 真正的赢家标签键对不上，规则挂不到任何 workload 上。这不是罕见边界，是
+// 复现于真实 fixture 形态（aggregate.go workloadLabelKeys 的注释原文）。
+// 沉默的后果是候选集里什么迹象都没有——必须报出来。
+func TestExposedIngressSelectorMismatchWithWinningKeyIsReported(t *testing.T) {
+	pods := []replay.PodRef{
+		{ClusterID: "c1", Namespace: "istio-system", Name: "gw-1", IP: "10.4.0.9",
+			Labels: map[string]string{
+				"app.kubernetes.io/name": "istio-ingressgateway", // 优先级更高，是赢家键
+				"app":                    "gateway",
+			}},
+	}
+	assets := snapshot.Assets{
+		ClusterID: "c1",
+		Services: []snapshot.Service{{
+			ClusterID: "c1", Namespace: "istio-system", Name: "istio-ingressgateway",
+			Type:     "LoadBalancer",
+			Selector: map[string]string{"app": "gateway"}, // 只用 app，与赢家键不同
+			Ports: []snapshot.ServicePort{
+				{Name: "https", Port: 443, TargetPort: 443, Protocol: "TCP"},
+			},
+			LoadBalancerIngressIPs: []string{"34.150.1.177"},
+		}},
+		// 网段登记填全：登记不全时入口地址的归属判不出来，EXPOSED_INGRESS
+		// 一条规则都推不出，这条用例的前提就不成立了。
+		Registry: snapshot.ClusterRegistry{
+			ClusterID: "c1", PodCIDR: "10.4.0.0/16", NodeCIDR: "10.170.48.0/24",
+		},
+	}
+	res := policygen.Generate(policygen.Input{ClusterID: "c1", Pods: pods, Assets: assets})
+
+	for _, p := range res.Policies {
+		for _, r := range p.Rules {
+			if r.Baseline != nil && *r.Baseline == baseline.KindExposedIngress {
+				t.Errorf("%s/%s 不该拿到这条规则——selector 与赢家标签键不一致: %+v",
+					p.Namespace, p.Workload, r)
+			}
+		}
+	}
+
+	var found bool
+	for _, u := range res.UnattachedBaselines {
+		if u.Kind == baseline.KindExposedIngress && u.Namespace == "istio-system" &&
+			u.Name == "istio-ingressgateway" && u.Reason == policygen.UnattachedBaselineNoSuchWorkload {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("istio-system/istio-ingressgateway 的规则挂不上任何 workload，"+
+			"却没有出现在 UnattachedBaselines 里: %+v", res.UnattachedBaselines)
+	}
+}
+
+// UnattachedBaselines 恒为空切片而不是 nil：与 UnattachedImports 同一条
+// 纪律，序列化成 null 会被读成"这一栏没算过"。
+func TestNoUnattachedBaselinesIsAnEmptySliceNotNil(t *testing.T) {
+	res := policygen.Generate(observe(t, "prod-asia-1"))
+	if res.UnattachedBaselines == nil {
+		t.Error("UnattachedBaselines 是 nil —— 它会序列化成 null，而空清单要读作" +
+			"「五类都检查过、都挂上了」，不是「没算过」")
+	}
+}
+
+// NC2 的另一个触发路径：Service selector 用的标签键根本不在
+// workloadLabelKeys 里（比如只用 statefulset.kubernetes.io/pod-name 之类
+// 的自定义键），resolveWorkloadLabel 直接解不出 workload 取值。同样不能
+// 沉默——必须报出来，不能因为"这条路径比 Helm 两标签冲突少见"就不管。
+func TestExposedIngressSelectorWithUnrecognizedLabelKeyIsReported(t *testing.T) {
+	pods := []replay.PodRef{
+		{ClusterID: "c1", Namespace: "shop", Name: "custom-1", IP: "10.4.0.9",
+			Labels: map[string]string{"app": "custom-workload"}},
+	}
+	assets := snapshot.Assets{
+		ClusterID: "c1",
+		Services: []snapshot.Service{{
+			ClusterID: "c1", Namespace: "shop", Name: "custom-lb", Type: "LoadBalancer",
+			// 只用一个不在 workloadLabelKeys 里的键：resolveWorkloadLabel
+			// 对这个 selector 直接返回 ok=false。
+			Selector: map[string]string{"custom-selector-key": "custom-workload"},
+			Ports: []snapshot.ServicePort{
+				{Name: "https", Port: 443, TargetPort: 443, Protocol: "TCP"},
+			},
+			LoadBalancerIngressIPs: []string{"34.150.1.177"},
+		}},
+		// 网段登记填全：登记不全时入口地址的归属判不出来，EXPOSED_INGRESS
+		// 一条规则都推不出，这条用例的前提就不成立了。
+		Registry: snapshot.ClusterRegistry{
+			ClusterID: "c1", PodCIDR: "10.4.0.0/16", NodeCIDR: "10.170.48.0/24",
+		},
+	}
+	res := policygen.Generate(policygen.Input{ClusterID: "c1", Pods: pods, Assets: assets})
+
+	var found bool
+	for _, u := range res.UnattachedBaselines {
+		if u.Kind == baseline.KindExposedIngress && u.Namespace == "shop" &&
+			u.Name == "custom-lb" && u.Reason == policygen.UnattachedBaselineNoSuchWorkload {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("shop/custom-lb 的 selector 解不出 workload，却没有出现在 UnattachedBaselines 里: %+v",
+			res.UnattachedBaselines)
+	}
+}
+
+// NI2 补测：第三条判不出主体的路径——winKey 能查到，但 (namespace, workload,
+// winKey) 不在花名册里。此前认为这条路径结构上很难触发（每一个在 winners
+// 里留下主张的 workload，通常也会有一个 Pod 进了 workloads），但
+// resolveWinningKeys 同时采信名册（fromRoster=true）与**观测流量里出现过的
+// Pod**（fromRoster=false，aggregate.go:120-129）——一个只在流量里出现过、
+// 从未进入 Input.Pods 的 Pod 照样能给 winners 留下一条主张。mesh/CCNP
+// 降级的流量（IdentityTrusted=false）与已经删除/滚动过的 Pod 都会走到
+// 这条路径，不是罕见边界。
+func TestExposedIngressWinningKeyFromObservedOnlyPodIsReported(t *testing.T) {
+	pods := []replay.PodRef{
+		{ClusterID: "c1", Namespace: "shop", Name: "worker-1", IP: "10.4.0.1",
+			Labels: map[string]string{"app": "worker"}},
+	}
+	// gw-1 只出现在观测流量里，从未进 Input.Pods——它不在花名册中。
+	gwPod := replay.PodRef{
+		ClusterID: "c1", Namespace: "shop", Name: "gw-1", IP: "10.4.0.9",
+		Labels: map[string]string{"app": "gateway"},
+	}
+	obs := []policygen.Observation{{
+		FlowID: "flow-degraded-1",
+		Flow: replay.Flow{
+			Source:   replay.Endpoint{ClusterID: "c1", IP: gwPod.IP, Pod: &gwPod},
+			Dest:     replay.Endpoint{IP: "8.8.8.8"},
+			Protocol: replay.ProtocolTCP, Port: 443,
+		},
+		// 身份不可信（mesh/CCNP 干扰）：整条流量判 Ungeneratable，但
+		// resolveWinningKeys 仍然会看到 gw-1 的标签，留下一条 winners 主张——
+		// 它不检查这条流量最终生不生成规则。
+		IdentityTrusted: false,
+	}}
+	assets := snapshot.Assets{
+		ClusterID: "c1",
+		Services: []snapshot.Service{{
+			ClusterID: "c1", Namespace: "shop", Name: "gw-lb", Type: "LoadBalancer",
+			Selector: map[string]string{"app": "gateway"},
+			Ports: []snapshot.ServicePort{
+				{Name: "https", Port: 443, TargetPort: 443, Protocol: "TCP"},
+			},
+			LoadBalancerIngressIPs: []string{"34.150.1.177"},
+		}},
+		// 网段登记填全：登记不全时入口地址的归属判不出来，EXPOSED_INGRESS
+		// 一条规则都推不出，这条用例的前提就不成立了。
+		Registry: snapshot.ClusterRegistry{
+			ClusterID: "c1", PodCIDR: "10.4.0.0/16", NodeCIDR: "10.170.48.0/24",
+		},
+	}
+	res := policygen.Generate(policygen.Input{
+		ClusterID: "c1", Pods: pods, Observations: obs, Assets: assets,
+	})
+
+	if len(res.Ungeneratable) == 0 {
+		t.Fatal("身份不可信的流量没有进 Ungeneratable，这条用例的前提没建立起来")
+	}
+	for _, p := range res.Policies {
+		for _, r := range p.Rules {
+			if r.Baseline != nil && *r.Baseline == baseline.KindExposedIngress {
+				t.Errorf("%s/%s 不该拿到这条规则——gw-1 从未进入花名册: %+v",
+					p.Namespace, p.Workload, r)
+			}
+		}
+	}
+
+	var found bool
+	for _, u := range res.UnattachedBaselines {
+		if u.Kind == baseline.KindExposedIngress && u.Namespace == "shop" &&
+			u.Name == "gw-lb" && u.Reason == policygen.UnattachedBaselineNoSuchWorkload {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("shop/gw-lb 的赢家键来自一个从未进花名册的观测 Pod，"+
+			"却没有出现在 UnattachedBaselines 里: %+v", res.UnattachedBaselines)
 	}
 }

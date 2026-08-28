@@ -26,12 +26,20 @@ const (
 	KindControlPlane Kind = "CONTROL_PLANE"
 	// KindNodeAgent 是节点级 agent 入向。
 	KindNodeAgent Kind = "NODE_AGENT"
+	// KindExposedIngress 是暴露型 Service 的入站放行。
+	//
+	// LoadBalancer / NodePort 声明的对外暴露，其入站来源**学不出来**：
+	// UAT 上 istio 入口网关一小时内有 4440 个源地址，那是一份每天都在变的
+	// /32 清单。不生成它的后果是入口网关拿到一份零放行的 default-deny，
+	// 应用即切断全集群外部入口（design doc 2026-08-28 §1）。
+	KindExposedIngress Kind = "EXPOSED_INGRESS"
 )
 
 // allKinds 是枚举的唯一登记处。新增类型必须同步登记，
 // 否则 Valid 会拒绝它，且 Missing 不会把它算进齐备性校验。
 var allKinds = []Kind{
 	KindDNS, KindLBHealth, KindMetrics, KindControlPlane, KindNodeAgent,
+	KindExposedIngress,
 }
 
 // AllKinds 返回全部已登记的必备 Baseline 类型。
@@ -109,6 +117,18 @@ type Rule struct {
 	Egress *networkingv1.NetworkPolicyEgressRule `json:"-"`
 	// Derivations 是推导依据，构造时保证非空。
 	Derivations []Derivation `json:"derivations"`
+	// Subject 是这条规则要挂靠的 workload selector；为空表示广播到整个
+	// namespace 里的每个 workload（既有五类的形态：DNS、control plane 等
+	// 是命名空间级的基础设施事实，理应对每个 workload 生效）。
+	//
+	// 非空时——目前只有 EXPOSED_INGRESS 会填它——调用方（policygen）只把
+	// 这条规则挂给 selector 实际选中的那一个 workload，用的是判定
+	// podSelector 归属的同一套 workload-label 解析，不为 Baseline 另起
+	// 第二套机制。广播这类规则的后果是「shop/worker 这种没有暴露对象的
+	// workload 也拿到一条 EXPOSED_INGRESS peers=[0.0.0.0/0]」（design review
+	// C1，2026-08-28）：Baseline 描述的是 Service 声明的暴露范围，不是
+	// namespace 的整体事实。
+	Subject map[string]string `json:"-"`
 }
 
 // NewRule 构造一条 Baseline 规则，拒绝没有推导依据的规则。

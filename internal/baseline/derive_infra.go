@@ -6,6 +6,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
+	"github.com/imkerbos/Distill/internal/cluster"
 	"github.com/imkerbos/Distill/internal/replay"
 	"github.com/imkerbos/Distill/internal/snapshot"
 )
@@ -79,10 +80,14 @@ func deriveLBHealth(a snapshot.Assets) []Rule {
 		svc := es.svc
 		// 端口取 targetPort 而非 Service port：健康检查直接打到 Pod，
 		// 放行 Service port 会放开一个后端没监听的端口，真正的检查仍被挡。
+		// 命名端口经 targetPortOf 原样写成字符串 —— intstr.FromInt32 在命名
+		// 端口下取到的是 TargetPort 的零值 0，而 0 是合法端口值，一条指向
+		// 端口 0 的规则永远匹配不上、外观却完全正常（UAT 的 kafka-0-external
+		// 正是这个形态）。
 		ports := make([]networkingv1.NetworkPolicyPort, 0, len(svc.Ports))
 		for _, p := range svc.Ports {
 			proto := corev1.Protocol(p.Protocol)
-			target := intstr.FromInt32(p.TargetPort)
+			target := targetPortOf(p)
 			ports = append(ports, networkingv1.NetworkPolicyPort{Protocol: &proto, Port: &target})
 		}
 		// 溯源：有 Gateway 就记 Gateway 那一跳；Service 与 Registry 始终记。
@@ -156,38 +161,40 @@ func deriveMetrics(a snapshot.Assets, namespace string) []Rule {
 func deriveNodeAgent(a snapshot.Assets) []Rule {
 	var out []Rule
 	for _, ag := range a.NodeAgents {
-		var peer networkingv1.NetworkPolicyPeer
+		var peers []networkingv1.NetworkPolicyPeer
 		derivations := []Derivation{{
 			SourceKind: SourceNodeAgent, Cluster: a.ClusterID,
 			Namespace: ag.Namespace, Name: ag.App, Field: "hostNetwork",
 		}}
 		if ag.HostNetwork {
-			if a.Registry.NodeCIDR == "" {
+			// 一条登记可以是逗号分隔的多段（双栈，见 cluster.ParsePrefixes），
+			// 一段一条对端。原样塞进 IPBlock.CIDR 会产出一个 NetworkPolicy
+			// 不认的值，而候选策略在被 apply 之前谁都不会发现。
+			nodes, ok := cluster.ParsePrefixes(a.Registry.NodeCIDR)
+			if !ok {
 				continue
 			}
-			peer = networkingv1.NetworkPolicyPeer{
-				IPBlock: &networkingv1.IPBlock{CIDR: a.Registry.NodeCIDR},
-			}
+			peers = peersOf(nodes)
 			derivations = append(derivations, Derivation{
 				SourceKind: SourceClusterRegistry, Cluster: a.ClusterID,
 				Name: a.ClusterID, Field: "nodeCIDR",
 			})
 		} else {
-			peer = networkingv1.NetworkPolicyPeer{
+			peers = []networkingv1.NetworkPolicyPeer{{
 				NamespaceSelector: &metav1.LabelSelector{
 					MatchLabels: map[string]string{nsNameLabel: ag.Namespace},
 				},
 				PodSelector: &metav1.LabelSelector{
 					MatchLabels: map[string]string{"app": ag.App},
 				},
-			}
+			}}
 		}
 		tcp := corev1.ProtocolTCP
 		port := intstr.FromInt32(ag.TargetPort)
 		rule, err := NewRule(
 			KindNodeAgent, replay.DirectionIngress,
 			&networkingv1.NetworkPolicyIngressRule{
-				From:  []networkingv1.NetworkPolicyPeer{peer},
+				From:  peers,
 				Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: &port}},
 			}, nil, derivations,
 		)

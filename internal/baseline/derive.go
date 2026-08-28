@@ -47,6 +47,10 @@ func Derive(a snapshot.Assets, namespace string, unassessed []Kind) Set {
 	set.Rules = append(set.Rules, deriveControlPlane(a)...)
 	set.Rules = append(set.Rules, deriveNodeAgent(a)...)
 	set.Rules = append(set.Rules, deriveMetrics(a, namespace)...)
+	// EXPOSED_INGRESS 判不出范围时不进 Rules，也不进 NotApplicable（那一支
+	// 只在没有暴露对象时打开）：于是 Missing() 自然把它报出来 —— 「有暴露
+	// 对象、却推不出放行规则」正是缺口的定义，不需要第三个字段来表达同一件事。
+	set.Rules = append(set.Rules, deriveExposedIngress(a, namespace)...)
 	for _, r := range deriveLBHealth(a) {
 		// LB Baseline 按暴露面所在 namespace 归属：一个 namespace 的入口
 		// 暴露不该给另一个 namespace 放行健康检查网段。

@@ -52,6 +52,14 @@ var baselineEvidence = map[baseline.Kind][]snapshot.ResourceKind{
 	baseline.KindControlPlane: {},
 	baseline.KindMetrics:      {snapshot.ResourcePod},
 	baseline.KindNodeAgent:    {snapshot.ResourceKind(baseline.SourceNodeAgent)},
+	// EXPOSED_INGRESS 只看 LoadBalancer/NodePort Service（derive_exposed.go），
+	// 因此它的判据资源就是 ResourceService。少了这一行，Service 采集被
+	// 403/超时挡住时 a.Services 是空的，applicability 里的
+	// exposedByLBOrNodePortService 会把它读成"这个 namespace 没有暴露对象"，
+	// EXPOSED_INGRESS 判成不适用，从 Missing() 里消失，Enforcing 门禁照常
+	// 放行——一次采集失败变成一次放行，正是 KindLBHealth 登记
+	// {Ingress, Service} 要挡住的那种（design review C2，2026-08-28）。
+	baseline.KindExposedIngress: {snapshot.ResourceService},
 }
 
 // runEvidence 是锚点那个时刻的采集在各类资源上的结果。
@@ -178,8 +186,16 @@ func (r *Reader) readRunEvidence(ctx context.Context, d described) (runEvidence,
 // 减法会让只读缺失清单的消费方看见比实际更少的阻塞项，而依据采集一旦
 // 403 或超时，DNS 这种要紧的类会间歇性地从那份清单里消失。
 //
-// 一个没有登记依据的新 Kind 会落进"可评估"那一支，于是推导不出来时照常
-// 只报缺失 —— 方向朝关：宁可多报一条该修的，也不要把它藏进"我们没看过"。
+// 一个没有登记依据的新 Kind 会落进"可评估"那一支——这句话只对**没有
+// applicability 判据、恒适用**的类型成立（DNS、CONTROL_PLANE：它们不会被
+// notApplicable 判成不适用，推导不出来只会落进 Missing()，方向朝关，
+// 宁可多报一条该修的）。对**有** applicability 判据的类型（LB_HEALTH_CHECK、
+// METRICS_SCRAPE、EXPOSED_INGRESS）不成立、且危险：判据资源没登记在这张表
+// 里时，它的采集失败不会出现在未评估清单里，applicability 会把"没采到"
+// 误读成"这个 namespace 没有暴露/抓取对象"，判成不适用，从 Missing() 里
+// 悄悄消失——一次采集失败就此变成一次放行。**这几类必须显式登记依据**，
+// 新增一个带 applicability 判据的 Kind 时这是第一处要同步的地方
+// （design review C2，2026-08-28）。
 func notAssessedBaselines(e runEvidence) []baseline.Kind {
 	kinds := baseline.AllKinds()
 	out := make([]baseline.Kind, 0, len(kinds))

@@ -204,6 +204,8 @@ func (r *Reader) PolicyPreviewAtGranularity(
 		NotApplicableBaselines: store.FilterMissing(gen.NotApplicableBaselines, namespace),
 		Ungeneratable:          gen.Ungeneratable,
 		UnattachedImports:      gen.UnattachedImports,
+		UnattachedBaselines:    gen.UnattachedBaselines,
+		ExposureWidenings:      gen.ExposureWidenings,
 		ExcludedNamespaces:     gen.ExcludedNamespaces,
 		ExcludedWorkloads:      gen.ExcludedWorkloads,
 		Prediction:             report,

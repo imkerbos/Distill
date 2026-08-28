@@ -84,14 +84,25 @@ func (c *Collector) collectServices(ctx context.Context, obs *snapshot.Observati
 				ports = append(ports, sp)
 			}
 
+			// 入口地址取 status 而非 spec：spec.loadBalancerIP 是**申请**的
+			// 地址，可能没生效；status 里的才是云厂商实际分配的那个，而
+			// 判定暴露范围要的是实际可达的入口。
+			var ingressIPs []string
+			for _, ing := range s.Status.LoadBalancer.Ingress {
+				if ing.IP != "" {
+					ingressIPs = append(ingressIPs, ing.IP)
+				}
+			}
 			obs.Services = append(obs.Services, snapshot.Service{
-				ClusterID: c.clusterID,
-				Namespace: s.Namespace,
-				Name:      s.Name,
-				Type:      string(s.Spec.Type),
-				Selector:  s.Spec.Selector,
-				ClusterIP: s.Spec.ClusterIP,
-				Ports:     ports,
+				ClusterID:                c.clusterID,
+				Namespace:                s.Namespace,
+				Name:                     s.Name,
+				Type:                     string(s.Spec.Type),
+				Selector:                 s.Spec.Selector,
+				ClusterIP:                s.Spec.ClusterIP,
+				Ports:                    ports,
+				LoadBalancerIngressIPs:   ingressIPs,
+				LoadBalancerSourceRanges: s.Spec.LoadBalancerSourceRanges,
 			})
 		}
 		return list.Continue, nil

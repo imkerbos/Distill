@@ -109,6 +109,7 @@ Pod 身份区间还没推导出来，而所有读路径都从那张表出发。
 | `LOG_SAMPLED_OUT` | 流量日志采样把它丢了 |
 | `POLICY_MALFORMED` | 策略本身解析不出来 |
 | `CCNP_PRESENT` | 存在 Cilium 集群级策略，标准 NetworkPolicy 语义不足以定论 |
+| `LB_INGRESS_ADDRESS` | 这一端是负载均衡入口地址，只能按 ipBlock 表达，没有 Pod 主体——这是一条结论，不必再查采集 |
 
 **看到 `UNKNOWN` 不要当成"没问题"。** 它的意思是这条连接的结论不成立，
 据此做的任何收紧都是赌博 —— 先把原因消掉。

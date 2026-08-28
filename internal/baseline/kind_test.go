@@ -2,6 +2,7 @@ package baseline_test
 
 import (
 	"errors"
+	"slices"
 	"testing"
 
 	networkingv1 "k8s.io/api/networking/v1"
@@ -11,16 +12,16 @@ import (
 )
 
 // 枚举必须有唯一登记处。漏登记的取值会在 Missing() 里被当成
-// "不必备"而静默跳过，五类齐备的门禁随之失效。
-func TestAllKindsRegistersExactlyFive(t *testing.T) {
+// "不必备"而静默跳过，六类齐备的门禁随之失效。
+func TestAllKindsRegistersExactlySix(t *testing.T) {
 	kinds := baseline.AllKinds()
-	if len(kinds) != 5 {
-		t.Fatalf("AllKinds() returned %d kinds, want 5", len(kinds))
+	if len(kinds) != 6 {
+		t.Fatalf("AllKinds() returned %d kinds, want 6", len(kinds))
 	}
 	want := map[baseline.Kind]bool{
 		baseline.KindDNS: false, baseline.KindLBHealth: false,
 		baseline.KindMetrics: false, baseline.KindControlPlane: false,
-		baseline.KindNodeAgent: false,
+		baseline.KindNodeAgent: false, baseline.KindExposedIngress: false,
 	}
 	for _, k := range kinds {
 		if _, known := want[k]; !known {
@@ -47,10 +48,24 @@ func TestEveryDeclaredKindIsValid(t *testing.T) {
 		baseline.KindMetrics,
 		baseline.KindControlPlane,
 		baseline.KindNodeAgent,
+		baseline.KindExposedIngress,
 	} {
 		if !k.Valid() {
 			t.Errorf("declared kind %q is not registered in allKinds", k)
 		}
+	}
+}
+
+// EXPOSED_INGRESS 必须进封闭枚举。
+//
+// 漏登记的后果不是编译错误：Valid 会拒绝它，Missing 不会把它算进齐备性
+// 校验，于是一个「入口没有放行规则」的集群在缺失清单上看起来是齐备的。
+func TestExposedIngressIsRegistered(t *testing.T) {
+	if !baseline.KindExposedIngress.Valid() {
+		t.Error("KindExposedIngress 不在封闭枚举里")
+	}
+	if !slices.Contains(baseline.AllKinds(), baseline.KindExposedIngress) {
+		t.Errorf("AllKinds() 少了 KindExposedIngress: %v", baseline.AllKinds())
 	}
 }
 

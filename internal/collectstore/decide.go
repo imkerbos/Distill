@@ -63,6 +63,14 @@ type traffic struct {
 	registered registry.Cluster
 	// fleet 是当前的网段登记，用来认出跨集群与出公网的对端。
 	fleet *cluster.Registry
+	// lbIngressIPs 是锚点那一刻各 Service 的 LoadBalancer 入口地址集合。
+	//
+	// 一个 LoadBalancer 入口地址天生没有 Pod 主体 —— 它是外部世界进集群的
+	// 门，不是集群里的一个成员。按 (namespace, name) 才对得上 observed_service
+	// 的粒度，这里只要一份"这个地址是不是入口"的集合，因此收窄成 map。
+	// 取自锚点而不是最新一次采集，理由与 pods/policies/namespaces 相同
+	// （CLAUDE.md §4）：一条历史连接要用当时的入口地址集合解释。
+	lbIngressIPs map[string]bool
 }
 
 // readTraffic 解析一段窗口的事实，并把做判定要用的资产一并装好。
@@ -144,6 +152,10 @@ func (r *Reader) trafficOf(
 	if err != nil {
 		return traffic{}, err
 	}
+	services, err := r.readServicesAt(ctx, d)
+	if err != nil {
+		return traffic{}, err
+	}
 	fleet, err := r.fleetRegistry(ctx)
 	if err != nil {
 		return traffic{}, err
@@ -203,7 +215,23 @@ func (r *Reader) trafficOf(
 	t.pods = byKey
 	t.registered = c
 	t.fleet = fleet
+	t.lbIngressIPs = lbIngressIPsOf(services)
 	return t, nil
+}
+
+// lbIngressIPsOf 把一批 Service 的 LoadBalancer 入口地址拍平成一份集合。
+//
+// 不按 Service 分——unknownReasonFor 只需要回答"这个地址是不是入口"，不需要
+// 回答"是哪个 Service 的入口"；界面上要说清楚是哪一个时，走的是 baseline
+// 那条推导路径（internal/baseline/derive_exposed.go），不是这里。
+func lbIngressIPsOf(services []snapshot.Service) map[string]bool {
+	out := make(map[string]bool, len(services))
+	for _, svc := range services {
+		for _, ip := range svc.LoadBalancerIngressIPs {
+			out[ip] = true
+		}
+	}
+	return out
 }
 
 // attributed 是一条连接归属解析与判定之后的全部结果。
@@ -306,6 +334,27 @@ func (t traffic) attribute(c flow.Connection) attributed {
 // 集群内的缺口压过公网：两端一个在集群内解不开、一个在公网时，前者是我们
 // 数据里一个真实的洞，后者只是"对端本来就没有主体"。报前者，SNAPSHOT_MISSING
 // 的统计口径才仍然只数真正的快照缺口。
+//
+// LB 入口地址不是缺口：一个 LoadBalancer 入口地址落在 node_cidr 里，按地址
+// 段它看起来就是一个"该有 Pod 却解不出来"的缺口 —— 而它本来就没有 Pod 主体
+// （design doc 2026-08-28 §1 症状二）。因此 inClusterGap 把这些地址排除在外，
+// 而不是靠把整条分支提到前面去压过它。
+//
+// **提到前面压过去是错的，两个方向都错。** 那样写的判断既不看这一端解没解
+// 出来，也不分是哪一端：
+//
+//   - 源是 LB 地址、目的是一个真正解不开的集群内地址时，报的是
+//     LB_INGRESS_ADDRESS —— 一句"这里没有主体可解"，而目的端那个缺口是我们
+//     数据里真实的洞。上面"集群内的缺口压过公网"那条纪律，在这一支上被反着
+//     走了一遍。
+//   - 源是 LB 地址但**解出来了**（HOST_NETWORK —— MetalLB L2、kube-vip、
+//     自建集群里 LB VIP 就挂在节点地址上，而那个节点上跑着 hostNetwork Pod）、
+//     目的端也解得开时，一条完全判得出来的连接直接短路成 UNKNOWN：它不进
+//     求值，学不出规则，对端 workload 于是少掉这一条入站放行。开发时对着的
+//     GKE 集群 LB VIP 不落在节点上，这一支一次都没走到过。
+//
+// 因此这一支按端判、且只在这一端确实解不出来时才成立；顺序排在
+// inClusterGap 之后，另一端真实的集群内缺口仍然先赢。
 func (t traffic) unknownReasonFor(a attributed) replay.UnknownReason {
 	// HOST_NETWORK 是**解出来了**的一种：那一端不在 Pod 网络里，策略选不中
 	// 它 —— 这是一个结论，不是一次弃权（同 NOT_COVERED 那条注释）。把它当成
@@ -315,13 +364,20 @@ func (t traffic) unknownReasonFor(a attributed) replay.UnknownReason {
 		return o == identity.OutcomeResolved || o == identity.OutcomeHostNetwork
 	}
 	inClusterGap := func(outcome identity.Outcome, ip string) bool {
-		return !resolved(outcome) && !t.externalAddress(ip)
+		return !resolved(outcome) && !t.externalAddress(ip) && !t.lbIngressIPs[ip]
+	}
+	// 解出来了的那一端不算，哪怕它确实是个 LB 入口地址：这一支说的是
+	// "这一端没有主体可解"，而它已经解出来了。
+	lbUnresolved := func(outcome identity.Outcome, ip string) bool {
+		return !resolved(outcome) && t.lbIngressIPs[ip]
 	}
 	switch {
 	case a.srcOutcome == identity.OutcomeAmbiguous || a.dstOutcome == identity.OutcomeAmbiguous:
 		return replay.ReasonIPAmbiguous
 	case inClusterGap(a.srcOutcome, a.conn.Source.IP) || inClusterGap(a.dstOutcome, a.conn.Dest.IP):
 		return replay.ReasonSnapshotMissing
+	case lbUnresolved(a.srcOutcome, a.conn.Source.IP) || lbUnresolved(a.dstOutcome, a.conn.Dest.IP):
+		return replay.ReasonLBIngressAddress
 	case !resolved(a.srcOutcome) || !resolved(a.dstOutcome):
 		// 剩下的只可能是"解不出主体、且地址不属于任何已登记网段"，
 		// 那正是 EXTERNAL_NO_IDENTITY 登记的那件事。
@@ -369,13 +425,21 @@ func (t traffic) unknown(reason replay.UnknownReason, detail string) replay.Deci
 // ok 为 false 表示区间与快照对不上，调用方必须据此答 UNKNOWN，**不得**拿
 // 一个只有名字、没有标签的 Pod 去求值。
 //
-// NamedPorts 留空：采集层没有落容器端口，命名端口于是解析不出来。这不是
-// 遗漏而是如实 —— 求值引擎遇到解不开的命名端口会答 NAMED_PORT_UNRESOLVED，
-// 那是它自己登记的原因，比猜一个端口号安全。
+// NamedPorts 补自快照里的 observedPod.namedPorts（采集层现在落了容器端口，
+// migrations/000032）：求值引擎按 (名字, 协议) 解析命名端口规则，缺了这份
+// 数据，一条合法的规则只会判 NAMED_PORT_UNRESOLVED，即便集群里那个端口
+// 确实开着。协议在这里从快照的自由字符串转成 replay.Protocol —— 两个包
+// 的类型故意不共用，PodRef 是求值引擎收窄过的最小视图（见 replay.PodRef）。
 func (t traffic) podRefOf(id identity.Identity, ip string) (*replay.PodRef, bool) {
 	p, ok := t.pods[podKey{namespace: id.Namespace, name: id.PodName}]
 	if !ok {
 		return nil, false
+	}
+	namedPorts := make([]replay.NamedPort, 0, len(p.namedPorts))
+	for _, np := range p.namedPorts {
+		namedPorts = append(namedPorts, replay.NamedPort{
+			Name: np.Name, Port: np.Port, Protocol: replay.Protocol(np.Protocol),
+		})
 	}
 	return &replay.PodRef{
 		ClusterID:   t.clusterID,
@@ -385,6 +449,7 @@ func (t traffic) podRefOf(id identity.Identity, ip string) (*replay.PodRef, bool
 		Labels:      p.labels,
 		HostNetwork: id.HostNetwork,
 		InMesh:      id.InMesh,
+		NamedPorts:  namedPorts,
 	}, true
 }
 

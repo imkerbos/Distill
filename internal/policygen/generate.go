@@ -89,6 +89,56 @@ type Result struct {
 	// 以为它生效了 —— 而它恰恰是用来补那条平台看不见的连接的，"以为补上了"
 	// 比"知道没补上"危险得多。
 	UnattachedImports []UnattachedImport `json:"unattachedImports"`
+	// UnattachedBaselines 是推导出来、却挂不到任何 workload 上的带
+	// Subject 的 Baseline 规则（今天只有 EXPOSED_INGRESS 会产生）。
+	//
+	// 与 UnattachedImports 同一条纪律，理由更迫切：这里描述的是集群
+	// **已经真实存在**的对外暴露，不是操作者自己补的东西。MissingBaselines
+	// 是 kind 粒度的，同一个 namespace 里只要有一个 Service 正常挂上了，
+	// 这个 kind 就不再"缺失"——而另一个判不出主体的 Service 依然什么
+	// 放行都没有，且没有任何信号。这正是候选策略下发后入口悄悄断掉、
+	// dry-run 也看不出来的那个方向（design review NC1/NC2，2026-08-28）。
+	UnattachedBaselines []UnattachedBaselineRule `json:"unattachedBaselines"`
+	// ExposureWidenings 是每一条挂上了 workload 的暴露型规则，在 Service
+	// selector 与 workload podSelector 之间放宽了多少个 Pod。
+	//
+	// Service selector 可以点名单个 Pod（StatefulSet 的
+	// statefulset.kubernetes.io/pod-name），候选策略却是 workload 粒度的——
+	// 生成的规则覆盖这个 workload 的全部 Pod。不报出来，操作者读到的是
+	// 「按 Service 放行」，实际下发的是「按 workload 放行」，UAT 上三个
+	// zookeeper Pod 各自有 LB、union 恰好相同只是这一个集群的巧合，不是
+	// 这条规则的性质（design review NI4，2026-08-28）。
+	//
+	// 恒为非 nil，理由同 UnattachedBaselines：空清单是"算过，没有一条放宽"，
+	// null 是"没人算过"。
+	ExposureWidenings []ExposureWidening `json:"exposureWidenings"`
+}
+
+// UnattachedBaselineReason 是一条 Baseline 规则挂不上任何 workload 的原因。
+// 封闭枚举。
+type UnattachedBaselineReason string
+
+const (
+	// UnattachedBaselineNoSelector 表示 Service 没有 selector——手工维护
+	// Endpoints 的合法形态（外部后端），但没有 workload 可挂。
+	UnattachedBaselineNoSelector UnattachedBaselineReason = "NO_SELECTOR"
+	// UnattachedBaselineNoSuchWorkload 表示 Service selector 解出的
+	// workload 不在候选花名册里——它当前的赢家标签键与 Service selector
+	// 用的键不一致（常见于 Helm 同时打 app 与 app.kubernetes.io/name 两个
+	// 不同取值的形态），或者集群里压根没有这个 workload。
+	UnattachedBaselineNoSuchWorkload UnattachedBaselineReason = "NO_SUCH_WORKLOAD"
+)
+
+// UnattachedBaselineRule 是一条挂不上任何 workload 的 Baseline 规则。
+//
+// **报出来而不是静默丢掉**，与 UnattachedImport 同一条纪律（imported.go）：
+// 一条真实存在的暴露没有出现在候选集里，比它压根不存在更危险——操作者
+// 看不到任何提示，而入口在下发之后无声中断。
+type UnattachedBaselineRule struct {
+	Kind      baseline.Kind            `json:"kind"`
+	Namespace string                   `json:"namespace"`
+	Name      string                   `json:"name"`
+	Reason    UnattachedBaselineReason `json:"reason"`
 }
 
 // MissingBaseline 是一个 namespace 缺失的 Baseline 类型。
@@ -225,15 +275,102 @@ func Generate(in Input) Result {
 	for s := range workloads {
 		nsWithWorkload[s.namespace] = true
 	}
+	// baselineByNS 是广播规则（Subject 为空，既有五类的形态）：整个
+	// namespace 里的每个 workload 都要有它们。baselineBySubject 是带
+	// Subject 的规则（目前只有 EXPOSED_INGRESS）：只挂给 Service selector
+	// 实际选中的那一个 workload，不广播——广播的后果是一个没有暴露对象的
+	// workload 也拿到一条 EXPOSED_INGRESS peers=[0.0.0.0/0]
+	// （design review C1，2026-08-28）。
 	baselineByNS := map[string][]Rule{}
+	baselineBySubject := map[subject][]Rule{}
 	baselineSetByNS := map[string]baseline.Set{}
+	// 恒为切片而不是 nil，同 UnattachedImports 的理由：Generate 一定跑过
+	// 这一段，"一条都没有"是一个算过的空集，不是没算过。
+	unattachedBaselines := []UnattachedBaselineRule{}
+	exposureWidenings := []ExposureWidening{}
 	for ns := range nsWithWorkload {
 		set := baseline.Derive(in.Assets, ns, in.UnassessedBaselines)
 		baselineSetByNS[ns] = set
+		// NC1：没有 selector 的暴露型 Service 在 deriveExposedIngress 里
+		// 被跳过，不会出现在 set.Rules 里——它不会被下面的循环看到，因此
+		// 必须单独查出来报出去，否则这个真实的暴露会悄悄消失。
+		for _, u := range baseline.UnresolvedExposureSubjects(in.Assets, ns) {
+			unattachedBaselines = append(unattachedBaselines, UnattachedBaselineRule{
+				Kind: baseline.KindExposedIngress, Namespace: u.Namespace, Name: u.Name,
+				Reason: UnattachedBaselineNoSelector,
+			})
+		}
 		for _, br := range set.Rules {
-			baselineByNS[ns] = append(baselineByNS[ns], baselineRule(br))
+			rule := baselineRule(br)
+			if len(br.Subject) == 0 {
+				baselineByNS[ns] = append(baselineByNS[ns], rule)
+				continue
+			}
+			// 用同一套 workload-label 归属判据把 selector 解成
+			// (workload 取值)，再用 winners 查出这个 (namespace, workload)
+			// 当前的赢家标签键——不是重新在 selector 上跑一遍优先级判定，
+			// 那样在 Service selector 与 Pod 标签用的键不一致时（选中同一个
+			// workload 但走了不同的约定键）会漏挂；而是复用 resolveWinningKeys
+			// 已经算好的赢家，这样只要 workload 取值对得上，就一定挂得上
+			// 花名册里那唯一一条 subject。
+			//
+			// NC2：这三条判不出主体的路径都必须报出去，不能静默 continue——
+			// 规则已经推导出来了，Missing() 认为这个 kind 齐备（它是 kind
+			// 粒度的，只要同一个 namespace 里有别的 Service 正常挂上了），
+			// 于是一条真实的暴露会在没有任何信号的情况下从候选集里消失
+			// （design review NC2，2026-08-28：Helm 常见的两标签不一致
+			// 就会触发这条路径，不是罕见形态）。
+			_, wl, ok := resolveWorkloadLabel(br.Subject)
+			if !ok {
+				unattachedBaselines = append(unattachedBaselines, UnattachedBaselineRule{
+					Kind: br.Kind, Namespace: ns, Name: serviceNameOf(br),
+					Reason: UnattachedBaselineNoSuchWorkload,
+				})
+				continue
+			}
+			winKey, ok := winners[nsWorkload{namespace: ns, workload: wl}]
+			if !ok {
+				unattachedBaselines = append(unattachedBaselines, UnattachedBaselineRule{
+					Kind: br.Kind, Namespace: ns, Name: serviceNameOf(br),
+					Reason: UnattachedBaselineNoSuchWorkload,
+				})
+				continue
+			}
+			target := subject{namespace: ns, workload: wl, labelKey: winKey}
+			if !workloads[target] {
+				unattachedBaselines = append(unattachedBaselines, UnattachedBaselineRule{
+					Kind: br.Kind, Namespace: ns, Name: serviceNameOf(br),
+					Reason: UnattachedBaselineNoSuchWorkload,
+				})
+				continue
+			}
+			baselineBySubject[target] = append(baselineBySubject[target], rule)
+			// 挂上了，但挂靠的粒度比 Service 实际点名的范围粗——数一遍
+			// 才知道粗了多少，见 ExposureWidening 的注释。
+			exposureWidenings = append(exposureWidenings, exposureWideningFor(
+				in.Pods, in.ClusterID, ns, serviceNameOf(br), wl, winKey, br.Subject))
 		}
 	}
+	sort.Slice(unattachedBaselines, func(i, j int) bool {
+		a, b := unattachedBaselines[i], unattachedBaselines[j]
+		if a.Namespace != b.Namespace {
+			return a.Namespace < b.Namespace
+		}
+		return a.Name < b.Name
+	})
+	// 比较到 Workload 为止：同一个 Service 理论上只解出一个 workload，
+	// 写出来是为了不让确定性又一次悄悄依赖 map 遍历顺序（同 res.Policies
+	// 那条排序器的注释）。
+	sort.Slice(exposureWidenings, func(i, j int) bool {
+		a, b := exposureWidenings[i], exposureWidenings[j]
+		if a.Namespace != b.Namespace {
+			return a.Namespace < b.Namespace
+		}
+		if a.Service != b.Service {
+			return a.Service < b.Service
+		}
+		return a.Workload < b.Workload
+	})
 
 	// 导入并进名册**之后**：一条挂到集群里并不存在的 workload 上的导入，
 	// 会生成一条选不中任何 Pod 的幽灵策略 —— 它不报错，只是永远不生效，
@@ -242,12 +379,15 @@ func Generate(in Input) Result {
 
 	res := Result{
 		Ungeneratable: dedupeGaps(bad), ExcludedWorkloads: excluded,
-		UnattachedImports:  unattached,
-		ExcludedNamespaces: sortedExcludedNamespaces(excludedNS),
+		UnattachedImports:   unattached,
+		UnattachedBaselines: unattachedBaselines,
+		ExcludedNamespaces:  sortedExcludedNamespaces(excludedNS),
+		ExposureWidenings:   exposureWidenings,
 	}
 	for s := range workloads {
 		rules := append([]Rule{}, byWorkload[s]...)
 		rules = append(rules, baselineByNS[s.namespace]...)
+		rules = append(rules, baselineBySubject[s]...)
 		rules = append(rules, imported[s]...)
 		sortRules(rules)
 		res.Policies = append(res.Policies, CandidatePolicy{
@@ -366,9 +506,83 @@ func cloneLabels(labels map[string]string) map[string]string {
 	return out
 }
 
+// serviceNameOf 从一条 Baseline 规则的推导依据里取出它的来源 Service 名。
+//
+// 依据里已经有这份信息——每条 EXPOSED_INGRESS 规则至少带一条 SourceService
+// derivation，指向推出它的那个 Service（derive_exposed.go）——不用在
+// baseline.Rule 上再加一个字段重复它。取不到时返回空字符串：调用方仍然要
+// 报出这条规则挂不上任何 workload，只是报告里的 Name 会是空的，好过因为
+// 取不到名字就整条吞掉。
+func serviceNameOf(br baseline.Rule) string {
+	for _, d := range br.Derivations {
+		if d.SourceKind == baseline.SourceService {
+			return d.Name
+		}
+	}
+	return ""
+}
+
+// exposureWideningFor 数出一条已挂上 workload 的暴露型规则，在 Service
+// selector 与 workload podSelector 之间放宽了多少个 Pod。
+//
+// **SelectedPods 只在 WorkloadPods 的集合内部数，不是两个独立算出来的计数
+// 相减。** winKey——生成出来的 podSelector 实际会用的键——与 Service
+// selector 里 resolveWorkloadLabel 解出来的键可以是两个不同的键
+// （resolveWorkloadLabel(br.Subject) 在上面那一行就把解出来的键丢了，只留
+// 取值；调用方传进来的 labelKey 是 winners 另算出来的、这个 workload 在
+// 整个 namespace 里当前的赢家键，见 resolveWinningKeys 那条 Helm 迁移期两
+// 标签并存的注释）。若各自独立数一遍 selector 命中与 winKey 命中再相减，
+// 一批还没迁移到赢家键、Service selector 却仍在用旧键选中的 Pod
+// 会被算进"Service 选中了"却算不进"workload 覆盖了"，ExtraPods 相减后
+// 变成负数——一个比无这个字段更糟的读数，因为它看起来像权威结论
+// （design review TI1，2026-08-28）。
+//
+// 因此先圈定 podSelector 真正会覆盖的那一批（Labels[labelKey] == workload），
+// **只在这批里再数一遍**有多少同时满足 Service 的完整 selector。
+// ExtraPods = WorkloadPods − SelectedPods 从结构上就不可能是负数：
+// SelectedPods 天生是 WorkloadPods 的子集，不是另一次独立扫描的结果。
+func exposureWideningFor(
+	pods []replay.PodRef, clusterID, namespace, service, workload, labelKey string,
+	selector map[string]string,
+) ExposureWidening {
+	covered, selected := 0, 0
+	for _, p := range pods {
+		if p.ClusterID != clusterID || p.Namespace != namespace {
+			continue
+		}
+		if p.Labels[labelKey] != workload {
+			// 不在 podSelector 的命中范围内——这条规则下发后根本不会覆盖
+			// 它，不计入分母，也不该被数进分子。
+			continue
+		}
+		covered++
+		if labelsMatch(p.Labels, selector) {
+			selected++
+		}
+	}
+	return ExposureWidening{
+		Namespace: namespace, Service: service, Workload: workload,
+		SelectedPods: selected, WorkloadPods: covered, ExtraPods: covered - selected,
+	}
+}
+
+// labelsMatch 报告 labels 是否包含 selector 里的每一个键值——与 Kubernetes
+// 的 selector 语义一致，空 selector 匹配一切。
+func labelsMatch(labels, selector map[string]string) bool {
+	for k, v := range selector {
+		if labels[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
 // baselineRule 把一条 Baseline 包装成候选策略里的规则。
 //
-// Baseline 恒为 Enabled：它们是必备项，不是建议项。
+// Baseline 恒为 Enabled：它们是必备项，不是建议项——即便它命中风险端口
+// 清单（比如 istio-ingressgateway-inner 暴露的 6379/8848，见 spec §3.6）。
+// 那条规则描述的是集群**已经**在暴露的东西，不生成它等于切断现有流量；
+// Risk 标注要做的是让它在界面上跟一条普通放行区分开，不是把它禁用掉。
 func baselineRule(br baseline.Rule) Rule {
 	kind := br.Kind
 	r := Rule{
@@ -376,8 +590,33 @@ func baselineRule(br baseline.Rule) Rule {
 		Direction: br.Direction, Enabled: true,
 		Ingress: br.Ingress, Egress: br.Egress,
 	}
+	if br.Ingress != nil {
+		r.Risk = riskOfPorts(br.Ingress.Ports)
+	} else if br.Egress != nil {
+		r.Risk = riskOfPorts(br.Egress.Ports)
+	}
 	r.describe()
 	return r
+}
+
+// riskOfPorts 在一组 NetworkPolicy 端口里命中风险清单时返回该端口信息。
+//
+// 只查数字端口：命名端口在这一步还没解析成具体数字（那需要 Pod 的容器
+// 端口声明），没有依据就不猜它是不是风险端口。一条规则里有多个端口时取
+// 第一个命中的——界面上这个标注要传达的是"这条规则里有风险"，不是逐端口
+// 枚举，与 learnedRule 每条规则只对应一个端口的形态不同（Baseline 的一条
+// 规则可以像 EXPOSED_INGRESS 那样一次带多个端口）。
+func riskOfPorts(ports []networkingv1.NetworkPolicyPort) *risk.Port {
+	for _, p := range ports {
+		if p.Port == nil || p.Port.Type != intstr.Int {
+			continue
+		}
+		if rp, ok := risk.Lookup(p.Port.IntVal); ok {
+			copied := rp
+			return &copied
+		}
+	}
+	return nil
 }
 
 // sortRules 给规则定序：Baseline 在前，其后按方向、证据、端口、协议、对端。

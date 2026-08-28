@@ -275,8 +275,8 @@ func insertPods(ctx context.Context, tx *sql.Tx, obs snapshot.Observation) error
 		    ip_scope, ip_scope_reason, extra_ips, labels, scrape_annotations,
 		    host_network, node_name, service_account,
 		    owner_kind, owner_name, workload_kind, workload_name,
-		    in_mesh, mesh_source, mesh_detail)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		    in_mesh, mesh_source, mesh_detail, named_ports)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return fmt.Errorf("snapshotstore: prepare pod: %w", err)
 	}
@@ -303,12 +303,19 @@ func insertPods(ctx context.Context, tx *sql.Tx, obs snapshot.Observation) error
 			return fmt.Errorf("snapshotstore: marshal pod extra ips %s/%s: %w",
 				p.Namespace, p.Name, err)
 		}
+		// 恒写成数组，从不写 NULL：同一条理由（migrations/000032）——
+		// NULL 只留给这一列存在之前写下的行，这次采集永远采了容器端口。
+		namedPorts, err := jsonArray(p.NamedPorts)
+		if err != nil {
+			return fmt.Errorf("snapshotstore: marshal pod named ports %s/%s: %w",
+				p.Namespace, p.Name, err)
+		}
 		if _, err := stmt.ExecContext(ctx,
 			obs.ClusterID, p.Namespace, p.Name, obs.ObservedAt, obs.RunID,
 			p.UID, p.Phase, p.IP, string(p.IPScope), string(p.IPScopeReason),
 			string(extra), labels, scrape, p.HostNetwork, p.NodeName, p.ServiceAccount,
 			p.OwnerKind, p.OwnerName, p.WorkloadKind, p.WorkloadName,
-			p.InMesh, string(p.MeshSource), p.MeshDetail); err != nil {
+			p.InMesh, string(p.MeshSource), p.MeshDetail, namedPorts); err != nil {
 			return fmt.Errorf("snapshotstore: insert pod %s/%s: %w", p.Namespace, p.Name, err)
 		}
 	}
@@ -344,8 +351,9 @@ func insertNodes(ctx context.Context, tx *sql.Tx, obs snapshot.Observation) erro
 func insertServices(ctx context.Context, tx *sql.Tx, obs snapshot.Observation) error {
 	stmt, err := tx.PrepareContext(ctx,
 		`INSERT INTO observed_service
-		   (cluster_id, namespace, name, observed_at, run_id, service_type, selector, cluster_ip, ports)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		   (cluster_id, namespace, name, observed_at, run_id, service_type, selector, cluster_ip, ports,
+		    lb_ingress_ips, lb_source_ranges)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return fmt.Errorf("snapshotstore: prepare service: %w", err)
 	}
@@ -360,9 +368,20 @@ func insertServices(ctx context.Context, tx *sql.Tx, obs snapshot.Observation) e
 		if err != nil {
 			return fmt.Errorf("snapshotstore: marshal service ports %s/%s: %w", s.Namespace, s.Name, err)
 		}
+		// 恒写成数组（nil 变 []），从不写 NULL：NULL 只留给迁移之前、
+		// 这两列根本不存在时写下的那些行，用来分辨「没采过」与「采过是空的」
+		// （migrations/000032）。这次采集永远采了，因此永远有值可写。
+		ingressIPs, err := jsonArray(s.LoadBalancerIngressIPs)
+		if err != nil {
+			return fmt.Errorf("snapshotstore: marshal service lb ingress ips %s/%s: %w", s.Namespace, s.Name, err)
+		}
+		sourceRanges, err := jsonArray(s.LoadBalancerSourceRanges)
+		if err != nil {
+			return fmt.Errorf("snapshotstore: marshal service lb source ranges %s/%s: %w", s.Namespace, s.Name, err)
+		}
 		if _, err := stmt.ExecContext(ctx,
 			obs.ClusterID, s.Namespace, s.Name, obs.ObservedAt, obs.RunID,
-			s.Type, selector, s.ClusterIP, ports); err != nil {
+			s.Type, selector, s.ClusterIP, ports, ingressIPs, sourceRanges); err != nil {
 			return fmt.Errorf("snapshotstore: insert service %s/%s: %w", s.Namespace, s.Name, err)
 		}
 	}

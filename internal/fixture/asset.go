@@ -28,6 +28,10 @@ func asiaAssets() snapshot.Assets {
 				Ports: []snapshot.ServicePort{
 					{Name: "https", Port: 443, TargetPort: 8443, Protocol: "TCP"},
 				},
+				// 入口地址落在下面登记的 node_cidr 内：EXPOSED_INGRESS 也要能在
+				// 这个「五类齐备」的 namespace 上推出规则，否则 gateway 就不再
+				// 是齐备侧的样本了。
+				LoadBalancerIngressIPs: []string{"10.128.0.5"},
 			},
 		},
 		Endpoints: []snapshot.Endpoints{
