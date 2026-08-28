@@ -30,13 +30,31 @@ import (
 // 加一个字段，这里立刻多一项要求，加字段的人被迫走到下面的豁免表前，
 // 写清楚为什么这一处不带。
 //
-// 判"带没带"看的是源码：在 Save() 里找到对应资源类型的那个 for-range
-// 循环（用循环变量名与 range 表达式的源码文本定位，不是整个函数体——
-// 这个函数里好几个循环变量重名，比如 Namespaces 与 Nodes 都叫 n，
-// 混在一起扫会把"读过 Namespace.Name"误判成"读过 Node.Name"），
-// 看循环体里有没有出现 <循环变量>.<字段名> 这个选择表达式。
+// 判"带没带"看的是源码，按抄写点的形状分两种定位：
+//
+//   - **元素类型**（Pod、Service、Failure……）在 Save() 里各有一个 for-range
+//     循环。用循环变量名与 range 表达式的源码文本定位到那**一个**循环，不是
+//     整个函数体 —— 这个函数里好几个循环变量重名（Namespaces 与 Nodes 都叫
+//     n），混在一起扫会把"读过 Namespace.Name"误判成"读过 Node.Name"。
+//
+//   - **聚合类型**（snapshot.Run 与 snapshot.Observation 本身）没有循环。
+//     它们的字段直接写成 run.X / run.Observation.X，因此按根表达式扫整个
+//     函数体。
+//
+// **第二种是补上去的，而它的缺席正是这条用例第一次没守住的原因。**
+// 只锚在 for-range 上时，这份清单覆盖了 11 个元素类型，却把产生它们的那
+// 两个聚合漏在外面 —— 于是 Run.Failures（采集失败记录）与
+// Observation.ForeignScopes / ForeignScopesComplete（第二策略平面的覆盖
+// 范围）从来没有过线，而两个独立评审各自撞上了同一个盲区。前者让
+// collection_run_failure 在推送模式下恒空，"Service 列表被 403 拒了"于是
+// 读成"我们看过了，这个集群就是没有 Service"；后者让完整度标志恒为
+// 零值。d36c94d 的提交信息说这条用例"要求每个字段要么被带上、要么写进
+// 豁免表"，那句话当时只对元素类型成立（design review RI2 / SC1，2026-08-28）。
 
 // wireFanoutSite 是快照类型到 agent 报文的一个抄写点。
+//
+// 两种定位二选一：给了 rootExpr 就按根表达式扫整个函数体（聚合类型），
+// 否则按 rangeExpr + src 定位到一个循环（元素类型）。
 type wireFanoutSite struct {
 	// label 是失败信息里的可读标识。
 	label string
@@ -46,6 +64,9 @@ type wireFanoutSite struct {
 	rangeExpr string
 	// src 是循环变量名。
 	src string
+	// rootExpr 是聚合类型在函数体里的根表达式，如 "run" 或 "run.Observation"。
+	// 非空时忽略 rangeExpr / src。
+	rootExpr string
 	// exempt 是故意不带的字段，值是理由。空表示这一处必须全带。
 	exempt map[string]string
 }
@@ -74,6 +95,23 @@ const preExistingGapExempt = "既有缺口，与本轮改动（LoadBalancer 暴�
 
 func wireFanoutSites() []wireFanoutSite {
 	return []wireFanoutSite{
+		{
+			label:    sinkFile + ":" + sinkFunc + " (Run)",
+			fields:   exportedFields(snapshot.Run{}),
+			rootExpr: "run",
+			exempt: map[string]string{
+				"ErrorReason": "中止的运行走 SaveAbortedRun 那条报文（它自己带 errorReason）；" +
+					"Save 收到的运行 ErrorReason 恒为空。在这里也发一遍，等于给" +
+					"「失败却带着资产」这种自相矛盾的报文多开一个入口，而平台正是靠" +
+					"errorReason 非空来判断该走哪条落库路径。",
+			},
+		},
+		{
+			label:    sinkFile + ":" + sinkFunc + " (Observation)",
+			fields:   exportedFields(snapshot.Observation{}),
+			rootExpr: "run.Observation",
+			exempt:   map[string]string{"ClusterID": clusterIDExempt},
+		},
 		{
 			label:     sinkFile + ":" + sinkFunc + " (Namespace)",
 			fields:    exportedFields(snapshot.Namespace{}),
@@ -155,6 +193,20 @@ func wireFanoutSites() []wireFanoutSite {
 			},
 		},
 		{
+			label:     sinkFile + ":" + sinkFunc + " (ForeignScope)",
+			fields:    exportedFields(snapshot.ForeignScope{}),
+			rangeExpr: "run.Observation.ForeignScopes",
+			src:       "fs",
+			exempt:    nil,
+		},
+		{
+			label:     sinkFile + ":" + sinkFunc + " (Failure)",
+			fields:    exportedFields(snapshot.Failure{}),
+			rangeExpr: "run.Failures",
+			src:       "f",
+			exempt:    nil,
+		},
+		{
 			label:     sinkFile + ":" + sinkFunc + " (NamedPort)",
 			fields:    exportedFields(snapshot.NamedPort{}),
 			rangeExpr: "p.NamedPorts",
@@ -167,7 +219,7 @@ func wireFanoutSites() []wireFanoutSite {
 func TestAgentWireCarriesEverySnapshotField(t *testing.T) {
 	for _, site := range wireFanoutSites() {
 		t.Run(site.label, func(t *testing.T) {
-			read := fieldsReadInLoop(t, sinkFile, sinkFunc, site.rangeExpr, site.src)
+			read := site.fieldsRead(t)
 			for _, f := range site.fields {
 				if read[f] {
 					if reason, ok := site.exempt[f]; ok {
@@ -197,6 +249,66 @@ func TestAgentWireCarriesEverySnapshotField(t *testing.T) {
 	}
 }
 
+// fieldsRead 按这个抄写点的定位方式读出被抄到的字段名。
+func (s wireFanoutSite) fieldsRead(t *testing.T) map[string]bool {
+	t.Helper()
+	if s.rootExpr != "" {
+		return fieldsReadUnder(t, sinkFile, sinkFunc, s.rootExpr)
+	}
+	return fieldsReadInLoop(t, sinkFile, sinkFunc, s.rangeExpr, s.src)
+}
+
+// fieldsReadUnder 收集函数 fn 的整个函数体里，形如 <rootExpr>.<字段名> 的
+// 选择表达式。
+//
+// 与 fieldsReadInLoop 相反，这里**要**扫整个函数体：聚合类型没有循环，它的
+// 字段散落在整个函数里（run.Status 在开头的报文字面量里，run.Observation.Pods
+// 在末尾的循环上）。歧义的风险也不存在 —— 根表达式是完整的点号路径，
+// "run.Observation" 只可能指那一个东西，不像循环变量 n 那样会撞名。
+func fieldsReadUnder(t *testing.T, file, fn, rootExpr string) map[string]bool {
+	t.Helper()
+	body := funcBody(t, file, fn)
+
+	read := map[string]bool{}
+	ast.Inspect(body, func(n ast.Node) bool {
+		sel, ok := n.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		if exprSource(sel.X) == rootExpr {
+			read[sel.Sel.Name] = true
+		}
+		return true
+	})
+	if len(read) == 0 {
+		t.Fatalf("%s 的 %s 里一次都没读过 %s.*——这条用例已经什么都不在守了",
+			file, fn, rootExpr)
+	}
+	return read
+}
+
+// funcBody 解析 file，取出函数 fn 的函数体。
+func funcBody(t *testing.T, file, fn string) *ast.BlockStmt {
+	t.Helper()
+	parsed, err := parser.ParseFile(token.NewFileSet(), file, nil, 0)
+	if err != nil {
+		t.Fatalf("解析 %s 失败: %v", file, err)
+	}
+	var body *ast.BlockStmt
+	ast.Inspect(parsed, func(n ast.Node) bool {
+		f, ok := n.(*ast.FuncDecl)
+		if ok && f.Name.Name == fn && f.Body != nil {
+			body = f.Body
+			return false
+		}
+		return true
+	})
+	if body == nil {
+		t.Fatalf("%s 里找不到函数 %s —— 抄写点被移动或改名了，wireFanoutSites 要跟着改", file, fn)
+	}
+	return body
+}
+
 // exportedFields 反射出一个类型的全部导出字段名，按名字排序。
 func exportedFields(v any) []string {
 	rt := reflect.TypeOf(v)
@@ -220,23 +332,7 @@ func exportedFields(v any) []string {
 // 读过"，而两个循环对应的是完全不同的快照类型。
 func fieldsReadInLoop(t *testing.T, file, fn, rangeExpr, src string) map[string]bool {
 	t.Helper()
-	parsed, err := parser.ParseFile(token.NewFileSet(), file, nil, 0)
-	if err != nil {
-		t.Fatalf("解析 %s 失败: %v", file, err)
-	}
-
-	var body *ast.BlockStmt
-	ast.Inspect(parsed, func(n ast.Node) bool {
-		f, ok := n.(*ast.FuncDecl)
-		if ok && f.Name.Name == fn && f.Body != nil {
-			body = f.Body
-			return false
-		}
-		return true
-	})
-	if body == nil {
-		t.Fatalf("%s 里找不到函数 %s —— 抄写点被移动或改名了，wireFanoutSites 要跟着改", file, fn)
-	}
+	body := funcBody(t, file, fn)
 
 	var loop *ast.RangeStmt
 	ast.Inspect(body, func(n ast.Node) bool {
