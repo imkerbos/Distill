@@ -66,6 +66,12 @@ type connectionPayload struct {
 	Protocol      string `json:"protocol"`
 	Port          int32  `json:"port"`
 	ObservedCount int    `json:"observedCount"`
+	// Verdict 是**来源报告的**判定，不是平台算的。缺席表示来源没报这件事，
+	// 与报了 ALLOWED 是两句话：前者让这条连接不参与一致率，后者是一条可以
+	// 推翻平台判定的证据（internal/reconcile）。
+	//
+	// conntrack 只在 TCP 上报得出：握手完成过就是执行平面放行过。
+	Verdict string `json:"verdict,omitempty"`
 }
 
 // flowIngestPayload 是 POST /api/v1/agent/flow-ingests 的报文。
@@ -131,6 +137,7 @@ func conntrackOnce(
 
 	startedAt := time.Now().UTC()
 	counts := map[connKey]int{}
+	verdicts := map[connKey]string{}
 	var order []connKey
 	var dropped uint64
 	truncated := false
@@ -183,6 +190,10 @@ func conntrackOnce(
 			k := connKey{src: c.Source.IP, dst: c.Dest.IP, proto: string(c.Protocol), port: c.Port}
 			if _, seen := counts[k]; !seen {
 				order = append(order, k)
+				// 判定由协议决定，同一个键每次都一样；取第一次见到的那个。
+				if v, ok := c.Verdict(); ok {
+					verdicts[k] = string(v)
+				}
 			}
 			counts[k] += c.ObservedCount
 		}
@@ -221,7 +232,7 @@ done:
 	for _, k := range order {
 		payload.Connections = append(payload.Connections, connectionPayload{
 			SrcIP: k.src, DstIP: k.dst, Protocol: k.proto, Port: k.port,
-			ObservedCount: counts[k],
+			ObservedCount: counts[k], Verdict: verdicts[k],
 		})
 	}
 	if truncated {
