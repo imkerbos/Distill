@@ -124,6 +124,16 @@ func (r Result) AtNamespaceGranularity() (Result, []Widening) {
 		NotApplicableBaselines: r.NotApplicableBaselines,
 		Ungeneratable:          r.Ungeneratable,
 		ExcludedWorkloads:      r.ExcludedWorkloads,
+		// UnattachedBaselines 讲的也是"这个集群缺什么"（一条真实暴露没有
+		// 挂上任何 workload），与主体粒度无关，必须原样带过来——namespace
+		// 粒度是界面默认视图，丢在这里等于丢在操作者实际会看的那条路径上，
+		// PolicyPreview 会把它序列化成 null，而这个字段的注释明确说 null
+		// 的含义是"这一栏没算过"（design review NI4，2026-08-28）。
+		//
+		// UnattachedImports 与 ExcludedNamespaces 在这里同样没有被带过来——
+		// 那是既有缺口，本轮不动它：本轮只保证新加的这一栏不重蹈覆辙，
+		// 不代表"原样带过来"这份清单现在是完整的。
+		UnattachedBaselines: r.UnattachedBaselines,
 	}
 	var widening []Widening
 

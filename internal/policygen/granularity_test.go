@@ -7,6 +7,7 @@ import (
 
 	networkingv1 "k8s.io/api/networking/v1"
 
+	"github.com/imkerbos/Distill/internal/baseline"
 	"github.com/imkerbos/Distill/internal/policygen"
 )
 
@@ -381,5 +382,25 @@ func TestWorkloadGranularityIsUnchanged(t *testing.T) {
 			t.Errorf("%s/%s: workload granularity rendered an empty podSelector, which would "+
 				"select the whole namespace", np.Namespace, np.Name)
 		}
+	}
+}
+
+// NI4: 折叠必须带上 UnattachedBaselines，与 MissingBaselines /
+// NotApplicableBaselines / Ungeneratable / ExcludedWorkloads 同一条纪律——
+// 它讲的也是"这个集群缺什么"，与主体粒度无关。namespace 粒度是界面默认
+// 视图（PolicyPage.tsx 缺省 'NAMESPACE'），丢在折叠这一步等于丢在操作者
+// 实际会看到的那条路径上：PolicyPreview 会把它序列化成 null，而这正是
+// 这个字段自己的注释明确禁止的读法（design review NI4，2026-08-28）。
+func TestCollapsingCarriesUnattachedBaselines(t *testing.T) {
+	in := policygen.Result{
+		UnattachedBaselines: []policygen.UnattachedBaselineRule{{
+			Kind: baseline.KindExposedIngress, Namespace: "shop", Name: "gw-lb",
+			Reason: policygen.UnattachedBaselineNoSelector,
+		}},
+	}
+	out, _ := in.AtNamespaceGranularity()
+	if !reflect.DeepEqual(out.UnattachedBaselines, in.UnattachedBaselines) {
+		t.Errorf("UnattachedBaselines = %+v after collapsing, want %+v unchanged",
+			out.UnattachedBaselines, in.UnattachedBaselines)
 	}
 }

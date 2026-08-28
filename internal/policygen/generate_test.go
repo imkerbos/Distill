@@ -1266,3 +1266,73 @@ func TestExposedIngressSelectorWithUnrecognizedLabelKeyIsReported(t *testing.T) 
 			res.UnattachedBaselines)
 	}
 }
+
+// NI2 补测：第三条判不出主体的路径——winKey 能查到，但 (namespace, workload,
+// winKey) 不在花名册里。此前认为这条路径结构上很难触发（每一个在 winners
+// 里留下主张的 workload，通常也会有一个 Pod 进了 workloads），但
+// resolveWinningKeys 同时采信名册（fromRoster=true）与**观测流量里出现过的
+// Pod**（fromRoster=false，aggregate.go:120-129）——一个只在流量里出现过、
+// 从未进入 Input.Pods 的 Pod 照样能给 winners 留下一条主张。mesh/CCNP
+// 降级的流量（IdentityTrusted=false）与已经删除/滚动过的 Pod 都会走到
+// 这条路径，不是罕见边界。
+func TestExposedIngressWinningKeyFromObservedOnlyPodIsReported(t *testing.T) {
+	pods := []replay.PodRef{
+		{ClusterID: "c1", Namespace: "shop", Name: "worker-1", IP: "10.4.0.1",
+			Labels: map[string]string{"app": "worker"}},
+	}
+	// gw-1 只出现在观测流量里，从未进 Input.Pods——它不在花名册中。
+	gwPod := replay.PodRef{
+		ClusterID: "c1", Namespace: "shop", Name: "gw-1", IP: "10.4.0.9",
+		Labels: map[string]string{"app": "gateway"},
+	}
+	obs := []policygen.Observation{{
+		FlowID: "flow-degraded-1",
+		Flow: replay.Flow{
+			Source:   replay.Endpoint{ClusterID: "c1", IP: gwPod.IP, Pod: &gwPod},
+			Dest:     replay.Endpoint{IP: "8.8.8.8"},
+			Protocol: replay.ProtocolTCP, Port: 443,
+		},
+		// 身份不可信（mesh/CCNP 干扰）：整条流量判 Ungeneratable，但
+		// resolveWinningKeys 仍然会看到 gw-1 的标签，留下一条 winners 主张——
+		// 它不检查这条流量最终生不生成规则。
+		IdentityTrusted: false,
+	}}
+	assets := snapshot.Assets{
+		ClusterID: "c1",
+		Services: []snapshot.Service{{
+			ClusterID: "c1", Namespace: "shop", Name: "gw-lb", Type: "LoadBalancer",
+			Selector: map[string]string{"app": "gateway"},
+			Ports: []snapshot.ServicePort{
+				{Name: "https", Port: 443, TargetPort: 443, Protocol: "TCP"},
+			},
+			LoadBalancerIngressIPs: []string{"34.150.1.177"},
+		}},
+	}
+	res := policygen.Generate(policygen.Input{
+		ClusterID: "c1", Pods: pods, Observations: obs, Assets: assets,
+	})
+
+	if len(res.Ungeneratable) == 0 {
+		t.Fatal("身份不可信的流量没有进 Ungeneratable，这条用例的前提没建立起来")
+	}
+	for _, p := range res.Policies {
+		for _, r := range p.Rules {
+			if r.Baseline != nil && *r.Baseline == baseline.KindExposedIngress {
+				t.Errorf("%s/%s 不该拿到这条规则——gw-1 从未进入花名册: %+v",
+					p.Namespace, p.Workload, r)
+			}
+		}
+	}
+
+	var found bool
+	for _, u := range res.UnattachedBaselines {
+		if u.Kind == baseline.KindExposedIngress && u.Namespace == "shop" &&
+			u.Name == "gw-lb" && u.Reason == policygen.UnattachedBaselineNoSuchWorkload {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("shop/gw-lb 的赢家键来自一个从未进花名册的观测 Pod，"+
+			"却没有出现在 UnattachedBaselines 里: %+v", res.UnattachedBaselines)
+	}
+}
