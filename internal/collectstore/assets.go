@@ -493,3 +493,49 @@ func confidenceOf(c flow.Completeness) replay.Confidence {
 	}
 	return replay.ConfidenceDegraded
 }
+
+// readNodeIPsAt 读出锚点那一刻各节点的内部地址。
+//
+// 用途只有一个：判断一个落在登记 node 网段里的地址**到底是不是节点**。
+//
+// 登记的 node_cidr 是一个网段，而集群节点通常只占其中一部分——同子网里还有
+// 数据库、跳板机、别的集群的节点。按网段判，这些机器全被算成"集群内"，平台
+// 于是期待一个 Pod 主体、找不到就报 SNAPSHOT_MISSING，而运维照着这个原因去
+// 查"哪次采集漏了快照"，根本没有这回事。UAT 实测：node 网段里 29 个出现过的
+// 地址，15 个是节点、14 个不是，而那 14 个是 SNAPSHOT_MISSING 的主体。
+//
+// **节点清单是采出来的事实，不是人填的登记**，因此它比收窄 node_cidr 更可靠：
+// 网段要有人去维护，而维护会漂。
+func (r *Reader) readNodeIPsAt(ctx context.Context, d described) (map[string]bool, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT internal_ips FROM observed_node
+		  WHERE cluster_id = ? AND observed_at = ?
+		  LIMIT ?`,
+		d.clusterID, d.anchor, maxSnapshotRows+1)
+	if err != nil {
+		return nil, fmt.Errorf("collectstore: read observed nodes: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := map[string]bool{}
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return nil, fmt.Errorf("collectstore: scan observed node: %w", err)
+		}
+		// 坏掉的列整体报错，不当成"这个节点没有地址"：后者会让这个节点的
+		// 地址退回按网段判，也就是退回这段代码要修的那个缺陷本身。
+		var ips []string
+		if err := json.Unmarshal(raw, &ips); err != nil {
+			return nil, fmt.Errorf(
+				"collectstore: decode node internal ips of cluster %s: %w", d.clusterID, err)
+		}
+		for _, ip := range ips {
+			out[ip] = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("collectstore: iterate observed nodes: %w", err)
+	}
+	return out, nil
+}
