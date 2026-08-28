@@ -81,18 +81,6 @@ const sinkFunc = "Save"
 const clusterIDExempt = "集群归属只来自 token（design doc §2），报文里没有这个字段的容身之处；" +
 	"报文带上会被平台的 DisallowUnknownFields 整体拒绝。TestSinkNeverClaimsACluster 独立钉住了这一点。"
 
-// preExistingGapExempt 标注一批与本轮改动无关的既有缺口：internal/collect
-// 的共享采集逻辑本来就会填上这些字段（pull 模式的采集器与 push 模式的
-// agent 走的是同一份 collectPods），但 agent 报文从来没带过它们。
-//
-// 本轮只关 LoadBalancer 暴露判定与命名端口两类——把这些字段也补上要求
-// 先确认平台侧怎么消费（尤其 InMesh/MeshSource/MeshDetail 影响身份可信度
-// 判定，ExtraIPs 影响双栈身份解析），那是另一轮的题。写在这里是为了它是
-// 一个被记下来的缺口，而不是一次悄悄放过的遗漏。
-const preExistingGapExempt = "既有缺口，与本轮改动（LoadBalancer 暴露判定、命名端口）无关：" +
-	"internal/collect 的共享采集逻辑本来就会填上这个字段，但 agent 报文从未带过它。" +
-	"本轮不补，先记下来。"
-
 func wireFanoutSites() []wireFanoutSite {
 	return []wireFanoutSite{
 		{
@@ -184,12 +172,7 @@ func wireFanoutSites() []wireFanoutSite {
 				"ClusterID": clusterIDExempt,
 				"IPScope": "归属是平台的判定（design doc §3.4），agent 连声明它的语法都不该有。" +
 					"TestSinkNeverClaimsAScope 独立钉住了这一点。",
-				"IPScopeReason":     "同 IPScope：只在归属判不出来时才有意义，而归属本身就不该由 agent 声明。",
-				"ExtraIPs":          preExistingGapExempt,
-				"InMesh":            preExistingGapExempt,
-				"MeshSource":        preExistingGapExempt,
-				"MeshDetail":        preExistingGapExempt,
-				"ScrapeAnnotations": preExistingGapExempt,
+				"IPScopeReason": "同 IPScope：只在归属判不出来时才有意义，而归属本身就不该由 agent 声明。",
 			},
 		},
 		{
