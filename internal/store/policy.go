@@ -38,7 +38,10 @@ type RuleEvidence struct {
 	// 每次都出现几条的规则，前者证据更弱 —— 一次压测就能造出前者。
 	Windows int `json:"windows"`
 	// Observations 是累计观测到的流量条数。
-	Observations int64 `json:"observations"`
+	// **uint64，与列的 BIGINT UNSIGNED 一致**（snapshotstore.RuleEvidence
+	// 上有同一条注释）：类型比列窄时，超界的值不是读成一个错的数字，而是
+	// 让整条读取路径失败。
+	Observations uint64 `json:"observations"`
 }
 
 // PolicyPreview 是一次候选策略预览的完整产物。
@@ -176,6 +179,19 @@ type PolicyPreview struct {
 	// **恒为非 nil**，理由同 UnattachedBaselines：空清单是"算过，没有一条
 	// 放宽"，null 是"没人算过"。
 	ExposureWidenings []policygen.ExposureWidening `json:"exposureWidenings"`
+	// UnobservedRules 是从累积证据并进来、但**本次求值窗口内没有出现**的规则。
+	//
+	// 单独一栏而不是混进候选集：dry-run 的四类计数报不出它们——那几个数比较
+	// 的是观测到的流量在两套策略下的判定，而这些规则放行的流量本窗口里根本
+	// 没出现，不产生任何 change kind。于是策略集放行的比本窗口证据支持的多，
+	// 而没有一个数字会动（design doc 2026-08-29 §3.4）。
+	UnobservedRules []policygen.UnobservedRule `json:"unobservedRules"`
+	// EvidenceLag 说的是这份预览里的证据计数还在不在更新。
+	//
+	// 放在预览上而不是只放在某个健康页：证据停摆之后，这一屏的
+	// windows / observations 仍然会显示一个数字，而那个数字是十几个小时
+	// 之前的。读它的人正在据此决定要不要确认一条规则（见 EvidenceLag）。
+	EvidenceLag EvidenceLag `json:"evidenceLag"`
 	// ExcludedNamespaces 是**整片**没有生成候选策略的命名空间。
 	//
 	// 今天唯一的原因是"这是 Kubernetes 内置系统命名空间"：候选集会给每个

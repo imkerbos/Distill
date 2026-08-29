@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/imkerbos/Distill/internal/flow"
 	"github.com/imkerbos/Distill/internal/policygen"
@@ -158,4 +159,65 @@ func TestExposureWideningReportsOnlyActualWidening(t *testing.T) {
 	if strings.Contains(text, "api-lb") {
 		t.Errorf("没放宽的那条不该被列出来:\n%s", text)
 	}
+}
+
+// 证据停摆时，注释头第一句就要说出来。
+//
+// 2026-08-29 事故的教训：记账连续失败 13 小时，而界面上唯一的症状是几个
+// 数字不再变大——"不再变大"与"这段时间确实没有新观测"长得一模一样。
+// 一份基于停摆证据的策略文件，读者手上只有这段文字。
+func TestStaleEvidenceIsSaidFirst(t *testing.T) {
+	pv := store.PolicyPreview{
+		WindowCompleteness: flow.CompletenessComplete,
+		EvidenceLag: store.EvidenceLag{
+			AccountedTo: mustTime("2026-08-29T00:06:56Z"),
+			IngestedTo:  mustTime("2026-08-29T13:21:00Z"),
+		},
+	}
+	lines := renderedLines(func(line func(string, ...any)) { renderPolicyCaveats(pv, line) })
+	text := joined(lines)
+
+	if !strings.Contains(text, "证据已停止更新") {
+		t.Fatalf("证据停了 13 小时，注释头一个字都没说:\n%s", text)
+	}
+	// 排在完整度前面：完整度也是记账那一刻算出来的，先说它会让读者
+	// 把一个过期的 COMPLETE 当成此刻的事实。
+	stale, complete := -1, -1
+	for i, l := range lines {
+		if stale < 0 && strings.Contains(l, "证据已停止更新") {
+			stale = i
+		}
+		if complete < 0 && strings.Contains(l, "观测窗口完整度") {
+			complete = i
+		}
+	}
+	if stale < 0 || complete < 0 || stale > complete {
+		t.Errorf("停摆那一行排在完整度后面（stale=%d complete=%d）:\n%s", stale, complete, text)
+	}
+	if !strings.Contains(text, "13h") && !strings.Contains(text, "落后") {
+		t.Errorf("没说落后了多久:\n%s", text)
+	}
+}
+
+// 没停摆时不许出现这段：一条常年挂着的警告等于没有警告。
+func TestFreshEvidenceSaysNothingAboutStaleness(t *testing.T) {
+	pv := store.PolicyPreview{
+		WindowCompleteness: flow.CompletenessComplete,
+		EvidenceLag: store.EvidenceLag{
+			AccountedTo: mustTime("2026-08-29T13:57:00Z"),
+			IngestedTo:  mustTime("2026-08-29T13:58:00Z"),
+		},
+	}
+	text := joined(renderedLines(func(line func(string, ...any)) { renderPolicyCaveats(pv, line) }))
+	if strings.Contains(text, "证据已停止更新") {
+		t.Errorf("证据是新的却报了停摆 —— 常年挂着的警告等于没有警告:\n%s", text)
+	}
+}
+
+func mustTime(s string) time.Time {
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		panic(err)
+	}
+	return t
 }

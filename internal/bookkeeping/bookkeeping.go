@@ -77,18 +77,52 @@ func (r Recorder) RecordWindow(ctx context.Context, clusterID string, from, to t
 				"this window will be missing from every rule's evidence: %w", clusterID, err)
 	}
 
+	// **本窗口没观测到的规则不记账。**
+	//
+	// 候选集里现在混着两种规则：这个窗口学到的，和从累积证据并进来的
+	// （policygen.MergeLearned）。后者的 FlowCount 是**累计**观测数，把它
+	// 当成本窗口的增量记进去，落库那句 observations = observations + VALUES
+	// 就会每轮把累计数加到自己身上——指数翻倍。UAT 实测 65 轮之后
+	// observations 涨到 1.38e19，超出 int64，读回时 Scan 直接失败，
+	// 于是预览挂掉、记账跟着挂掉，整条链停了 13 小时。
+	//
+	// windows 也一样不能加：一条本窗口没出现的规则，"它出现过多少个窗口"
+	// 不该因为这次预览而增加，那会让证据显得比实际强。
+	unobserved := make(map[string]struct{}, len(pv.UnobservedRules))
+	for _, u := range pv.UnobservedRules {
+		unobserved[snapshotstore.EvidenceKey(u.Namespace, u.Workload, u.Fingerprint)] = struct{}{}
+	}
+
 	var rules []snapshotstore.RuleEvidence
 	for _, c := range pv.Candidates {
 		for _, rule := range c.Rules {
+			if _, skip := unobserved[snapshotstore.EvidenceKey(
+				c.Namespace, c.Workload, rule.Fingerprint)]; skip {
+				continue
+			}
 			// 被否决的规则也记：操作者取消确认之后，那条规则的证据不该
 			// 从零开始重数 —— 它一直在被观测，只是没有被采纳。
+			// 规则体一并记下。没有它，这张表只有指纹，而指纹是单向的——
+			// 于是"跨窗口累积的规则集"取不回来，平台学了一天、导出时只
+			// 拿得到最后一个窗口里跑过的那些（design doc 2026-08-29 §1）。
+			//
+			// 序列化失败**只跳过这一条的规则体、不中断记账**：计数仍然要记，
+			// 否则一条规则体有问题的规则会把整个窗口的证据一起吞掉。
+			body, err := policygen.MarshalRule(rule)
+			if err != nil {
+				r.logger.Warn("cannot persist a rule body; its counters are still recorded",
+					"cluster", clusterID, "namespace", c.Namespace,
+					"workload", c.Workload, "fingerprint", rule.Fingerprint, "err", err)
+				body = nil
+			}
 			rules = append(rules, snapshotstore.RuleEvidence{
 				Fingerprint: rule.Fingerprint,
 				Namespace:   c.Namespace,
 				Workload:    c.Workload,
 				// FlowCount 是这条规则在**这个窗口**里的观测次数；
 				// 跨窗口的累计由落库层做。
-				Observations: int64(rule.FlowCount),
+				Observations: observationsOf(rule.FlowCount),
+				Body:         body,
 			})
 		}
 	}
@@ -251,4 +285,16 @@ func (f AccountedFunc) LastAccountedWindowEnd(
 	ctx context.Context, clusterID string,
 ) (time.Time, bool, error) {
 	return f(ctx, clusterID)
+}
+
+// observationsOf 把一个窗口的观测计数翻成落库用的无符号数。
+//
+// **负数当 0**，不是回绕：FlowCount 是 int，一个负值（溢出、或上游算错）
+// 落进 BIGINT UNSIGNED 列会回绕成一个天文数字，而那个数字下次读回来会让
+// Scan 失败、把整条预览与记账一起打挂（2026-08-29 实测）。宁可少记一次观测。
+func observationsOf(flowCount int) uint64 {
+	if flowCount < 0 {
+		return 0
+	}
+	return uint64(flowCount)
 }

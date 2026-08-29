@@ -33,7 +33,21 @@ type RuleEvidence struct {
 	//
 	// 与 Windows 分开：一个窗口里刷了十万次的规则，与十个窗口里各出现一次
 	// 的规则，可靠性不是一回事，而一个合并出来的"证据分"会把两者混成一个数。
-	Observations int64 `json:"observations"`
+	//
+	// **uint64，与列的 BIGINT UNSIGNED 一致。** 用 int64 扫，一个超过 2^63
+	// 的值不会读成一个错的数字——它让 Scan 整个失败，而这条读取路径挂了
+	// 就等于预览挂了、记账跟着挂了。2026-08-29 实测：一次计数缺陷把这一列
+	// 推过 2^63 之后，整条链停了 13 小时，而界面上唯一的症状是数字不再更新。
+	Observations uint64 `json:"observations"`
+	// Body 是规则体的持久化形状（policygen.MarshalRule）。
+	//
+	// 存它是为了让**跨窗口的规则集**取得回来：在此之前这张表只有指纹，
+	// 而指纹是单向的，于是平台学了一天、导出时只拿得到最后一个窗口里跑过
+	// 的那些（design doc 2026-08-29 §1）。
+	//
+	// 空表示调用方没给。落库时写 NULL，与"存了一个空规则"分得开——后者
+	// 渲染出来是一条谁都不放行的策略。
+	Body []byte `json:"-"`
 }
 
 // EvidenceKey 是证据在返回 map 里的键：主体 + 规则指纹。
@@ -97,16 +111,20 @@ func (s *Store) RecordRuleEvidence(
 		if _, err = tx.ExecContext(ctx,
 			`INSERT INTO rule_evidence
 			   (cluster_id, fingerprint, namespace, workload,
-			    first_seen, last_seen, windows, complete_windows, observations)
-			 VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+			    first_seen, last_seen, windows, complete_windows, observations, rule_body)
+			 VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
 			 ON DUPLICATE KEY UPDATE
 			   first_seen       = LEAST(first_seen, VALUES(first_seen)),
 			   last_seen        = GREATEST(last_seen, VALUES(last_seen)),
 			   windows          = windows + 1,
 			   complete_windows = complete_windows + VALUES(complete_windows),
-			   observations     = observations + VALUES(observations)`,
+			   observations     = observations + VALUES(observations),
+			   -- 规则体跟着覆盖：同一个指纹的规则体按构造必然相同，因此
+			   -- 覆盖是无害的；而它顺手把本次迁移之前那些没有规则体的旧行
+			   -- 补上——那些行只要再被观测到一次就恢复成能贡献规则的行。
+			   rule_body        = COALESCE(VALUES(rule_body), rule_body)`,
 			clusterID, r.Fingerprint, r.Namespace, r.Workload,
-			from.UTC(), to.UTC(), completeCount, r.Observations,
+			from.UTC(), to.UTC(), completeCount, r.Observations, nullBody(r.Body),
 		); err != nil {
 			return fmt.Errorf("snapshotstore: upsert rule evidence: %w", err)
 		}
@@ -230,4 +248,88 @@ func (s *Store) readEvidenceChunk(
 		return fmt.Errorf("snapshotstore: iterate rule evidence: %w", err)
 	}
 	return nil
+}
+
+// nullBody 把空规则体落成 NULL，而不是一个空 JSON。
+//
+// NULL 是"没有规则体"，'{}' 是"有一个内容为空的规则"——后者取回来会渲染成
+// 一条谁都不放行的策略，朝切断的方向错。
+func nullBody(b []byte) any {
+	if len(b) == 0 {
+		return nil
+	}
+	return b
+}
+
+// LearnedRule 是一条从证据表取回来的、跨窗口累积的规则。
+type LearnedRule struct {
+	Namespace   string
+	Workload    string
+	Fingerprint string
+	// LastSeen 是最后一次观测到它的窗口末端。
+	//
+	// **必须一路带到界面与导出注释头。** 一条两天没见过的规则留在策略里，
+	// 是一个要给人看的信号，不是一个可以藏起来的事实（design doc §3.2）。
+	LastSeen time.Time
+	// Observations 是累计观测次数，用来替代单窗口的 FlowCount。
+	//
+	// **uint64，不是 int64**：列是 BIGINT UNSIGNED。用 int64 扫，一个超过
+	// 2^63 的值会让 Scan 直接失败，而失败会连带把整次预览打挂——这正是
+	// 2026-08-29 那次记账停摆的第二个原因（第一个是重复计数把它涨到那么大）。
+	Observations uint64
+	// Body 是规则体，交给 policygen.UnmarshalRule 还原。
+	Body []byte
+}
+
+// maxLearnedRules 是一次取回的规则条数上限。
+//
+// 超出即报错，**不截断**：截断会让策略集读起来比实际小，而"比实际小"意味着
+// 少几条放行——正是应用之后造成阻断的那个方向（同 maxWindowConnections）。
+const maxLearnedRules = 50_000
+
+// LearnedRulesSince 取回 since 之后还被观测到过的规则。
+//
+// 这是"规则集不再被单个观测窗口限死"的取数一端：窗口决定 dry-run 算在哪段
+// 流量上，这里决定策略集里有哪些规则。两者分开之后，观测多久就能学到多久
+// （design doc 2026-08-29 §3.2）。
+//
+// **rule_body 为 NULL 的行不返回。** 那些是本次迁移之前记下的，只有计数、
+// 没有规则体；把它们当成规则会渲染出一条空策略。它们仍然贡献 windows /
+// observations 那几个计数，只要再被观测到一次就会被补上规则体。
+func (s *Store) LearnedRulesSince(
+	ctx context.Context, clusterID string, since time.Time,
+) ([]LearnedRule, error) {
+	if clusterID == "" {
+		return nil, fmt.Errorf("snapshotstore: learned rules need a cluster")
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT namespace, workload, fingerprint, last_seen, observations, rule_body
+		   FROM rule_evidence
+		  WHERE cluster_id = ? AND last_seen >= ? AND rule_body IS NOT NULL
+		  ORDER BY namespace, workload, fingerprint
+		  LIMIT ?`,
+		clusterID, since.UTC(), maxLearnedRules+1)
+	if err != nil {
+		return nil, fmt.Errorf("snapshotstore: read learned rules: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []LearnedRule
+	for rows.Next() {
+		var r LearnedRule
+		if err := rows.Scan(&r.Namespace, &r.Workload, &r.Fingerprint,
+			&r.LastSeen, &r.Observations, &r.Body); err != nil {
+			return nil, fmt.Errorf("snapshotstore: scan learned rule: %w", err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("snapshotstore: iterate learned rules: %w", err)
+	}
+	if len(out) > maxLearnedRules {
+		return nil, fmt.Errorf(
+			"snapshotstore: cluster %s has more than %d learned rules since %s; shorten the retention",
+			clusterID, maxLearnedRules, since.UTC().Format(time.RFC3339))
+	}
+	return out, nil
 }

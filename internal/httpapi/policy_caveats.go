@@ -30,6 +30,22 @@ import (
 func renderPolicyCaveats(pv store.PolicyPreview, line func(format string, args ...any)) {
 	line("—— 以下是平台知道自己没看全的地方 ——")
 
+	// **证据停摆排在最前面，且在停摆时先于完整度说。**
+	//
+	// 其余每一栏描述的是"平台看到了什么、没看到什么"，而这一栏描述的是
+	// "下面这些数字还是不是新的"。它不成立时，后面每一行都要打个折扣——
+	// 包括完整度本身，因为完整度也是记账那一刻算出来的。
+	//
+	// 2026-08-29 实测：周期记账连续失败 13 小时，界面上唯一的症状是几个
+	// 数字不再变大，而"不再变大"与"这段时间确实没有新观测"长得一模一样。
+	if pv.EvidenceLag.Stale() {
+		line("⚠ 证据已停止更新: 记账最远记到 %s，而流量已经摄入到 %s，落后 %s。",
+			lagStamp(pv.EvidenceLag.AccountedTo), lagStamp(pv.EvidenceLag.IngestedTo),
+			pv.EvidenceLag.Behind().Round(time.Minute))
+		line("  下面每一条的证据计数都停在那一刻，**不是这一刻的集群状态**。")
+		line("  先查平台的周期记账为什么没跑，再决定要不要用这份文件。")
+	}
+
 	// 完整度单独一行且永远打印：它是「学到的规则能不能被信」这条链的源头
 	// （完整度非 COMPLETE → 可信度 DEGRADED → 证据 INCOMPLETE_WINDOW →
 	// 规则默认禁用）。缺了它，读者无从判断这份文件是「看全了之后的结论」
@@ -170,6 +186,29 @@ func renderPolicyCaveats(pv store.PolicyPreview, line func(format string, args .
 			return r + "：" + strconv.Itoa(byReason[policygen.UngeneratableReason(r)]) + " 条"
 		})
 	}
+	// **这一栏最要紧,因为四类计数报不出它。** 其余每一栏描述的都是"平台没
+	// 看到什么",而这一栏描述的是"策略里有些东西本窗口没见过"——它放行的
+	// 流量本窗口内不存在,不产生任何 change kind,于是 WOULD_OPEN 一动不动,
+	// 而策略集实际放行的比这个窗口的证据支持的多(design doc 2026-08-29 §3.4)。
+	if n := len(pv.UnobservedRules); n > 0 {
+		oldest := pv.UnobservedRules[0].LastSeen
+		for _, u := range pv.UnobservedRules {
+			if u.LastSeen.Before(oldest) {
+				oldest = u.LastSeen
+			}
+		}
+		say("来自累积证据的规则: %d 条 —— 它们在本次求值窗口内没有出现，"+
+			"放行范围因此大于这个窗口的证据所能支持的。"+
+			"上面四类 dry-run 计数**算不到它们**：那几个数比较的是观测到的流量，"+
+			"而这些规则放行的流量本窗口里根本没有。最早一条上次出现在 %s。",
+			n, oldest.UTC().Format(time.RFC3339))
+		listEach(line, n, func(i int) string {
+			u := pv.UnobservedRules[i]
+			return u.Namespace + "/" + u.Workload +
+				"（上次出现 " + u.LastSeen.UTC().Format(time.RFC3339) + "）"
+		})
+	}
+
 	if n := len(pv.StaleOverrides); n > 0 {
 		say("失效的人工决定: %d 条 —— 曾经有人对这些规则做过决定，而规则已经变了，"+
 			"那个决定没有落在本文件上。", n)
@@ -258,4 +297,12 @@ func renderPolicyBasis(
 	for _, k := range predict.AllChangeKinds() {
 		line("dry-run %s: %d", k, counts[k])
 	}
+}
+
+// lagStamp 把时刻渲染成人读的形状；零值说"从来没有过"，不印一个 0001 年。
+func lagStamp(t time.Time) string {
+	if t.IsZero() {
+		return "从来没有过"
+	}
+	return t.UTC().Format(time.RFC3339)
 }

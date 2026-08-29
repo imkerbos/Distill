@@ -20,7 +20,7 @@ func TestRuleEvidenceAccumulatesAcrossWindows(t *testing.T) {
 	base := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
 	fp := "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
 
-	rec := func(from time.Time, obs int64, complete bool) {
+	rec := func(from time.Time, obs uint64, complete bool) {
 		t.Helper()
 		if err := s.RecordRuleEvidence(ctx, clusterA, from, from.Add(time.Minute), complete,
 			[]snapshotstore.RuleEvidence{{
