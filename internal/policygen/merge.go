@@ -16,7 +16,7 @@ type LearnedRule struct {
 	// LastSeen 是最后一次观测到它的窗口末端。
 	LastSeen time.Time
 	// Observations 是累计观测次数，替代单窗口的 FlowCount。
-	Observations int64
+	Observations uint64
 	// Rule 是还原出来的规则（UnmarshalRule 的产物）。
 	Rule Rule
 }
@@ -90,7 +90,11 @@ func MergeLearned(res Result, learned []LearnedRule) (Result, []UnobservedRule) 
 		r.Fingerprint = l.Fingerprint
 		// FlowCount 取累计观测数，不是某一个旧窗口的计数：界面上这个数
 		// 回答的是"这条规则被看见过多少次"，而累计才是那个问题的答案。
-		r.FlowCount = int(l.Observations)
+		//
+		// **夹到 int 的上界**：这个字段是 int，而累计数是 uint64。溢出会让
+		// 一个很大的观测数变成负数，而负数会一路走回记账、被当成增量加进
+		// BIGINT UNSIGNED 列，在那里回绕成一个天文数字（2026-08-29 实测）。
+		r.FlowCount = clampToInt(l.Observations)
 		// Enabled 与 Risk 在这里重算，不从库里取（MarshalRule 刻意不存它们）：
 		// 判据是纯函数，而存下来的那一份会在风险清单更新之后过期，
 		// 过期的方向是"这个端口不再算风险"。
@@ -159,4 +163,17 @@ func describeBody(r Rule) (peers, ports []string) {
 		ports = append(ports, describePort(p))
 	}
 	return peers, ports
+}
+
+// clampToInt 把累计观测数夹到 int 能表示的范围内。
+//
+// 溢出成负数比夹顶危险得多：负数会被当成增量加回 BIGINT UNSIGNED 列，
+// 在那里回绕成一个天文数字，而那个数字下次读回来又会让 Scan 失败。
+// 夹顶只是一个显示上偏小的计数——而这个字段本来就只用来给人看。
+func clampToInt(v uint64) int {
+	const maxInt = int(^uint(0) >> 1)
+	if v > uint64(maxInt) {
+		return maxInt
+	}
+	return int(v)
 }

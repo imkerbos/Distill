@@ -77,9 +77,29 @@ func (r Recorder) RecordWindow(ctx context.Context, clusterID string, from, to t
 				"this window will be missing from every rule's evidence: %w", clusterID, err)
 	}
 
+	// **本窗口没观测到的规则不记账。**
+	//
+	// 候选集里现在混着两种规则：这个窗口学到的，和从累积证据并进来的
+	// （policygen.MergeLearned）。后者的 FlowCount 是**累计**观测数，把它
+	// 当成本窗口的增量记进去，落库那句 observations = observations + VALUES
+	// 就会每轮把累计数加到自己身上——指数翻倍。UAT 实测 65 轮之后
+	// observations 涨到 1.38e19，超出 int64，读回时 Scan 直接失败，
+	// 于是预览挂掉、记账跟着挂掉，整条链停了 13 小时。
+	//
+	// windows 也一样不能加：一条本窗口没出现的规则，"它出现过多少个窗口"
+	// 不该因为这次预览而增加，那会让证据显得比实际强。
+	unobserved := make(map[string]struct{}, len(pv.UnobservedRules))
+	for _, u := range pv.UnobservedRules {
+		unobserved[snapshotstore.EvidenceKey(u.Namespace, u.Workload, u.Fingerprint)] = struct{}{}
+	}
+
 	var rules []snapshotstore.RuleEvidence
 	for _, c := range pv.Candidates {
 		for _, rule := range c.Rules {
+			if _, skip := unobserved[snapshotstore.EvidenceKey(
+				c.Namespace, c.Workload, rule.Fingerprint)]; skip {
+				continue
+			}
 			// 被否决的规则也记：操作者取消确认之后，那条规则的证据不该
 			// 从零开始重数 —— 它一直在被观测，只是没有被采纳。
 			// 规则体一并记下。没有它，这张表只有指纹，而指纹是单向的——

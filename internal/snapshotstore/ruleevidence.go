@@ -267,7 +267,11 @@ type LearnedRule struct {
 	// 是一个要给人看的信号，不是一个可以藏起来的事实（design doc §3.2）。
 	LastSeen time.Time
 	// Observations 是累计观测次数，用来替代单窗口的 FlowCount。
-	Observations int64
+	//
+	// **uint64，不是 int64**：列是 BIGINT UNSIGNED。用 int64 扫，一个超过
+	// 2^63 的值会让 Scan 直接失败，而失败会连带把整次预览打挂——这正是
+	// 2026-08-29 那次记账停摆的第二个原因（第一个是重复计数把它涨到那么大）。
+	Observations uint64
 	// Body 是规则体，交给 policygen.UnmarshalRule 还原。
 	Body []byte
 }

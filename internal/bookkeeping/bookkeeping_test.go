@@ -576,3 +576,49 @@ func TestAccountOnceGuardsEachTaskSeparately(t *testing.T) {
 		t.Errorf("对账被证据那一侧的守卫连累，记了 %d 次，want 1", len(rs.saved))
 	}
 }
+
+// **从累积证据并进来、本窗口没观测到的规则不记账。**
+//
+// 这是 2026-08-29 那次事故的复现用例。候选集里混着两种规则：这个窗口学到的，
+// 和 policygen.MergeLearned 并进来的。后者的 FlowCount 是**累计**观测数，
+// 把它当成本窗口的增量记进去，落库那句
+//
+//	observations = observations + VALUES(observations)
+//
+// 就会每轮把累计数加到自己身上——指数翻倍。UAT 实测 65 轮之后 observations
+// 涨到 1.38e19，超出 int64，读回时 Scan 失败，预览挂掉、记账跟着挂掉，
+// 整条链停了 13 小时而界面上只是数字不再更新。
+func TestUnobservedRulesAreNotAccountedAsFreshObservations(t *testing.T) {
+	pv := previewWith(flow.CompletenessComplete)
+	// 候选集里多一条从累积并进来的规则，FlowCount 是累计数。
+	pv.Candidates = append(pv.Candidates, policygen.CandidatePolicy{
+		Namespace: "devops", Workload: "nacos",
+		Rules: []policygen.Rule{{Fingerprint: "fp-accumulated", FlowCount: 40_000}},
+	})
+	pv.UnobservedRules = []policygen.UnobservedRule{{
+		Namespace: "devops", Workload: "nacos", Fingerprint: "fp-accumulated",
+		LastSeen: at("2026-08-29T00:00:00Z"),
+	}}
+
+	p := &fakePreviewer{preview: pv}
+	s := &fakeStore{}
+	rec := bookkeeping.NewRecorder(p, s, testLogger(t))
+
+	if err := rec.RecordWindow(context.Background(), "c1",
+		at("2026-08-29T10:00:00Z"), at("2026-08-29T10:01:00Z")); err != nil {
+		t.Fatalf("RecordWindow: %v", err)
+	}
+	if len(s.records) != 1 {
+		t.Fatalf("记账 %d 次，want 1", len(s.records))
+	}
+	for _, r := range s.records[0].rules {
+		if r.Fingerprint == "fp-accumulated" {
+			t.Fatalf("本窗口没观测到的规则被当成一次新观测记了进去"+
+				"（observations=%d）——落库那句加法会让它每轮翻倍", r.Observations)
+		}
+	}
+	// 窗口里真正观测到的那些照记不误。
+	if len(s.records[0].rules) == 0 {
+		t.Error("把观测到的规则也一并跳过了")
+	}
+}
