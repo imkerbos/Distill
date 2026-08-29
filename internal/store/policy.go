@@ -38,7 +38,10 @@ type RuleEvidence struct {
 	// 每次都出现几条的规则，前者证据更弱 —— 一次压测就能造出前者。
 	Windows int `json:"windows"`
 	// Observations 是累计观测到的流量条数。
-	Observations int64 `json:"observations"`
+	// **uint64，与列的 BIGINT UNSIGNED 一致**（snapshotstore.RuleEvidence
+	// 上有同一条注释）：类型比列窄时，超界的值不是读成一个错的数字，而是
+	// 让整条读取路径失败。
+	Observations uint64 `json:"observations"`
 }
 
 // PolicyPreview 是一次候选策略预览的完整产物。

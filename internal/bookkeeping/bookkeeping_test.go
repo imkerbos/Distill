@@ -158,7 +158,7 @@ func TestRecordWindowRecordsEveryCandidateRule(t *testing.T) {
 		t.Fatalf("记了 %d 条规则，want 3 —— 主体不同的同一指纹是两份证据", len(got.rules))
 	}
 	// 主体必须跟着规则走：指纹不含主体，只按指纹归集会把一次采集算成多个窗口。
-	want := map[string]int64{"shop/api/fp-a": 7, "shop/api/fp-b": 2, "shop/worker/fp-a": 1}
+	want := map[string]uint64{"shop/api/fp-a": 7, "shop/api/fp-b": 2, "shop/worker/fp-a": 1}
 	for _, r := range got.rules {
 		key := snapshotstore.EvidenceKey(r.Namespace, r.Workload, r.Fingerprint)
 		obs, ok := want[key]

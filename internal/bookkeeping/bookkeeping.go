@@ -121,7 +121,7 @@ func (r Recorder) RecordWindow(ctx context.Context, clusterID string, from, to t
 				Workload:    c.Workload,
 				// FlowCount 是这条规则在**这个窗口**里的观测次数；
 				// 跨窗口的累计由落库层做。
-				Observations: int64(rule.FlowCount),
+				Observations: observationsOf(rule.FlowCount),
 				Body:         body,
 			})
 		}
@@ -285,4 +285,16 @@ func (f AccountedFunc) LastAccountedWindowEnd(
 	ctx context.Context, clusterID string,
 ) (time.Time, bool, error) {
 	return f(ctx, clusterID)
+}
+
+// observationsOf 把一个窗口的观测计数翻成落库用的无符号数。
+//
+// **负数当 0**，不是回绕：FlowCount 是 int，一个负值（溢出、或上游算错）
+// 落进 BIGINT UNSIGNED 列会回绕成一个天文数字，而那个数字下次读回来会让
+// Scan 失败、把整条预览与记账一起打挂（2026-08-29 实测）。宁可少记一次观测。
+func observationsOf(flowCount int) uint64 {
+	if flowCount < 0 {
+		return 0
+	}
+	return uint64(flowCount)
 }

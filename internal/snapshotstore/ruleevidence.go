@@ -33,7 +33,12 @@ type RuleEvidence struct {
 	//
 	// 与 Windows 分开：一个窗口里刷了十万次的规则，与十个窗口里各出现一次
 	// 的规则，可靠性不是一回事，而一个合并出来的"证据分"会把两者混成一个数。
-	Observations int64 `json:"observations"`
+	//
+	// **uint64，与列的 BIGINT UNSIGNED 一致。** 用 int64 扫，一个超过 2^63
+	// 的值不会读成一个错的数字——它让 Scan 整个失败，而这条读取路径挂了
+	// 就等于预览挂了、记账跟着挂了。2026-08-29 实测：一次计数缺陷把这一列
+	// 推过 2^63 之后，整条链停了 13 小时，而界面上唯一的症状是数字不再更新。
+	Observations uint64 `json:"observations"`
 	// Body 是规则体的持久化形状（policygen.MarshalRule）。
 	//
 	// 存它是为了让**跨窗口的规则集**取得回来：在此之前这张表只有指纹，
