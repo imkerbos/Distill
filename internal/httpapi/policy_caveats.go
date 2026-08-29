@@ -30,6 +30,22 @@ import (
 func renderPolicyCaveats(pv store.PolicyPreview, line func(format string, args ...any)) {
 	line("—— 以下是平台知道自己没看全的地方 ——")
 
+	// **证据停摆排在最前面，且在停摆时先于完整度说。**
+	//
+	// 其余每一栏描述的是"平台看到了什么、没看到什么"，而这一栏描述的是
+	// "下面这些数字还是不是新的"。它不成立时，后面每一行都要打个折扣——
+	// 包括完整度本身，因为完整度也是记账那一刻算出来的。
+	//
+	// 2026-08-29 实测：周期记账连续失败 13 小时，界面上唯一的症状是几个
+	// 数字不再变大，而"不再变大"与"这段时间确实没有新观测"长得一模一样。
+	if pv.EvidenceLag.Stale() {
+		line("⚠ 证据已停止更新: 记账最远记到 %s，而流量已经摄入到 %s，落后 %s。",
+			lagStamp(pv.EvidenceLag.AccountedTo), lagStamp(pv.EvidenceLag.IngestedTo),
+			pv.EvidenceLag.Behind().Round(time.Minute))
+		line("  下面每一条的证据计数都停在那一刻，**不是这一刻的集群状态**。")
+		line("  先查平台的周期记账为什么没跑，再决定要不要用这份文件。")
+	}
+
 	// 完整度单独一行且永远打印：它是「学到的规则能不能被信」这条链的源头
 	// （完整度非 COMPLETE → 可信度 DEGRADED → 证据 INCOMPLETE_WINDOW →
 	// 规则默认禁用）。缺了它，读者无从判断这份文件是「看全了之后的结论」
@@ -281,4 +297,12 @@ func renderPolicyBasis(
 	for _, k := range predict.AllChangeKinds() {
 		line("dry-run %s: %d", k, counts[k])
 	}
+}
+
+// lagStamp 把时刻渲染成人读的形状；零值说"从来没有过"，不印一个 0001 年。
+func lagStamp(t time.Time) string {
+	if t.IsZero() {
+		return "从来没有过"
+	}
+	return t.UTC().Format(time.RFC3339)
 }

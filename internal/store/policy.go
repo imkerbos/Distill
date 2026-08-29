@@ -186,6 +186,12 @@ type PolicyPreview struct {
 	// 没出现，不产生任何 change kind。于是策略集放行的比本窗口证据支持的多，
 	// 而没有一个数字会动（design doc 2026-08-29 §3.4）。
 	UnobservedRules []policygen.UnobservedRule `json:"unobservedRules"`
+	// EvidenceLag 说的是这份预览里的证据计数还在不在更新。
+	//
+	// 放在预览上而不是只放在某个健康页：证据停摆之后，这一屏的
+	// windows / observations 仍然会显示一个数字，而那个数字是十几个小时
+	// 之前的。读它的人正在据此决定要不要确认一条规则（见 EvidenceLag）。
+	EvidenceLag EvidenceLag `json:"evidenceLag"`
 	// ExcludedNamespaces 是**整片**没有生成候选策略的命名空间。
 	//
 	// 今天唯一的原因是"这是 Kubernetes 内置系统命名空间"：候选集会给每个

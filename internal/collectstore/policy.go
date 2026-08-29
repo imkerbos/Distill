@@ -126,6 +126,14 @@ func (r *Reader) PolicyPreviewAtGranularity(
 	// **读不到就是读不到，不降级成空 map。** 空 map 的含义是「记过，还没有
 	// 证据」，而查询失败时真实情况是「不知道」—— 把两者压平会让一条其实
 	// 已经观察了三周的规则显示成刚出现，从而被当作不可信而搁置。
+	// 证据还在不在更新，与证据本身一起读出来：这一屏显示的 windows /
+	// observations 在记账停摆之后仍然是一串数字，而那串数字是十几个小时
+	// 之前的（design doc / internal/store.EvidenceLag）。
+	lag, err := r.evidenceLagOf(ctx, clusterID)
+	if err != nil {
+		return store.PolicyPreview{}, err
+	}
+
 	stored2, err := r.facts.RuleEvidenceOf(ctx, clusterID, evidenceRefsOf(cs.result))
 	if err != nil {
 		return store.PolicyPreview{}, err
@@ -213,6 +221,7 @@ func (r *Reader) PolicyPreviewAtGranularity(
 		UnattachedBaselines:    gen.UnattachedBaselines,
 		ExposureWidenings:      gen.ExposureWidenings,
 		UnobservedRules:        cs.unobserved,
+		EvidenceLag:            lag,
 		ExcludedNamespaces:     gen.ExcludedNamespaces,
 		ExcludedWorkloads:      gen.ExcludedWorkloads,
 		Prediction:             report,
@@ -909,4 +918,32 @@ func candidateSubjects(res policygen.Result) map[string]int {
 		out[c.Namespace]++
 	}
 	return out
+}
+
+// evidenceLagOf 读出"记账记到哪"与"摄入收到哪"，交给 store.EvidenceLag 判。
+//
+// 两个值都取平台已经存着的事实，不新增任何表：新增一张记录跑批结果的表，
+// 它自己也会在同一种故障下停止写入——而那时它显示的仍然是上一次成功。
+// 拿摄入当参照系就没有这个问题：摄入不动了是另一回事，也一样看得见。
+func (r *Reader) evidenceLagOf(ctx context.Context, clusterID string) (store.EvidenceLag, error) {
+	var lag store.EvidenceLag
+
+	accounted, ok, err := r.facts.LastRuleEvidenceWindowEnd(ctx, clusterID)
+	if err != nil {
+		return store.EvidenceLag{}, err
+	}
+	if ok {
+		lag.AccountedTo = accounted
+	}
+
+	w, err := r.latestFlowWindow(ctx, clusterID)
+	switch {
+	case errors.Is(err, ErrNoFlowIngest):
+		// 还没有过流量摄入：证据不更新是因为没有东西可记，不是记账坏了。
+		return lag, nil
+	case err != nil:
+		return store.EvidenceLag{}, err
+	}
+	lag.IngestedTo = w.To
+	return lag, nil
 }

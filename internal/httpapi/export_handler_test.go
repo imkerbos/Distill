@@ -432,6 +432,11 @@ func TestPolicyExportHeaderIsSelfDescribingAndNothingMore(t *testing.T) {
 		//
 		// 凭据、仓库地址、host key 与哈希到不了这里：renderPolicyCaveats 的
 		// 入参只有 store.PolicyPreview，里面没有这些字段。
+		// 证据停摆那一段。取值只有两个时刻与一个时长，都是平台自己的
+		// 记账进度，不含集群内容。
+		"# ⚠ 证据已停止更新: ",
+		"#   下面每一条的证据计数都停在那一刻",
+		"#   先查平台的周期记账为什么没跑",
 		"# —— 以下是平台知道自己没看全的地方 ——",
 		"# 观测窗口完整度: ",
 		"# 规则粒度: ",
