@@ -53,6 +53,11 @@ type settingPayload struct {
 	// 更新的形状：其余字段缺席仍然是零值，仍然会被 ValidatePlatformSetting
 	// 当场拒绝。
 	GitVerifyHostKeys *string `json:"gitVerifyHostKeys"`
+	// GitAllowedDestinations 是允许出站到达的私有网段，CIDR，一行一条。
+	//
+	// 与 host key 不同，它**回显**：网段不是凭据，操作者要能看见自己
+	// 放行了哪几段——一份看不见的出站允许清单，等于一道没人能复核的门。
+	GitAllowedDestinations string `json:"gitAllowedDestinations"`
 }
 
 // toSetting 把请求体转成领域对象。
@@ -66,16 +71,17 @@ func (p settingPayload) toSetting(current registry.PlatformSetting) registry.Pla
 		hostKeys = *p.GitVerifyHostKeys
 	}
 	return registry.PlatformSetting{
-		SessionTTL:          time.Duration(p.SessionTTLSeconds) * time.Second,
-		HTTPReadTimeout:     time.Duration(p.HTTPReadTimeoutMs) * time.Millisecond,
-		HTTPWriteTimeout:    time.Duration(p.HTTPWriteTimeoutMs) * time.Millisecond,
-		HTTPShutdownTimeout: time.Duration(p.HTTPShutdownTimeoutMs) * time.Millisecond,
-		SecretsBackend:      registry.SecretsBackend(p.SecretsBackend),
-		SecretsProject:      p.SecretsProject,
-		SecretsPrefix:       p.SecretsPrefix,
-		SecretsDir:          p.SecretsDir,
-		GitVerifyTimeout:    time.Duration(p.GitVerifyTimeoutMs) * time.Millisecond,
-		GitVerifyHostKeys:   hostKeys,
+		SessionTTL:             time.Duration(p.SessionTTLSeconds) * time.Second,
+		HTTPReadTimeout:        time.Duration(p.HTTPReadTimeoutMs) * time.Millisecond,
+		HTTPWriteTimeout:       time.Duration(p.HTTPWriteTimeoutMs) * time.Millisecond,
+		HTTPShutdownTimeout:    time.Duration(p.HTTPShutdownTimeoutMs) * time.Millisecond,
+		SecretsBackend:         registry.SecretsBackend(p.SecretsBackend),
+		SecretsProject:         p.SecretsProject,
+		SecretsPrefix:          p.SecretsPrefix,
+		SecretsDir:             p.SecretsDir,
+		GitVerifyTimeout:       time.Duration(p.GitVerifyTimeoutMs) * time.Millisecond,
+		GitVerifyHostKeys:      hostKeys,
+		GitAllowedDestinations: p.GitAllowedDestinations,
 	}
 }
 
@@ -101,6 +107,9 @@ type settingView struct {
 	// （design doc §1.3）。操作者需要的是「现在装的还是不是我认得的那一份」，
 	// 回答这个问题只需要指纹。
 	GitVerifyHostKeysFingerprint string `json:"gitVerifyHostKeysFingerprint"`
+	// GitAllowedDestinations 原样回显：网段不是凭据，而一份看不见的出站
+	// 允许清单等于一道没人能复核的门。
+	GitAllowedDestinations string `json:"gitAllowedDestinations"`
 }
 
 // toSettingView 把一份设置转成响应形状。
@@ -116,6 +125,7 @@ func toSettingView(s registry.PlatformSetting) settingView {
 		SecretsDir:                   s.SecretsDir,
 		GitVerifyTimeoutMs:           int64(s.GitVerifyTimeout / time.Millisecond),
 		GitVerifyHostKeysFingerprint: hostKeysFingerprint(s.GitVerifyHostKeys),
+		GitAllowedDestinations:       s.GitAllowedDestinations,
 	}
 }
 

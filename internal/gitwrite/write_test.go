@@ -454,7 +454,7 @@ func TestPushRefusesToConnectToAnInternalAddress(t *testing.T) {
 	addr, hostKey := startSSHListener(t, authAttempted)
 
 	known := []byte(knownhosts.Normalize(addr) + " " + string(cryptossh.MarshalAuthorizedKey(hostKey)))
-	w, err := gitwrite.New(newResolver(t), known, 10*time.Second)
+	w, err := gitwrite.New(newResolver(t), known, 10*time.Second, nil)
 	if err != nil {
 		t.Fatalf("New() = %v", err)
 	}
@@ -633,7 +633,7 @@ func testRepo(url, branch string) registry.GitRepo {
 
 func newWriter(t *testing.T, r *stubResolver) *gitwrite.Writer {
 	t.Helper()
-	w, err := gitwrite.New(r, hostKeyLine(t), 30*time.Second)
+	w, err := gitwrite.New(r, hostKeyLine(t), 30*time.Second, nil)
 	if err != nil {
 		t.Fatalf("New() = %v", err)
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -42,13 +43,13 @@ func TestCheckDestinationRefusesInternalAddresses(t *testing.T) {
 	}
 	for _, c := range blocked {
 		t.Run(c.name, func(t *testing.T) {
-			if err := checkDestination(tcpAddr(t, c.addr)); !errors.Is(err, ErrBlockedDestination) {
-				t.Errorf("checkDestination(%s) = %v, want ErrBlockedDestination", c.addr, err)
+			if err := checkDestination(tcpAddr(t, c.addr), nil); !errors.Is(err, ErrBlockedDestination) {
+				t.Errorf("checkDestination(%s, nil) = %v, want ErrBlockedDestination", c.addr, err)
 			}
 			// 同一个地址换成非 *net.TCPAddr 的实现也必须拒绝：判定不能
 			// 依赖 net.Addr 的具体类型。
-			if err := checkDestination(stringAddr(c.addr)); !errors.Is(err, ErrBlockedDestination) {
-				t.Errorf("checkDestination(stringAddr %s) = %v, want ErrBlockedDestination", c.addr, err)
+			if err := checkDestination(stringAddr(c.addr), nil); !errors.Is(err, ErrBlockedDestination) {
+				t.Errorf("checkDestination(stringAddr %s, nil) = %v, want ErrBlockedDestination", c.addr, err)
 			}
 		})
 	}
@@ -63,8 +64,8 @@ func TestCheckDestinationRefusesInternalAddresses(t *testing.T) {
 	}
 	for _, c := range allowed {
 		t.Run(c.name, func(t *testing.T) {
-			if err := checkDestination(tcpAddr(t, c.addr)); err != nil {
-				t.Errorf("checkDestination(%s) = %v, want nil", c.addr, err)
+			if err := checkDestination(tcpAddr(t, c.addr), nil); err != nil {
+				t.Errorf("checkDestination(%s, nil) = %v, want nil", c.addr, err)
 			}
 		})
 	}
@@ -78,8 +79,8 @@ func TestCheckDestinationRefusesZonedLinkLocal(t *testing.T) {
 		stringAddr("[fe80::1%eth0]:22"),
 	}
 	for _, addr := range zoned {
-		if err := checkDestination(addr); !errors.Is(err, ErrBlockedDestination) {
-			t.Errorf("checkDestination(%v) = %v, want ErrBlockedDestination", addr, err)
+		if err := checkDestination(addr, nil); !errors.Is(err, ErrBlockedDestination) {
+			t.Errorf("checkDestination(%v, nil) = %v, want ErrBlockedDestination", addr, err)
 		}
 	}
 }
@@ -98,8 +99,8 @@ func TestCheckDestinationRefusesUnrecognizableAddresses(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if err := checkDestination(c.addr); !errors.Is(err, ErrBlockedDestination) {
-				t.Errorf("checkDestination(%v) = %v, want ErrBlockedDestination", c.addr, err)
+			if err := checkDestination(c.addr, nil); !errors.Is(err, ErrBlockedDestination) {
+				t.Errorf("checkDestination(%v, nil) = %v, want ErrBlockedDestination", c.addr, err)
 			}
 		})
 	}
@@ -111,7 +112,7 @@ func TestCheckDestinationRefusesUnrecognizableAddresses(t *testing.T) {
 func TestAuthCarriesTheDestinationGuard(t *testing.T) {
 	pinned := newHostKey(t)
 	known := []byte("git.example.com " + string(cryptossh.MarshalAuthorizedKey(pinned)))
-	tr, err := New(pemResolver{key: newPrivateKeyPEM(t)}, known, time.Second)
+	tr, err := New(pemResolver{key: newPrivateKeyPEM(t)}, known, time.Second, nil)
 	if err != nil {
 		t.Fatalf("New() = %v", err)
 	}
@@ -153,3 +154,72 @@ type stringAddr string
 
 func (stringAddr) Network() string  { return "tcp" }
 func (a stringAddr) String() string { return string(a) }
+
+// mustPrefixes 是测试里写网段清单的简写。
+func mustPrefixes(t *testing.T, cidrs ...string) []netip.Prefix {
+	t.Helper()
+	out := make([]netip.Prefix, 0, len(cidrs))
+	for _, c := range cidrs {
+		p, err := netip.ParsePrefix(c)
+		if err != nil {
+			t.Fatalf("ParsePrefix(%s): %v", c, err)
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// 登记过的内网网段可以出站 —— 这是这份清单存在的理由。
+//
+// UAT 的形状：gitlab-devops 解析到 10.170.1.11，而策略仓库在内网是正常
+// 部署形态（design doc 2026-09-01 §1）。
+func TestAllowlistPermitsARegisteredPrivateRange(t *testing.T) {
+	allowed := mustPrefixes(t, "10.170.0.0/16")
+	if err := checkDestination(tcpAddr(t, "10.170.1.11:22"), allowed); err != nil {
+		t.Errorf("登记过的网段仍被拒: %v", err)
+	}
+	// 没登记的那一段照旧拒：清单是"这几段"，不是"内网都行"。
+	if err := checkDestination(tcpAddr(t, "10.171.1.11:22"), allowed); !errors.Is(err, ErrBlockedDestination) {
+		t.Errorf("没登记的网段被放行了: %v", err)
+	}
+}
+
+// **清单改不了第一层。** 这是整个设计的支点。
+//
+// 云元数据地址一旦可以被清单放行，平台就成了一把偷取实例凭据的钥匙；
+// 回环一旦可以放行，平台就成了本机服务的探测器。设置层的校验已经挡住
+// 这些网段（它们都不是私有地址），这一条守的是**即便有人绕过校验把它们
+// 写进库**，拨号仍然被拒（§3.1）。
+func TestAllowlistCannotUnblockTheAbsoluteDenials(t *testing.T) {
+	for _, tc := range []struct{ name, cidr, addr string }{
+		{"回环", "127.0.0.0/8", "127.0.0.1:22"},
+		{"链路本地（含 169.254.169.254）", "169.254.0.0/16", "169.254.169.254:22"},
+		{"Azure 元数据", "168.63.129.16/32", "168.63.129.16:22"},
+		{"阿里云元数据所在段", "100.64.0.0/10", "100.100.100.200:22"},
+		{"整个 IPv4", "0.0.0.0/0", "127.0.0.1:22"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			allowed := mustPrefixes(t, tc.cidr)
+			if err := checkDestination(tcpAddr(t, tc.addr), allowed); !errors.Is(err, ErrBlockedDestination) {
+				t.Errorf("清单放行了 %s —— 这一层不该被清单改动: %v", tc.addr, err)
+			}
+		})
+	}
+}
+
+// 公网照旧放行，清单不影响它。
+func TestAllowlistDoesNotAffectPublicAddresses(t *testing.T) {
+	allowed := mustPrefixes(t, "10.170.0.0/16")
+	if err := checkDestination(tcpAddr(t, "93.184.216.34:22"), allowed); err != nil {
+		t.Errorf("公网地址被拒: %v", err)
+	}
+}
+
+// **空清单等于引入它之前的行为。** 一次升级不该悄悄改变任何现有部署的出站面。
+func TestAnEmptyAllowlistKeepsPrivateAddressesBlocked(t *testing.T) {
+	for _, addr := range []string{"10.170.1.11:22", "192.168.1.1:22", "172.16.0.1:22"} {
+		if err := checkDestination(tcpAddr(t, addr), nil); !errors.Is(err, ErrBlockedDestination) {
+			t.Errorf("空清单下 %s 被放行了: %v", addr, err)
+		}
+	}
+}

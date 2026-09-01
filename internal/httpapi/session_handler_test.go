@@ -320,6 +320,10 @@ func buildTestRouterWithLog(
 		// 去处"的形态，而写回在那种形态下必须拒绝。
 		Writeback:    writebackStoreOf(reg),
 		PolicyWriter: pw,
+		// 凭据保管处默认为 nil：这是"平台不保管凭据"的形态（DIR /
+		// SECRET_MANAGER / NONE），也是当前部署的真实形态。要它非空的
+		// 用例走 newTestRouterWithCredentials。
+		CredentialStore: testCredentialStore,
 		// 这里不再有 DefaultWindow：未指定 from/to 时的时间窗由 Reader 按
 		// 集群现答（design doc 2026-08-18 §3.1）。要跑在一段自定义默认窗口
 		// 上的用例把 Reader 包一层 windowedReader。

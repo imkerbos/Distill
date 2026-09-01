@@ -4,6 +4,8 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"database/sql"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
@@ -31,6 +33,7 @@ import (
 	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/response"
 	"github.com/imkerbos/Distill/internal/secrets"
+	"github.com/imkerbos/Distill/internal/secrets/dbsecrets"
 	"github.com/imkerbos/Distill/internal/secrets/gcpsecrets"
 	"github.com/imkerbos/Distill/internal/settings"
 	"github.com/imkerbos/Distill/internal/snapshotstore"
@@ -74,6 +77,16 @@ func run(configPath string) error {
 	//
 	// 也是设置能被读到的前提：种子行由 000005 迁移写下，表不能为空。
 	if err := mysqlregistry.Migrate(cfg.Database, "migrations"); err != nil {
+		return err
+	}
+
+	// 凭据加密密钥在这里解出来一次，**启动就失败**而不是等到第一次写回。
+	//
+	// 选了 DB 后端却没给密钥，症状会是"仓库不可达"——排查方向完全错。
+	// 这里解不出来就不启动，让配置错误在启动日志里说清楚。
+	secretsKEK, err := decodeSecretsKEK(cfg.Secrets.EncryptionKey)
+	if err != nil {
+		logger.Error("cannot decode the credential encryption key", "error", err)
 		return err
 	}
 
@@ -132,12 +145,18 @@ func run(configPath string) error {
 		Logger:      logger,
 		Reader:      reader,
 		Registry:    reg,
-		GitVerifier: newSettingsGitVerifier(settingsProvider, logger),
+		GitVerifier: newSettingsGitVerifier(settingsProvider, logger, db, secretsKEK),
 		// 写回的两条持久化路径与写入器。同一个 *mysqlregistry.Store 同时
 		// 满足 registry.Store 与 registry.WritebackStore —— 收窄成两个接口
 		// 是为了让边界层只拿到它真正需要的那几个方法，不是为了换实现。
 		Writeback:    reg,
-		PolicyWriter: newSettingsPolicyWriter(settingsProvider, logger),
+		PolicyWriter: newSettingsPolicyWriter(settingsProvider, logger, db, secretsKEK),
+		// 凭据保管处：只有平台自己保管凭据（DB 后端）时才非空。
+		//
+		// **按启动时的密钥装，不按运行期设置装**：KEK 来自启动配置，改设置
+		// 改不出一把密钥来。选了 DB 却没配 KEK 时这里是 nil，接口会明确拒绝
+		// 带私钥的请求——而不是收下之后在写回那一刻才失败。
+		CredentialStore: newCredentialStore(db, secretsKEK, logger),
 		// 资产采集的只读摘要。拉取式采集的写入侧属于 cmd/distill-collector
 		// —— 这里只拿读的那一面，主服务不持有任何 Kubernetes 凭据。
 		Collection: snapshotstore.New(db),
@@ -270,11 +289,16 @@ func run(configPath string) error {
 type settingsGitVerifier struct {
 	settings *settings.Provider
 	logger   *slog.Logger
+	// db 与 kek 供 DB 凭据后端装配：密文在库里，密钥在库外。
+	db  *sql.DB
+	kek []byte
 }
 
 // newSettingsGitVerifier 构造一个按当前设置现装校验器的 GitVerifier。
-func newSettingsGitVerifier(p *settings.Provider, logger *slog.Logger) *settingsGitVerifier {
-	return &settingsGitVerifier{settings: p, logger: logger}
+func newSettingsGitVerifier(
+	p *settings.Provider, logger *slog.Logger, db *sql.DB, kek []byte,
+) *settingsGitVerifier {
+	return &settingsGitVerifier{settings: p, logger: logger, db: db, kek: kek}
 }
 
 // VerifyRepo 用当前设置做一次仓库级只读校验。
@@ -341,7 +365,7 @@ func (v *settingsGitVerifier) current(ctx context.Context) (httpapi.GitVerifier,
 		v.logger.Error("cannot read the platform setting for git verification", "error", err)
 		return nil, false
 	}
-	gv, err := newGitVerifier(ctx, s)
+	gv, err := newGitVerifier(ctx, s, v.db, v.kek)
 	if err != nil {
 		v.logger.Error("cannot build a git verifier from the current setting", "error", err)
 		return nil, false
@@ -376,11 +400,16 @@ var ErrPolicyWriterUnavailable = errors.New("policy writer unavailable for the c
 type settingsPolicyWriter struct {
 	settings *settings.Provider
 	logger   *slog.Logger
+	// db 与 kek 供 DB 凭据后端装配：密文在库里，密钥在库外。
+	db  *sql.DB
+	kek []byte
 }
 
 // newSettingsPolicyWriter 构造一个按当前设置现装写入器的 PolicyWriter。
-func newSettingsPolicyWriter(p *settings.Provider, logger *slog.Logger) *settingsPolicyWriter {
-	return &settingsPolicyWriter{settings: p, logger: logger}
+func newSettingsPolicyWriter(
+	p *settings.Provider, logger *slog.Logger, db *sql.DB, kek []byte,
+) *settingsPolicyWriter {
+	return &settingsPolicyWriter{settings: p, logger: logger, db: db, kek: kek}
 }
 
 // Push 用当前设置装一个写入器并把计划推出去。
@@ -424,7 +453,7 @@ func (v *settingsPolicyWriter) writer(ctx context.Context) (*gitwrite.Writer, er
 		v.logger.Error("cannot read the platform setting for the policy write-back", "error", err)
 		return nil, ErrPolicyWriterUnavailable
 	}
-	resolver, err := newSecretResolver(ctx, s)
+	resolver, err := newSecretResolver(ctx, s, v.db, v.kek)
 	if err != nil {
 		v.logger.Error("cannot build a secret resolver for the policy write-back", "error", err)
 		return nil, ErrPolicyWriterUnavailable
@@ -436,7 +465,17 @@ func (v *settingsPolicyWriter) writer(ctx context.Context) (*gitwrite.Writer, er
 	// timeout 与 host keys 显式传给 gitwrite.New：它经由 gitssh.New 拒绝
 	// 非正超时、也拒绝空 host key 集合。**没有 host key 就构造失败**，
 	// 不存在「未配置就不校验」的分支 —— 写路径与读路径共用那一份判定。
-	writer, err := gitwrite.New(resolver, []byte(s.GitVerifyHostKeys), s.GitVerifyTimeout)
+	// 出站允许清单跟着设置现读，与 host key 同一条路径：两条各自演化的
+	// 拨号路径意味着两套地址守卫，而漏掉守卫的那一条会成为一次 SSRF 的
+	// 入口（design doc 2026-09-01 §3.5）。
+	//
+	// 解析失败不退回"空清单"：空清单是一个合法配置（只放行公网），而
+	// 一份填错了的清单被当成空，症状是"仓库不可达"，说不出真正的原因。
+	allowed, err := registry.ParseAllowedDestinations(s.GitAllowedDestinations)
+	if err != nil {
+		return nil, err
+	}
+	writer, err := gitwrite.New(resolver, []byte(s.GitVerifyHostKeys), s.GitVerifyTimeout, allowed)
 	if err != nil {
 		v.logger.Error("cannot build a policy writer from the current setting", "error", err)
 		return nil, ErrPolicyWriterUnavailable
@@ -460,15 +499,27 @@ var _ httpapi.PolicyWriter = (*settingsPolicyWriter)(nil)
 // 而不是一个「装出来了但每次校验都失败」的校验器。设置在保存时已经过
 // registry.ValidatePlatformSetting，settings.Provider 读出来时又判了一次；
 // 这里的失败是最后一道，不是唯一一道。
-func newGitVerifier(ctx context.Context, s registry.PlatformSetting) (httpapi.GitVerifier, error) {
-	resolver, err := newSecretResolver(ctx, s)
+func newGitVerifier(
+	ctx context.Context, s registry.PlatformSetting, db *sql.DB, kek []byte,
+) (httpapi.GitVerifier, error) {
+	resolver, err := newSecretResolver(ctx, s, db, kek)
 	if err != nil {
 		return nil, err
 	}
 	if resolver == nil {
 		return nil, nil
 	}
-	v, err := gitverify.New(resolver, []byte(s.GitVerifyHostKeys), s.GitVerifyTimeout)
+	// 出站允许清单跟着设置现读，与 host key 同一条路径：两条各自演化的
+	// 拨号路径意味着两套地址守卫，而漏掉守卫的那一条会成为一次 SSRF 的
+	// 入口（design doc 2026-09-01 §3.5）。
+	//
+	// 解析失败不退回"空清单"：空清单是一个合法配置（只放行公网），而
+	// 一份填错了的清单被当成空，症状是"仓库不可达"，说不出真正的原因。
+	allowed, err := registry.ParseAllowedDestinations(s.GitAllowedDestinations)
+	if err != nil {
+		return nil, err
+	}
+	v, err := gitverify.New(resolver, []byte(s.GitVerifyHostKeys), s.GitVerifyTimeout, allowed)
 	if err != nil {
 		return nil, err
 	}
@@ -485,10 +536,28 @@ func newGitVerifier(ctx context.Context, s registry.PlatformSetting) (httpapi.Gi
 // 每个分支都显式写出返回值，不用 `return gcpsecrets.NewResolver(...)` 那种
 // 直接转发：构造失败时它返回的是 (*gcpsecrets.Resolver)(nil)，装进接口就成了一个
 // 非 nil 的接口值，而调用方正是用 `resolver == nil` 判断「没有解析器」的。
-func newSecretResolver(ctx context.Context, s registry.PlatformSetting) (secrets.Resolver, error) {
+func newSecretResolver(
+	ctx context.Context, s registry.PlatformSetting, db *sql.DB, kek []byte,
+) (secrets.Resolver, error) {
 	switch s.SecretsBackend {
 	case registry.SecretsBackendDir:
 		return secrets.NewDirResolver(s.SecretsDir), nil
+	case registry.SecretsBackendDB:
+		// **缺密钥直接失败，不退回明文、也不退回「没有解析器」。**
+		//
+		// 与下面 default 分支同一条理由：一次静默降级会把"配置漏了一项"
+		// 变成一次悄悄关掉加密的上线，而它的症状与正常运行完全一样。
+		cipher, err := dbsecrets.NewCipher(kek)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"secretsBackend 选了 DB，但加密密钥不可用（配 secrets.encryption_key，"+
+					"32 字节 base64）：%w", err)
+		}
+		store, err := dbsecrets.New(db, cipher)
+		if err != nil {
+			return nil, err
+		}
+		return store, nil
 	case registry.SecretsBackendSecretManager:
 		r, err := gcpsecrets.NewResolver(ctx, s.SecretsProject, s.SecretsPrefix)
 		if err != nil {
@@ -511,4 +580,58 @@ func newHealthHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		response.WriteOK(w, map[string]string{"version": buildinfo.Version()})
 	})
+}
+
+// decodeSecretsKEK 解出凭据加密密钥。
+//
+// 空值是允许的：只有 DB 后端需要它，而后端是运行期设置、启动时未必已选。
+// 缺失在 newSecretResolver 里变成一个明确的错误（"选了 DB 但密钥不可用"），
+// 那时报的是具体哪一项没配，而不是一句"仓库不可达"。
+//
+// **非空但解不出来直接失败**：一个填错的密钥与没填是两件事，
+// 前者说明有人以为自己配好了。
+func decodeSecretsKEK(encoded string) ([]byte, error) {
+	if encoded == "" {
+		return nil, nil
+	}
+	key, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		// 底层错误不外带：它会把密钥的一部分写进日志。
+		return nil, errors.New("secrets.encryption_key 不是合法的 base64")
+	}
+	if len(key) != dbsecrets.KEKSize {
+		return nil, fmt.Errorf("secrets.encryption_key 解出来是 %d 字节，需要 %d 字节",
+			len(key), dbsecrets.KEKSize)
+	}
+	return key, nil
+}
+
+// newCredentialStore 按启动时拿到的密钥装一个凭据保管处。
+//
+// 没有密钥就返回 nil，**不返回一个装着空密钥的实现**：后者会在每次写入时
+// 失败，而失败信息是"存不进去"，说不出真正的原因是没配密钥。nil 让接口层
+// 给出那句能照着做的拒绝（"这个部署没有把凭据交给平台保管"）。
+//
+// 返回具体类型而不是接口：返回接口时 nil 指针会装成一个非 nil 的接口值，
+// 而调用方正是用 == nil 判断"没有保管处"的（同 newSecretResolver 那条）。
+func newCredentialStore(
+	db *sql.DB, kek []byte, logger *slog.Logger,
+) httpapi.CredentialStore {
+	if len(kek) == 0 {
+		logger.Info("no credential encryption key; the platform will not keep git credentials")
+		return nil
+	}
+	cipher, err := dbsecrets.NewCipher(kek)
+	if err != nil {
+		// 启动时已经解过一次密钥（decodeSecretsKEK），走到这里说明长度校验
+		// 与构造对密钥的要求不一致——那是代码的问题，不是配置的问题。
+		logger.Error("cannot build the credential cipher", "error", err)
+		return nil
+	}
+	store, err := dbsecrets.New(db, cipher)
+	if err != nil {
+		logger.Error("cannot build the credential store", "error", err)
+		return nil
+	}
+	return store
 }

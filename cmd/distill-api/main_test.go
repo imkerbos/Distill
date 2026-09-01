@@ -1,19 +1,25 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/imkerbos/Distill/internal/httpapi"
+
 	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/secrets"
+	"github.com/imkerbos/Distill/internal/secrets/dbsecrets"
 	"github.com/imkerbos/Distill/internal/secrets/gcpsecrets"
 	"github.com/imkerbos/Distill/internal/settings"
 )
@@ -93,7 +99,7 @@ var _ httpapi.GitVerifier = (*settingsGitVerifier)(nil)
 // 结论写死成某个值的实现会有一半是绿的。
 func TestGitVerifierIsBuiltFromTheCurrentSettingOnEveryUse(t *testing.T) {
 	src := &mutableSource{current: baseSetting()}
-	v := newSettingsGitVerifier(settings.New(src), quietLogger())
+	v := newSettingsGitVerifier(settings.New(src), quietLogger(), nil, nil)
 	r := sampleRepo()
 
 	if got, _ := v.VerifyRepo(t.Context(), r); got != registry.RepoVerifyNotVerified {
@@ -135,7 +141,7 @@ func TestGitVerifierIsBuiltFromTheCurrentSettingOnEveryUse(t *testing.T) {
 // 时把结论朝「可信」的方向开。
 func TestGitVerifierIsNotVerifiedWhenTheSettingCannotBeRead(t *testing.T) {
 	src := &mutableSource{err: errBrokenSource}
-	v := newSettingsGitVerifier(settings.New(src), quietLogger())
+	v := newSettingsGitVerifier(settings.New(src), quietLogger(), nil, nil)
 
 	repoResult, at := v.VerifyRepo(t.Context(), sampleRepo())
 	if repoResult != registry.RepoVerifyNotVerified {
@@ -163,7 +169,7 @@ func TestGitVerifierIsNotVerifiedWhenTheSettingCannotBeRead(t *testing.T) {
 func TestGitVerifierIsNotVerifiedWhenItCannotBeBuilt(t *testing.T) {
 	s := dirSetting(t.TempDir())
 	s.GitVerifyHostKeys = "" // 没有 host key 就没有 SSH 校验，gitverify.New 拒绝构造。
-	v := newSettingsGitVerifier(settings.New(&mutableSource{current: s}), quietLogger())
+	v := newSettingsGitVerifier(settings.New(&mutableSource{current: s}), quietLogger(), nil, nil)
 
 	if got, _ := v.VerifyRepo(t.Context(), sampleRepo()); got != registry.RepoVerifyNotVerified {
 		t.Fatalf("repo verdict = %q with no host keys, want NOT_VERIFIED — never OK", got)
@@ -183,7 +189,7 @@ var errBrokenSource = errors.New("settings source is unavailable")
 // 判断"没有校验这回事"，包着 nil 指针的接口值会让那个判断为假 —— 随后
 // 每次校验都在空指针上调方法。
 func TestNewGitVerifierIsNilForTheNoneBackend(t *testing.T) {
-	v, err := newGitVerifier(t.Context(), baseSetting())
+	v, err := newGitVerifier(t.Context(), baseSetting(), nil, nil)
 	if err != nil {
 		t.Fatalf("newGitVerifier() error = %v", err)
 	}
@@ -193,7 +199,7 @@ func TestNewGitVerifierIsNilForTheNoneBackend(t *testing.T) {
 }
 
 func TestNewGitVerifierBuildsAVerifierWhenConfigured(t *testing.T) {
-	v, err := newGitVerifier(t.Context(), dirSetting(t.TempDir()))
+	v, err := newGitVerifier(t.Context(), dirSetting(t.TempDir()), nil, nil)
 	if err != nil {
 		t.Fatalf("newGitVerifier() error = %v", err)
 	}
@@ -211,7 +217,7 @@ func TestNewGitVerifierRefusesAMissingTimeout(t *testing.T) {
 	s := dirSetting(t.TempDir())
 	s.GitVerifyTimeout = 0
 
-	if _, err := newGitVerifier(t.Context(), s); err == nil {
+	if _, err := newGitVerifier(t.Context(), s, nil, nil); err == nil {
 		t.Fatal("newGitVerifier() = nil error, want a failure for a missing timeout")
 	}
 }
@@ -221,14 +227,14 @@ func TestNewGitVerifierRefusesMissingHostKeys(t *testing.T) {
 	s := dirSetting(t.TempDir())
 	s.GitVerifyHostKeys = ""
 
-	if _, err := newGitVerifier(t.Context(), s); err == nil {
+	if _, err := newGitVerifier(t.Context(), s, nil, nil); err == nil {
 		t.Fatal("newGitVerifier() = nil error, want a failure for missing host keys")
 	}
 }
 
 // 后端为 NONE 时装不出解析器，且必须是一个真正的 nil 接口。
 func TestNewSecretResolverIsNilForTheNoneBackend(t *testing.T) {
-	r, err := newSecretResolver(t.Context(), baseSetting())
+	r, err := newSecretResolver(t.Context(), baseSetting(), nil, nil)
 	if err != nil {
 		t.Fatalf("newSecretResolver() error = %v", err)
 	}
@@ -239,7 +245,7 @@ func TestNewSecretResolverIsNilForTheNoneBackend(t *testing.T) {
 
 // 选了 DIR 就装目录解析器。
 func TestNewSecretResolverPicksTheDirectoryBackend(t *testing.T) {
-	r, err := newSecretResolver(t.Context(), dirSetting(t.TempDir()))
+	r, err := newSecretResolver(t.Context(), dirSetting(t.TempDir()), nil, nil)
 	if err != nil {
 		t.Fatalf("newSecretResolver() error = %v", err)
 	}
@@ -263,7 +269,7 @@ func TestNewSecretResolverNeverFallsBackToTheDirectoryBackend(t *testing.T) {
 	s.SecretsProject = "distill-prod"
 	s.SecretsPrefix = "distill-git-"
 
-	r, err := newSecretResolver(t.Context(), s)
+	r, err := newSecretResolver(t.Context(), s, nil, nil)
 	if _, ok := r.(*secrets.DirResolver); ok {
 		t.Fatalf("resolver = %T for a Secret Manager setting, want the local directory backend never to be reached", r)
 	}
@@ -281,7 +287,7 @@ func TestNewSecretResolverRejectsAnUnregisteredBackend(t *testing.T) {
 	s := baseSetting()
 	s.SecretsBackend = registry.SecretsBackend("LOOKS_FINE")
 
-	if _, err := newSecretResolver(t.Context(), s); err == nil {
+	if _, err := newSecretResolver(t.Context(), s, nil, nil); err == nil {
 		t.Fatal("newSecretResolver() = nil error for an unregistered backend, want a failure")
 	}
 }
@@ -301,5 +307,63 @@ func TestHealthHandler(t *testing.T) {
 	}
 	if got["code"] != float64(0) {
 		t.Errorf("code = %v, want 0", got["code"])
+	}
+}
+
+// **有密钥就装出保管处，没密钥就没有。**
+//
+// 这条用例补的是一次真实的遗漏：处理器与存储层都写好、都有用例，
+// 而 Deps.CredentialStore 从来没有被赋值。两边各自的用例全绿，
+// 界面上的表现是"这个部署没有把凭据交给平台保管"——一句正确的话，
+// 描述的却是一个不该出现的状态（2026-09-01 UAT 实测）。
+//
+// 装配层的遗漏测不出来，是因为每一半都被单独测过。
+func TestCredentialStoreIsAssembledWhenAKeyIsPresent(t *testing.T) {
+	// sql.Open 不连接，只造一个句柄——这一条要证的是"装配走到了构造"，
+	// 不是"能连上库"。
+	db, err := sql.Open("mysql", "user:pass@tcp(127.0.0.1:1)/none")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	kek := bytes.Repeat([]byte{7}, dbsecrets.KEKSize)
+	if got := newCredentialStore(db, kek, quietLogger()); got == nil {
+		t.Fatal("有密钥、有数据库句柄，却没装出凭据保管处 —— " +
+			"界面上会说这个部署不保管凭据，而那是一句描述了错误状态的正确的话")
+	}
+}
+
+// 没有密钥就不装：一个装着空密钥的实现会在每次写入时失败，
+// 而失败信息说不出真正的原因是没配密钥。
+func TestCredentialStoreIsAbsentWithoutAKey(t *testing.T) {
+	db, err := sql.Open("mysql", "user:pass@tcp(127.0.0.1:1)/none")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	if got := newCredentialStore(db, nil, quietLogger()); got != nil {
+		t.Error("没有密钥却装出了凭据保管处")
+	}
+}
+
+// **Deps 上那一行赋值必须在。**
+//
+// 上面两条用例测的是 newCredentialStore 这个函数，而 2026-09-01 漏掉的是
+// 装配里的一行赋值：函数写好了、有用例、全绿，Deps.CredentialStore 却
+// 从来没被赋过值。删掉那一行，上面两条依然全过。
+//
+// 这一条按源码断言，因为装配发生在 run() 里、要连数据库才走得到，
+// 而"这一行在不在"不需要连数据库就能回答。源码断言脆（改个变量名就红），
+// 但它的失败方式是显眼的，而它防的那个缺陷的失败方式是"界面上说这个部署
+// 不保管凭据"——一句正确的话，描述的却是一个不该出现的状态。
+func TestDepsCarriesTheCredentialStore(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	if !bytes.Contains(src, []byte("CredentialStore: newCredentialStore(")) {
+		t.Error("httpapi.Deps 上没有装配 CredentialStore —— " +
+			"凭据保管处存在、有用例、但接口层永远拿不到它")
 	}
 }

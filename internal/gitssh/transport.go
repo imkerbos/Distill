@@ -14,6 +14,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/netip"
 	"time"
 
 	gogitssh "github.com/go-git/go-git/v5/plumbing/transport/ssh"
@@ -51,6 +52,8 @@ var errUnknownHostKey = errors.New("gitssh: host key not in the configured set")
 // 建认证方法时现取，只在该次调用栈里存在（spec §2.5）。
 type Transport struct {
 	resolver secrets.Resolver
+	// allowed 是允许出站的私有网段，见 New 的说明。
+	allowed  []netip.Prefix
 	hostKeys cryptossh.HostKeyCallback
 	timeout  time.Duration
 }
@@ -65,7 +68,15 @@ type Transport struct {
 // timeout 必须为正。出站挂在操作者的保存动作上，一个没有超时的出站
 // 请求会把界面永久挂住（spec §4）；宁可在启动时拒绝配置，也不要在
 // 运行时才发现没有超时。
-func New(r secrets.Resolver, hostKeys []byte, timeout time.Duration) (*Transport, error) {
+// allowedDestinations 是操作者显式登记的、允许出站的私有网段。
+//
+// 空表示"只放行公网"——也就是引入这个参数之前的行为（design doc
+// 2026-09-01 §3.3）。它只影响私有地址那一档：回环、链路本地与云元数据
+// 网段在这份清单之上，改不了。
+func New(
+	r secrets.Resolver, hostKeys []byte, timeout time.Duration,
+	allowedDestinations []netip.Prefix,
+) (*Transport, error) {
 	if r == nil {
 		return nil, errors.New("gitssh: nil secrets resolver")
 	}
@@ -76,7 +87,7 @@ func New(r secrets.Resolver, hostKeys []byte, timeout time.Duration) (*Transport
 	if err != nil {
 		return nil, err
 	}
-	return &Transport{resolver: r, hostKeys: cb, timeout: timeout}, nil
+	return &Transport{resolver: r, hostKeys: cb, timeout: timeout, allowed: allowedDestinations}, nil
 }
 
 // Timeout 是这条传输的出站超时。
@@ -111,7 +122,7 @@ func (t *Transport) Auth(ctx context.Context, credentialRef string) (*gogitssh.P
 	if err != nil {
 		return nil, ErrUnusableCredential
 	}
-	auth.HostKeyCallback = guardDestination(t.hostKeys)
+	auth.HostKeyCallback = guardDestination(t.hostKeys, t.allowed)
 	return auth, nil
 }
 

@@ -4,6 +4,7 @@ package gitverify
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -49,7 +50,8 @@ func Classify(err error) registry.RepoVerifyResult {
 		return registry.RepoVerifyCredentialUnresolved
 
 	case errors.Is(err, transport.ErrAuthenticationRequired),
-		errors.Is(err, transport.ErrAuthorizationFailed):
+		errors.Is(err, transport.ErrAuthorizationFailed),
+		isSSHAuthFailure(err):
 		return registry.RepoVerifyAuthFailed
 
 	// 分支不存在有三种形态：直接解析引用得到 ErrReferenceNotFound；
@@ -76,7 +78,51 @@ func Classify(err error) registry.RepoVerifyResult {
 		errors.Is(err, context.DeadlineExceeded):
 		return registry.RepoVerifyRepoUnreachable
 
+	// **文本匹配排在所有哨兵之后**，这个位置是必须的，不是风格选择：
+	// 它要调 err.Error()，而 git.NoMatchingRefSpecError 的零值 Error() 会
+	// panic（go-git v5.19.2 的 refspec.go:54 对空 RefSpec 取下标）。放在
+	// 前面，一次「分支不存在」就变成一次 panic —— 而这段代码跑在请求路径上。
+	case isSSHAuthFailure(err):
+		return registry.RepoVerifyAuthFailed
+
 	default:
 		return registry.RepoVerifyRepoUnreachable
 	}
+}
+
+// isSSHAuthFailure 认出 SSH 层的公钥被拒。
+//
+// **go-git 的 SSH 传输不把它翻成 transport.ErrAuthorizationFailed**：
+// x/crypto/ssh 在服务端拒绝全部认证方法时返回的是一个普通 error，文本形如
+//
+//	ssh: handshake failed: ssh: unable to authenticate,
+//	attempted methods [none publickey], no supported methods remain
+//
+// 没有可 errors.Is 的哨兵，也没有导出的类型。落进 default 的后果是它被报成
+// REPO_UNREACHABLE —— 运维照着"仓库不可达"去查网络，而实际要做的是把公钥
+// 装到仓库上。这两件事该找的人不是同一个，正是本函数上方那段注释在说的事
+// （UAT 实测：deploy key 没装，界面说仓库不可达）。
+//
+// **按文本认，是因为没有别的东西可认。** 这不好，但比把一次认证失败报成
+// 不可达好：文本变了会退回 default，也就是退回今天的行为，不会把别的错误
+// 误报成认证失败。匹配的是 x/crypto/ssh 里那句固定的英文，不是服务端返回的
+// 内容，所以它不随对端实现变。
+func isSSHAuthFailure(err error) (matched bool) {
+	if err == nil {
+		return false
+	}
+	// **挡住 Error() 自己 panic。** go-git v5.19.2 的
+	// NoMatchingRefSpecError 在零值上调 Error() 会 index out of range
+	// （refspec.go:54 对空 RefSpec 取下标）。这段代码跑在请求路径上，
+	// 一个第三方类型的 String 方法不该能把一次校验变成一次 500。
+	//
+	// 恢复之后返回 false，也就是退回 default —— 与文本对不上时同一个去向。
+	defer func() {
+		if recover() != nil {
+			matched = false
+		}
+	}()
+	msg := err.Error()
+	return strings.Contains(msg, "unable to authenticate") ||
+		strings.Contains(msg, "no supported methods remain")
 }

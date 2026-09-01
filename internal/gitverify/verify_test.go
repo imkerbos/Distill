@@ -40,28 +40,28 @@ func (s stubResolver) Resolve(context.Context, string) ([]byte, error) {
 // 未配置 host key 时必须构造失败，而不是回退到不校验。
 // 回退等于接受任意中间人，而这条链路的终点是生产集群的策略。
 func TestNewRefusesToRunWithoutHostKeys(t *testing.T) {
-	if _, err := gitverify.New(stubResolver{}, nil, 10*time.Second); err == nil {
+	if _, err := gitverify.New(stubResolver{}, nil, 10*time.Second, nil); err == nil {
 		t.Fatal("New(nil host keys) = nil error, want refusal")
 	}
-	if _, err := gitverify.New(stubResolver{}, []byte("  \n\n"), 10*time.Second); err == nil {
+	if _, err := gitverify.New(stubResolver{}, []byte("  \n\n"), 10*time.Second, nil); err == nil {
 		t.Fatal("New(blank host keys) = nil error, want refusal")
 	}
 	// 只有 @revoked 条目等于一把可用的 host key 都没有。
 	revoked := append([]byte("@revoked "), hostKeyLine(t)...)
-	if _, err := gitverify.New(stubResolver{}, revoked, 10*time.Second); err == nil {
+	if _, err := gitverify.New(stubResolver{}, revoked, 10*time.Second, nil); err == nil {
 		t.Fatal("New(only revoked host keys) = nil error, want refusal")
 	}
 }
 
 func TestNewRefusesUnusableConfiguration(t *testing.T) {
-	if _, err := gitverify.New(nil, hostKeyLine(t), 10*time.Second); err == nil {
+	if _, err := gitverify.New(nil, hostKeyLine(t), 10*time.Second, nil); err == nil {
 		t.Fatal("New(nil resolver) = nil error, want refusal")
 	}
 	// 没有超时的出站会把操作者的保存动作永久挂住（spec §4）。
-	if _, err := gitverify.New(stubResolver{}, hostKeyLine(t), 0); err == nil {
+	if _, err := gitverify.New(stubResolver{}, hostKeyLine(t), 0, nil); err == nil {
 		t.Fatal("New(zero timeout) = nil error, want refusal")
 	}
-	if _, err := gitverify.New(stubResolver{}, []byte("not a known_hosts line\n"), 10*time.Second); err == nil {
+	if _, err := gitverify.New(stubResolver{}, []byte("not a known_hosts line\n"), 10*time.Second, nil); err == nil {
 		t.Fatal("New(malformed host keys) = nil error, want refusal")
 	}
 }
@@ -191,7 +191,7 @@ func TestPathVerdictIsNotVerifiedWhenTheRepoItselfFailed(t *testing.T) {
 // 凭据取不到时不得发起出站，也不得报成仓库侧问题 —— 找错负责人比
 // 没有结论更糟。
 func TestVerifyReportsUnresolvableCredentialWithoutReachingOut(t *testing.T) {
-	v, err := gitverify.New(stubResolver{err: secrets.ErrNotFound}, hostKeyLine(t), 10*time.Second)
+	v, err := gitverify.New(stubResolver{err: secrets.ErrNotFound}, hostKeyLine(t), 10*time.Second, nil)
 	if err != nil {
 		t.Fatalf("New() = %v", err)
 	}
@@ -213,7 +213,7 @@ func TestVerifyReportsUnresolvableCredentialWithoutReachingOut(t *testing.T) {
 // 一起跳过，于是这条测试就只在测它自己。仓库是存在的，所以「没到达
 // 仓库」这个结论若出现，只可能来自错误分类，不可能来自真实的不可达。
 func TestVerifyReportsAMissingCredentialRefAsUnresolved(t *testing.T) {
-	v, err := gitverify.New(secrets.NewDirResolver(t.TempDir()), hostKeyLine(t), 10*time.Second)
+	v, err := gitverify.New(secrets.NewDirResolver(t.TempDir()), hostKeyLine(t), 10*time.Second, nil)
 	if err != nil {
 		t.Fatalf("New() = %v", err)
 	}
@@ -225,7 +225,7 @@ func TestVerifyReportsAMissingCredentialRefAsUnresolved(t *testing.T) {
 
 // 取到了内容但它不是一把私钥，仍然是平台侧的凭据问题。
 func TestVerifyReportsUnusableCredential(t *testing.T) {
-	v, err := gitverify.New(stubResolver{key: []byte("this is not a private key")}, hostKeyLine(t), 10*time.Second)
+	v, err := gitverify.New(stubResolver{key: []byte("this is not a private key")}, hostKeyLine(t), 10*time.Second, nil)
 	if err != nil {
 		t.Fatalf("New() = %v", err)
 	}
@@ -271,7 +271,7 @@ func TestVerifyRefusesToConnectToAnInternalAddress(t *testing.T) {
 	addr, hostKey := startSSHListener(t, authAttempted)
 
 	known := []byte(knownhosts.Normalize(addr) + " " + string(cryptossh.MarshalAuthorizedKey(hostKey)))
-	v, err := gitverify.New(stubResolver{key: privateKeyPEM(t)}, known, 10*time.Second)
+	v, err := gitverify.New(stubResolver{key: privateKeyPEM(t)}, known, 10*time.Second, nil)
 	if err != nil {
 		t.Fatalf("New() = %v", err)
 	}
@@ -352,7 +352,7 @@ func startSSHListener(t *testing.T, attempted chan<- struct{}) (string, cryptoss
 
 func newVerifier(t *testing.T) *gitverify.Verifier {
 	t.Helper()
-	v, err := gitverify.New(stubResolver{key: privateKeyPEM(t)}, hostKeyLine(t), 10*time.Second)
+	v, err := gitverify.New(stubResolver{key: privateKeyPEM(t)}, hostKeyLine(t), 10*time.Second, nil)
 	if err != nil {
 		t.Fatalf("New() = %v", err)
 	}

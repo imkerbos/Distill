@@ -1,6 +1,10 @@
 package registry
 
-import "time"
+import (
+	"net/netip"
+	"strings"
+	"time"
+)
 
 // SecretsBackend 是凭据解析后端的封闭枚举。
 //
@@ -18,6 +22,12 @@ const (
 	SecretsBackendDir SecretsBackend = "DIR"
 	// SecretsBackendSecretManager 是生产用的 Secret Manager 解析器。
 	SecretsBackendSecretManager SecretsBackend = "SECRET_MANAGER"
+	// SecretsBackendDB 把凭据以密文存进平台自己的数据库。
+	//
+	// 加密密钥来自启动配置、不经过数据库：拿到一份完整转储得到的是一堆
+	// 解不开的字节（design doc 2026-09-01 §2）。选它的理由是可用性——
+	// 另外两个后端都要求在平台之外先把私钥放好，而那不是"在界面上配一个仓库"。
+	SecretsBackendDB SecretsBackend = "DB"
 )
 
 // Valid 判断该后端是否已登记。
@@ -27,7 +37,7 @@ const (
 // 遗漏就是一次无声的编译通过（同 VerifyResult.Valid 的取舍）。
 func (b SecretsBackend) Valid() bool {
 	switch b {
-	case SecretsBackendNone, SecretsBackendDir, SecretsBackendSecretManager:
+	case SecretsBackendNone, SecretsBackendDir, SecretsBackendSecretManager, SecretsBackendDB:
 		return true
 	default:
 		return false
@@ -67,6 +77,20 @@ type PlatformSetting struct {
 	// 为空时 gitverify.New 仍然拒绝构造（既有行为，不在这里重复校验）——
 	// 清空这个字段不会让平台退化成「不校验」，只会让它起不来。
 	GitVerifyHostKeys string `json:"gitVerifyHostKeys"`
+	// GitAllowedDestinations 是允许出站到达的**私有**网段，CIDR，一行一条。
+	//
+	// 空表示只放行公网——也就是引入这一项之前的行为。**没有"默认放行内网"
+	// 这一档**：一次升级不该悄悄改变任何现有部署的出站面
+	// （design doc 2026-09-01 §3.3）。
+	//
+	// 它只影响私有地址那一档。回环、链路本地、组播与云元数据网段在这份清单
+	// **之上**，改不了：前者一旦可放行，平台就成了本机服务的探测器；
+	// 后者一旦可放行，平台就成了一把偷取实例凭据的钥匙（§3.1）。
+	//
+	// 加上它意味着"平台不能被诱导去连任意内网地址"这条保证，从结构上不可能
+	// 降级成取决于操作者填了什么。这是真实的削弱，换来的是平台能在内网
+	// GitOps 环境里工作——而那本来就是它的目标场景（§2）。
+	GitAllowedDestinations string `json:"gitAllowedDestinations"`
 }
 
 // ValidatePlatformSetting 校验一份设置。
@@ -96,6 +120,11 @@ func ValidatePlatformSetting(s PlatformSetting) error {
 	}
 	if !s.SecretsBackend.Valid() {
 		return invalidf("secretsBackend %q 不在已登记的取值范围内", s.SecretsBackend)
+	}
+	// 保存时就把非法网段挡下来。留到拨号那一刻才发现，症状是
+	// REPO_UNREACHABLE —— 一句说不出真正原因的话。
+	if _, err := ParseAllowedDestinations(s.GitAllowedDestinations); err != nil {
+		return err
 	}
 	return validateSecretsBackendFields(s)
 }
@@ -161,6 +190,73 @@ func validateSecretsBackendFields(s PlatformSetting) error {
 		if s.SecretsDir != "" {
 			return invalid("secretsBackend 为 SECRET_MANAGER 时 secretsDir 必须为空")
 		}
+	case SecretsBackendDB:
+		// DB 后端的凭据存在平台自己的库里，另外两套后端的定位字段都用不上。
+		// 留着非空值会让操作者以为两套后端都在生效——与 DIR 那条同一个理由。
+		//
+		// **加密密钥不在这里校验**：它来自启动配置、不落库，因此它缺不缺
+		// 是装配层的事（newSecretResolver 那里构造失败）。写进设置里校验
+		// 等于把密钥也搬进数据库的势力范围。
+		if s.SecretsProject != "" || s.SecretsPrefix != "" || s.SecretsDir != "" {
+			return invalid("secretsBackend 为 DB 时 secretsProject/secretsPrefix/secretsDir 必须全部为空")
+		}
 	}
 	return nil
+}
+
+// privateRanges 是允许清单条目必须落在其中的地址空间。
+//
+// RFC1918 与 IPv6 ULA。清单的用途是放行内网，不是放行互联网——把判据写成
+// "整段落在私有空间内"，同时挡住了三件事，而且是同一条规则挡的：
+// 0.0.0.0/0 这种等于关掉检查的填法、公网网段、以及云元数据网段
+// （169.254.169.254 是链路本地，168.63.129.16 与 100.64.0.0/10 都不是私有
+// 地址，一律落不进来）。
+var privateRanges = []netip.Prefix{
+	netip.MustParsePrefix("10.0.0.0/8"),
+	netip.MustParsePrefix("172.16.0.0/12"),
+	netip.MustParsePrefix("192.168.0.0/16"),
+	netip.MustParsePrefix("fc00::/7"),
+}
+
+// ParseAllowedDestinations 把设置里的多行文本解析成网段清单。
+//
+// 空行与 # 注释跳过：这一栏会被人手工维护，而"为什么放行这一段"正是
+// 该写在旁边的东西。
+func ParseAllowedDestinations(raw string) ([]netip.Prefix, error) {
+	var out []netip.Prefix
+	for i, line := range strings.Split(raw, "\n") {
+		text := strings.TrimSpace(line)
+		if text == "" || strings.HasPrefix(text, "#") {
+			continue
+		}
+		p, err := netip.ParsePrefix(text)
+		if err != nil {
+			return nil, invalidf("第 %d 行 %q 不是合法的 CIDR 网段", i+1, text)
+		}
+		// Masked 之后再比：10.170.1.11/16 这种写法里主机位是有值的，
+		// 不规范化会让包含判定落在另一条分支上。
+		p = p.Masked()
+		if !withinPrivateSpace(p) {
+			return nil, invalidf(
+				"第 %d 行 %q 不在私有地址空间内。这一栏只能放行内网网段"+
+					"（10/8、172.16/12、192.168/16、fc00::/7 之内）——"+
+					"填公网段、0.0.0.0/0 或云元数据网段等于关掉这道检查，"+
+					"而它挡的是「平台被诱导去连任意地址」", i+1, text)
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+// withinPrivateSpace 报告一个网段是否**整段**落在私有地址空间内。
+//
+// 判包含关系而不是"看起来像内网"：只判起始地址的话，10.255.255.0/16
+// 这类跨界写法会被放过一半。前缀长度不短于私有段本身，才谈得上整段在内。
+func withinPrivateSpace(p netip.Prefix) bool {
+	for _, r := range privateRanges {
+		if r.Contains(p.Addr()) && p.Bits() >= r.Bits() {
+			return true
+		}
+	}
+	return false
 }
