@@ -221,10 +221,23 @@ func classifyChange(current, predicted replay.Verdict) ChangeKind {
 // unknownReasonOf 取把这条流量推进 UNKNOWN 的那一侧的原因。
 //
 // 两侧的缺口成因不同，要修的子系统也不同：predicted 侧的 UNKNOWN 来自
-// 候选策略回放，current 侧的来自当前判定。一律记 predicted 侧会让
-// current 侧的缺口挂到一个与它无关的成因上（多数时候是空字符串），
-// 构成表既指不回源头，也不再等于 UNKNOWN 总数。
+// 候选策略回放，current 侧的来自当前判定。记错一侧会让缺口挂到一个与它
+// 无关的成因上，构成表既指不回源头，也不再等于 UNKNOWN 总数。
+//
+// **两侧都判不出时以 current（归属层）为准。** 这一支不是对称的：求值引擎
+// 只看得见 `endpoint.Pod == nil`，它不知道为什么解不开身份，只能给一个占位
+// （evaluator 那一处固定返回 SNAPSHOT_MISSING）；而归属层四路分类过 ——
+// 本集群节点、LB 入口地址、集群外地址、IP 复用分不开。取占位值等于把四类
+// 压成一类，且压成唯一一个会把人引去查采集的那个（UAT 实测：2259 条 UNKNOWN
+// 里 1412 条这样标错，而其中 375 条 LB_INGRESS_ADDRESS 的枚举注释写着
+// 「根本没有什么该采而没采的东西」）。
+//
+// current 判得出结论、只有 predicted 是 UNKNOWN 时仍取 predicted：那类缺口
+// 是候选集自己引入的，指向的子系统是策略生成，不是归属。
 func unknownReasonOf(current, predicted replay.Decision) replay.UnknownReason {
+	if current.Verdict == replay.VerdictUnknown && current.UnknownReason != replay.ReasonNone {
+		return current.UnknownReason
+	}
 	if predicted.Verdict == replay.VerdictUnknown {
 		return predicted.UnknownReason
 	}

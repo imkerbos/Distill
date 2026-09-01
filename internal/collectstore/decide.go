@@ -395,9 +395,27 @@ func (t traffic) unknownReasonFor(a attributed) replay.UnknownReason {
 		c, err := t.fleet.Classify(ip)
 		return err == nil && c.Scope == cluster.ScopeNode
 	}
+	// 本集群自己的节点地址、且身份解析给出的是 NOT_COVERED：那一刻这个 IP
+	// 上没有 Pod，而节点按定义就不是 Pod —— 这是**结论**，不是缺口。
+	//
+	// **判据是 NOT_COVERED 而不是「没解出来」。** identity 那两个取值的注释
+	// 写着「与 NOT_COVERED 不得合并：合成一个会让『我们没数据』被读成
+	// 『那时确实没有 Pod』」，而把两者一起塞进 inClusterGap 正是那次合并：
+	// NO_DATA（平台那段时间没在看）是真缺口，要留在 SNAPSHOT_MISSING 里；
+	// NOT_COVERED（那一刻这个 IP 没有 Pod）不是。
+	//
+	// 不这么收窄的代价是反向的：节点上一个 hostNetwork Pod 的快照真的缺了
+	// 时，那条流量会被说成「节点地址，没有主体可解」，而它本该去查采集。
+	//
+	// 清单为空时不判：空是"我不知道哪些是节点"，据此把节点网段整个判成
+	// 「有结论」等于用一次读取失败换掉一整类真实缺口的可见性。
+	thisClustersNode := func(outcome identity.Outcome, ip string) bool {
+		return outcome == identity.OutcomeNotCovered && len(t.nodeIPs) > 0 && t.nodeIPs[ip]
+	}
 	inClusterGap := func(outcome identity.Outcome, ip string) bool {
 		return !resolved(outcome) && !t.externalAddress(ip) &&
-			!t.lbIngressIPs[ip] && !notThisClustersNode(ip)
+			!t.lbIngressIPs[ip] && !notThisClustersNode(ip) &&
+			!thisClustersNode(outcome, ip)
 	}
 	// 解出来了的那一端不算，哪怕它确实是个 LB 入口地址：这一支说的是
 	// "这一端没有主体可解"，而它已经解出来了。
@@ -411,6 +429,9 @@ func (t traffic) unknownReasonFor(a attributed) replay.UnknownReason {
 		return replay.ReasonSnapshotMissing
 	case lbUnresolved(a.srcOutcome, a.conn.Source.IP) || lbUnresolved(a.dstOutcome, a.conn.Dest.IP):
 		return replay.ReasonLBIngressAddress
+	case thisClustersNode(a.srcOutcome, a.conn.Source.IP) ||
+		thisClustersNode(a.dstOutcome, a.conn.Dest.IP):
+		return replay.ReasonNodeAddress
 	case !resolved(a.srcOutcome) || !resolved(a.dstOutcome):
 		// 剩下的只可能是"解不出主体、且地址不属于任何已登记网段"，
 		// 那正是 EXTERNAL_NO_IDENTITY 登记的那件事。

@@ -18,6 +18,7 @@ func TestUnknownReasonIsClosedEnum(t *testing.T) {
 		replay.ReasonNATTranslated,
 		replay.ReasonExternalNoIdentity,
 		replay.ReasonLBIngressAddress,
+		replay.ReasonNodeAddress,
 		replay.ReasonNamedPortUnresolved,
 		replay.ReasonLogSampledOut,
 		replay.ReasonPolicyMalformed,
