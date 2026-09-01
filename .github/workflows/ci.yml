@@ -49,7 +49,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           # 钉死大版本，理由同 golangci-lint：latest 会在上游发新版的那天
           # 把一次无关的 PR 变成红的，而门禁必须是可复现的。
