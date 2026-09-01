@@ -910,8 +910,14 @@ func writeGitWriteError(w http.ResponseWriter, r *http.Request, d Deps, clusterI
 	case errors.Is(err, gitwrite.ErrNoCommitMessage):
 		response.WriteInvalid(w, "这份计划没有提交信息，因此没有可供评审的依据。请重新出一次计划。")
 	default:
+		// **记分类，不记原文。** 错误本身带主机、端口与 known_hosts 行号，
+		// 那是内网拓扑，响应与日志都不许有它。但一个字都不记的代价是一次
+		// 推送失败之后没有任何人查得出原因，包括平台自己（UAT 实测：
+		// 连续两次 500，日志里只有 request_id）。分类是封闭枚举里的固定
+		// 字符串，不含对端返回的任何内容，却足以把人指到对的子系统。
 		d.Logger.Error("policy write-back push failed",
-			"request_id", RequestIDFrom(r.Context()), "cluster", clusterID)
+			"request_id", RequestIDFrom(r.Context()), "cluster", clusterID,
+			"failure_class", gitwrite.ClassifyFailure(err))
 		response.WriteSystem(w, http.StatusInternalServerError, response.CodeDependencyUnavailable)
 	}
 }
