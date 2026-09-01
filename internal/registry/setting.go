@@ -130,6 +130,20 @@ func ValidatePlatformSetting(s PlatformSetting) error {
 	if s.GitWriteTimeout <= 0 {
 		return invalid("gitWriteTimeout 必须为正")
 	}
+	// **写回的出站超时必须短于 HTTP 写超时。** 否则那次出站还没结束，
+	// 服务端已经把连接关了：调用方拿到的是连接被断（curl 报 000），
+	// 而平台这边那次推送仍在继续 —— 一次没有人知道结果的写入。
+	//
+	// UAT 实测过这个形态：gitWriteTimeout 调到 60 秒之后 push 仍然拿不到
+	// 响应，因为 httpWriteTimeout 还是 20 秒。两个值各自都"合理"，合起来
+	// 不成立，而这种矛盾只有在这里比一次才看得出来。
+	if s.GitWriteTimeout >= s.HTTPWriteTimeout {
+		return invalidf(
+			"gitWriteTimeout（%s）必须短于 httpWriteTimeout（%s）："+
+				"否则出站还没结束，服务端已经关掉了连接，调用方看到的是连接被断，"+
+				"而那次推送仍在继续，没有人知道它的结果",
+			s.GitWriteTimeout, s.HTTPWriteTimeout)
+	}
 	if !s.SecretsBackend.Valid() {
 		return invalidf("secretsBackend %q 不在已登记的取值范围内", s.SecretsBackend)
 	}

@@ -26,7 +26,7 @@ function view(over: Partial<PlatformSettingView> = {}): PlatformSettingView {
     secretsPrefix: '',
     secretsDir: '',
     gitVerifyTimeoutMs: 10000,
-    gitWriteTimeoutMs: 60000,
+    gitWriteTimeoutMs: 15000,
     gitVerifyHostKeysFingerprint: '',
     ...over,
   }

@@ -2,6 +2,7 @@ package registry_test
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,7 +18,7 @@ func validSetting() registry.PlatformSetting {
 		HTTPShutdownTimeout: 15 * time.Second,
 		SecretsBackend:      registry.SecretsBackendNone,
 		GitVerifyTimeout:    10 * time.Second,
-		GitWriteTimeout:     60 * time.Second,
+		GitWriteTimeout:     15 * time.Second,
 		GitVerifyHostKeys:   "example.com ssh-ed25519 AAAA...",
 	}
 }
@@ -145,5 +146,30 @@ func TestValidateSettingUpdateRefusesToClearTheTrustAnchor(t *testing.T) {
 				t.Fatalf("ValidateSettingUpdate() = %v, want nil", err)
 			}
 		})
+	}
+}
+
+// **写回出站超时必须短于 HTTP 写超时。**
+//
+// 两个值各自都"合理"、合起来不成立：出站还没结束服务端就关了连接，调用方
+// 拿到的是连接被断，而那次推送仍在继续 —— 一次没有人知道结果的写入。
+// UAT 上实测到过：gitWriteTimeout 提到 60 秒之后 push 仍然拿不到响应，
+// 因为 httpWriteTimeout 还是 20 秒。
+func TestGitWriteTimeoutMustFitInsideTheHTTPWriteTimeout(t *testing.T) {
+	s := validSetting()
+	s.HTTPWriteTimeout = 20 * time.Second
+	s.GitWriteTimeout = 60 * time.Second
+	err := registry.ValidatePlatformSetting(s)
+	if err == nil {
+		t.Fatal("出站 60 秒、HTTP 写超时 20 秒的组合被接受了 —— " +
+			"这种配置下每一次写回都拿不到响应")
+	}
+	if !strings.Contains(err.Error(), "httpWriteTimeout") {
+		t.Errorf("错误信息没点出另一个字段: %v", err)
+	}
+
+	s.GitWriteTimeout = 15 * time.Second
+	if err := registry.ValidatePlatformSetting(s); err != nil {
+		t.Errorf("装得下的组合被拒了: %v", err)
 	}
 }

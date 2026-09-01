@@ -8,7 +8,13 @@
 -- **这个缺陷会随平台自己的产出恶化**：每成功写一次，仓库更大，下一次克隆
 -- 更慢。共用一个值让"读得快"这条经验被错误地用在写路径上。
 --
--- 默认 60 秒：容得下当前规模的一次克隆加推送，同时仍然是一个会失败的上限 ——
--- 不设超时等于让一次挂死的出站占住一个请求直到进程重启。
+-- **默认 15 秒，不是"够用"的那个值。** 它必须短于 httpWriteTimeout，
+-- 否则出站还没结束服务端已经关掉连接，调用方看到连接被断、而那次推送仍在
+-- 继续（ValidatePlatformSetting 里有这条跨字段校验）。现有部署的
+-- httpWriteTimeout 多为 20 秒，取一个装得进去的默认值，升级才不会让一份
+-- 本来合法的设置变成非法。
+--
+-- 真实规模下 15 秒多半不够 —— 那要操作者在设置页把两个值一起往上调，
+-- 并且看得见自己在调什么。默认值悄悄放宽一个超时，比让人显式调它更糟。
 ALTER TABLE platform_setting
-  ADD COLUMN gitwrite_timeout_ms BIGINT NOT NULL DEFAULT 60000;
+  ADD COLUMN gitwrite_timeout_ms BIGINT NOT NULL DEFAULT 15000;

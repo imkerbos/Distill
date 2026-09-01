@@ -38,7 +38,7 @@ func seededSetting() registry.PlatformSetting {
 		HTTPShutdownTimeout: 15 * time.Second,
 		SecretsBackend:      registry.SecretsBackendNone,
 		GitVerifyTimeout:    10 * time.Second,
-		GitWriteTimeout:     60 * time.Second,
+		GitWriteTimeout:     15 * time.Second,
 	}
 }
 
@@ -222,7 +222,7 @@ func TestUpdateSettingRoundTripsThroughTheIntegerColumns(t *testing.T) {
 		SecretsProject:      "distill-prod",
 		SecretsPrefix:       "distill-git-",
 		GitVerifyTimeout:    7500 * time.Millisecond,
-		GitWriteTimeout:     45 * time.Second,
+		GitWriteTimeout:     7 * time.Second,
 		GitVerifyHostKeys:   "gitlab.example.com ssh-ed25519 AAAAKEY",
 	}
 	if err := s.UpdateSetting(ctx, registry.Actor{Username: "admin"}, want); err != nil {

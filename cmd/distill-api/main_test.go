@@ -38,7 +38,7 @@ func baseSetting() registry.PlatformSetting {
 		HTTPShutdownTimeout: 15 * time.Second,
 		SecretsBackend:      registry.SecretsBackendNone,
 		GitVerifyTimeout:    10 * time.Second,
-		GitWriteTimeout:     60 * time.Second,
+		GitWriteTimeout:     15 * time.Second,
 	}
 }
 
@@ -381,7 +381,7 @@ func TestDepsCarriesTheCredentialStore(t *testing.T) {
 func TestPolicyWriterUsesTheWriteTimeoutNotTheVerifyOne(t *testing.T) {
 	s := baseSetting()
 	s.GitVerifyTimeout = 10 * time.Second
-	s.GitWriteTimeout = 60 * time.Second
+	s.GitWriteTimeout = 15 * time.Second
 	if s.GitWriteTimeout == s.GitVerifyTimeout {
 		t.Fatal("前提不成立：两个超时必须不同，否则这条用例验不到接线")
 	}

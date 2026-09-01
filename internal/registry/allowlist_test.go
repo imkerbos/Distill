@@ -56,7 +56,7 @@ func TestAnEmptyAllowlistIsValid(t *testing.T) {
 // 留到拨号的症状是 REPO_UNREACHABLE —— 一句说不出真正原因的话。
 func TestSettingValidationRejectsABadAllowlist(t *testing.T) {
 	s := registry.PlatformSetting{
-		SessionTTL: 1, HTTPReadTimeout: 1, HTTPWriteTimeout: 1,
+		SessionTTL: 1, HTTPReadTimeout: 1, HTTPWriteTimeout: 2,
 		HTTPShutdownTimeout: 1, GitVerifyTimeout: 1, GitWriteTimeout: 1,
 		SecretsBackend:         registry.SecretsBackendNone,
 		GitAllowedDestinations: "0.0.0.0/0",
