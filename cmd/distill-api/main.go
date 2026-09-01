@@ -151,6 +151,12 @@ func run(configPath string) error {
 		// 是为了让边界层只拿到它真正需要的那几个方法，不是为了换实现。
 		Writeback:    reg,
 		PolicyWriter: newSettingsPolicyWriter(settingsProvider, logger, db, secretsKEK),
+		// 凭据保管处：只有平台自己保管凭据（DB 后端）时才非空。
+		//
+		// **按启动时的密钥装，不按运行期设置装**：KEK 来自启动配置，改设置
+		// 改不出一把密钥来。选了 DB 却没配 KEK 时这里是 nil，接口会明确拒绝
+		// 带私钥的请求——而不是收下之后在写回那一刻才失败。
+		CredentialStore: newCredentialStore(db, secretsKEK, logger),
 		// 资产采集的只读摘要。拉取式采集的写入侧属于 cmd/distill-collector
 		// —— 这里只拿读的那一面，主服务不持有任何 Kubernetes 凭据。
 		Collection: snapshotstore.New(db),
@@ -578,4 +584,34 @@ func decodeSecretsKEK(encoded string) ([]byte, error) {
 			len(key), dbsecrets.KEKSize)
 	}
 	return key, nil
+}
+
+// newCredentialStore 按启动时拿到的密钥装一个凭据保管处。
+//
+// 没有密钥就返回 nil，**不返回一个装着空密钥的实现**：后者会在每次写入时
+// 失败，而失败信息是"存不进去"，说不出真正的原因是没配密钥。nil 让接口层
+// 给出那句能照着做的拒绝（"这个部署没有把凭据交给平台保管"）。
+//
+// 返回具体类型而不是接口：返回接口时 nil 指针会装成一个非 nil 的接口值，
+// 而调用方正是用 == nil 判断"没有保管处"的（同 newSecretResolver 那条）。
+func newCredentialStore(
+	db *sql.DB, kek []byte, logger *slog.Logger,
+) httpapi.CredentialStore {
+	if len(kek) == 0 {
+		logger.Info("no credential encryption key; the platform will not keep git credentials")
+		return nil
+	}
+	cipher, err := dbsecrets.NewCipher(kek)
+	if err != nil {
+		// 启动时已经解过一次密钥（decodeSecretsKEK），走到这里说明长度校验
+		// 与构造对密钥的要求不一致——那是代码的问题，不是配置的问题。
+		logger.Error("cannot build the credential cipher", "error", err)
+		return nil
+	}
+	store, err := dbsecrets.New(db, cipher)
+	if err != nil {
+		logger.Error("cannot build the credential store", "error", err)
+		return nil
+	}
+	return store
 }
