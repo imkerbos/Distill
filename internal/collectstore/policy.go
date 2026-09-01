@@ -389,6 +389,30 @@ func (r *Reader) generate(
 // （design doc 2026-08-29 §3.5）。
 const defaultRuleRetention = 24 * time.Hour
 
+// retentionStart 算出累积规则的回溯起点。
+//
+// 保留期从**窗口末端**往回算，不从当下往回算：回看一段很久以前的窗口时，
+// 按当下算会把那之后学到的规则一并并进去，而那是拿现在解释过去
+// （CLAUDE.md §4）。
+//
+// **没有流量窗口时退到锚点**，不是退到零值。零值减去保留期是公元前，
+// 而 MySQL 会拒掉整条查询（"year is not in the range [1, 9999]: 0"）——
+// 症状是一个采到了资产、还没有流量的集群连一份纯 Baseline 的候选策略都
+// 拿不到，而那正是操作者问「那你推荐我加什么策略」时要看的那一屏。
+// 锚点是这份预览描述的那一刻，与窗口末端同一个含义。
+//
+// 两者都没有时返回 false：没有任何时刻可以往回算，由调用方跳过这次读取。
+func retentionStart(window flow.Window, anchor time.Time, retention time.Duration) (time.Time, bool) {
+	end := window.To
+	if end.IsZero() {
+		end = anchor
+	}
+	if end.IsZero() {
+		return time.Time{}, false
+	}
+	return end.Add(-retention), true
+}
+
 // learnedRulesFor 取回保留期内累积下来的规则。
 //
 // 保留期取集群登记的业务周期：那正是"看全一轮流量要多久"这个问题的答案
@@ -400,10 +424,11 @@ func (r *Reader) learnedRulesFor(
 	if retention <= 0 {
 		retention = defaultRuleRetention
 	}
-	// 保留期从**窗口末端**往回算，不从当下往回算：回看一段很久以前的窗口时，
-	// 按当下算会把那之后学到的规则一并并进去，而那是拿现在解释过去
-	// （CLAUDE.md §4）。
-	since := t.window.To.Add(-retention)
+	since, ok := retentionStart(t.window, t.anchor, retention)
+	if !ok {
+		// 没有窗口也没有锚点：没有任何时刻可以往回算，这次不并累积规则。
+		return nil, nil
+	}
 
 	stored, err := r.facts.LearnedRulesSince(ctx, t.clusterID, since)
 	if err != nil {
