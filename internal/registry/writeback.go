@@ -257,6 +257,49 @@ func NewWritebackPlan(b GitBinding, p WritebackPlan) (WritebackPlan, error) {
 	return p, nil
 }
 
+// FingerprintParts 把指纹的各个分量各算一个摘要。
+//
+// 存在的理由是排查：指纹对不上时，"哪一项变了"是唯一有用的信息，而整份
+// 指纹只会告诉你"变了"。UAT 上出计划与推送之间连续 12 次对不上，四类计数、
+// 提交信息、待删清单逐项比对却完全相同 —— 没有这份分量摘要，下一步只能靠猜。
+//
+// **只出摘要，不出内容。** 文件内容是集群的网络结构，日志不是它该去的地方。
+func FingerprintParts(p WritebackPlan) map[string]string {
+	sum := func(parts ...string) string {
+		h := sha256.New()
+		for _, s := range parts {
+			_, _ = h.Write([]byte(strconv.Itoa(len(s))))
+			_, _ = h.Write([]byte{':'})
+			_, _ = h.Write([]byte(s))
+		}
+		return hex.EncodeToString(h.Sum(nil))[:12]
+	}
+	counts := make([]string, 0, len(predict.AllChangeKinds())*2)
+	for _, k := range predict.AllChangeKinds() {
+		counts = append(counts, string(k), strconv.Itoa(p.Counts[k]))
+	}
+	confirmed := append([]string{}, p.Confirmed...)
+	sort.Strings(confirmed)
+	files := make([]string, 0, len(p.Files)*2)
+	paths := make([]string, 0, len(p.Files))
+	sorted := make([]WritebackFile, len(p.Files))
+	copy(sorted, p.Files)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Path < sorted[j].Path })
+	for _, f := range sorted {
+		paths = append(paths, f.Path)
+		files = append(files, f.Path, f.Content)
+	}
+	return map[string]string{
+		"repo":          sum(p.RepoID),
+		"branch":        sum(p.Branch),
+		"commitMessage": sum(p.CommitMessage),
+		"counts":        sum(counts...),
+		"confirmed":     sum(confirmed...),
+		"filePaths":     sum(paths...),
+		"fileContents":  sum(files...),
+	}
+}
+
 // FingerprintOf 计算一份写回计划的内容指纹。
 //
 // 覆盖目标仓库、全部待写文件的路径与内容、目标分支、提交信息、重算后的

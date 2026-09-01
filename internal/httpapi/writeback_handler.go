@@ -218,6 +218,11 @@ func handlePolicyWritebackPlan(d Deps) http.HandlerFunc {
 		// 审计先于响应体，与导出同一处置：一份计划描述的是平台打算往策略
 		// 仓库里写什么（规范 §43）。写不进去就整次失败，不"记条日志照样把
 		// 计划发出去"—— 事后没有任何东西能回答谁看过哪一份。
+		d.Logger.Info("write-back plan produced",
+			"request_id", RequestIDFrom(r.Context()),
+			"cluster", chi.URLParam(r, "clusterID"),
+			"branch", planned.plan.Branch, "fingerprint", planned.plan.Fingerprint,
+			"parts", registry.FingerprintParts(planned.plan))
 		if err := recordWriteback(r, d, planned.plan, ""); err != nil {
 			writeRegistryError(w, r, d, err)
 			return
@@ -275,6 +280,14 @@ func handlePolicyWritebackPush(d Deps) http.HandlerFunc {
 		// 第三道：指纹。计划由平台重算，指纹由 registry.NewWritebackPlan 现算，
 		// 请求体带来的那一串只做比对，不做输入。
 		if planned.plan.Fingerprint != req.Fingerprint {
+			// **对不上时把各分量的摘要留下来。** 整份指纹只说明"变了"，
+			// 而要修的是"哪一项变了"——出计划那一侧同样打一份，两行一比
+			// 就能定位。摘要不含文件内容：那是集群的网络结构。
+			d.Logger.Warn("write-back plan fingerprint mismatch",
+				"request_id", RequestIDFrom(r.Context()), "cluster", clusterID,
+				"branch", req.Branch, "confirmed", planned.plan.Fingerprint,
+				"recomputed", req.Fingerprint,
+				"parts", registry.FingerprintParts(planned.plan))
 			response.WriteInvalid(w, writebackStaleMsg)
 			return
 		}
