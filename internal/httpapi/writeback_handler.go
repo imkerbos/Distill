@@ -77,6 +77,17 @@ type PolicyWriter interface {
 // 那道判断防的是将来约束被放宽。
 const writebackDirName = "distill"
 
+// writebackSettleDelay 是写回取默认窗口时往回退的那一段。
+//
+// agent 每分钟推一次，一次覆盖约一分钟的轮询；一个窗口要等到没有任何
+// agent 还可能往它里面写行，才算沉降。取两倍推送间隔：一次迟到、一次
+// 重试之后仍然成立，而不是刚好卡在边界上。
+//
+// 退得太多的代价只是"这份计划描述的是两分钟前"——写回本来就要人工合并，
+// 两分钟不影响任何判断；退得不够的代价是指纹对不上，而那道门是写回链路上
+// 唯一的人工确认点。
+const writebackSettleDelay = 2 * time.Minute
+
 // writebackBranchPrefix 与 writebackStampLayout 组成目标分支名
 // `distill/<clusterID>-<UTC 时间戳>`（design doc §2）。
 //
@@ -345,7 +356,13 @@ func planWriteback(
 	//
 	// 推送从分支名里解析回出计划那一刻的 at，所以只要窗口是 at 的函数，
 	// 两次就必然算出同一个。显式传了 from/to 时仍以调用方给的为准。
-	window, ok, err := parseWindowAt(r.Context(), r.URL.Query(), d.Reader, clusterID, at)
+	// **再往回退一段沉降期。** 上一步把窗口钉成了 at 的函数，两次请求因此
+	// 拿到同一个窗口；但集群里每个节点的 agent 各推各的窗口、彼此重叠，
+	// 落进同一个窗口的连接行还在陆续到达 —— 窗口一样、行集不一样，
+	// 四类计数照旧会变，指纹照旧对不上（UAT 实测：只钉窗口之后 3 次里
+	// 仍有 1 次被拒；而钉一个已经沉降的窗口时，连出两份计划逐字相同）。
+	window, ok, err := parseWindowAt(
+		r.Context(), r.URL.Query(), d.Reader, clusterID, at.Add(-writebackSettleDelay))
 	if err != nil {
 		writeReaderError(w, r, d, err)
 		return plannedWriteback{}, false

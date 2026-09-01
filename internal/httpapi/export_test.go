@@ -16,3 +16,9 @@ const MaxTrendPointsForTest = maxTrendPoints
 func EnforcingBlockersForTest(pv store.PolicyPreview) string {
 	return enforcingBlockers(pv)
 }
+
+// WritebackSettleDelayForTest 把沉降期暴露给外部测试包。
+//
+// 导出别名而不是让用例抄一个字面量：抄进去之后，改常量的人不会看到
+// 用例失败，而那条用例正是用来保证"确实退了一整段"的。
+const WritebackSettleDelayForTest = writebackSettleDelay

@@ -19,6 +19,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/imkerbos/Distill/internal/gitwrite"
+	"github.com/imkerbos/Distill/internal/httpapi"
 	"github.com/imkerbos/Distill/internal/policygen"
 	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/response"
@@ -503,5 +504,33 @@ func TestWritebackAsksForTheWindowAsOfThePlanMoment(t *testing.T) {
 	if p.atSeen.IsZero() {
 		t.Error("传给 DefaultWindowAt 的 at 是零值 —— 那等于不设上界，" +
 			"与直接取最新没有区别")
+	}
+}
+
+// **写回要的窗口必须已经沉降，不能是刚结束的那一个。**
+//
+// 上一条把窗口钉成了 at 的函数，两次请求因此拿到同一个窗口。但集群里
+// 15 个 agent 各推各的窗口、彼此重叠，落进同一个窗口的连接行还在陆续到达：
+// 窗口一样，行集不一样，四类计数照旧会变。UAT 实测：默认窗口这条路
+// 3 次里仍有 1 次被拒；而钉一个 30 分钟前的窗口时，连出两份计划的计数
+// 逐字相同。
+//
+// 判据是"传给 DefaultWindowAt 的时刻明显早于出计划那一刻"——早多少由
+// writebackSettleDelay 定，这里只钉住"确实退了一段"，不把常量抄进用例。
+func TestWritebackAsksForASettledWindow(t *testing.T) {
+	p := &windowProbeReader{}
+	h, cookie := newWindowProbeRouter(t, p)
+
+	before := time.Now().UTC()
+	_ = authedPostJSON(t, h, cookie,
+		"/api/v1/clusters/"+probeCluster+"/policy-writeback/plan", map[string]any{})
+	if !p.sawDefaultWindowAt {
+		t.Fatal("写回没走 DefaultWindowAt")
+	}
+	// 断言退够了一整段沉降期，不只是"早一点"：出计划的时刻本来就被截到秒，
+	// 只比"早于现在"的话这条用例恒真，什么都没验到。
+	if gap := before.Sub(p.atSeen); gap < httpapi.WritebackSettleDelayForTest {
+		t.Errorf("只退了 %s，不足一整段沉降期 %s —— 刚结束的窗口还在收行，"+
+			"出计划与推送会读到不同的行集", gap, httpapi.WritebackSettleDelayForTest)
 	}
 }
