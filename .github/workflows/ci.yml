@@ -30,7 +30,7 @@ jobs:
         # 钉死版本，不用 latest：CLAUDE.md §8 指定 golangci-lint v2，而
         # latest 会在上游发新版的那天把一次无关的 PR 变成红的，或者反过来
         # 悄悄放宽某条规则 —— 两种都让 CI 不再是可复现的门禁。
-        uses: golangci/golangci-lint-action@v7
+        uses: golangci/golangci-lint-action@v9
         with:
           version: v2.12.2
 
