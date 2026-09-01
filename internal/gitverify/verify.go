@@ -3,6 +3,7 @@ package gitverify
 import (
 	"context"
 	"errors"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -35,8 +36,14 @@ type Verifier struct {
 // 可用的 host key）都在那里做。**没有 host key 就构造失败**，不存在
 // 「未配置就不校验」的分支：回退等于接受任意中间人，而这条链路的终点
 // 是生产集群的策略集合。
-func New(r secrets.Resolver, hostKeys []byte, timeout time.Duration) (*Verifier, error) {
-	t, err := gitssh.New(r, hostKeys, timeout)
+// allowedDestinations 与另一条路径拿的必须是同一份：两条各自演化的拨号
+// 路径意味着两套地址守卫，而漏掉守卫的那一条会成为一次 SSRF 的入口
+// （design doc 2026-09-01 §3.5）。
+func New(
+	r secrets.Resolver, hostKeys []byte, timeout time.Duration,
+	allowedDestinations []netip.Prefix,
+) (*Verifier, error) {
+	t, err := gitssh.New(r, hostKeys, timeout, allowedDestinations)
 	if err != nil {
 		return nil, err
 	}

@@ -46,9 +46,9 @@ var blockedPrefixes = []netip.Prefix{
 // Hostname 改写到另一个地址的情况 —— 那种改写在 URL 上完全看不出来。
 //
 // 顺序不能颠倒：地址不合法就不该再去比对 host key。
-func guardDestination(next cryptossh.HostKeyCallback) cryptossh.HostKeyCallback {
+func guardDestination(next cryptossh.HostKeyCallback, allowed []netip.Prefix) cryptossh.HostKeyCallback {
 	return func(hostname string, remote net.Addr, key cryptossh.PublicKey) error {
-		if err := checkDestination(remote); err != nil {
+		if err := checkDestination(remote, allowed); err != nil {
 			return err
 		}
 		return next(hostname, remote, key)
@@ -58,12 +58,12 @@ func guardDestination(next cryptossh.HostKeyCallback) cryptossh.HostKeyCallback 
 // checkDestination 判定一个已连上的对端地址是否允许继续。
 //
 // 认不出地址形态时返回拒绝：这一层的失败方向必须是关，不是开。
-func checkDestination(remote net.Addr) error {
+func checkDestination(remote net.Addr, allowed []netip.Prefix) error {
 	ip, ok := remoteIP(remote)
 	if !ok {
 		return ErrBlockedDestination
 	}
-	return checkIP(ip)
+	return checkIP(ip, allowed)
 }
 
 // checkIP 对目的 IP 做默认拒绝的判定。
@@ -71,21 +71,39 @@ func checkDestination(remote net.Addr) error {
 // 只放行全局单播、且不在 blockedPrefixes 里的地址；回环、私有、链路本地、
 // ULA、未指定、组播与广播一律拒（安全规范 §13）。调用方必须先 Unmap，
 // 否则 ::ffff:127.0.0.1 这类写法会绕过按 IPv4 写的判定（补充版 §26）。
-func checkIP(ip netip.Addr) error {
+func checkIP(ip netip.Addr, allowed []netip.Prefix) error {
 	if !ip.IsValid() {
 		return ErrBlockedDestination
 	}
 	// IsGlobalUnicast 已经排除未指定、回环、组播（含链路本地与接口本地
-	// 组播）、链路本地单播与 IPv4 广播；剩下要单独判的只有私有地址。
-	if !ip.IsGlobalUnicast() || ip.IsPrivate() {
+	// 组播）、链路本地单播与 IPv4 广播。
+	//
+	// **这一层允许清单改不了**（design doc 2026-09-01 §3.1）：回环一旦可以
+	// 被放行，平台就成了本机服务的探测器；而这两类不属于"操作者的部署选择"。
+	if !ip.IsGlobalUnicast() {
 		return ErrBlockedDestination
 	}
+	// 云元数据网段同样在清单之上：它一旦可以被放行，平台就成了一把偷取
+	// 实例凭据的钥匙。清单的字段校验已经挡住这些网段（它们都不是私有地址），
+	// 这里是纵深防御——**即便有人绕过校验把它们写进库**，拨号仍然被拒。
 	for _, p := range blockedPrefixes {
 		if p.Contains(ip) {
 			return ErrBlockedDestination
 		}
 	}
-	return nil
+	// 到这里只剩私有地址要判。操作者显式登记过的网段放行，其余默认拒绝。
+	//
+	// 清单为空时行为与引入它之前逐字节相同：一次升级不该悄悄改变任何
+	// 现有部署的出站面（§3.3）。
+	if !ip.IsPrivate() {
+		return nil
+	}
+	for _, p := range allowed {
+		if p.Contains(ip) {
+			return nil
+		}
+	}
+	return ErrBlockedDestination
 }
 
 // remoteIP 从连接的对端地址里取出 IP。

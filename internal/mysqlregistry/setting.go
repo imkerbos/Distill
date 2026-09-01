@@ -93,11 +93,13 @@ func (s *Store) Setting(ctx context.Context) (registry.PlatformSetting, error) {
 	err := s.db.QueryRowContext(ctx,
 		`SELECT session_ttl_seconds, http_read_timeout_ms, http_write_timeout_ms,
 		        http_shutdown_timeout_ms, secrets_backend, secrets_project,
-		        secrets_prefix, secrets_dir, gitverify_timeout_ms, gitverify_host_keys
+		        secrets_prefix, secrets_dir, gitverify_timeout_ms, gitverify_host_keys,
+		        git_allowed_destinations
 		   FROM platform_setting WHERE id = 1`).
 		Scan(&row.sessionTTLSeconds, &row.readTimeoutMS, &row.writeTimeoutMS,
 			&row.shutdownTimeoutMS, &backend, &out.SecretsProject, &out.SecretsPrefix,
-			&out.SecretsDir, &row.gitVerifyTimeoutMS, &out.GitVerifyHostKeys)
+			&out.SecretsDir, &row.gitVerifyTimeoutMS, &out.GitVerifyHostKeys,
+			&out.GitAllowedDestinations)
 	if errors.Is(err, sql.ErrNoRows) {
 		// 空表不等于「用默认值」：零值超时是关掉超时保护，零值 TTL 是
 		// 会话立即过期。迁移种下了这一行，读不到它说明库的状态不对，
@@ -168,12 +170,13 @@ func (s *Store) UpdateSetting(
 				        http_write_timeout_ms = ?, http_shutdown_timeout_ms = ?,
 				        secrets_backend = ?, secrets_project = ?, secrets_prefix = ?,
 				        secrets_dir = ?, gitverify_timeout_ms = ?,
-				        gitverify_host_keys = ?, updated_at = ?
+				        gitverify_host_keys = ?, git_allowed_destinations = ?,
+				        updated_at = ?
 				  WHERE id = 1`,
 				row.sessionTTLSeconds, row.readTimeoutMS, row.writeTimeoutMS,
 				row.shutdownTimeoutMS, string(ps.SecretsBackend), ps.SecretsProject,
 				ps.SecretsPrefix, ps.SecretsDir, row.gitVerifyTimeoutMS,
-				ps.GitVerifyHostKeys, s.now(),
+				ps.GitVerifyHostKeys, ps.GitAllowedDestinations, s.now(),
 			); err != nil {
 				return fmt.Errorf("update platform setting: %w", err)
 			}

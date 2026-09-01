@@ -48,7 +48,7 @@ func TestCloneBranchDialsThroughTheGuardedAuth(t *testing.T) {
 	// host key 钉进清单：这条用例里 host key 那一层是**放行**的，于是唯一
 	// 还能拦住这次拨号的东西就是目的地址判定。
 	known := []byte(knownhosts.Normalize(addr) + " " + string(cryptossh.MarshalAuthorizedKey(hostKey)))
-	v, err := New(pemResolver{key: newPrivateKeyPEM(t)}, known, 10*time.Second)
+	v, err := New(pemResolver{key: newPrivateKeyPEM(t)}, known, 10*time.Second, nil)
 	if err != nil {
 		t.Fatalf("New() = %v", err)
 	}

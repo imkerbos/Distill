@@ -53,6 +53,7 @@ func TestAuthCarriesThePinnedHostKeyCallback(t *testing.T) {
 		pemResolver{key: newPrivateKeyPEM(t)},
 		[]byte("git.example.com "+string(cryptossh.MarshalAuthorizedKey(pinned))),
 		time.Second,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("New() = %v", err)

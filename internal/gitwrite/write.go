@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/netip"
 	"os"
 	"path"
 	"strings"
@@ -66,8 +67,14 @@ type Writer struct {
 // 参数原样交给 gitssh.New，构造期的拒绝（解析器为空、超时非正、没有一把
 // 可用的 host key）都在那里做，与 gitverify.New 是同一条链路的同一道门。
 // **没有 host key 就构造失败**，不存在「未配置就不校验」的分支。
-func New(r secrets.Resolver, hostKeys []byte, timeout time.Duration) (*Writer, error) {
-	t, err := gitssh.New(r, hostKeys, timeout)
+// allowedDestinations 与另一条路径拿的必须是同一份：两条各自演化的拨号
+// 路径意味着两套地址守卫，而漏掉守卫的那一条会成为一次 SSRF 的入口
+// （design doc 2026-09-01 §3.5）。
+func New(
+	r secrets.Resolver, hostKeys []byte, timeout time.Duration,
+	allowedDestinations []netip.Prefix,
+) (*Writer, error) {
+	t, err := gitssh.New(r, hostKeys, timeout, allowedDestinations)
 	if err != nil {
 		return nil, err
 	}

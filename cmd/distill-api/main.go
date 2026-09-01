@@ -465,7 +465,17 @@ func (v *settingsPolicyWriter) writer(ctx context.Context) (*gitwrite.Writer, er
 	// timeout 与 host keys 显式传给 gitwrite.New：它经由 gitssh.New 拒绝
 	// 非正超时、也拒绝空 host key 集合。**没有 host key 就构造失败**，
 	// 不存在「未配置就不校验」的分支 —— 写路径与读路径共用那一份判定。
-	writer, err := gitwrite.New(resolver, []byte(s.GitVerifyHostKeys), s.GitVerifyTimeout)
+	// 出站允许清单跟着设置现读，与 host key 同一条路径：两条各自演化的
+	// 拨号路径意味着两套地址守卫，而漏掉守卫的那一条会成为一次 SSRF 的
+	// 入口（design doc 2026-09-01 §3.5）。
+	//
+	// 解析失败不退回"空清单"：空清单是一个合法配置（只放行公网），而
+	// 一份填错了的清单被当成空，症状是"仓库不可达"，说不出真正的原因。
+	allowed, err := registry.ParseAllowedDestinations(s.GitAllowedDestinations)
+	if err != nil {
+		return nil, err
+	}
+	writer, err := gitwrite.New(resolver, []byte(s.GitVerifyHostKeys), s.GitVerifyTimeout, allowed)
 	if err != nil {
 		v.logger.Error("cannot build a policy writer from the current setting", "error", err)
 		return nil, ErrPolicyWriterUnavailable
@@ -499,7 +509,17 @@ func newGitVerifier(
 	if resolver == nil {
 		return nil, nil
 	}
-	v, err := gitverify.New(resolver, []byte(s.GitVerifyHostKeys), s.GitVerifyTimeout)
+	// 出站允许清单跟着设置现读，与 host key 同一条路径：两条各自演化的
+	// 拨号路径意味着两套地址守卫，而漏掉守卫的那一条会成为一次 SSRF 的
+	// 入口（design doc 2026-09-01 §3.5）。
+	//
+	// 解析失败不退回"空清单"：空清单是一个合法配置（只放行公网），而
+	// 一份填错了的清单被当成空，症状是"仓库不可达"，说不出真正的原因。
+	allowed, err := registry.ParseAllowedDestinations(s.GitAllowedDestinations)
+	if err != nil {
+		return nil, err
+	}
+	v, err := gitverify.New(resolver, []byte(s.GitVerifyHostKeys), s.GitVerifyTimeout, allowed)
 	if err != nil {
 		return nil, err
 	}
