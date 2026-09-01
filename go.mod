@@ -8,7 +8,7 @@ require (
 	github.com/go-chi/chi/v5 v5.1.0
 	github.com/go-git/go-billy/v5 v5.9.0
 	github.com/go-git/go-git/v5 v5.19.2
-	github.com/go-sql-driver/mysql v1.8.1
+	github.com/go-sql-driver/mysql v1.10.0
 	github.com/golang-migrate/migrate/v4 v4.17.1
 	github.com/googleapis/gax-go/v2 v2.23.0
 	github.com/knadh/koanf/parsers/yaml v0.1.0
@@ -21,6 +21,7 @@ require (
 	k8s.io/api v0.35.3
 	k8s.io/apimachinery v0.35.3
 	k8s.io/client-go v0.35.3
+	sigs.k8s.io/network-policy-api v0.2.0
 	sigs.k8s.io/yaml v1.6.0
 )
 
@@ -30,7 +31,7 @@ require (
 	cloud.google.com/go/compute/metadata v0.9.0 // indirect
 	cloud.google.com/go/iam v1.11.0 // indirect
 	dario.cat/mergo v1.0.0 // indirect
-	filippo.io/edwards25519 v1.1.0 // indirect
+	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/ProtonMail/go-crypto v1.1.6 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
@@ -113,7 +114,6 @@ require (
 	k8s.io/kube-openapi v0.0.0-20250910181357-589584f1c912 // indirect
 	k8s.io/utils v0.0.0-20260210185600-b8788abfbbc2 // indirect
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
-	sigs.k8s.io/network-policy-api v0.2.0 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.2-0.20260122202528-d9cc6641c482 // indirect
 )
