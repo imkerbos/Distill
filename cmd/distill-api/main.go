@@ -251,7 +251,7 @@ func run(configPath string) error {
 			Recorder:  bookkeeping.NewAgreementRecorder(accountingReader, accountingStore, logger),
 			Accounted: bookkeeping.AccountedFunc(accountingStore.LastReconciliationWindowEnd),
 		},
-	), cfg.Evidence.Interval, logger)
+	).WithPurge(accountingStore, flowRetentionOf), cfg.Evidence.Interval, logger)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -638,4 +638,21 @@ func newCredentialStore(
 		return nil
 	}
 	return store
+}
+
+// flowRetentionOf 给出一个集群的流量可查询期。
+//
+// **取业务周期，不另立一个数**（design doc 2026-09-02 §2.3）：
+// registry.Cluster.BusinessCycle 已经是"看全一轮流量要多久"的答案，
+// 操作者只需要回答一次这个问题。两个数会分家，而分家之后保留期短于业务
+// 周期的那一刻，预览在自己声明的周期内就查不到数据 —— 而写回门禁正是按
+// 这个周期判"观测覆盖够不够"。
+//
+// 没登记业务周期时退回 24 小时，与 learnedRulesFor 同一条兜底。**不是不删**：
+// 那样一来最需要保留策略的集群（没人管过的那些）恰好是唯一不清理的。
+func flowRetentionOf(c registry.Cluster) time.Duration {
+	if c.BusinessCycle > 0 {
+		return c.BusinessCycle
+	}
+	return 24 * time.Hour
 }
