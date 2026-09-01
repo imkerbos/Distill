@@ -323,7 +323,7 @@ func Generate(in Input) Result {
 			_, wl, ok := resolveWorkloadLabel(br.Subject)
 			if !ok {
 				unattachedBaselines = append(unattachedBaselines, UnattachedBaselineRule{
-					Kind: br.Kind, Namespace: ns, Name: serviceNameOf(br),
+					Kind: br.Kind, Namespace: ns, Name: subjectNameOf(br),
 					Reason: UnattachedBaselineNoSuchWorkload,
 				})
 				continue
@@ -331,7 +331,7 @@ func Generate(in Input) Result {
 			winKey, ok := winners[nsWorkload{namespace: ns, workload: wl}]
 			if !ok {
 				unattachedBaselines = append(unattachedBaselines, UnattachedBaselineRule{
-					Kind: br.Kind, Namespace: ns, Name: serviceNameOf(br),
+					Kind: br.Kind, Namespace: ns, Name: subjectNameOf(br),
 					Reason: UnattachedBaselineNoSuchWorkload,
 				})
 				continue
@@ -339,16 +339,24 @@ func Generate(in Input) Result {
 			target := subject{namespace: ns, workload: wl, labelKey: winKey}
 			if !workloads[target] {
 				unattachedBaselines = append(unattachedBaselines, UnattachedBaselineRule{
-					Kind: br.Kind, Namespace: ns, Name: serviceNameOf(br),
+					Kind: br.Kind, Namespace: ns, Name: subjectNameOf(br),
 					Reason: UnattachedBaselineNoSuchWorkload,
 				})
 				continue
 			}
 			baselineBySubject[target] = append(baselineBySubject[target], rule)
+			// **只有暴露型规则谈得上"放宽"。** 这一栏问的是「Service 点名的
+			// 范围比规则实际覆盖的范围窄了多少」，而 KUBELET_PROBE 的主体
+			// 本来就是这个 workload 自己，没有第二个更窄的 selector 可比：
+			// 给它记一条 Service 名为空的放宽，读起来像"有个 Service 把范围
+			// 放宽了"，而那个 Service 不存在。
+			if br.Kind != baseline.KindExposedIngress {
+				continue
+			}
 			// 挂上了，但挂靠的粒度比 Service 实际点名的范围粗——数一遍
 			// 才知道粗了多少，见 ExposureWidening 的注释。
 			exposureWidenings = append(exposureWidenings, exposureWideningFor(
-				in.Pods, in.ClusterID, ns, serviceNameOf(br), wl, winKey, br.Subject))
+				in.Pods, in.ClusterID, ns, subjectNameOf(br), wl, winKey, br.Subject))
 		}
 	}
 	sort.Slice(unattachedBaselines, func(i, j int) bool {
@@ -506,16 +514,22 @@ func cloneLabels(labels map[string]string) map[string]string {
 	return out
 }
 
-// serviceNameOf 从一条 Baseline 规则的推导依据里取出它的来源 Service 名。
+// subjectNameOf 从一条 Baseline 规则的推导依据里取出它指向的那个对象名，
+// 用来在「这条规则挂不上任何 workload」的报告里点名。
 //
-// 依据里已经有这份信息——每条 EXPOSED_INGRESS 规则至少带一条 SourceService
-// derivation，指向推出它的那个 Service（derive_exposed.go）——不用在
-// baseline.Rule 上再加一个字段重复它。取不到时返回空字符串：调用方仍然要
-// 报出这条规则挂不上任何 workload，只是报告里的 Name 会是空的，好过因为
-// 取不到名字就整条吞掉。
-func serviceNameOf(br baseline.Rule) string {
+// 依据里已经有这份信息，不用在 baseline.Rule 上再加一个字段重复它：
+// EXPOSED_INGRESS 带 SourceService（推出它的 Service），KUBELET_PROBE 带
+// SourcePodProbe（声明探针的那个 workload）。
+//
+// **每一类 Subject 非空的 Baseline 都要在这里有一条。** 认不出的那一类会
+// 报出一个名字为空的缺口，而这份报告的全部用处就是告诉操作者该去看哪个
+// 对象 —— 空名字等于报了一条没法处置的缺口。
+//
+// 取不到时仍返回空字符串：报一条名字空的，好过因为取不到名字就整条吞掉。
+func subjectNameOf(br baseline.Rule) string {
 	for _, d := range br.Derivations {
-		if d.SourceKind == baseline.SourceService {
+		switch d.SourceKind {
+		case baseline.SourceService, baseline.SourcePodProbe:
 			return d.Name
 		}
 	}

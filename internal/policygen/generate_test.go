@@ -1361,3 +1361,86 @@ func TestExposedIngressWinningKeyFromObservedOnlyPodIsReported(t *testing.T) {
 			"却没有出现在 UnattachedBaselines 里: %+v", res.UnattachedBaselines)
 	}
 }
+
+// 挂不上的 KUBELET_PROBE 必须点得出**是哪个 workload**。
+//
+// serviceNameOf 只认 SourceService，探针规则一条都没有——报出来的 Name 会是
+// 空字符串，屏幕上是一行「KUBELET_PROBE 挂不上，名字空白」。而这条缺口的
+// 处置恰恰是去看那一个 workload 的标签，报不出名字就无从下手。
+func TestAnUnattachedKubeletProbeNamesItsWorkload(t *testing.T) {
+	// 名册里的 Pod 用赢家键 app.kubernetes.io/name；探针主体用 app，
+	// 两者解出同一个 workload 取值但键不同，于是挂不上（同上面那条
+	// Helm 迁移期的形态）。
+	pods := []replay.PodRef{
+		{ClusterID: "c1", Namespace: "uat-app", Name: "backend-0", IP: "10.4.0.9",
+			Labels: map[string]string{"app.kubernetes.io/name": "backend"}},
+	}
+	assets := snapshot.Assets{
+		ClusterID: "c1",
+		ProbeTargets: []snapshot.ProbeTarget{{
+			ClusterID: "c1", Namespace: "uat-app",
+			WorkloadKey: "app", Workload: "not-in-the-roster",
+			Ports: []snapshot.NamedPort{{Port: 8088, Protocol: "TCP"}},
+		}},
+		Registry: snapshot.ClusterRegistry{
+			ClusterID: "c1", PodCIDR: "10.4.0.0/16", NodeCIDR: "10.170.48.0/24",
+		},
+	}
+	res := policygen.Generate(policygen.Input{ClusterID: "c1", Pods: pods, Assets: assets})
+
+	var found bool
+	for _, u := range res.UnattachedBaselines {
+		if u.Kind != baseline.KindKubeletProbe {
+			continue
+		}
+		found = true
+		if u.Name != "not-in-the-roster" {
+			t.Errorf("Name = %q, want not-in-the-roster —— 报不出名字就无从下手", u.Name)
+		}
+	}
+	if !found {
+		t.Errorf("挂不上的探针规则没有报出来: %+v", res.UnattachedBaselines)
+	}
+}
+
+// **探针规则不产生 ExposureWidening。**
+//
+// 这一栏说的是「Service 点名的范围比规则实际覆盖的范围窄了多少」。探针规则
+// 的主体本来就是 workload 自己，没有第二个更窄的 selector 可比 —— 记一条
+// Service 名为空的放宽，读起来像「有个 Service 把范围放宽了」，而那个
+// Service 不存在。
+func TestKubeletProbeRulesProduceNoExposureWidening(t *testing.T) {
+	pods := []replay.PodRef{
+		{ClusterID: "c1", Namespace: "uat-app", Name: "backend-0", IP: "10.4.0.9",
+			Labels: map[string]string{"app": "backend"}},
+	}
+	assets := snapshot.Assets{
+		ClusterID: "c1",
+		ProbeTargets: []snapshot.ProbeTarget{{
+			ClusterID: "c1", Namespace: "uat-app",
+			WorkloadKey: "app", Workload: "backend",
+			Ports: []snapshot.NamedPort{{Port: 8088, Protocol: "TCP"}},
+		}},
+		Registry: snapshot.ClusterRegistry{
+			ClusterID: "c1", PodCIDR: "10.4.0.0/16", NodeCIDR: "10.170.48.0/24",
+		},
+	}
+	res := policygen.Generate(policygen.Input{ClusterID: "c1", Pods: pods, Assets: assets})
+
+	// 前提：规则真的挂上了，否则这条用例什么都没验到。
+	var attached bool
+	for _, p := range res.Policies {
+		for _, r := range p.Rules {
+			if r.Baseline != nil && *r.Baseline == baseline.KindKubeletProbe {
+				attached = true
+			}
+		}
+	}
+	if !attached {
+		t.Fatal("探针规则没挂上，这条用例的前提不成立")
+	}
+	if len(res.ExposureWidenings) != 0 {
+		t.Errorf("ExposureWidenings = %+v, want 空 —— 那条记录指向一个不存在的 Service",
+			res.ExposureWidenings)
+	}
+}
