@@ -69,16 +69,6 @@ const (
 	// 与 SNAPSHOT_MISSING 分开：后者说的是「我们数据里缺了一块」，
 	// 会把人引去查采集，而这里根本没有什么该采而没采的东西。
 	ReasonLBIngressAddress UnknownReason = "LB_INGRESS_ADDRESS"
-	// ReasonNodeAddress 表示这一端是本集群的一个节点地址。
-	//
-	// 节点按定义就不是 Pod，NetworkPolicy 里它只能是 ipBlock 对端 ——
-	// **这是一个结论，不是一次弃权**，与 LB_INGRESS_ADDRESS 同一形状。
-	//
-	// 与 SNAPSHOT_MISSING 分开的理由也一样：后者说「我们数据里缺了一块」，
-	// 会把人引去查采集，而这里根本没有什么该采而没采的东西。UAT 上这一类
-	// 占了 SNAPSHOT_MISSING 的全部 847 条，其中 707 条走的是 kubelet 探针
-	// 端口 —— 那批流量由 KUBELET_PROBE 基线覆盖，不需要任何人去查快照。
-	ReasonNodeAddress UnknownReason = "NODE_ADDRESS"
 	// ReasonNamedPortUnresolved 表示命名端口无法解析为具体端口号。
 	ReasonNamedPortUnresolved UnknownReason = "NAMED_PORT_UNRESOLVED"
 	// ReasonLogSampledOut 表示日志采样或限流导致记录缺失。
@@ -114,7 +104,6 @@ var allUnknownReasons = []UnknownReason{
 	ReasonNATTranslated,
 	ReasonExternalNoIdentity,
 	ReasonLBIngressAddress,
-	ReasonNodeAddress,
 	ReasonNamedPortUnresolved,
 	ReasonLogSampledOut,
 	ReasonPolicyMalformed,

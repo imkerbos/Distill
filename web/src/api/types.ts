@@ -223,9 +223,6 @@ export const UNKNOWN_REASON_LABEL: Record<string, string> = {
   // 会把人引去查采集；后者是判完了的结论——这个地址本来就没有 Pod
   // 主体，不存在一个"该采而没采"的东西，操作者不必再查。
   LB_INGRESS_ADDRESS: '这一端是负载均衡入口地址，只能按 ipBlock 表达，没有 Pod 主体可解',
-  // 与 LB_INGRESS_ADDRESS 同一形状，也与 SNAPSHOT_MISSING 相对：节点按定义
-  // 就不是 Pod，这一端解不出主体是结论，没有"该采而没采"的东西可查。
-  NODE_ADDRESS: '这一端是本集群的节点地址（多为 kubelet 探针），只能按 ipBlock 表达，没有 Pod 主体可解',
   IP_AMBIGUOUS: '同集群内 IP 复用，时间上不可区分',
   CLUSTER_AMBIGUOUS: '跨集群网段重叠，归属不唯一',
   IDENTITY_LOST_MESH: 'sidecar 导致源身份丢失',
