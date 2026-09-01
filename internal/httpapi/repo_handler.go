@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"golang.org/x/crypto/ssh"
 
 	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/response"
@@ -30,16 +31,31 @@ type gitRepoPayload struct {
 	URL           string `json:"repoUrl"`
 	Branch        string `json:"branch"`
 	CredentialRef string `json:"credentialRef"`
+	// PrivateKey 是这个仓库的 SSH 私钥（PEM），**只入不出**。
+	//
+	// 平台把它加密存进 stored_secret，credentialRef 自动填成 repoId，
+	// 调用方不需要理解 ref 这个概念（design doc 2026-09-01 §3.5）。
+	//
+	// 任何响应都不含它，列表与详情也不含 —— 它写进去之后除了平台自己
+	// 拿去连 Git，没有任何路径能取出来。
+	PrivateKey string `json:"privateKey,omitempty"`
 }
 
 // toRepo 把请求体转成领域对象。
 func (p gitRepoPayload) toRepo() registry.GitRepo {
-	return registry.GitRepo{
+	repo := registry.GitRepo{
 		ID:            p.ID,
 		URL:           p.URL,
 		Branch:        p.Branch,
 		CredentialRef: p.CredentialRef,
 	}
+	// 带了私钥就自动把 ref 指向这个仓库自己：调用方填了钥匙却还要再想一个
+	// 引用名，是把平台内部的概念摊给他。显式填了的 ref 不覆盖 —— 那是
+	// 让一把钥匙给多个仓库共用的正当写法。
+	if p.PrivateKey != "" && repo.CredentialRef == "" {
+		repo.CredentialRef = p.ID
+	}
+	return repo
 }
 
 // decodeGitRepoPayload 解析请求体。
@@ -90,6 +106,11 @@ func handleCreateGitRepo(d Deps) http.HandlerFunc {
 			writeRegistryError(w, r, d, err)
 			return
 		}
+		// 私钥在仓库登记成功之后再存：反过来的话，一次登记失败会留下一条
+		// 没有仓库的孤儿凭据，而没有任何东西会去清它。
+		if !storePrivateKey(w, r, d, repo.CredentialRef, p.PrivateKey) {
+			return
+		}
 		writeRepoVerification(w, r, d, repo)
 	}
 }
@@ -114,8 +135,14 @@ func handleUpdateGitRepo(d Deps) http.HandlerFunc {
 			return
 		}
 		p.ID = chi.URLParam(r, "repoID")
-		if err := d.Registry.UpdateGitRepo(r.Context(), actorOf(r), p.toRepo()); err != nil {
+		repo := p.toRepo()
+		if err := d.Registry.UpdateGitRepo(r.Context(), actorOf(r), repo); err != nil {
 			writeRegistryError(w, r, d, err)
+			return
+		}
+		// 换钥匙走这条路：带了新私钥就覆盖，没带就保持原样。
+		// **没带不等于要清空** —— 更新仓库地址时不该顺手把凭据删掉。
+		if !storePrivateKey(w, r, d, repo.CredentialRef, p.PrivateKey) {
 			return
 		}
 		response.WriteOK(w, map[string]string{"repoId": p.ID})
@@ -134,6 +161,17 @@ func handleDeleteGitRepo(d Deps) http.HandlerFunc {
 		if err := d.Registry.SoftDeleteGitRepo(r.Context(), actorOf(r), id); err != nil {
 			writeRegistryError(w, r, d, err)
 			return
+		}
+		// 仓库删掉了，它的凭据也跟着删：留下一条没有仓库的密文，
+		// 没有任何东西会去清它，而它仍然是一把能连上那个仓库的钥匙。
+		//
+		// 删凭据失败不让整个删除失败（仓库已经删了，报错会让操作者以为
+		// 没删掉而重试），但要留下痕迹供人工清理。
+		if d.CredentialStore != nil {
+			if err := d.CredentialStore.Delete(r.Context(), id); err != nil {
+				d.Logger.Error("the repository is deleted but its credential remains",
+					"request_id", RequestIDFrom(r.Context()), "repo", id, "error", err)
+			}
 		}
 		response.WriteOK(w, map[string]string{"repoId": id})
 	}
@@ -188,4 +226,42 @@ func writeRepoVerification(w http.ResponseWriter, r *http.Request, d Deps, repo 
 		}
 	}
 	response.WriteOK(w, repoVerifyStatus{VerifyResult: result, VerifiedAt: at})
+}
+
+// storePrivateKey 把请求里带的私钥加密存进平台自己的库。
+//
+// 空私钥是合法的：仓库可以先登记下来、凭据稍后再配（同 ValidateGitRepo
+// 对 credentialRef 的处置）。返回 false 表示响应已写好，调用方直接返回。
+func storePrivateKey(
+	w http.ResponseWriter, r *http.Request, d Deps, ref, key string,
+) bool {
+	if key == "" {
+		return true
+	}
+	if d.CredentialStore == nil {
+		// **不静默忽略。** 忽略之后操作者以为钥匙配好了，而失败会推迟到
+		// 写回那一刻，报成"仓库不可达"——排查方向完全错。
+		response.WriteInvalid(w,
+			"这个部署没有把凭据交给平台保管（secretsBackend 不是 DB），"+
+				"因此不能在这里填私钥。请改用该后端约定的方式配置凭据，"+
+				"或把 secretsBackend 切成 DB。")
+		return false
+	}
+	// **落库之前先解析一次。** 存一段解析不了的私钥，失败会推迟到写回那一刻，
+	// 而那时报的是"仓库不可达"（design doc 2026-09-01 §3.7）。
+	if _, err := ssh.ParsePrivateKey([]byte(key)); err != nil {
+		// 底层错误不外带：它可能带上私钥的片段。
+		response.WriteInvalid(w,
+			"这不是一把能用的 SSH 私钥。请粘贴私钥文件（PEM，"+
+				"-----BEGIN ... PRIVATE KEY----- 开头）的完整内容，"+
+				"不是公钥（.pub）、也不是访问令牌。")
+		return false
+	}
+	if err := d.CredentialStore.Put(r.Context(), ref, []byte(key)); err != nil {
+		d.Logger.Error("cannot store a repository credential",
+			"request_id", RequestIDFrom(r.Context()), "repo", ref, "error", err)
+		response.WriteSystem(w, http.StatusInternalServerError, response.CodeInternal)
+		return false
+	}
+	return true
 }

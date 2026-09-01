@@ -105,6 +105,22 @@ type Config struct {
 	Database DatabaseConfig `koanf:"database"`
 	// Evidence 是证据记账的周期。
 	Evidence EvidenceConfig `koanf:"evidence"`
+	// Secrets 是凭据加密参数。
+	Secrets SecretsConfig `koanf:"secrets"`
+}
+
+// SecretsConfig 是 DB 凭据后端的加密参数。
+//
+// **在配置文件/环境变量里，不在数据库里。** 这是 DB 后端成立的全部前提：
+// 密文落库而密钥不落库，于是一份完整的数据库转储解不开任何凭据
+// （design doc 2026-09-01 §2）。密钥与密文放在一起就等于没加密。
+type SecretsConfig struct {
+	// EncryptionKey 是 base64 编码的 32 字节 KEK。
+	//
+	// 走环境变量 DISTILL_SECRETS__ENCRYPTION_KEY 注入（k8s Secret 挂成
+	// 环境变量），不写进 configmap —— configmap 是明文的，且常被一并
+	// 提交进仓库。
+	EncryptionKey string `koanf:"encryption_key"`
 }
 
 // EvidenceConfig 是证据记账的周期。

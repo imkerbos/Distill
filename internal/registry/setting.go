@@ -18,6 +18,12 @@ const (
 	SecretsBackendDir SecretsBackend = "DIR"
 	// SecretsBackendSecretManager 是生产用的 Secret Manager 解析器。
 	SecretsBackendSecretManager SecretsBackend = "SECRET_MANAGER"
+	// SecretsBackendDB 把凭据以密文存进平台自己的数据库。
+	//
+	// 加密密钥来自启动配置、不经过数据库：拿到一份完整转储得到的是一堆
+	// 解不开的字节（design doc 2026-09-01 §2）。选它的理由是可用性——
+	// 另外两个后端都要求在平台之外先把私钥放好，而那不是"在界面上配一个仓库"。
+	SecretsBackendDB SecretsBackend = "DB"
 )
 
 // Valid 判断该后端是否已登记。
@@ -27,7 +33,7 @@ const (
 // 遗漏就是一次无声的编译通过（同 VerifyResult.Valid 的取舍）。
 func (b SecretsBackend) Valid() bool {
 	switch b {
-	case SecretsBackendNone, SecretsBackendDir, SecretsBackendSecretManager:
+	case SecretsBackendNone, SecretsBackendDir, SecretsBackendSecretManager, SecretsBackendDB:
 		return true
 	default:
 		return false
@@ -160,6 +166,16 @@ func validateSecretsBackendFields(s PlatformSetting) error {
 		}
 		if s.SecretsDir != "" {
 			return invalid("secretsBackend 为 SECRET_MANAGER 时 secretsDir 必须为空")
+		}
+	case SecretsBackendDB:
+		// DB 后端的凭据存在平台自己的库里，另外两套后端的定位字段都用不上。
+		// 留着非空值会让操作者以为两套后端都在生效——与 DIR 那条同一个理由。
+		//
+		// **加密密钥不在这里校验**：它来自启动配置、不落库，因此它缺不缺
+		// 是装配层的事（newSecretResolver 那里构造失败）。写进设置里校验
+		// 等于把密钥也搬进数据库的势力范围。
+		if s.SecretsProject != "" || s.SecretsPrefix != "" || s.SecretsDir != "" {
+			return invalid("secretsBackend 为 DB 时 secretsProject/secretsPrefix/secretsDir 必须全部为空")
 		}
 	}
 	return nil

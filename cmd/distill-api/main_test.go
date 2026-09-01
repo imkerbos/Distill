@@ -93,7 +93,7 @@ var _ httpapi.GitVerifier = (*settingsGitVerifier)(nil)
 // 结论写死成某个值的实现会有一半是绿的。
 func TestGitVerifierIsBuiltFromTheCurrentSettingOnEveryUse(t *testing.T) {
 	src := &mutableSource{current: baseSetting()}
-	v := newSettingsGitVerifier(settings.New(src), quietLogger())
+	v := newSettingsGitVerifier(settings.New(src), quietLogger(), nil, nil)
 	r := sampleRepo()
 
 	if got, _ := v.VerifyRepo(t.Context(), r); got != registry.RepoVerifyNotVerified {
@@ -135,7 +135,7 @@ func TestGitVerifierIsBuiltFromTheCurrentSettingOnEveryUse(t *testing.T) {
 // 时把结论朝「可信」的方向开。
 func TestGitVerifierIsNotVerifiedWhenTheSettingCannotBeRead(t *testing.T) {
 	src := &mutableSource{err: errBrokenSource}
-	v := newSettingsGitVerifier(settings.New(src), quietLogger())
+	v := newSettingsGitVerifier(settings.New(src), quietLogger(), nil, nil)
 
 	repoResult, at := v.VerifyRepo(t.Context(), sampleRepo())
 	if repoResult != registry.RepoVerifyNotVerified {
@@ -163,7 +163,7 @@ func TestGitVerifierIsNotVerifiedWhenTheSettingCannotBeRead(t *testing.T) {
 func TestGitVerifierIsNotVerifiedWhenItCannotBeBuilt(t *testing.T) {
 	s := dirSetting(t.TempDir())
 	s.GitVerifyHostKeys = "" // 没有 host key 就没有 SSH 校验，gitverify.New 拒绝构造。
-	v := newSettingsGitVerifier(settings.New(&mutableSource{current: s}), quietLogger())
+	v := newSettingsGitVerifier(settings.New(&mutableSource{current: s}), quietLogger(), nil, nil)
 
 	if got, _ := v.VerifyRepo(t.Context(), sampleRepo()); got != registry.RepoVerifyNotVerified {
 		t.Fatalf("repo verdict = %q with no host keys, want NOT_VERIFIED — never OK", got)
@@ -183,7 +183,7 @@ var errBrokenSource = errors.New("settings source is unavailable")
 // 判断"没有校验这回事"，包着 nil 指针的接口值会让那个判断为假 —— 随后
 // 每次校验都在空指针上调方法。
 func TestNewGitVerifierIsNilForTheNoneBackend(t *testing.T) {
-	v, err := newGitVerifier(t.Context(), baseSetting())
+	v, err := newGitVerifier(t.Context(), baseSetting(), nil, nil)
 	if err != nil {
 		t.Fatalf("newGitVerifier() error = %v", err)
 	}
@@ -193,7 +193,7 @@ func TestNewGitVerifierIsNilForTheNoneBackend(t *testing.T) {
 }
 
 func TestNewGitVerifierBuildsAVerifierWhenConfigured(t *testing.T) {
-	v, err := newGitVerifier(t.Context(), dirSetting(t.TempDir()))
+	v, err := newGitVerifier(t.Context(), dirSetting(t.TempDir()), nil, nil)
 	if err != nil {
 		t.Fatalf("newGitVerifier() error = %v", err)
 	}
@@ -211,7 +211,7 @@ func TestNewGitVerifierRefusesAMissingTimeout(t *testing.T) {
 	s := dirSetting(t.TempDir())
 	s.GitVerifyTimeout = 0
 
-	if _, err := newGitVerifier(t.Context(), s); err == nil {
+	if _, err := newGitVerifier(t.Context(), s, nil, nil); err == nil {
 		t.Fatal("newGitVerifier() = nil error, want a failure for a missing timeout")
 	}
 }
@@ -221,14 +221,14 @@ func TestNewGitVerifierRefusesMissingHostKeys(t *testing.T) {
 	s := dirSetting(t.TempDir())
 	s.GitVerifyHostKeys = ""
 
-	if _, err := newGitVerifier(t.Context(), s); err == nil {
+	if _, err := newGitVerifier(t.Context(), s, nil, nil); err == nil {
 		t.Fatal("newGitVerifier() = nil error, want a failure for missing host keys")
 	}
 }
 
 // 后端为 NONE 时装不出解析器，且必须是一个真正的 nil 接口。
 func TestNewSecretResolverIsNilForTheNoneBackend(t *testing.T) {
-	r, err := newSecretResolver(t.Context(), baseSetting())
+	r, err := newSecretResolver(t.Context(), baseSetting(), nil, nil)
 	if err != nil {
 		t.Fatalf("newSecretResolver() error = %v", err)
 	}
@@ -239,7 +239,7 @@ func TestNewSecretResolverIsNilForTheNoneBackend(t *testing.T) {
 
 // 选了 DIR 就装目录解析器。
 func TestNewSecretResolverPicksTheDirectoryBackend(t *testing.T) {
-	r, err := newSecretResolver(t.Context(), dirSetting(t.TempDir()))
+	r, err := newSecretResolver(t.Context(), dirSetting(t.TempDir()), nil, nil)
 	if err != nil {
 		t.Fatalf("newSecretResolver() error = %v", err)
 	}
@@ -263,7 +263,7 @@ func TestNewSecretResolverNeverFallsBackToTheDirectoryBackend(t *testing.T) {
 	s.SecretsProject = "distill-prod"
 	s.SecretsPrefix = "distill-git-"
 
-	r, err := newSecretResolver(t.Context(), s)
+	r, err := newSecretResolver(t.Context(), s, nil, nil)
 	if _, ok := r.(*secrets.DirResolver); ok {
 		t.Fatalf("resolver = %T for a Secret Manager setting, want the local directory backend never to be reached", r)
 	}
@@ -281,7 +281,7 @@ func TestNewSecretResolverRejectsAnUnregisteredBackend(t *testing.T) {
 	s := baseSetting()
 	s.SecretsBackend = registry.SecretsBackend("LOOKS_FINE")
 
-	if _, err := newSecretResolver(t.Context(), s); err == nil {
+	if _, err := newSecretResolver(t.Context(), s, nil, nil); err == nil {
 		t.Fatal("newSecretResolver() = nil error for an unregistered backend, want a failure")
 	}
 }

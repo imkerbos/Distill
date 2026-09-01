@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"time"
@@ -114,6 +115,12 @@ type Deps struct {
 	// 要有人填对才安全，而填错了没有任何症状 —— 填长了扫过量数据，填短了
 	// 漏掉真实流量并把它读成「这条规则没有流量、可以收紧」。「我们实际能
 	// 回答的是哪一段时间」是库里现成的事实，不是一个待填的参数。
+	// CredentialStore 保管平台自己持有的凭据（DB 后端）。
+	//
+	// nil 表示这个部署不由平台保管凭据（DIR / SECRET_MANAGER / NONE），
+	// 那时接口拒绝带私钥的请求——**不静默忽略**：忽略之后操作者以为钥匙
+	// 配好了，而失败会推迟到写回，报成"仓库不可达"。
+	CredentialStore CredentialStore
 }
 
 // 登录限流的参数。
@@ -397,4 +404,15 @@ func NewRouter(d Deps) http.Handler {
 	})
 
 	return r
+}
+
+// CredentialStore 是平台自己保管凭据的写入端。
+//
+// 只有写与存在性查询，**没有读**：私钥取出来这件事只发生在平台内部
+// （secrets.Resolver），不经过任何 HTTP 处理器。接口上少一个方法，
+// 就少一个把它透出去的位置。
+type CredentialStore interface {
+	Put(ctx context.Context, ref string, plaintext []byte) error
+	Delete(ctx context.Context, ref string) error
+	Has(ctx context.Context, ref string) (bool, error)
 }
