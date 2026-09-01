@@ -43,7 +43,7 @@ export const ALL_SECRETS_BACKENDS = Object.keys(SECRETS_BACKEND_LABEL) as Secret
 /** 表单里以数字承载的那几项。 */
 export type NumericSettingKey =
   | 'sessionTtlSeconds' | 'httpReadTimeoutMs' | 'httpWriteTimeoutMs'
-  | 'httpShutdownTimeoutMs' | 'gitVerifyTimeoutMs'
+  | 'httpShutdownTimeoutMs' | 'gitVerifyTimeoutMs' | 'gitWriteTimeoutMs'
 
 export interface NumericFieldSpec {
   key: NumericSettingKey
@@ -96,6 +96,14 @@ export const NUMERIC_FIELDS: readonly NumericFieldSpec[] = [
     effect: 'IMMEDIATE',
     hint: '一次只读校验的出站超时；校验在使用处现读设置，改完立刻生效。',
   },
+  {
+    key: 'gitWriteTimeoutMs',
+    label: '策略写回超时（毫秒）',
+    effect: 'IMMEDIATE',
+    // 与校验分开的理由要写在操作者看得见的地方：他多半会问"为什么有两个"。
+    hint: '一次写回的出站超时。它比校验大得多，因为写回要列举仓库、克隆部署分支、'
+      + '提交并推送；而且随策略仓库变大而变慢，仓库涨了就要往上调。',
+  },
 ]
 
 /**
@@ -134,6 +142,7 @@ export interface SettingsFormValues {
   secretsPrefix: string
   secretsDir: string
   gitVerifyTimeoutMs: string
+  gitWriteTimeoutMs: string
   /** 新的 known_hosts 原文。留空 = 不修改信任锚。 */
   hostKeysInput: string
 }
@@ -160,6 +169,7 @@ export function settingsFormValuesOf(v: PlatformSettingView): SettingsFormValues
     secretsPrefix: v.secretsPrefix,
     secretsDir: v.secretsDir,
     gitVerifyTimeoutMs: String(v.gitVerifyTimeoutMs),
+    gitWriteTimeoutMs: String(v.gitWriteTimeoutMs),
     hostKeysInput: '',
   }
 }
@@ -278,6 +288,7 @@ export function buildSettingsWrite(values: SettingsFormValues): SettingsBuildRes
       secretsPrefix: values.secretsPrefix.trim(),
       secretsDir: values.secretsDir.trim(),
       gitVerifyTimeoutMs: numbers.gitVerifyTimeoutMs,
+      gitWriteTimeoutMs: numbers.gitWriteTimeoutMs,
       // 留空就整个不带这个键：空串在协议上是"清空"，而这一页表达不出
       // 那个意思，也不该表达得出。
       ...(hostKeys === '' ? {} : { gitVerifyHostKeys: hostKeys }),

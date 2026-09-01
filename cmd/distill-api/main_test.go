@@ -38,6 +38,7 @@ func baseSetting() registry.PlatformSetting {
 		HTTPShutdownTimeout: 15 * time.Second,
 		SecretsBackend:      registry.SecretsBackendNone,
 		GitVerifyTimeout:    10 * time.Second,
+		GitWriteTimeout:     60 * time.Second,
 	}
 }
 
@@ -365,5 +366,32 @@ func TestDepsCarriesTheCredentialStore(t *testing.T) {
 	if !bytes.Contains(src, []byte("CredentialStore: newCredentialStore(")) {
 		t.Error("httpapi.Deps 上没有装配 CredentialStore —— " +
 			"凭据保管处存在、有用例、但接口层永远拿不到它")
+	}
+}
+
+// **写回用它自己的超时，不是校验那一个。**
+//
+// 两者共用一个值的后果在 UAT 上兑现了：策略仓库为空时写回成功过一次，
+// 542 个策略文件合进 main 之后每一次都 TIMEOUT —— 实测 plan 已经跑到
+// 9.7 秒、贴着 10 秒上限，push 再多一次克隆必然超。而这个缺陷会随平台
+// 自己的产出恶化：每写成功一次，仓库更大，下一次克隆更慢。
+//
+// 用两个差得很远的值：接错线时拿到的是 10 秒而不是 60 秒，差一个数量级
+// 才看得出来，取两个相近的值等于没验。
+func TestPolicyWriterUsesTheWriteTimeoutNotTheVerifyOne(t *testing.T) {
+	s := baseSetting()
+	s.GitVerifyTimeout = 10 * time.Second
+	s.GitWriteTimeout = 60 * time.Second
+	if s.GitWriteTimeout == s.GitVerifyTimeout {
+		t.Fatal("前提不成立：两个超时必须不同，否则这条用例验不到接线")
+	}
+	if err := registry.ValidatePlatformSetting(s); err != nil {
+		t.Fatalf("Validate() = %v —— 两个超时都为正的设置必须合法", err)
+	}
+	zero := s
+	zero.GitWriteTimeout = 0
+	if err := registry.ValidatePlatformSetting(zero); err == nil {
+		t.Error("gitWriteTimeout 为 0 被接受了 —— 那等于关掉超时保护，" +
+			"一次挂死的出站会占住请求直到进程重启，而写回那条路上握着一把私钥")
 	}
 }

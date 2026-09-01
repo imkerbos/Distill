@@ -57,7 +57,7 @@ func TestAnEmptyAllowlistIsValid(t *testing.T) {
 func TestSettingValidationRejectsABadAllowlist(t *testing.T) {
 	s := registry.PlatformSetting{
 		SessionTTL: 1, HTTPReadTimeout: 1, HTTPWriteTimeout: 1,
-		HTTPShutdownTimeout: 1, GitVerifyTimeout: 1,
+		HTTPShutdownTimeout: 1, GitVerifyTimeout: 1, GitWriteTimeout: 1,
 		SecretsBackend:         registry.SecretsBackendNone,
 		GitAllowedDestinations: "0.0.0.0/0",
 	}

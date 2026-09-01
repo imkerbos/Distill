@@ -1668,6 +1668,7 @@ export interface PlatformSettingView {
   secretsPrefix: string
   secretsDir: string
   gitVerifyTimeoutMs: number
+  gitWriteTimeoutMs: number
   /** 当前 host key 原文的 SHA-256 指纹；未配置时为空串。 */
   gitVerifyHostKeysFingerprint: string
 }
@@ -1689,6 +1690,7 @@ export interface PlatformSettingWrite {
   secretsPrefix: string
   secretsDir: string
   gitVerifyTimeoutMs: number
+  gitWriteTimeoutMs: number
   /**
    * known_hosts 原文。只入不出：读取端点没有对应字段，无从回显。
    *

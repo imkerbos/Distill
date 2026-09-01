@@ -30,6 +30,7 @@ type settingPayload struct {
 	SecretsPrefix         string `json:"secretsPrefix"`
 	SecretsDir            string `json:"secretsDir"`
 	GitVerifyTimeoutMs    int64  `json:"gitVerifyTimeoutMs"`
+	GitWriteTimeoutMs     int64  `json:"gitWriteTimeoutMs"`
 	// GitVerifyHostKeys 是 known_hosts 格式的原文，**只入不出**。
 	//
 	// 它在响应形状 settingView 里没有对应字段，那是刻意的：读取端点回的是
@@ -80,6 +81,7 @@ func (p settingPayload) toSetting(current registry.PlatformSetting) registry.Pla
 		SecretsPrefix:          p.SecretsPrefix,
 		SecretsDir:             p.SecretsDir,
 		GitVerifyTimeout:       time.Duration(p.GitVerifyTimeoutMs) * time.Millisecond,
+		GitWriteTimeout:        time.Duration(p.GitWriteTimeoutMs) * time.Millisecond,
 		GitVerifyHostKeys:      hostKeys,
 		GitAllowedDestinations: p.GitAllowedDestinations,
 	}
@@ -101,6 +103,7 @@ type settingView struct {
 	SecretsPrefix         string `json:"secretsPrefix"`
 	SecretsDir            string `json:"secretsDir"`
 	GitVerifyTimeoutMs    int64  `json:"gitVerifyTimeoutMs"`
+	GitWriteTimeoutMs     int64  `json:"gitWriteTimeoutMs"`
 	// GitVerifyHostKeysFingerprint 是当前 host key 原文的指纹；未配置时为空串。
 	//
 	// 指纹而非原文：host key 是平台连接策略仓库时的信任锚，而它能从后台改
@@ -124,6 +127,7 @@ func toSettingView(s registry.PlatformSetting) settingView {
 		SecretsPrefix:                s.SecretsPrefix,
 		SecretsDir:                   s.SecretsDir,
 		GitVerifyTimeoutMs:           int64(s.GitVerifyTimeout / time.Millisecond),
+		GitWriteTimeoutMs:            int64(s.GitWriteTimeout / time.Millisecond),
 		GitVerifyHostKeysFingerprint: hostKeysFingerprint(s.GitVerifyHostKeys),
 		GitAllowedDestinations:       s.GitAllowedDestinations,
 	}

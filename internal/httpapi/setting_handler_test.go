@@ -45,6 +45,7 @@ func settingBody(extra map[string]any) map[string]any {
 		"httpWriteTimeoutMs": 20000, "httpShutdownTimeoutMs": 15000,
 		"secretsBackend": "DIR", "secretsProject": "", "secretsPrefix": "",
 		"secretsDir": testDirBackendPath, "gitVerifyTimeoutMs": 10000,
+		"gitWriteTimeoutMs": 60000,
 		"gitVerifyHostKeys": testHostKeys,
 	}
 	for k, v := range extra {
@@ -140,6 +141,7 @@ func TestUpdateSettingStoresEveryField(t *testing.T) {
 		SecretsBackend:      registry.SecretsBackendDir,
 		SecretsDir:          testDirBackendPath,
 		GitVerifyTimeout:    10 * time.Second,
+		GitWriteTimeout:     60 * time.Second,
 		GitVerifyHostKeys:   testHostKeys,
 	}
 	if reg.setting != want {
@@ -211,7 +213,7 @@ func TestUpdateSettingRejectsNonPositiveTimeouts(t *testing.T) {
 
 	for _, field := range []string{
 		"sessionTtlSeconds", "httpReadTimeoutMs", "httpWriteTimeoutMs",
-		"httpShutdownTimeoutMs", "gitVerifyTimeoutMs",
+		"httpShutdownTimeoutMs", "gitVerifyTimeoutMs", "gitWriteTimeoutMs",
 	} {
 		t.Run(field, func(t *testing.T) {
 			rec := authedPutJSON(t, h, cookie, settingPath, settingBody(map[string]any{field: 0}))

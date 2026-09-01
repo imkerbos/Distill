@@ -17,6 +17,7 @@ func validSetting() registry.PlatformSetting {
 		HTTPShutdownTimeout: 15 * time.Second,
 		SecretsBackend:      registry.SecretsBackendNone,
 		GitVerifyTimeout:    10 * time.Second,
+		GitWriteTimeout:     60 * time.Second,
 		GitVerifyHostKeys:   "example.com ssh-ed25519 AAAA...",
 	}
 }

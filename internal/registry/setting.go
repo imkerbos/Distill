@@ -72,6 +72,13 @@ type PlatformSetting struct {
 	SecretsDir string `json:"secretsDir"`
 	// GitVerifyTimeout 是 Git 绑定只读校验的单次出站超时。
 	GitVerifyTimeout time.Duration `json:"gitVerifyTimeout"`
+	// GitWriteTimeout 是策略写回的单次出站超时。
+	//
+	// **与 GitVerifyTimeout 分开，不是重复。** 校验是一次浅读；写回要列举
+	// 仓库、克隆部署分支、提交、推送。共用一个值的后果在 UAT 上兑现了：
+	// 仓库为空时成功过一次，542 个策略文件进 main 之后每一次都 TIMEOUT。
+	// 而它会随平台自己的产出恶化 —— 每写成功一次，下一次克隆就更慢。
+	GitWriteTimeout time.Duration `json:"gitWriteTimeout"`
 	// GitVerifyHostKeys 是 known_hosts 格式的已知主机公钥，Git 校验时的信任锚。
 	//
 	// 为空时 gitverify.New 仍然拒绝构造（既有行为，不在这里重复校验）——
@@ -117,6 +124,11 @@ func ValidatePlatformSetting(s PlatformSetting) error {
 	}
 	if s.GitVerifyTimeout <= 0 {
 		return invalid("gitVerifyTimeout 必须为正")
+	}
+	// 非正等于关掉超时保护：一次挂死的出站会占住请求直到进程重启，
+	// 而写回那条路上还握着一把私钥。与上面几个同一条判据。
+	if s.GitWriteTimeout <= 0 {
+		return invalid("gitWriteTimeout 必须为正")
 	}
 	if !s.SecretsBackend.Valid() {
 		return invalidf("secretsBackend %q 不在已登记的取值范围内", s.SecretsBackend)

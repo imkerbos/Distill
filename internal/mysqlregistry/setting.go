@@ -42,6 +42,7 @@ type settingRow struct {
 	writeTimeoutMS     int64
 	shutdownTimeoutMS  int64
 	gitVerifyTimeoutMS int64
+	gitWriteTimeoutMS  int64
 }
 
 // durationIn 把 Duration 换成以 unit 为单位的整数，除不尽时报错。
@@ -74,6 +75,9 @@ func toSettingRow(s registry.PlatformSetting) (settingRow, error) {
 	if r.shutdownTimeoutMS, err = durationIn("httpShutdownTimeout", s.HTTPShutdownTimeout, time.Millisecond); err != nil {
 		return settingRow{}, err
 	}
+	if r.gitWriteTimeoutMS, err = durationIn("gitWriteTimeout", s.GitWriteTimeout, time.Millisecond); err != nil {
+		return settingRow{}, err
+	}
 	if r.gitVerifyTimeoutMS, err = durationIn("gitVerifyTimeout", s.GitVerifyTimeout, time.Millisecond); err != nil {
 		return settingRow{}, err
 	}
@@ -93,12 +97,12 @@ func (s *Store) Setting(ctx context.Context) (registry.PlatformSetting, error) {
 	err := s.db.QueryRowContext(ctx,
 		`SELECT session_ttl_seconds, http_read_timeout_ms, http_write_timeout_ms,
 		        http_shutdown_timeout_ms, secrets_backend, secrets_project,
-		        secrets_prefix, secrets_dir, gitverify_timeout_ms, gitverify_host_keys,
+		        secrets_prefix, secrets_dir, gitverify_timeout_ms, gitwrite_timeout_ms, gitverify_host_keys,
 		        git_allowed_destinations
 		   FROM platform_setting WHERE id = 1`).
 		Scan(&row.sessionTTLSeconds, &row.readTimeoutMS, &row.writeTimeoutMS,
 			&row.shutdownTimeoutMS, &backend, &out.SecretsProject, &out.SecretsPrefix,
-			&out.SecretsDir, &row.gitVerifyTimeoutMS, &out.GitVerifyHostKeys,
+			&out.SecretsDir, &row.gitVerifyTimeoutMS, &row.gitWriteTimeoutMS, &out.GitVerifyHostKeys,
 			&out.GitAllowedDestinations)
 	if errors.Is(err, sql.ErrNoRows) {
 		// 空表不等于「用默认值」：零值超时是关掉超时保护，零值 TTL 是
@@ -114,6 +118,7 @@ func (s *Store) Setting(ctx context.Context) (registry.PlatformSetting, error) {
 	out.HTTPWriteTimeout = time.Duration(row.writeTimeoutMS) * time.Millisecond
 	out.HTTPShutdownTimeout = time.Duration(row.shutdownTimeoutMS) * time.Millisecond
 	out.GitVerifyTimeout = time.Duration(row.gitVerifyTimeoutMS) * time.Millisecond
+	out.GitWriteTimeout = time.Duration(row.gitWriteTimeoutMS) * time.Millisecond
 	out.SecretsBackend = registry.SecretsBackend(backend)
 	return out, nil
 }
@@ -169,13 +174,13 @@ func (s *Store) UpdateSetting(
 				    SET session_ttl_seconds = ?, http_read_timeout_ms = ?,
 				        http_write_timeout_ms = ?, http_shutdown_timeout_ms = ?,
 				        secrets_backend = ?, secrets_project = ?, secrets_prefix = ?,
-				        secrets_dir = ?, gitverify_timeout_ms = ?,
+				        secrets_dir = ?, gitverify_timeout_ms = ?, gitwrite_timeout_ms = ?,
 				        gitverify_host_keys = ?, git_allowed_destinations = ?,
 				        updated_at = ?
 				  WHERE id = 1`,
 				row.sessionTTLSeconds, row.readTimeoutMS, row.writeTimeoutMS,
 				row.shutdownTimeoutMS, string(ps.SecretsBackend), ps.SecretsProject,
-				ps.SecretsPrefix, ps.SecretsDir, row.gitVerifyTimeoutMS,
+				ps.SecretsPrefix, ps.SecretsDir, row.gitVerifyTimeoutMS, row.gitWriteTimeoutMS,
 				ps.GitVerifyHostKeys, ps.GitAllowedDestinations, s.now(),
 			); err != nil {
 				return fmt.Errorf("update platform setting: %w", err)

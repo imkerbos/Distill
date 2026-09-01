@@ -475,7 +475,11 @@ func (v *settingsPolicyWriter) writer(ctx context.Context) (*gitwrite.Writer, er
 	if err != nil {
 		return nil, err
 	}
-	writer, err := gitwrite.New(resolver, []byte(s.GitVerifyHostKeys), s.GitVerifyTimeout, allowed)
+	// **写回用自己的超时，不复用校验那一个。** 校验是一次浅读，写回要列举
+	// 仓库、克隆部署分支、提交、推送 —— 共用一个值的后果在 UAT 上兑现了：
+	// 仓库为空时成功过一次，542 个策略文件进 main 之后每一次都 TIMEOUT
+	// （migrations/000037）。
+	writer, err := gitwrite.New(resolver, []byte(s.GitVerifyHostKeys), s.GitWriteTimeout, allowed)
 	if err != nil {
 		v.logger.Error("cannot build a policy writer from the current setting", "error", err)
 		return nil, ErrPolicyWriterUnavailable
