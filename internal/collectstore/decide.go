@@ -308,8 +308,8 @@ func (t traffic) attribute(c flow.Connection) attributed {
 		return a
 	}
 
-	srcPod, srcOK := t.podRefOf(a.src, c.Source.IP)
-	dstPod, dstOK := t.podRefOf(a.dst, c.Dest.IP)
+	srcPod, srcOK := t.podRefAt(a.src, a.srcOutcome, c.Source.IP)
+	dstPod, dstOK := t.podRefAt(a.dst, a.dstOutcome, c.Dest.IP)
 	if !srcOK || !dstOK {
 		// 区间说那一刻这个地址上有 Pod，锚点那次快照里却找不到它。缺的是
 		// 标签，而没有标签就比不了 selector。拿一份空标签去比会得出"没有
@@ -484,6 +484,34 @@ func (t traffic) unknown(reason replay.UnknownReason, detail string) replay.Deci
 // 数据，一条合法的规则只会判 NAMED_PORT_UNRESOLVED，即便集群里那个端口
 // 确实开着。协议在这里从快照的自由字符串转成 replay.Protocol —— 两个包
 // 的类型故意不共用，PodRef 是求值引擎收窄过的最小视图（见 replay.PodRef）。
+// podRefAt 按解析结果补主体，hostNetwork 那一端不查快照。
+//
+// **hostNetwork 端点没有可查的主体。** 多个 hostNetwork Pod 共用节点 IP 时
+// identity.Resolve 返回零值 Identity（「具体是哪一个 Pod 既答不出也不重要」），
+// 拿它去查 podKey{"",""} 必然落空，而调用方把落空读成「区间与快照对不上」——
+// 一个并不存在的采集缺口。UAT 实测这一条产出了全部 794 条残余
+// SNAPSHOT_MISSING：一个节点上十个 hostNetwork DaemonSet，多区间覆盖是常态。
+//
+// 不查快照也不缺什么：这一端不在 Pod 网络里，podSelector 选不中它，标签
+// 与命名端口都没有用处。给出 HostNetwork=true 的最小主体，求值引擎的
+// localPod 会照旧跳过这一侧（那是对的：本集群策略确实管不到它），而
+// evaluator 那道「声称属于本集群却没有主体」的拦截不会误伤 —— 主体非空。
+func (t traffic) podRefAt(
+	id identity.Identity, outcome identity.Outcome, ip string,
+) (*replay.PodRef, bool) {
+	if outcome == identity.OutcomeHostNetwork {
+		return &replay.PodRef{
+			ClusterID:   t.clusterID,
+			Namespace:   id.Namespace,
+			Name:        id.PodName,
+			IP:          ip,
+			HostNetwork: true,
+			InMesh:      id.InMesh,
+		}, true
+	}
+	return t.podRefOf(id, ip)
+}
+
 func (t traffic) podRefOf(id identity.Identity, ip string) (*replay.PodRef, bool) {
 	p, ok := t.pods[podKey{namespace: id.Namespace, name: id.PodName}]
 	if !ok {
