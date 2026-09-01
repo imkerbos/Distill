@@ -124,3 +124,35 @@ func TestProbesCollectedDistinguishesNeverCollectedFromNoProbes(t *testing.T) {
 		t.Error("空快照被判成没采过 —— 会给一个没有 Pod 的集群报一条不存在的盲区")
 	}
 }
+
+// **hostNetwork Pod 不产生探针主体。**
+//
+// 它不受 NetworkPolicy 管控，候选策略的花名册明确把它排除
+// （generate.go 的 ExclusionHostNetwork）。为它推一条探针规则的后果不是
+// 多一条无害的放行，而是一个**永远挂不上**的主体：花名册里没有这个
+// workload，规则进 UnattachedBaselines，写回门禁据此拒绝出计划，而操作者
+// 无论怎么改标签都消不掉它。UAT 上 monitoring/prometheus-node-exporter
+// 正是这样把整个集群的写回卡死的。
+func TestHostNetworkPodsProduceNoProbeTarget(t *testing.T) {
+	hn := probePod("monitoring", "node-exporter-abc",
+		map[string]string{"app": "prometheus-node-exporter"}, 9100)
+	hn.hostNetwork = true
+	got := probeTargetsOf("uat-1", []observedPod{hn})
+	if len(got) != 0 {
+		t.Errorf("probeTargetsOf() = %+v, want 空 —— 这个主体永远挂不上，会把写回门禁卡死", got)
+	}
+}
+
+// 同一个 workload 混着 hostNetwork 与普通 Pod 时，只按普通 Pod 出主体。
+func TestAMixedWorkloadKeepsOnlyTheGovernedPods(t *testing.T) {
+	labels := map[string]string{"app": "mixed"}
+	hn := probePod("uat-app", "mixed-host", labels, 9100)
+	hn.hostNetwork = true
+	got := probeTargetsOf("uat-1", []observedPod{hn, probePod("uat-app", "mixed-pod", labels, 8088)})
+	if len(got) != 1 {
+		t.Fatalf("聚合出 %d 个，want 1", len(got))
+	}
+	if len(got[0].Ports) != 1 || got[0].Ports[0].Port != 8088 {
+		t.Errorf("Ports = %+v, want 只有 8088 —— hostNetwork Pod 的端口不该并进来", got[0].Ports)
+	}
+}

@@ -8,11 +8,15 @@ import (
 	"testing"
 	"time"
 
+	networkingv1 "k8s.io/api/networking/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"github.com/imkerbos/Distill/internal/baseline"
 	"github.com/imkerbos/Distill/internal/collectstore"
 
 	"github.com/imkerbos/Distill/internal/fixture"
 	"github.com/imkerbos/Distill/internal/gitwrite"
+	"github.com/imkerbos/Distill/internal/httpapi"
 	"github.com/imkerbos/Distill/internal/policygen"
 	"github.com/imkerbos/Distill/internal/registry"
 	"github.com/imkerbos/Distill/internal/store"
@@ -516,5 +520,53 @@ func TestTheUnattachedRefusalPointsAtTheLabelsNotTheRegistry(t *testing.T) {
 	}
 	if strings.Contains(msg, "若某一类在本集群确实不需要") {
 		t.Errorf("拒绝把操作者指向了集群登记，而那里没有能豁免这一条的地方: %q", msg)
+	}
+}
+
+// **挂不上的探针要按探针的话说，不能套用 Service 那套处置。**
+//
+// 这条拦截的文案原本只服务 EXPOSED_INGRESS —— 那时 Subject 非空的 Baseline
+// 只有它一类。KUBELET_PROBE 也带 Subject 之后，同一句话会把一条探针缺口
+// 描述成"对外暴露的 Service"，并让操作者去对齐一个根本不存在的 Service 的
+// spec.selector。处置指错方向比不给处置更糟：他会去翻一个不存在的对象，
+// 而真正要看的是这个 workload 的归属标签。
+func TestTheGateDescribesAnUnattachedProbeInItsOwnTerms(t *testing.T) {
+	msg := httpapi.EnforcingBlockersForTest(store.PolicyPreview{
+		Overridden: store.OverriddenView{
+			Enabled: []networkingv1.NetworkPolicy{
+				{ObjectMeta: metav1.ObjectMeta{Namespace: "monitoring", Name: "w"}},
+			},
+		},
+		UnattachedBaselines: []policygen.UnattachedBaselineRule{{
+			Kind: baseline.KindKubeletProbe, Namespace: "monitoring",
+			Name: "prometheus-node-exporter", Reason: policygen.UnattachedBaselineNoSuchWorkload,
+		}},
+	})
+	if msg == "" {
+		t.Fatal("挂不上的探针没有挡住写回")
+	}
+	if !strings.Contains(msg, "prometheus-node-exporter") {
+		t.Errorf("没点名是哪个 workload: %s", msg)
+	}
+	if strings.Contains(msg, "spec.selector") || strings.Contains(msg, "对外暴露的 Service") {
+		t.Errorf("把探针缺口说成了 Service 的事，处置指向一个不存在的对象:\n%s", msg)
+	}
+}
+
+// EXPOSED_INGRESS 那一支的文案不变：它说的确实是 Service。
+func TestTheGateStillDescribesAnUnattachedExposureAsAService(t *testing.T) {
+	msg := httpapi.EnforcingBlockersForTest(store.PolicyPreview{
+		Overridden: store.OverriddenView{
+			Enabled: []networkingv1.NetworkPolicy{
+				{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "w"}},
+			},
+		},
+		UnattachedBaselines: []policygen.UnattachedBaselineRule{{
+			Kind: baseline.KindExposedIngress, Namespace: "shop",
+			Name: "orphan-lb", Reason: policygen.UnattachedBaselineNoSuchWorkload,
+		}},
+	})
+	if !strings.Contains(msg, "spec.selector") {
+		t.Errorf("暴露那一支丢了它自己的处置: %s", msg)
 	}
 }

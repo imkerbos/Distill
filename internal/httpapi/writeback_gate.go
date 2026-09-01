@@ -54,13 +54,23 @@ func enforcingBlockers(pv store.PolicyPreview) string {
 		parts = append(parts, "这些命名空间的必备 Baseline 尚未齐备："+strings.Join(missing, "；")+
 			"。若某一类在本集群确实不需要，请在集群登记里写下理由")
 	}
-	// 挂不上的暴露单独说，**处置也单独说**：这一栏补不了登记，要去看这个
-	// Service 的 selector 与它真正想暴露的 workload 之间标签对不对得上。
-	if unattached := unattachedInPushedNamespaces(pv); len(unattached) > 0 {
+	// 挂不上的规则单独说，**处置还要按类别分开说**：两类的处置指向不同的
+	// 对象。混成一句的后果不是文案不精确，而是把操作者指向一个不存在的
+	// 东西 —— 让他去对齐一条探针规则背后那个根本没有的 Service 的
+	// spec.selector，而真正要看的是这个 workload 的归属标签。
+	exposures, others := unattachedInPushedNamespaces(pv)
+	if len(exposures) > 0 {
 		parts = append(parts,
 			"这些对外暴露的 Service 推出了放行范围，却挂不到任何 workload 上，"+
-				"下发之后它们的入口会被 default-deny 断掉："+strings.Join(unattached, "；")+
+				"下发之后它们的入口会被 default-deny 断掉："+strings.Join(exposures, "；")+
 				"。去把 Service 的 spec.selector 与那个 workload 的标签对齐"+
+				"（集群登记里没有能豁免这一条的地方）")
+	}
+	if len(others) > 0 {
+		parts = append(parts,
+			"这些必备 Baseline 推出了放行范围，却挂不到任何 workload 上，"+
+				"下发之后它们要放行的流量会被 default-deny 断掉："+strings.Join(others, "；")+
+				"。去看这个 workload 的归属标签与候选策略花名册对不对得上"+
 				"（集群登记里没有能豁免这一条的地方）")
 	}
 	// 未评估单独说，不与缺失混成一句：处置不同 —— 缺失去补登记，
@@ -128,18 +138,26 @@ func missingInPushedNamespaces(pv store.PolicyPreview) []string {
 // 接口进"没有挂上的对外暴露"那一节（unattachedBaselineView.ts 为两种成因
 // 各写了一句处置）。spec §6.2 要的是这次暴露不能悄无声息，不是它必须拦住
 // 写回 —— 而一条既拦不住又劝不动的拒绝，两样都做不到。
-func unattachedInPushedNamespaces(pv store.PolicyPreview) []string {
+// 分两栏返回：EXPOSED_INGRESS 的处置指向 Service 的 selector，其余几类
+// （今天是 KUBELET_PROBE）指向 workload 自己的归属标签。按类别分开是必须
+// 的 —— 一条统一的文案会把探针缺口的处置指向一个不存在的 Service。
+func unattachedInPushedNamespaces(pv store.PolicyPreview) (exposures, others []string) {
 	pushed := pushedNamespaces(pv.Overridden.Enabled)
-	var out []string
 	for _, u := range pv.UnattachedBaselines {
 		if !pushed[u.Namespace] || !blocksWriteback(u.Reason) {
 			continue
 		}
-		out = append(out, u.Namespace+"/"+u.Name+"（"+string(u.Kind)+"，"+
-			string(u.Reason)+"）")
+		line := u.Namespace + "/" + u.Name + "（" + string(u.Kind) + "，" +
+			string(u.Reason) + "）"
+		if u.Kind == baseline.KindExposedIngress {
+			exposures = append(exposures, line)
+			continue
+		}
+		others = append(others, line)
 	}
-	sort.Strings(out)
-	return out
+	sort.Strings(exposures)
+	sort.Strings(others)
+	return exposures, others
 }
 
 // blocksWriteback 判断一种"挂不上"的成因该不该挡住写回。

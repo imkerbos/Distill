@@ -659,6 +659,14 @@ func probeTargetsOf(clusterID string, pods []observedPod) []snapshot.ProbeTarget
 	seen := map[key]map[snapshot.NamedPort]bool{}
 	var order []key
 	for _, p := range pods {
+		if p.hostNetwork {
+			// hostNetwork Pod 不受 NetworkPolicy 管控，候选策略的花名册
+			// 明确把它排除（policygen 的 ExclusionHostNetwork）。为它推一条
+			// 探针规则不是多一条无害的放行，而是一个**永远挂不上**的主体：
+			// 花名册里没有这个 workload，规则进 UnattachedBaselines，写回
+			// 门禁据此拒绝出计划，而操作者无论怎么改标签都消不掉它。
+			continue
+		}
 		k, v, ok := policygen.WorkloadOf(p.labels)
 		if !ok {
 			continue
