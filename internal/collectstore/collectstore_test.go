@@ -67,6 +67,7 @@ var cleanupStatements = []string{
 	// 测试留下的行会让下面那条 DELETE FROM collection_run 撞上外键，
 	// 表现为另一个包的测试无故失败。
 	"DELETE FROM identity_derive_run",
+	"DELETE FROM flow_retention",
 	"DELETE FROM observed_connection",
 	"DELETE FROM flow_ingest_run",
 	"DELETE FROM pod_identity_interval",

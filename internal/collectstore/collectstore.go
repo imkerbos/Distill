@@ -58,6 +58,17 @@ var ErrNoCollection = errors.New("collectstore: no usable collection for this cl
 // 路上没有资产可用 —— 失败方式会从一次明确的拒绝变成一份空报告。
 var ErrNoFlowIngest = fmt.Errorf("%w: no flow ingest", ErrNoCollection)
 
+// ErrWindowPurged 表示这个窗口早于保留水位，那段连接已经被清理掉了。
+//
+// **与"这段时间没有流量"必须分开。** 清理之后那段窗口查出来是零条，而
+// 零条会被读成一个关于集群的结论：那时没有人在通信。它不是 —— 我们只是
+// 不再留着那段证据（同 identity 的 NOT_COVERED / NO_DATA 那条纪律，
+// 也是 design doc 2026-09-02 §2.2 立这套水位的全部理由）。
+//
+// 是窗口级的错误而不是 replay.UnknownReason：那个枚举挂在每一条流量上，
+// 而窗口被清理之后根本没有流量可挂。
+var ErrWindowPurged = errors.New("collectstore: the flow window has been purged by retention")
+
 // ErrReadNotCollectedYet 表示这个读方法还没有接到采集数据上。
 //
 // 分阶段接入的中间态必须是一次明确的拒绝，不是一份空结果，也不是一份
@@ -233,6 +244,13 @@ func (r *Reader) describeAt(
 ) (described, error) {
 	at := window.From
 
+	// 保留水位排在最前，**在读连接之前**：读完再判的话，一个被清理干净的
+	// 窗口会先产出一份零条的结果，而任何一处忘了检查这个错误的调用方
+	// 都会把它当成"这段时间没有流量"用下去。
+	if err := r.refuseIfPurged(ctx, clusterID, window); err != nil {
+		return described{}, err
+	}
+
 	anchor, err := r.assetAnchor(ctx, clusterID, at)
 	if err != nil {
 		return described{}, err
@@ -400,4 +418,26 @@ func (r *Reader) assetAnchor(ctx context.Context, clusterID string, at time.Time
 			"%w: cluster %s has no collection run covering that moment", ErrNoCollection, clusterID)
 	}
 	return anchor.Time, nil
+}
+
+// refuseIfPurged 在窗口起点早于保留水位时拒绝作答。
+//
+// 判的是窗口**起点**：起点之后的部分可能还在，但那份结果描述的已经不是
+// 调用方问的那段时间了，而它自己看不出来。宁可拒绝一次答得出一部分的
+// 查询，也不给一份说不清覆盖了多少的答案。
+//
+// 从未清理过（水位未设）时什么都不做 —— 那是绝大多数集群的常态。
+func (r *Reader) refuseIfPurged(
+	ctx context.Context, clusterID string, window flow.Window,
+) error {
+	from, ok, err := r.facts.RetainedFrom(ctx, clusterID)
+	if err != nil {
+		return err
+	}
+	if !ok || !window.From.Before(from) {
+		return nil
+	}
+	return fmt.Errorf("%w: cluster %s window starts at %s, retained from %s",
+		ErrWindowPurged, clusterID,
+		window.From.UTC().Format(time.RFC3339), from.UTC().Format(time.RFC3339))
 }

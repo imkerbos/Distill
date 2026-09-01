@@ -186,11 +186,44 @@ type Accountant struct {
 	windows  Windows
 	tasks    []Task
 	logger   *slog.Logger
+	// purger 删掉保留水位之前的连接；为 nil 表示这个部署不清理。
+	//
+	// 挂在记账循环里而不是另起一个组件：清理的水位取自记账进度，而这里
+	// 已经按集群遍历、已经知道每件记账记到哪、也已经有失败可见性
+	// （2026-08-29 停摆 13 小时的正是它）。
+	purger Purger
+	// retentionOf 给出一个集群的可查询期。
+	retentionOf func(registry.Cluster) time.Duration
+	// now 供用例注入时钟。保留水位是"现在减可查询期"，用真实时钟的话
+	// 那条判断没法被测到。
+	now func() time.Time
 }
 
 // NewAccountant 构造一个按集群记账的调度器。
 func NewAccountant(c Clusters, w Windows, logger *slog.Logger, tasks ...Task) Accountant {
-	return Accountant{clusters: c, windows: w, tasks: tasks, logger: logger}
+	return Accountant{
+		clusters: c, windows: w, tasks: tasks, logger: logger,
+		now: func() time.Time { return time.Now().UTC() },
+	}
+}
+
+// WithClock 换掉这个调度器读的时钟，供用例注入。
+//
+// 保留水位是"现在减可查询期"，用真实时钟的话那条判断没法被测到 ——
+// 而它正是这套机制里最要紧的一条。
+func (a Accountant) WithClock(now func() time.Time) Accountant {
+	a.now = now
+	return a
+}
+
+// WithPurge 给这个调度器接上流量清理。
+//
+// 不接就不清理：清理是删数据，一个"默认打开"的删除在升级时会悄悄开始跑，
+// 而操作者没有任何机会先看一眼水位算得对不对。
+func (a Accountant) WithPurge(p Purger, retention func(registry.Cluster) time.Duration) Accountant {
+	a.purger = p
+	a.retentionOf = retention
+	return a
 }
 
 // Once 给每个集群的每件记账各做一次。
@@ -219,6 +252,7 @@ func (a Accountant) Once(ctx context.Context) error {
 			continue
 		}
 		a.accountCluster(ctx, c.ID)
+		a.purgeAfterAccounting(ctx, c)
 	}
 	return nil
 }

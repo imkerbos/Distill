@@ -56,6 +56,7 @@ var cleanupStatements = []string{
 	"DELETE FROM reconciliation_subject",
 	"DELETE FROM reconciliation_run",
 	"DELETE FROM identity_derive_run",
+	"DELETE FROM flow_retention",
 	"DELETE FROM observed_connection",
 	"DELETE FROM flow_ingest_run",
 	"DELETE FROM pod_identity_interval",
