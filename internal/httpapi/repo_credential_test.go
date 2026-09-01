@@ -143,6 +143,9 @@ func TestPrivateKeyNeverComesBackOutOfTheAPI(t *testing.T) {
 // 存一段用不了的私钥，失败会推迟到写回那一刻，而那时报的是"仓库不可达"——
 // 排查方向完全错。
 func TestAnUnusablePrivateKeyIsRefusedBeforeItIsStored(t *testing.T) {
+	// **这里不放形似真令牌的字面量。** 判定看的只是"这段东西解析不成私钥"，
+	// 任何非 PEM 串都验得到同一条路径；而一个长得像真令牌的样例迟早会被
+	// 照着换成一个真的（这个用例里就出现过一次，被 GitHub 的推送保护拦下）。
 	for _, tc := range []struct{ name, key string }{
 		{"公钥而不是私钥", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA test@example"},
 		{"访问令牌", "deploy-token-REDACTED"},
