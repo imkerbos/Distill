@@ -279,8 +279,7 @@ func subjectOf(
 	if replay.IsUnmanaged(*ep.Pod) {
 		return subject{}, false, &UngeneratableItem{
 			FlowID: o.FlowID, Reason: ReasonUnmanagedEndpoint,
-			Detail: fmt.Sprintf("%s/%s 使用 hostNetwork，NetworkPolicy 管不到",
-				ep.Pod.Namespace, ep.Pod.Name),
+			Detail: endpointName(ep.Pod) + " 使用 hostNetwork，NetworkPolicy 管不到",
 		}
 	}
 	key, wl, ok := resolveWorkloadLabel(ep.Pod.Labels)
@@ -333,8 +332,7 @@ func peerOf(o Observation, ep replay.Endpoint, clusterID string) (
 		if replay.IsUnmanaged(*ep.Pod) {
 			return "", "", "", "", false, &UngeneratableItem{
 				FlowID: o.FlowID, Reason: ReasonUnmanagedEndpoint,
-				Detail: fmt.Sprintf("对端 %s/%s 使用 hostNetwork，不受 NetworkPolicy 管控",
-					ep.Pod.Namespace, ep.Pod.Name),
+				Detail: "对端 " + endpointName(ep.Pod) + " 使用 hostNetwork，不受 NetworkPolicy 管控",
 			}
 		}
 		if key, wl, hit := resolveWorkloadLabel(ep.Pod.Labels); hit {
@@ -389,4 +387,20 @@ func evidenceFor(o Observation) EvidenceClass {
 // isExternal 报告端点是否为集群外地址：既无 Pod 身份，也不属于任何集群。
 func isExternal(ep replay.Endpoint) bool {
 	return ep.Pod == nil && ep.ClusterID == ""
+}
+
+// endpointName 是一个端点在给人读的说明里的称呼。
+//
+// **没有名字时用地址。** 多个 hostNetwork Pod 共用节点 IP 时
+// identity.Resolve 返回零值 Identity（「具体是哪一个 Pod 既答不出也不
+// 重要」），照 "%s/%s" 渲染出来是一行 "/ 使用 hostNetwork" —— 说明文字的
+// 全部用处就是告诉操作者说的是哪一端，而地址是这时唯一还认得出对象的东西。
+func endpointName(p *replay.PodRef) string {
+	if p == nil {
+		return ""
+	}
+	if p.Namespace == "" || p.Name == "" {
+		return p.IP
+	}
+	return p.Namespace + "/" + p.Name
 }

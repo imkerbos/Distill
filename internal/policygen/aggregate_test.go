@@ -374,3 +374,20 @@ func TestResolvedButUntrustedIdentityStillReportsDegradedEvidence(t *testing.T) 
 		t.Fatalf("got %+v, want one DEGRADED_EVIDENCE", bad)
 	}
 }
+
+// **主体名为空时改用地址，不印出一个 "/"。**
+//
+// 多个 hostNetwork Pod 共用节点 IP 时 identity.Resolve 返回零值 Identity
+// （「具体是哪一个 Pod 既答不出也不重要」），下游拿到的主体因此没有
+// namespace 与名字。按 "%s/%s" 渲染出来是一行 "/ 使用 hostNetwork"，
+// 操作者无从知道说的是哪一端 —— 而地址是这时唯一还认得出对象的东西。
+func TestAnUnnamedHostNetworkEndpointIsDescribedByItsAddress(t *testing.T) {
+	if got := endpointName(&replay.PodRef{IP: "10.170.48.99", HostNetwork: true}); got != "10.170.48.99" {
+		t.Errorf("endpointName() = %q, want 10.170.48.99 —— 空主体印成 \"/\" 指不出任何对象", got)
+	}
+	if got := endpointName(&replay.PodRef{
+		Namespace: "kube-system", Name: "kube-proxy-x", IP: "10.170.48.99",
+	}); got != "kube-system/kube-proxy-x" {
+		t.Errorf("endpointName() = %q, want kube-system/kube-proxy-x", got)
+	}
+}
