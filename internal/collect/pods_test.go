@@ -10,6 +10,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"github.com/imkerbos/Distill/internal/cluster"
 	"github.com/imkerbos/Distill/internal/snapshot"
@@ -600,5 +601,189 @@ func TestToPodDefaultsNamedPortProtocolToTCP(t *testing.T) {
 	want := []snapshot.NamedPort{{Name: "kafka-external", Port: 9095, Protocol: "TCP"}}
 	if !reflect.DeepEqual(got.NamedPorts, want) {
 		t.Errorf("NamedPorts = %v, want %v —— 未写协议要落成 TCP", got.NamedPorts, want)
+	}
+}
+
+// probeCtr 是探针用例的容器骨架。
+func probeCtr(readiness, liveness, startup *corev1.Probe) corev1.Container {
+	return corev1.Container{
+		Name:           "app",
+		ReadinessProbe: readiness,
+		LivenessProbe:  liveness,
+		StartupProbe:   startup,
+	}
+}
+
+func httpProbe(port intstr.IntOrString) *corev1.Probe {
+	return &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
+		HTTPGet: &corev1.HTTPGetAction{Port: port},
+	}}
+}
+
+// kubelet 从节点地址探测，podSelector 永远选不中它。探针端口是这条基线的
+// 唯一依据，采集不到就推导不出，而缺了它的 default-deny 会让 Pod 被判
+// 不健康并杀掉——整个集群滚着重启。
+//
+// 三种探针都要读：startup 探针失败同样会杀 Pod，漏掉它的症状是
+// 「慢启动的服务永远起不来」。
+func TestToPodCarriesProbePorts(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ctr  corev1.Container
+		want []snapshot.NamedPort
+	}{
+		{
+			name: "readiness",
+			ctr:  probeCtr(httpProbe(intstr.FromInt32(8088)), nil, nil),
+			want: []snapshot.NamedPort{{Port: 8088, Protocol: "TCP"}},
+		},
+		{
+			name: "liveness",
+			ctr:  probeCtr(nil, httpProbe(intstr.FromInt32(80)), nil),
+			want: []snapshot.NamedPort{{Port: 80, Protocol: "TCP"}},
+		},
+		{
+			name: "startup",
+			ctr:  probeCtr(nil, nil, httpProbe(intstr.FromInt32(9000))),
+			want: []snapshot.NamedPort{{Port: 9000, Protocol: "TCP"}},
+		},
+		{
+			name: "tcpSocket",
+			ctr: probeCtr(&corev1.Probe{ProbeHandler: corev1.ProbeHandler{
+				TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(6379)},
+			}}, nil, nil),
+			want: []snapshot.NamedPort{{Port: 6379, Protocol: "TCP"}},
+		},
+		{
+			name: "grpc",
+			ctr: probeCtr(&corev1.Probe{ProbeHandler: corev1.ProbeHandler{
+				GRPC: &corev1.GRPCAction{Port: 5000},
+			}}, nil, nil),
+			want: []snapshot.NamedPort{{Port: 5000, Protocol: "TCP"}},
+		},
+		{
+			// 同一个端口出现在多个探针上只记一次。
+			name: "去重",
+			ctr:  probeCtr(httpProbe(intstr.FromInt32(8088)), httpProbe(intstr.FromInt32(8088)), nil),
+			want: []snapshot.NamedPort{{Port: 8088, Protocol: "TCP"}},
+		},
+		{
+			// exec 探针不走网络，为它生成一条放行是凭空放行。
+			name: "exec 不产出端口",
+			ctr: probeCtr(&corev1.Probe{ProbeHandler: corev1.ProbeHandler{
+				Exec: &corev1.ExecAction{Command: []string{"/bin/health"}},
+			}}, nil, nil),
+			want: nil,
+		},
+		{
+			// 一个探针都没有：不需要这条基线，也不该凭空造一个端口。
+			name: "没有探针",
+			ctr:  probeCtr(nil, nil, nil),
+			want: nil,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := collectorWith(fleetRegistry(t))
+			p := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "uat-app", Name: "app-0"},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{tc.ctr}},
+				Status:     corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "172.16.5.9"},
+			}
+			got, _ := c.toPod(p, nil)
+			if !reflect.DeepEqual(got.ProbePorts, tc.want) {
+				t.Errorf("ProbePorts = %v, want %v", got.ProbePorts, tc.want)
+			}
+		})
+	}
+}
+
+// 命名端口的探针用 Pod 自己声明的容器端口解析：NetworkPolicy 的 ipBlock
+// 对端写不了端口名（名字由 CNI 对着**被选中的 Pod** 解析，而这里对端是
+// 节点网段），所以必须在采集时就落成数字。
+func TestToPodResolvesNamedProbePorts(t *testing.T) {
+	c := collectorWith(fleetRegistry(t))
+	p := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "uat-app", Name: "app-1"},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name:           "app",
+			Ports:          []corev1.ContainerPort{{Name: "http", ContainerPort: 8088}},
+			ReadinessProbe: httpProbe(intstr.FromString("http")),
+		}}},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "172.16.5.10"},
+	}
+
+	got, warnings := c.toPod(p, nil)
+	want := []snapshot.NamedPort{{Port: 8088, Protocol: "TCP"}}
+	if !reflect.DeepEqual(got.ProbePorts, want) {
+		t.Errorf("ProbePorts = %v, want %v —— 名字没解析成数字", got.ProbePorts, want)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("解析成功却报了告警: %v", warnings)
+	}
+}
+
+// 解析不出来的名字**不静默跳过**。静默跳过的后果是这个 Pod 拿到一条看起来
+// 齐备、实际漏了探针端口的策略，而症状要等到下发之后 Pod 开始滚动重启
+// 才出现——那时报的是「服务挂了」，不是「策略缺了一条」。
+func TestToPodWarnsWhenAProbePortNameCannotBeResolved(t *testing.T) {
+	c := collectorWith(fleetRegistry(t))
+	p := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "uat-app", Name: "app-2"},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name:           "app",
+			ReadinessProbe: httpProbe(intstr.FromString("mgmt")),
+		}}},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "172.16.5.11"},
+	}
+
+	got, warnings := c.toPod(p, nil)
+	if len(got.ProbePorts) != 0 {
+		t.Errorf("解析不出来却造了一个端口: %v —— 那是一条凭空的放行", got.ProbePorts)
+	}
+	var found bool
+	for _, w := range warnings {
+		if w.Kind == snapshot.WarningProbePortUnresolved {
+			found = true
+			if !strings.Contains(w.Detail, "mgmt") {
+				t.Errorf("告警没说是哪个名字: %q", w.Detail)
+			}
+			if w.Subject != "uat-app/app-2" {
+				t.Errorf("Subject = %q, want uat-app/app-2", w.Subject)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("解析失败没有告警: %v —— 这个 Pod 的探针会被静默切断", warnings)
+	}
+}
+
+// 越界端口不生成规则，进告警。
+//
+// int → int32 的截断会把一个越界值变成一个**合法**端口号（65536 截成 0），
+// 而那条规则会放行一个谁都没声明过的端口 —— 一次输入错误变成一次静默放行。
+func TestToPodRefusesAnOutOfRangeProbePort(t *testing.T) {
+	for _, port := range []int32{0, 65536} {
+		c := collectorWith(fleetRegistry(t))
+		p := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "uat-app", Name: "app-3"},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{
+				Name:           "app",
+				ReadinessProbe: httpProbe(intstr.FromInt32(port)),
+			}}},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "172.16.5.12"},
+		}
+		got, warnings := c.toPod(p, nil)
+		if len(got.ProbePorts) != 0 {
+			t.Errorf("端口 %d 被收下了: %v —— 截断后是一个合法端口号", port, got.ProbePorts)
+		}
+		var found bool
+		for _, w := range warnings {
+			if w.Kind == snapshot.WarningProbePortUnresolved {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("端口 %d 被静默丢弃，没有告警", port)
+		}
 	}
 }

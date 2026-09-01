@@ -104,7 +104,7 @@ type PolicyPreview struct {
 	Widening []policygen.Widening `json:"widening"`
 	// MissingBaselines 是尚未齐备的 Baseline 类型。
 	//
-	// 五类齐备是进入 Enforcing 的前提（spec §7.3 G3）。缺失必须与
+	// 各类齐备是进入 Enforcing 的前提（spec §7.3 G3）。缺失必须与
 	// 候选策略同屏，否则一份"看起来完整"的推荐会掩盖入口中断的风险。
 	//
 	// **这份清单装的是全部尚未齐备的类，一个都不减。** 其中哪几类是因为
@@ -139,7 +139,7 @@ type PolicyPreview struct {
 	// 门禁代码今天还不存在，而写它的人最自然的写法就是只读缺失清单。
 	// 因此这条不能留给未来的实现者去记得 —— 它必须在数据形状上成立。
 	//
-	// **恒为非 nil。** 一份空清单是"五类依据我们都检查过，都在"，与
+	// **恒为非 nil。** 一份空清单是"每一类的依据我们都检查过，都在"，与
 	// "这个 Reader 根本没回答过这个问题"必须能区分：前者序列化成 []，
 	// 后者是 null。两个 Reader 都要说得出这同一句话。
 	//
@@ -229,7 +229,7 @@ type PolicyPreview struct {
 	// Kinds 是必备 Baseline 的全集，随报告返回。
 	//
 	// 与 RiskPortCatalog 同理：缺失清单为空时，使用者必须能看到
-	// "我们检查了哪五类"，否则一份空缺失与一次根本没做的校验无法区分。
+	// "我们检查了哪几类"，否则一份空缺失与一次根本没做的校验无法区分。
 	Kinds []baseline.Kind `json:"baselineKinds"`
 	// Overrides 是当前生效的人工决定。
 	Overrides []registry.RuleOverride `json:"overrides"`
@@ -509,9 +509,9 @@ func (r *FixtureReader) PolicyPreviewAtGranularity(
 		// 与缺失清单同样按 namespace 裁剪展示：两栏并排读，一栏跟着筛选走、
 		// 另一栏不跟，会让人以为别的 namespace 也不适用。
 		NotApplicableBaselines: nonNilMissing(FilterMissing(gen.NotApplicableBaselines, namespace)),
-		// 合成数据集把五类依据都带齐了（Services / Endpoints / Gateways /
+		// 合成数据集把各类依据都带齐了（Services / Endpoints / Gateways /
 		// ScrapeTargets / NodeAgents 都在 fixture.Cluster.Assets 里），因此
-		// 这里恒为空。**非 nil**：空清单要读作"五类都检查过、都在"，而不是
+		// 这里恒为空。**非 nil**：空清单要读作"每一类都检查过、都在"，而不是
 		// 读作"这个 Reader 没回答"（见字段说明）。
 		NotAssessedBaselines:   []baseline.Kind{},
 		Ungeneratable:          gen.Ungeneratable,

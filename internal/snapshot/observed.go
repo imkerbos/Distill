@@ -144,6 +144,15 @@ type Pod struct {
 	// **只收有名字的那些**：无名端口在 NetworkPolicy 里只能写数字，
 	// 而数字不需要解析。全都收进来只会让这一列在大集群上白白变长。
 	NamedPorts []NamedPort
+	// ProbePorts 是 kubelet 探针连接的端口（readiness / liveness / startup）。
+	//
+	// kubelet 从节点地址发起探测，podSelector 永远选不中它。default-deny
+	// 之后没有对应放行，探测就失败，Pod 被判不健康后杀掉重启——
+	// 这是最先断、后果最重的一类，所以探针端口必须是采集来的事实，
+	// 而不是操作者填的登记（设计文档 2026-09-01）。
+	//
+	// exec 探针不在此列：它不走网络。命名端口在采集时就解析成数字。
+	ProbePorts []NamedPort
 	// HostNetwork 表示该 Pod 使用宿主网络，不受 NetworkPolicy 管控。
 	HostNetwork bool
 	// NodeName 是所在节点。
@@ -290,6 +299,10 @@ const (
 	WarningServiceWithoutEndpoints WarningKind = "SERVICE_WITHOUT_ENDPOINTS"
 	// WarningWorkloadUnresolved 表示 ownerRef 链没能解到顶层控制器。
 	WarningWorkloadUnresolved WarningKind = "WORKLOAD_UNRESOLVED"
+	// WarningProbePortUnresolved 表示探针引用了一个这个 Pod 没有声明的
+	// 命名端口。这条不能静默：解析不出端口就推导不出探针基线，而缺了
+	// 探针基线的 default-deny 会让 kubelet 判这个 Pod 不健康并杀掉它。
+	WarningProbePortUnresolved WarningKind = "PROBE_PORT_UNRESOLVED"
 )
 
 // Warning 是采集当时发现的一个问题。

@@ -203,6 +203,38 @@ type Assets struct {
 	APIServers []APIServerEndpoint
 	// NodeAgents 是节点级 agent 快照。
 	NodeAgents []NodeAgent
+	// ProbeTargets 是每个 workload 声明的 kubelet 探针端口。
+	//
+	// **与 NodeAgents 分开，因为来源不同。** NodeAgents 是操作者登记的
+	// （平台看得见集群里有哪些 hostNetwork DaemonSet，看不见它们往哪连），
+	// 而探针端口写在 Pod 规格里，采集得到。一条登记一个固定端口的形状也
+	// 表达不了探针：每个 workload 的探针端口都不一样。
+	ProbeTargets []ProbeTarget
 	// Registry 是集群网段注册信息。
 	Registry ClusterRegistry
+}
+
+// ProbeTarget 是一个 workload 声明的 kubelet 探针端口。
+//
+// 按 workload 聚合而不是按 Pod：同一个 workload 的 Pod 探针端口相同，
+// 而放行规则挂在 workload 上。按 Pod 出规则会让一个 20 副本的 Deployment
+// 产出 20 条一模一样的规则。
+type ProbeTarget struct {
+	// ClusterID 是所属集群。
+	ClusterID string
+	// Namespace 是所属命名空间。
+	Namespace string
+	// WorkloadKey 是这个 workload 归属标签的键，Workload 是取值。
+	//
+	// 键与取值成对带过来，是因为 podSelector 必须用实际命中的那个键构造：
+	// 一个按 k8s-app 归属的 workload 被拼成 {app: ...} 会得到一条选不中
+	// 任何 Pod 的幽灵策略（同 policygen.resolveWorkloadLabel 的注释）。
+	WorkloadKey string
+	// Workload 是 workload 归属标签的取值。
+	Workload string
+	// Ports 是这个 workload 的探针连接的端口，命名端口已解析成数字。
+	//
+	// 空表示这个 workload 一个走网络的探针都没声明——它不需要这条基线，
+	// 与「没采到探针」是两件事，后者根本不会出现在这份列表里。
+	Ports []NamedPort
 }

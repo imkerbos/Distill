@@ -172,7 +172,11 @@ type agentPodPayload struct {
 	Labels    map[string]string `json:"labels,omitempty"`
 	// NamedPorts 是这个 Pod 声明的命名容器端口，供求值层解析命名端口规则
 	// （replay.resolveNamedPort 要的正是这份数据）。理由同 snapshot.Pod。
-	NamedPorts     []agentNamedPortPayload `json:"namedPorts,omitempty"`
+	NamedPorts []agentNamedPortPayload `json:"namedPorts,omitempty"`
+	// ProbePorts 是 kubelet 探针连接的端口，命名端口已在采集侧对着这个 Pod
+	// 解析成数字。理由同 snapshot.Pod：它是探针基线的唯一依据，缺了它
+	// default-deny 会让 kubelet 判 Pod 不健康并杀掉重启。
+	ProbePorts     []agentNamedPortPayload `json:"probePorts,omitempty"`
 	HostNetwork    bool                    `json:"hostNetwork,omitempty"`
 	NodeName       string                  `json:"nodeName,omitempty"`
 	ServiceAccount string                  `json:"serviceAccount,omitempty"`
@@ -463,14 +467,8 @@ func (s *httpSink) Save(ctx context.Context, run snapshot.Run) error {
 		})
 	}
 	for _, p := range run.Observation.Pods {
-		var namedPorts []agentNamedPortPayload
-		for _, np := range p.NamedPorts {
-			namedPorts = append(namedPorts, agentNamedPortPayload{
-				Name:     np.Name,
-				Port:     np.Port,
-				Protocol: np.Protocol,
-			})
-		}
+		namedPorts := toWirePorts(p.NamedPorts)
+		probePorts := toWirePorts(p.ProbePorts)
 		var extraIPs []string
 		for _, a := range p.ExtraIPs {
 			extraIPs = append(extraIPs, a.IP)
@@ -483,6 +481,7 @@ func (s *httpSink) Save(ctx context.Context, run snapshot.Run) error {
 			IP:                p.IP,
 			Labels:            p.Labels,
 			NamedPorts:        namedPorts,
+			ProbePorts:        probePorts,
 			HostNetwork:       p.HostNetwork,
 			NodeName:          p.NodeName,
 			ServiceAccount:    p.ServiceAccount,
@@ -621,4 +620,17 @@ func hintFor(code int) string {
 // 泄漏的入口。
 func (s *httpSink) SaveFlowIngest(ctx context.Context, p flowIngestPayload) error {
 	return s.postTo(ctx, "/api/v1/agent/flow-ingests", p, "flow ingest")
+}
+
+// toWirePorts 把快照里的端口列表翻成上报报文的类型。
+func toWirePorts(in []snapshot.NamedPort) []agentNamedPortPayload {
+	var out []agentNamedPortPayload
+	for _, np := range in {
+		out = append(out, agentNamedPortPayload{
+			Name:     np.Name,
+			Port:     np.Port,
+			Protocol: np.Protocol,
+		})
+	}
+	return out
 }

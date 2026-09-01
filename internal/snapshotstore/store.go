@@ -275,8 +275,8 @@ func insertPods(ctx context.Context, tx *sql.Tx, obs snapshot.Observation) error
 		    ip_scope, ip_scope_reason, extra_ips, labels, scrape_annotations,
 		    host_network, node_name, service_account,
 		    owner_kind, owner_name, workload_kind, workload_name,
-		    in_mesh, mesh_source, mesh_detail, named_ports)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		    in_mesh, mesh_source, mesh_detail, named_ports, probe_ports)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return fmt.Errorf("snapshotstore: prepare pod: %w", err)
 	}
@@ -310,12 +310,18 @@ func insertPods(ctx context.Context, tx *sql.Tx, obs snapshot.Observation) error
 			return fmt.Errorf("snapshotstore: marshal pod named ports %s/%s: %w",
 				p.Namespace, p.Name, err)
 		}
+		// 同一条理由：探针端口这次采集一定采过，NULL 只留给加这一列之前的行。
+		probePorts, err := jsonArray(p.ProbePorts)
+		if err != nil {
+			return fmt.Errorf("snapshotstore: marshal pod probe ports %s/%s: %w",
+				p.Namespace, p.Name, err)
+		}
 		if _, err := stmt.ExecContext(ctx,
 			obs.ClusterID, p.Namespace, p.Name, obs.ObservedAt, obs.RunID,
 			p.UID, p.Phase, p.IP, string(p.IPScope), string(p.IPScopeReason),
 			string(extra), labels, scrape, p.HostNetwork, p.NodeName, p.ServiceAccount,
 			p.OwnerKind, p.OwnerName, p.WorkloadKind, p.WorkloadName,
-			p.InMesh, string(p.MeshSource), p.MeshDetail, namedPorts); err != nil {
+			p.InMesh, string(p.MeshSource), p.MeshDetail, namedPorts, probePorts); err != nil {
 			return fmt.Errorf("snapshotstore: insert pod %s/%s: %w", p.Namespace, p.Name, err)
 		}
 	}

@@ -137,11 +137,13 @@ func TestPolicyPreviewMissingBaselinesContent(t *testing.T) {
 		// （policygen.systemNamespaces），因此也不为它推导 Baseline ——
 		// 那些缺口是给"要下发策略"准备的，而这一片平台默认不下发。
 		// 它出现在 ExcludedNamespaces 里，不是悄悄消失。
+		// KUBELET_PROBE 在这四个 namespace 上不适用：fixture 只给 gateway
+		// 声明了探针（asset.go 的 ProbeTargets），其余的确实一个探针都没有。
 		wantNA := map[string][]baseline.Kind{
-			"batch":    {baseline.KindLBHealth, baseline.KindMetrics, baseline.KindExposedIngress},
-			"checkout": {baseline.KindLBHealth, baseline.KindMetrics, baseline.KindExposedIngress},
-			"legacy":   {baseline.KindLBHealth, baseline.KindMetrics, baseline.KindExposedIngress},
-			"payment":  {baseline.KindLBHealth, baseline.KindExposedIngress},
+			"batch":    {baseline.KindLBHealth, baseline.KindMetrics, baseline.KindExposedIngress, baseline.KindKubeletProbe},
+			"checkout": {baseline.KindLBHealth, baseline.KindMetrics, baseline.KindExposedIngress, baseline.KindKubeletProbe},
+			"legacy":   {baseline.KindLBHealth, baseline.KindMetrics, baseline.KindExposedIngress, baseline.KindKubeletProbe},
+			"payment":  {baseline.KindLBHealth, baseline.KindExposedIngress, baseline.KindKubeletProbe},
 		}
 		if !reflect.DeepEqual(na, wantNA) {
 			t.Errorf("%s: NotApplicableBaselines = %v, want %v", cluster, na, wantNA)
@@ -339,10 +341,10 @@ func TestOverriddenViewReflectsAnEnabledRule(t *testing.T) {
 	}
 }
 
-// 两个 Reader 都要说得出"未评估的 Baseline 有哪些"，而合成数据集五类依据
+// 两个 Reader 都要说得出"未评估的 Baseline 有哪些"，而合成数据集各类依据
 // 齐备，因此它恒为空（design doc 2026-08-17 §11）。
 //
-// 断言非 nil 而不只是长度为 0：空清单要读作"我们检查了五类依据，都在"，
+// 断言非 nil 而不只是长度为 0：空清单要读作"我们检查了每一类依据，都在"，
 // 与"这个 Reader 根本没回答这个问题"必须能区分 —— 序列化出去前者是 []、
 // 后者是 null，而前端拿到 null 时唯一能做的就是把这一栏藏掉。
 //

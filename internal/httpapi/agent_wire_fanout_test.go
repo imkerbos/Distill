@@ -27,7 +27,10 @@ import (
 // 要么两侧都记在案，不该出现"agent 发了、平台没收"或反过来的半吊子状态。
 
 type wireFanoutSite struct {
-	label     string
+	label string
+	// fn 是抄写循环所在的函数。多数抄写点在 toRun 里，端口那一类被提成了
+	// 共用函数——两份端口列表共用一段抄写，正是这条守卫想要的形状。
+	fn        string
 	fields    []string
 	rangeExpr string
 	src       string
@@ -119,9 +122,12 @@ func wireFanoutSites() []wireFanoutSite {
 			},
 		},
 		{
-			label:     toRunFile + ":" + toRunFunc + " (NamedPort)",
+			// NamedPorts 与 ProbePorts 走同一段抄写（toSnapshotPorts），
+			// 所以这里只有一条：两份列表不可能各自演化出不同的遗漏。
+			label:     toRunFile + ":toSnapshotPorts (NamedPort)",
+			fn:        "toSnapshotPorts",
 			fields:    exportedFields(snapshot.NamedPort{}),
-			rangeExpr: "in.NamedPorts",
+			rangeExpr: "in",
 			src:       "np",
 			exempt:    nil,
 		},
@@ -131,7 +137,11 @@ func wireFanoutSites() []wireFanoutSite {
 func TestAgentWireCarriesEverySnapshotFieldIntoTheRun(t *testing.T) {
 	for _, site := range wireFanoutSites() {
 		t.Run(site.label, func(t *testing.T) {
-			read := fieldsReadInLoop(t, toRunFile, toRunFunc, site.rangeExpr, site.src)
+			fn := site.fn
+			if fn == "" {
+				fn = toRunFunc
+			}
+			read := fieldsReadInLoop(t, toRunFile, fn, site.rangeExpr, site.src)
 			for _, f := range site.fields {
 				if read[f] {
 					if reason, ok := site.exempt[f]; ok {

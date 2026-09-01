@@ -16,7 +16,7 @@ import (
 // **推送就是进入 Enforcing。** 生成器给每条候选策略固定
 // policyTypes: Ingress+Egress，规则为空即 default-deny（policygen/generate.go
 // 的注释）—— 文件一旦被合并、被 Argo 应用，被选中的工作负载就只剩规则里
-// 列出的那些放行。V4 spec §7.3 的 G3 校验项落在这里：五类 Baseline 在任何
+// 列出的那些放行。V4 spec §7.3 的 G3 校验项落在这里：必备 Baseline 在任何
 // (cluster, namespace) 进入 Enforcing 前必须齐备
 // （design doc 2026-08-18-enforcing-gate §1）。
 //

@@ -406,10 +406,18 @@ export type EvidenceClass =
    */
   | 'INCOMPLETE_WINDOW'
 
-/** BASELINE 规则的六类基础设施事实。 */
+/** BASELINE 规则的七类基础设施事实。 */
 export type Kind =
   | 'DNS' | 'LB_HEALTH_CHECK' | 'METRICS_SCRAPE' | 'CONTROL_PLANE' | 'NODE_AGENT'
   | 'EXPOSED_INGRESS'
+  /**
+   * kubelet 探针入向：节点网段 → 这个 workload 自己声明的
+   * readiness / liveness / startup 端口。
+   *
+   * 端口来自 Pod 规格，不是操作者填的登记。缺了它，default-deny 之后
+   * kubelet 探测被挡，Pod 被判不健康后杀掉重启。
+   */
+  | 'KUBELET_PROBE'
 
 /** 一条流量无法生成候选规则的封闭原因枚举。 */
 export type UngeneratableReason =
@@ -1207,7 +1215,7 @@ export interface PolicyPreview {
    * 带 `| null`，但**理由与 overrides / excludedWorkloads 完全不同**：那两个
    * 字段是后端零条时 Go nil 切片序列化成了 `null`，`null` 就是「零条」。这个
    * 字段不是 —— 后端契约（internal/store/policy.go 的 NotAssessedBaselines）
-   * 把两者定义成两件事：`[]` 是「五类依据我们都检查过、都在」，`null` 是
+   * 把两者定义成两件事：`[]` 是「每一类的依据我们都检查过、都在」，`null` 是
    * 「这个 Reader 根本没回答过这个问题」，并要求恒为非 nil。
    *
    * 因此 `null` **不得读成「零条未评估」**：那是把一个我们不知道的事情说成

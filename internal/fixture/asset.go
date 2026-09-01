@@ -29,7 +29,7 @@ func asiaAssets() snapshot.Assets {
 					{Name: "https", Port: 443, TargetPort: 8443, Protocol: "TCP"},
 				},
 				// 入口地址落在下面登记的 node_cidr 内：EXPOSED_INGRESS 也要能在
-				// 这个「五类齐备」的 namespace 上推出规则，否则 gateway 就不再
+				// 这个「各类齐备」的 namespace 上推出规则，否则 gateway 就不再
 				// 是齐备侧的样本了。
 				LoadBalancerIngressIPs: []string{"10.128.0.5"},
 			},
@@ -82,6 +82,16 @@ func asiaAssets() snapshot.Assets {
 				HostNetwork: true, TargetPort: 9100,
 			},
 		},
+		// gateway 是「齐备」那一侧的样本，所以它也得声明探针 ——
+		// 少了这一条，KUBELET_PROBE 会把 gateway 判成不适用，齐备侧的样本
+		// 就不再齐备了。
+		ProbeTargets: []snapshot.ProbeTarget{
+			{
+				ClusterID: clusterID, Namespace: "gateway",
+				WorkloadKey: "app", Workload: "gateway",
+				Ports: []snapshot.NamedPort{{Port: 8443, Protocol: "TCP"}},
+			},
+		},
 		Registry: snapshot.ClusterRegistry{
 			ClusterID: clusterID,
 			PodCIDR:   "10.4.0.0/14",
@@ -96,7 +106,7 @@ func asiaAssets() snapshot.Assets {
 // euAssets 构造 prod-eu-1 的资产快照。
 //
 // **这个集群承担「真的缺 Baseline」那一侧**，asia 承担齐备那一侧。两侧都
-// 必须有数据：全齐备时「五类齐备」恒真、Missing() 成了摆设；全缺失时
+// 必须有数据：全齐备时「各类齐备」恒真、Missing() 成了摆设；全缺失时
 // 「不适用」那条路径没人走。
 //
 // partner 的缺失是真缺，不是没有暴露面：它有一个 type=LoadBalancer 的

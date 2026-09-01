@@ -58,6 +58,9 @@ import (
 type wireFanoutSite struct {
 	// label 是失败信息里的可读标识。
 	label string
+	// fn 是抄写点所在的函数，空则是 Save。端口那一类被提成了共用函数：
+	// 两份端口列表共用一段抄写，不可能各自演化出不同的遗漏。
+	fn string
 	// fields 是被抄写的快照类型的全部导出字段名，反射得到。
 	fields []string
 	// rangeExpr 是定位循环的 range 表达式源码文本，如 "run.Observation.Pods"。
@@ -190,9 +193,11 @@ func wireFanoutSites() []wireFanoutSite {
 			exempt:    nil,
 		},
 		{
-			label:     sinkFile + ":" + sinkFunc + " (NamedPort)",
+			// NamedPorts 与 ProbePorts 走同一段抄写（toWirePorts）。
+			label:     sinkFile + ":toWirePorts (NamedPort)",
+			fn:        "toWirePorts",
 			fields:    exportedFields(snapshot.NamedPort{}),
-			rangeExpr: "p.NamedPorts",
+			rangeExpr: "in",
 			src:       "np",
 			exempt:    nil,
 		},
@@ -235,10 +240,14 @@ func TestAgentWireCarriesEverySnapshotField(t *testing.T) {
 // fieldsRead 按这个抄写点的定位方式读出被抄到的字段名。
 func (s wireFanoutSite) fieldsRead(t *testing.T) map[string]bool {
 	t.Helper()
-	if s.rootExpr != "" {
-		return fieldsReadUnder(t, sinkFile, sinkFunc, s.rootExpr)
+	fn := s.fn
+	if fn == "" {
+		fn = sinkFunc
 	}
-	return fieldsReadInLoop(t, sinkFile, sinkFunc, s.rangeExpr, s.src)
+	if s.rootExpr != "" {
+		return fieldsReadUnder(t, sinkFile, fn, s.rootExpr)
+	}
+	return fieldsReadInLoop(t, sinkFile, fn, s.rangeExpr, s.src)
 }
 
 // fieldsReadUnder 收集函数 fn 的整个函数体里，形如 <rootExpr>.<字段名> 的

@@ -159,7 +159,7 @@ export function listTruncationView(
  *
  * 是三值而不是布尔：后端契约（internal/store/policy.go 的
  * NotAssessedBaselines）把 `[]` 与 `null` 定义成**两件不同的事** ——
- * `[]` 是"五类依据我们都检查过、都在"，`null` 是"这个 Reader 根本没
+ * `[]` 是"每一类的依据我们都检查过、都在"，`null` 是"这个 Reader 根本没
  * 回答过这个问题"。一个布尔只能把后者折成前者，而那正好是朝"一切正常"
  * 的方向折（design doc §4）。
  */
@@ -200,7 +200,7 @@ const UNKNOWN_REMEDY =
  *
  * **`null` / 缺席一律落到 UNKNOWN，不落到"一条都没未评估"**，与
  * dataSourceView、wouldBreakQualifier 同一条纪律：后端契约要求这个字段恒为
- * 非 nil，因此真拿到 `null` 只说明这不是一份守约的响应 —— 把它读成"五类
+ * 非 nil，因此真拿到 `null` 只说明这不是一份守约的响应 —— 把它读成"每一类的
  * 依据都检查过了"，就是把一个我们不知道的事情说成最让人安心的那个方向。
  */
 export function baselineGapViews(

@@ -138,3 +138,80 @@ func TestPreMigrationRowsKeepTheColumnsNull(t *testing.T) {
 		t.Error("named_ports IS NULL = false, want true")
 	}
 }
+
+// 探针端口逐字节落库。缺了它 KUBELET_PROBE 一条规则都推不出来，而症状
+// 要等到下发之后 kubelet 探测被挡、Pod 开始滚动重启才出现。
+func TestProbePortsAreStoredVerbatim(t *testing.T) {
+	s, db := newTestStore(t)
+	ctx := context.Background()
+
+	if err := s.Save(ctx, snapshot.Run{
+		Status: snapshot.RunOK, StartedAt: runOneAt, FinishedAt: runOneAt,
+		Observation: snapshot.Observation{
+			ClusterID: clusterA, RunID: "probe-run", ObservedAt: runOneAt,
+			Pods: []snapshot.Pod{{
+				ClusterID: clusterA, Namespace: "uat-app", Name: "backend-0",
+				UID: "aaaaaaaa-0000-4000-8000-00000000000c", Phase: "Running", IP: "10.4.0.11",
+				ProbePorts: []snapshot.NamedPort{
+					{Port: 8088, Protocol: "TCP"},
+					{Port: 8081, Protocol: "TCP"},
+				},
+			}},
+		},
+	}); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	var raw string
+	if err := db.QueryRowContext(ctx,
+		`SELECT probe_ports FROM observed_pod WHERE cluster_id = ? AND name = ?`,
+		clusterA, "backend-0").Scan(&raw); err != nil {
+		t.Fatalf("query observed_pod: %v", err)
+	}
+	var got []snapshot.NamedPort
+	if err := json.Unmarshal([]byte(raw), &got); err != nil {
+		t.Fatalf("decode probe_ports: %v", err)
+	}
+	want := []snapshot.NamedPort{{Port: 8088, Protocol: "TCP"}, {Port: 8081, Protocol: "TCP"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("probe_ports = %+v, want %+v", got, want)
+	}
+}
+
+// 采过、但这个 Pod 没有走网络的探针 → 空数组，**不是 NULL**。
+//
+// 两者的下游含义相反：空数组是「这个 workload 不需要 KUBELET_PROBE」，
+// NULL 是「这一行写在这一列存在之前，我们没看过」。写成 NULL 会让每一次
+// 正常采集都长得像一次数据缺口。
+func TestAPodWithoutProbesStoresAnEmptyArrayNotNull(t *testing.T) {
+	s, db := newTestStore(t)
+	ctx := context.Background()
+
+	if err := s.Save(ctx, snapshot.Run{
+		Status: snapshot.RunOK, StartedAt: runOneAt, FinishedAt: runOneAt,
+		Observation: snapshot.Observation{
+			ClusterID: clusterA, RunID: "probe-empty-run", ObservedAt: runOneAt,
+			Pods: []snapshot.Pod{{
+				ClusterID: clusterA, Namespace: "uat-app", Name: "worker-0",
+				UID: "aaaaaaaa-0000-4000-8000-00000000000d", Phase: "Running", IP: "10.4.0.12",
+			}},
+		},
+	}); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	var isNull bool
+	var raw string
+	if err := db.QueryRowContext(ctx,
+		`SELECT probe_ports IS NULL, COALESCE(probe_ports, '') FROM observed_pod
+		  WHERE cluster_id = ? AND name = ?`,
+		clusterA, "worker-0").Scan(&isNull, &raw); err != nil {
+		t.Fatalf("query observed_pod: %v", err)
+	}
+	if isNull {
+		t.Fatal("probe_ports IS NULL —— 一次正常采集被写成了数据缺口的样子")
+	}
+	if raw != "[]" {
+		t.Errorf("probe_ports = %q, want []", raw)
+	}
+}

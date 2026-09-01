@@ -51,6 +51,10 @@ func Derive(a snapshot.Assets, namespace string, unassessed []Kind) Set {
 	// 只在没有暴露对象时打开）：于是 Missing() 自然把它报出来 —— 「有暴露
 	// 对象、却推不出放行规则」正是缺口的定义，不需要第三个字段来表达同一件事。
 	set.Rules = append(set.Rules, deriveExposedIngress(a, namespace)...)
+	// KUBELET_PROBE 与 EXPOSED_INGRESS 同一条：推不出对端（没登记 node CIDR）
+	// 时不进 Rules，也不进 NotApplicable —— Missing() 于是把它报成缺口，
+	// 处置是去把网段填上。
+	set.Rules = append(set.Rules, deriveKubeletProbe(a, namespace)...)
 	for _, r := range deriveLBHealth(a) {
 		// LB Baseline 按暴露面所在 namespace 归属：一个 namespace 的入口
 		// 暴露不该给另一个 namespace 放行健康检查网段。

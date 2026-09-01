@@ -33,6 +33,16 @@ type observedPod struct {
 	// 补成求值引擎认的 replay.PodRef，命名端口规则才解析得出具体端口号——
 	// 缺了它，一条合法的规则在这里只会判 NAMED_PORT_UNRESOLVED。
 	namedPorts []snapshot.NamedPort
+	// probePorts 是 kubelet 探针连接的端口（命名端口已在采集侧解析成数字），
+	// KUBELET_PROBE Baseline 的唯一依据（design doc 2026-09-01）。
+	probePorts []snapshot.NamedPort
+	// probesCollected 表示这一行**采过**探针端口（probe_ports 列非 NULL）。
+	//
+	// 与 len(probePorts) == 0 是两件事：后者可能是"采过，这个 Pod 只有
+	// exec 探针"，也可能是"这一行写在 migrations/000036 之前，根本没采过"。
+	// 混成一个会让升级之后、下一次采集之前的每个 namespace 都被判成
+	// 「不需要 KUBELET_PROBE」，从缺失清单里消失——一次数据缺口变成一次放行。
+	probesCollected bool
 }
 
 // podKey 按 (namespace, name) 索引一次快照里的 Pod。
@@ -122,7 +132,7 @@ func (r *Reader) readIntervals(
 // 且取的是**覆盖那一刻的那次运行**，不是最新一次。
 func (r *Reader) readPodsAt(ctx context.Context, d described) ([]observedPod, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT namespace, name, labels, scrape_annotations, host_network, named_ports
+		`SELECT namespace, name, labels, scrape_annotations, host_network, named_ports, probe_ports
 		   FROM observed_pod
 		  WHERE cluster_id = ? AND observed_at = ?
 		  LIMIT ?`,
@@ -139,8 +149,10 @@ func (r *Reader) readPodsAt(ctx context.Context, d described) ([]observedPod, er
 			raw           []byte
 			rawScrape     []byte
 			rawNamedPorts sql.NullString
+			rawProbePorts sql.NullString
 		)
-		if err := rows.Scan(&p.namespace, &p.name, &raw, &rawScrape, &p.hostNetwork, &rawNamedPorts); err != nil {
+		if err := rows.Scan(&p.namespace, &p.name, &raw, &rawScrape, &p.hostNetwork,
+			&rawNamedPorts, &rawProbePorts); err != nil {
 			return nil, fmt.Errorf("collectstore: scan observed pod: %w", err)
 		}
 		if err := json.Unmarshal(raw, &p.labels); err != nil {
@@ -161,6 +173,16 @@ func (r *Reader) readPodsAt(ctx context.Context, d described) ([]observedPod, er
 			if err := json.Unmarshal([]byte(rawNamedPorts.String), &p.namedPorts); err != nil {
 				return nil, fmt.Errorf(
 					"collectstore: decode pod named ports of cluster %s: %w", d.clusterID, err)
+			}
+		}
+		// NULL 同理：迁移之前写下的行没有采过探针，与「采过、这个 Pod
+		// 没有走网络的探针」不是同一件事——后者是 KUBELET_PROBE 的
+		// NotApplicable 一档，前者不是（migrations/000036）。
+		p.probesCollected = rawProbePorts.Valid
+		if rawProbePorts.Valid {
+			if err := json.Unmarshal([]byte(rawProbePorts.String), &p.probePorts); err != nil {
+				return nil, fmt.Errorf(
+					"collectstore: decode pod probe ports of cluster %s: %w", d.clusterID, err)
 			}
 		}
 		out = append(out, p)

@@ -6,7 +6,7 @@ import (
 	"github.com/imkerbos/Distill/internal/fixture"
 )
 
-// 五类必备 Baseline 各需要一个推导来源。任何一类缺了对应快照对象，
+// 每一类必备 Baseline 各需要一个推导来源。任何一类缺了对应快照对象，
 // 推导就只能靠硬编码常量表 —— 那正是 spec §7.2 禁止的东西。
 func TestEveryClusterHasDerivationSourcesForAllFiveBaselines(t *testing.T) {
 	for _, c := range fixture.Load().Clusters {

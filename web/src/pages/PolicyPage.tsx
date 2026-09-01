@@ -227,7 +227,7 @@ function NoTrafficBanner() {
   return (
     <Card className="mb-4 border-l-[3px] px-4 py-3" style={{ borderLeftColor: 'var(--verdict-unknown)' }}>
       <p className="mt-0 mb-2 text-sm">
-        这个集群还没有任何流量观测。下面的候选策略是真的 —— 五类必备 Baseline
+        这个集群还没有任何流量观测。下面的候选策略是真的 —— 必备 Baseline
         的推导依据来自资产快照，不依赖流量；但<strong>「加了会拦断什么」这个问题，
         在有流量之前没有答案</strong>。
       </p>
@@ -1433,7 +1433,7 @@ function MissingBaselineSection({ missing, baselineKinds, notAssessed, notApplic
           挡住的读法。 */}
       {note !== '' && <Notice>{note}</Notice>}
       {/* 「不适用」与缺失并列，且在空清单上同样出现：一份空缺失可能是
-          "五类都推出来了"，也可能是"其中几类这个命名空间根本不需要"，
+          "每一类都推出来了"，也可能是"其中几类这个命名空间根本不需要"，
           而这两句话对下一步做什么的含义不同。少了它，那几行会凭空消失
           （design doc 2026-08-18-baseline-applicability §5）。 */}
       {naNote !== '' && <Notice>{naNote}</Notice>}

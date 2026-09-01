@@ -275,7 +275,7 @@ func Generate(in Input) Result {
 	for s := range workloads {
 		nsWithWorkload[s.namespace] = true
 	}
-	// baselineByNS 是广播规则（Subject 为空，既有五类的形态）：整个
+	// baselineByNS 是广播规则（Subject 为空，既有几类的形态）：整个
 	// namespace 里的每个 workload 都要有它们。baselineBySubject 是带
 	// Subject 的规则（目前只有 EXPOSED_INGRESS）：只挂给 Service selector
 	// 实际选中的那一个 workload，不广播——广播的后果是一个没有暴露对象的

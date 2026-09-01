@@ -3,9 +3,11 @@ package collect
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"github.com/imkerbos/Distill/internal/cluster"
 	"github.com/imkerbos/Distill/internal/snapshot"
@@ -73,6 +75,18 @@ func (c *Collector) toPod(p *corev1.Pod, rsOwners map[string]ownerRef) (snapshot
 		}
 	}
 
+	probePorts, unresolved := probePortsOf(p, namedPorts)
+	for _, name := range unresolved {
+		// 解析不出来的命名端口要留下痕迹，**不静默跳过**：一条解不出的
+		// 探针端口意味着这个 Pod 的探针会在 default-deny 之后被断，
+		// 而那正是操作者必须看见的（design doc 2026-09-01 §3.2）。
+		warnings = append(warnings, snapshot.Warning{
+			Kind:    snapshot.WarningProbePortUnresolved,
+			Subject: subject,
+			Detail:  "probe references container port " + name + ", which this pod does not declare",
+		})
+	}
+
 	snap := snapshot.Pod{
 		ClusterID:         c.clusterID,
 		Namespace:         p.Namespace,
@@ -83,6 +97,7 @@ func (c *Collector) toPod(p *corev1.Pod, rsOwners map[string]ownerRef) (snapshot
 		ExtraIPs:          extraPodIPs(p),
 		Labels:            p.Labels,
 		NamedPorts:        namedPorts,
+		ProbePorts:        probePorts,
 		HostNetwork:       p.Spec.HostNetwork,
 		NodeName:          p.Spec.NodeName,
 		ServiceAccount:    p.Spec.ServiceAccountName,
@@ -165,4 +180,88 @@ func extraPodIPs(p *corev1.Pod) []snapshot.PodAddress {
 		out = append(out, snapshot.PodAddress{IP: addr.IP})
 	}
 	return out
+}
+
+// probePortsOf 读出一个 Pod 的探针端口。
+//
+// **三种探针都读**：readiness、liveness、startup。startup 探针失败同样会让
+// Pod 被杀，漏掉它的症状是"慢启动的服务永远起不来"——最难往回追的一种。
+//
+// exec 探针不产出端口：它不走网络，为它生成一条放行是凭空放行。
+//
+// 命名端口用 Pod 自己声明的容器端口解析。解析不出来的名字回给调用方，
+// 由它落一条告警——静默跳过等于让这个 Pod 的探针在下发之后无声地断掉。
+func probePortsOf(p *corev1.Pod, named []snapshot.NamedPort) (
+	ports []snapshot.NamedPort, unresolved []string,
+) {
+	seen := map[string]bool{}
+	add := func(port int32, proto string) {
+		key := proto + "/" + strconv.Itoa(int(port))
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		ports = append(ports, snapshot.NamedPort{Port: port, Protocol: proto})
+	}
+	for _, ctr := range p.Spec.Containers {
+		for _, probe := range []*corev1.Probe{
+			ctr.ReadinessProbe, ctr.LivenessProbe, ctr.StartupProbe,
+		} {
+			if probe == nil {
+				continue
+			}
+			target, ok := probeTarget(probe)
+			if !ok {
+				continue // exec 探针，不走网络
+			}
+			// 探针一律是 TCP：httpGet / tcpSocket / grpc 都跑在 TCP 上。
+			const proto = string(corev1.ProtocolTCP)
+			if target.Type == intstr.Int {
+				// 端口范围显式判一次。int → int32 的截断会把一个越界值
+				// 变成一个**合法**端口号（65536 截成 0，131072 也截成 0），
+				// 而那条规则会放行一个谁都没声明过的端口。
+				port := target.IntValue()
+				if port < 1 || port > maxPort {
+					unresolved = append(unresolved, strconv.Itoa(port))
+					continue
+				}
+				add(int32(port), proto)
+				continue
+			}
+			resolved, ok := resolveNamed(named, target.StrVal)
+			if !ok {
+				unresolved = append(unresolved, target.StrVal)
+				continue
+			}
+			add(resolved, proto)
+		}
+	}
+	return ports, unresolved
+}
+
+// maxPort 是 TCP/UDP 端口号的上界。
+const maxPort = 65535
+
+// probeTarget 取出一个探针连接的端口；exec 探针返回 false。
+func probeTarget(p *corev1.Probe) (intstr.IntOrString, bool) {
+	switch {
+	case p.HTTPGet != nil:
+		return p.HTTPGet.Port, true
+	case p.TCPSocket != nil:
+		return p.TCPSocket.Port, true
+	case p.GRPC != nil:
+		return intstr.FromInt32(p.GRPC.Port), true
+	default:
+		return intstr.IntOrString{}, false
+	}
+}
+
+// resolveNamed 把一个命名端口翻成数字。
+func resolveNamed(named []snapshot.NamedPort, name string) (int32, bool) {
+	for _, n := range named {
+		if n.Name == name {
+			return n.Port, true
+		}
+	}
+	return 0, false
 }

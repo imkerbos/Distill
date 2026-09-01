@@ -1025,7 +1025,7 @@ func TestSplitPoliciesCarryEveryRule(t *testing.T) {
 
 // C1: EXPOSED_INGRESS 只挂给 Service selector 实际选中的那个 workload，
 // 不广播给整个 namespace。之前的实现把 Baseline 无条件追加给 namespace
-// 里的每个 workload——那条规则对既有五类（DNS、control plane 等）是对的，
+// 里的每个 workload——那条规则对既有那几类（DNS、control plane 等）是对的，
 // 因为它们本来就是 namespace 级的基础设施事实，但对 EXPOSED_INGRESS 是错的：
 // shop/worker 没有任何暴露对象，却因为同 namespace 里的 shop/edge 有一个
 // LoadBalancer Service，也拿到了一条 EXPOSED_INGRESS peers=[0.0.0.0/0]
@@ -1241,7 +1241,7 @@ func TestNoUnattachedBaselinesIsAnEmptySliceNotNil(t *testing.T) {
 	res := policygen.Generate(observe(t, "prod-asia-1"))
 	if res.UnattachedBaselines == nil {
 		t.Error("UnattachedBaselines 是 nil —— 它会序列化成 null，而空清单要读作" +
-			"「五类都检查过、都挂上了」，不是「没算过」")
+			"「每一类都检查过、都挂上了」，不是「没算过」")
 	}
 }
 

@@ -140,7 +140,7 @@ func TestPushIsRefusedWhenAPushedNamespaceIsMissingABaseline(t *testing.T) {
 	}
 }
 
-// **本轮不得让原本能推的推不了。** asia 五类齐备（其余 namespace 是不适用，
+// **本轮不得让原本能推的推不了。** asia 各类齐备（其余 namespace 是不适用，
 // 不是缺失），它必须照旧出得来计划、推得出去。
 //
 // 少了这条，一个"一律拒绝"的门禁实现会让上面两条永远通过，而那等于把写回

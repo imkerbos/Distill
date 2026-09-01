@@ -60,6 +60,12 @@ var baselineEvidence = map[baseline.Kind][]snapshot.ResourceKind{
 	// 放行——一次采集失败变成一次放行，正是 KindLBHealth 登记
 	// {Ingress, Service} 要挡住的那种（design review C2，2026-08-28）。
 	baseline.KindExposedIngress: {snapshot.ResourceService},
+	// KUBELET_PROBE 的依据是 Pod 规格里声明的探针（derive_probe.go），
+	// 因此判据资源是 ResourcePod。理由与上面那条逐字相同：Pod 采集没拿回来
+	// 时 a.ProbeTargets 是空的，probeDeclared 会把它读成"这个 namespace 里
+	// 没有 workload 声明探针"，判成不适用，从 Missing() 里消失——而探针被挡
+	// 的后果是 Pod 被 kubelet 判不健康后杀掉重启，是这几类里最重的那一个。
+	baseline.KindKubeletProbe: {snapshot.ResourcePod},
 }
 
 // runEvidence 是锚点那个时刻的采集在各类资源上的结果。

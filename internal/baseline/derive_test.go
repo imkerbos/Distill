@@ -8,7 +8,7 @@ import (
 	"github.com/imkerbos/Distill/internal/snapshot"
 )
 
-// asia 的 gateway namespace 对外暴露，五类应当齐备。
+// asia 的 gateway namespace 对外暴露，各类应当齐备。
 func TestDeriveOnGatewayNamespaceIsComplete(t *testing.T) {
 	c, ok := fixture.Load().Cluster("prod-asia-1")
 	if !ok {

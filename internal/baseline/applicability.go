@@ -43,6 +43,13 @@ func notApplicable(a snapshot.Assets, namespace string, unassessed []Kind) []Kin
 	if !blind[KindMetrics] && !scrapeDeclared(a, namespace) {
 		out = append(out, KindMetrics)
 	}
+	// 一个 workload 都没声明走网络的探针（全是 exec，或干脆没有探针）时
+	// 这一类不适用。判据与 deriveKubeletProbe 能处理的范围严格对齐：
+	// 判成适用却推不出规则，会把这个 namespace 永久卡在门禁前；判成不适用
+	// 而其实有探针，是一次静默放行，代价是 Pod 滚动重启。
+	if !blind[KindKubeletProbe] && !probeDeclared(a, namespace) {
+		out = append(out, KindKubeletProbe)
+	}
 	// 按 allKinds 的登记顺序返回，与 Missing()/Kinds() 一致。
 	ordered := make([]Kind, 0, len(out))
 	for _, k := range allKinds {

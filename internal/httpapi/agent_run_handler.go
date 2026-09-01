@@ -69,7 +69,11 @@ type agentPodPayload struct {
 	Labels    map[string]string `json:"labels,omitempty"`
 	// NamedPorts 是这个 Pod 声明的命名容器端口，供求值层解析命名端口规则
 	// （replay.resolveNamedPort 要的正是这份数据）。理由同 snapshot.Pod。
-	NamedPorts     []agentNamedPortPayload `json:"namedPorts,omitempty"`
+	NamedPorts []agentNamedPortPayload `json:"namedPorts,omitempty"`
+	// ProbePorts 是 kubelet 探针连接的端口，已由 agent 解析成数字
+	// （命名端口在采集侧就对着这个 Pod 解开了）。理由同 snapshot.Pod：
+	// 它是探针基线的唯一依据，缺了它 default-deny 会让 Pod 被杀掉重启。
+	ProbePorts     []agentNamedPortPayload `json:"probePorts,omitempty"`
 	HostNetwork    bool                    `json:"hostNetwork,omitempty"`
 	NodeName       string                  `json:"nodeName,omitempty"`
 	ServiceAccount string                  `json:"serviceAccount,omitempty"`
@@ -494,14 +498,8 @@ func validFailureReason(s string) bool {
 func (p agentRunPayload) toRun(clusterID string) snapshot.Run {
 	pods := make([]snapshot.Pod, 0, len(p.Observation.Pods))
 	for _, in := range p.Observation.Pods {
-		namedPorts := make([]snapshot.NamedPort, 0, len(in.NamedPorts))
-		for _, np := range in.NamedPorts {
-			namedPorts = append(namedPorts, snapshot.NamedPort{
-				Name:     np.Name,
-				Port:     np.Port,
-				Protocol: np.Protocol,
-			})
-		}
+		namedPorts := toSnapshotPorts(in.NamedPorts)
+		probePorts := toSnapshotPorts(in.ProbePorts)
 		var extraIPs []snapshot.PodAddress
 		for _, ip := range in.ExtraIPs {
 			// 只填地址：Scope/Reason 留空，由 collect.Classify 算出来。
@@ -516,6 +514,7 @@ func (p agentRunPayload) toRun(clusterID string) snapshot.Run {
 			IP:             in.IP,
 			Labels:         in.Labels,
 			NamedPorts:     namedPorts,
+			ProbePorts:     probePorts,
 			HostNetwork:    in.HostNetwork,
 			NodeName:       in.NodeName,
 			ServiceAccount: in.ServiceAccount,
@@ -701,4 +700,17 @@ func validRunErrorReason(s string) bool {
 	default:
 		return false
 	}
+}
+
+// toSnapshotPorts 把线上的端口列表翻成快照类型。
+func toSnapshotPorts(in []agentNamedPortPayload) []snapshot.NamedPort {
+	out := make([]snapshot.NamedPort, 0, len(in))
+	for _, np := range in {
+		out = append(out, snapshot.NamedPort{
+			Name:     np.Name,
+			Port:     np.Port,
+			Protocol: np.Protocol,
+		})
+	}
+	return out
 }

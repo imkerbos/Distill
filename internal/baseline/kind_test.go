@@ -12,16 +12,17 @@ import (
 )
 
 // 枚举必须有唯一登记处。漏登记的取值会在 Missing() 里被当成
-// "不必备"而静默跳过，六类齐备的门禁随之失效。
-func TestAllKindsRegistersExactlySix(t *testing.T) {
+// "不必备"而静默跳过，齐备性门禁随之失效。
+func TestAllKindsRegistersExactlySeven(t *testing.T) {
 	kinds := baseline.AllKinds()
-	if len(kinds) != 6 {
-		t.Fatalf("AllKinds() returned %d kinds, want 6", len(kinds))
+	if len(kinds) != 7 {
+		t.Fatalf("AllKinds() returned %d kinds, want 7", len(kinds))
 	}
 	want := map[baseline.Kind]bool{
 		baseline.KindDNS: false, baseline.KindLBHealth: false,
 		baseline.KindMetrics: false, baseline.KindControlPlane: false,
 		baseline.KindNodeAgent: false, baseline.KindExposedIngress: false,
+		baseline.KindKubeletProbe: false,
 	}
 	for _, k := range kinds {
 		if _, known := want[k]; !known {
@@ -49,6 +50,7 @@ func TestEveryDeclaredKindIsValid(t *testing.T) {
 		baseline.KindControlPlane,
 		baseline.KindNodeAgent,
 		baseline.KindExposedIngress,
+		baseline.KindKubeletProbe,
 	} {
 		if !k.Valid() {
 			t.Errorf("declared kind %q is not registered in allKinds", k)

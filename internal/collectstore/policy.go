@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -303,7 +304,7 @@ func (r *Reader) generate(
 		}
 	}
 
-	assets, err := r.assetsAt(ctx, t)
+	assets, probesAssessed, err := r.assetsAt(ctx, t)
 	if err != nil {
 		return candidateSet{}, err
 	}
@@ -328,6 +329,13 @@ func (r *Reader) generate(
 	// 先算未评估，再喂给生成：Derive 要靠它区分"集群里就是没有"与
 	// "我们没看过"，而两者在资产里长得一模一样。
 	notAssessed := notAssessedBaselines(evidence)
+	// 探针端口是 migrations/000036 才有的列。锚点那一次采集写在它之前时，
+	// Pod 明明采回来了、探针那一列却是 NULL——而 notAssessedBaselines 只看
+	// 资源枚举，判不出这一层。不补这一条的话，升级之后到下一次采集之前，
+	// 每个 namespace 都会被判成不需要 KUBELET_PROBE，从缺失清单里消失。
+	if !probesAssessed {
+		notAssessed = appendKind(notAssessed, baseline.KindKubeletProbe)
+	}
 
 	// 人工导入的补充规则进候选集（design doc 2026-08-25-existing-policies §3）。
 	//
@@ -518,22 +526,23 @@ func (t traffic) roster() []replay.PodRef {
 // 平台看得见集群里有哪些 hostNetwork DaemonSet，但看不见它们往哪连 —— agent
 // 连不连工作负载、连哪个端口，写在它自己的配置里。没有登记时它是空的，
 // NODE_AGENT 照旧进缺失清单，除非操作者显式声明了这个集群不需要（§4.3）。
-func (r *Reader) assetsAt(ctx context.Context, t traffic) (snapshot.Assets, error) {
+// 第二个返回值报告锚点那次采集**落过**探针端口这一列。见 probesCollected。
+func (r *Reader) assetsAt(ctx context.Context, t traffic) (snapshot.Assets, bool, error) {
 	services, err := r.readServicesAt(ctx, t.described)
 	if err != nil {
-		return snapshot.Assets{}, err
+		return snapshot.Assets{}, false, err
 	}
 	endpoints, err := r.readEndpointsAt(ctx, t.described)
 	if err != nil {
-		return snapshot.Assets{}, err
+		return snapshot.Assets{}, false, err
 	}
 	gateways, err := r.readGatewaysAt(ctx, t.described)
 	if err != nil {
-		return snapshot.Assets{}, err
+		return snapshot.Assets{}, false, err
 	}
 	pods, err := r.readPodsAt(ctx, t.described)
 	if err != nil {
-		return snapshot.Assets{}, err
+		return snapshot.Assets{}, false, err
 	}
 	// 只把这一半用得上的两个字段搬过去：ScrapeTargetSnapshots 要的是
 	// 「这个 Pod 在哪、它声明了什么」，不需要整行观测。
@@ -561,8 +570,12 @@ func (r *Reader) assetsAt(ctx context.Context, t traffic) (snapshot.Assets, erro
 		// Prometheus 会被挡（design doc 2026-08-18-baseline-applicability §4.2）。
 		ScrapeDeclarations: scrapeDeclarationsOf(t.clusterID, declared),
 		NodeAgents:         t.registered.NodeAgentSnapshots(),
-		Registry:           t.registered.ToSnapshot(),
-	}, nil
+		// 探针端口与 NodeAgents 相反：来自采集，不是登记。平台读得出
+		// Pod 规格里声明的探针，而 kubelet 往哪连由那份规格决定
+		// （design doc 2026-09-01）。
+		ProbeTargets: probeTargetsOf(t.clusterID, pods),
+		Registry:     t.registered.ToSnapshot(),
+	}, probesCollected(pods), nil
 }
 
 // scrapeDeclarationsOf 把声明了抓取意愿的 Pod 转成适用性判据。
@@ -579,6 +592,105 @@ func scrapeDeclarationsOf(clusterID string, declared []snapshot.Pod) []snapshot.
 		}
 		out = append(out, snapshot.ScrapeDeclaration{
 			ClusterID: clusterID, Namespace: p.Namespace, PodName: p.Name,
+		})
+	}
+	return out
+}
+
+// probesCollected 报告锚点那次采集是否落过探针端口。
+//
+// 一行非 NULL 就算采过：探针那一列是整批一起写的，不会只写一部分。
+// 一个 Pod 都没有时算"采过"——那时没有任何 workload 要放行，KUBELET_PROBE
+// 会走 notApplicable 那一支，与这里无关。
+func probesCollected(pods []observedPod) bool {
+	if len(pods) == 0 {
+		return true
+	}
+	for _, p := range pods {
+		if p.probesCollected {
+			return true
+		}
+	}
+	return false
+}
+
+// appendKind 把一个类型并进清单，已在其中则原样返回。
+func appendKind(kinds []baseline.Kind, k baseline.Kind) []baseline.Kind {
+	for _, got := range kinds {
+		if got == k {
+			return kinds
+		}
+	}
+	// 顺序跟 AllKinds() 的登记顺序，与缺失清单同一套口径。
+	out := make([]baseline.Kind, 0, len(kinds)+1)
+	for _, want := range baseline.AllKinds() {
+		if want == k {
+			out = append(out, k)
+			continue
+		}
+		for _, got := range kinds {
+			if got == want {
+				out = append(out, want)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// probeTargetsOf 把观测到的 Pod 聚合成每个 workload 的探针端口。
+//
+// **按 workload 聚合而不是按 Pod**：同一个 workload 的副本探针端口相同，
+// 而放行规则挂在 workload 上。按 Pod 出规则会让一个 20 副本的 Deployment
+// 产出 20 条一模一样的规则。
+//
+// 归属键用 policygen.WorkloadOf，不另抄一套：候选策略的主体、对账的聚合键、
+// 这里的挂靠键必须是同一个定义，否则 Baseline 会挂到一个候选策略里不存在的
+// 主体上，而挂不上的后果是这条放行静默消失（WorkloadOf 的注释说的正是这件事）。
+//
+// 解不出归属键的 Pod 直接跳过：它在候选策略里也没有主体可挂。
+//
+// **端口取并集**：同一个 workload 的两个副本可以处在滚动更新的两侧，
+// 探针端口不同。取并集而不是取其一，是因为漏掉的那一侧会在下发之后被
+// kubelet 判成不健康——而取并集多放行的那个端口本来就是这个 workload
+// 自己的探针端口，不是别人的。
+func probeTargetsOf(clusterID string, pods []observedPod) []snapshot.ProbeTarget {
+	type key struct{ namespace, labelKey, workload string }
+	seen := map[key]map[snapshot.NamedPort]bool{}
+	var order []key
+	for _, p := range pods {
+		k, v, ok := policygen.WorkloadOf(p.labels)
+		if !ok {
+			continue
+		}
+		id := key{namespace: p.namespace, labelKey: k, workload: v}
+		if _, known := seen[id]; !known {
+			seen[id] = map[snapshot.NamedPort]bool{}
+			order = append(order, id)
+		}
+		for _, port := range p.probePorts {
+			seen[id][port] = true
+		}
+	}
+	out := make([]snapshot.ProbeTarget, 0, len(order))
+	for _, id := range order {
+		// 端口按数值排序：map 遍历顺序不定，而这份列表最终决定候选策略里
+		// 端口的排列——不排序的话同一份快照会生成内容相同、字节不同的
+		// YAML，GitOps 上表现为一次没有实质变化的 diff。
+		ports := make([]snapshot.NamedPort, 0, len(seen[id]))
+		for port := range seen[id] {
+			ports = append(ports, port)
+		}
+		sort.Slice(ports, func(i, j int) bool {
+			if ports[i].Port != ports[j].Port {
+				return ports[i].Port < ports[j].Port
+			}
+			return ports[i].Protocol < ports[j].Protocol
+		})
+		out = append(out, snapshot.ProbeTarget{
+			ClusterID: clusterID, Namespace: id.namespace,
+			WorkloadKey: id.labelKey, Workload: id.workload,
+			Ports: ports,
 		})
 	}
 	return out

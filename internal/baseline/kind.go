@@ -12,7 +12,7 @@ import (
 	"github.com/imkerbos/Distill/internal/replay"
 )
 
-// Kind 是必备 Baseline 的封闭枚举（spec §7.3 五类）。
+// Kind 是必备 Baseline 的封闭枚举（spec §7.3）。
 type Kind string
 
 const (
@@ -33,13 +33,24 @@ const (
 	// /32 清单。不生成它的后果是入口网关拿到一份零放行的 default-deny，
 	// 应用即切断全集群外部入口（design doc 2026-08-28 §1）。
 	KindExposedIngress Kind = "EXPOSED_INGRESS"
+	// KindKubeletProbe 是 kubelet 探针入向。
+	//
+	// kubelet 跑在节点上，探测的源地址是节点 IP，podSelector 永远选不中它。
+	// default-deny 之后没有对应放行，readiness/liveness 探测就失败，Pod 被判
+	// 不健康后杀掉重启——这是最先断、后果最重的一类。
+	//
+	// 依据是 Pod 规格里声明的探针端口，不是操作者填的登记：UAT 上节点打进
+	// Pod 的流量主体正是探针（8088 打到 216 个 Pod、80 打到 98 个），而每个
+	// workload 的探针端口都不同，一条登记一个固定端口的 NODE_AGENT 表达不了
+	// （design doc 2026-09-01）。
+	KindKubeletProbe Kind = "KUBELET_PROBE"
 )
 
 // allKinds 是枚举的唯一登记处。新增类型必须同步登记，
 // 否则 Valid 会拒绝它，且 Missing 不会把它算进齐备性校验。
 var allKinds = []Kind{
 	KindDNS, KindLBHealth, KindMetrics, KindControlPlane, KindNodeAgent,
-	KindExposedIngress,
+	KindExposedIngress, KindKubeletProbe,
 }
 
 // AllKinds 返回全部已登记的必备 Baseline 类型。
@@ -80,6 +91,8 @@ const (
 	SourceNodeAgent SourceKind = "NODE_AGENT"
 	// SourceClusterRegistry 表示依据来自集群网段注册信息。
 	SourceClusterRegistry SourceKind = "CLUSTER_REGISTRY"
+	// SourcePodProbe 表示依据来自 Pod 规格里声明的探针。
+	SourcePodProbe SourceKind = "POD_PROBE"
 )
 
 // Derivation 指向推导所依据的快照对象。
@@ -118,7 +131,7 @@ type Rule struct {
 	// Derivations 是推导依据，构造时保证非空。
 	Derivations []Derivation `json:"derivations"`
 	// Subject 是这条规则要挂靠的 workload selector；为空表示广播到整个
-	// namespace 里的每个 workload（既有五类的形态：DNS、control plane 等
+	// namespace 里的每个 workload（既有几类的形态：DNS、control plane 等
 	// 是命名空间级的基础设施事实，理应对每个 workload 生效）。
 	//
 	// 非空时——目前只有 EXPOSED_INGRESS 会填它——调用方（policygen）只把
