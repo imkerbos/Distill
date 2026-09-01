@@ -62,6 +62,10 @@ func dispatchCasesFor(ctx context.Context, clusterID string, window store.TimeWi
 			_, err := d.DefaultWindow(ctx, clusterID)
 			return err
 		}},
+		{method: "DefaultWindowAt", name: "DefaultWindowAt", call: func(d *dispatchReader) error {
+			_, err := d.DefaultWindowAt(ctx, clusterID, time.Time{})
+			return err
+		}},
 		{method: "Topology", name: "Topology", call: func(d *dispatchReader) error {
 			_, err := d.Topology(ctx, clusterID, store.LevelNamespace)
 			return err

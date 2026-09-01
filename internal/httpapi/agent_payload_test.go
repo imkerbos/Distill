@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/imkerbos/Distill/internal/collectstore"
 	"github.com/imkerbos/Distill/internal/response"
@@ -252,4 +253,10 @@ func (noIngestReader) Security(_ context.Context, clusterID string, _ store.Time
 		RiskyFlows:      []store.RiskyFlow{},
 		EgressTargets:   []store.EgressTarget{},
 	}, nil
+}
+
+func (noIngestReader) DefaultWindowAt(
+	ctx context.Context, clusterID string, _ time.Time,
+) (store.TimeWindow, error) {
+	return noIngestReader{}.DefaultWindow(ctx, clusterID)
 }

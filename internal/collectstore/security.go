@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"time"
 
 	"github.com/imkerbos/Distill/internal/flow"
 	"github.com/imkerbos/Distill/internal/identity"
@@ -56,7 +57,7 @@ func (r *Reader) Security(
 
 	trafficObserved := true
 	var t traffic
-	_, werr := r.latestFlowWindow(ctx, clusterID)
+	_, werr := r.latestFlowWindowAt(ctx, clusterID, time.Time{})
 	switch {
 	case errors.Is(werr, ErrNoFlowIngest):
 		trafficObserved = false

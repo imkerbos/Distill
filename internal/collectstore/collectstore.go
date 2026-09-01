@@ -168,7 +168,7 @@ func (r *Reader) describe(ctx context.Context, clusterID string) (described, err
 		return described{}, err
 	}
 
-	window, err := r.latestFlowWindow(ctx, clusterID)
+	window, err := r.latestFlowWindowAt(ctx, clusterID, time.Time{})
 	if err != nil {
 		return described{}, err
 	}
@@ -289,10 +289,18 @@ func (r *Reader) describeAt(
 // 没有摄入证据的时间里，"没有观测到连接"会被下游读成"这条规则没有流量、
 // 可以收紧"，而那是这个平台唯一那个单向的失败方向。
 func (r *Reader) DefaultWindow(ctx context.Context, clusterID string) (store.TimeWindow, error) {
+	return r.DefaultWindowAt(ctx, clusterID, time.Time{})
+}
+
+// DefaultWindowAt 同 DefaultWindow，但只看 at 之前结束的那些摄入窗口。
+// at 为零值时不设上界，也就是 DefaultWindow 的行为。见接口上的说明。
+func (r *Reader) DefaultWindowAt(
+	ctx context.Context, clusterID string, at time.Time,
+) (store.TimeWindow, error) {
 	if _, err := r.collectedCluster(ctx, clusterID); err != nil {
 		return store.TimeWindow{}, err
 	}
-	w, err := r.latestFlowWindow(ctx, clusterID)
+	w, err := r.latestFlowWindowAt(ctx, clusterID, at)
 	if err != nil {
 		return store.TimeWindow{}, err
 	}
@@ -309,15 +317,26 @@ func (r *Reader) DefaultWindow(ctx context.Context, clusterID string) (store.Tim
 // 排除 FAILED 的摄入：那次运行根本没拿到数据，用它的窗口去查连接必然得到
 // 零条，而零条会被读成"这段时间没有流量"（snapshotstore.validateIngestRun
 // 拒绝无原因的失败运行，正是同一条理由的写入侧）。
-func (r *Reader) latestFlowWindow(ctx context.Context, clusterID string) (flow.Window, error) {
+func (r *Reader) latestFlowWindowAt(
+	ctx context.Context, clusterID string, at time.Time,
+) (flow.Window, error) {
 	var w flow.Window
+	// at 为零值时上界取一个永远成立的值，SQL 保持一条，不分叉成两句：
+	// 两句各自演化的结果是"带上界"与"不带上界"在别的地方慢慢不一样。
+	upper := at
+	if upper.IsZero() {
+		// 一个仍然落在 DATETIME 范围内的上界。取 time.Unix(1<<62, 0) 这类
+		// 值会溢出 MySQL 的 DATETIME，整条查询直接失败 —— 而失败的是
+		// "不设上界"那一支，也就是除写回之外的所有调用方。
+		upper = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
+	}
 	err := r.db.QueryRowContext(ctx,
 		`SELECT window_start, window_end
 		   FROM flow_ingest_run
-		  WHERE cluster_id = ? AND status <> ?
+		  WHERE cluster_id = ? AND status <> ? AND window_end <= ?
 		  ORDER BY window_start DESC, window_end DESC
 		  LIMIT 1`,
-		clusterID, string(snapshotstore.IngestFailed)).Scan(&w.From, &w.To)
+		clusterID, string(snapshotstore.IngestFailed), upper.UTC()).Scan(&w.From, &w.To)
 	if errors.Is(err, sql.ErrNoRows) {
 		return flow.Window{}, fmt.Errorf("%w: cluster %s", ErrNoFlowIngest, clusterID)
 	}

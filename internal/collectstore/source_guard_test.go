@@ -93,6 +93,12 @@ func sourceGuardCases(ctx context.Context, window store.TimeWindow) []sourceGuar
 			_, err := r.DefaultWindow(ctx, id)
 			return wantClusterNotFound(err)
 		}},
+		{method: "DefaultWindowAt", name: "DefaultWindowAt", refusal: func(r *collectstore.Reader, id string) string {
+			// 与 DefaultWindow 同一格：写回走的是这一个，它是按出计划那一刻
+			// 收窄的默认窗口，同样不得回答一个 FIXTURE 集群。
+			_, err := r.DefaultWindowAt(ctx, id, time.Time{})
+			return wantClusterNotFound(err)
+		}},
 		{method: "Topology", name: "Topology", refusal: func(r *collectstore.Reader, id string) string {
 			_, err := r.Topology(ctx, id, store.LevelNamespace)
 			return wantClusterNotFound(err)

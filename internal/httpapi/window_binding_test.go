@@ -76,6 +76,9 @@ type windowCall struct {
 // 结论。返回值只要能让 handler 走完就够。
 type windowProbeReader struct {
 	calls []windowCall
+	// sawDefaultWindowAt / atSeen 记下写回是不是按出计划那一刻要的窗口。
+	sawDefaultWindowAt bool
+	atSeen             time.Time
 }
 
 func (p *windowProbeReader) DefaultWindow(_ context.Context, clusterID string) (store.TimeWindow, error) {
@@ -465,5 +468,40 @@ func TestEveryWindowedPathNamesTheMissingIngestRunSpecifically(t *testing.T) {
 	if !exempted {
 		t.Errorf("the walk never reached POST %s; the exemption above now covers nothing, "+
 			"and whatever that route became is unguarded", overrideRoute)
+	}
+}
+
+func (p *windowProbeReader) DefaultWindowAt(
+	ctx context.Context, clusterID string, at time.Time,
+) (store.TimeWindow, error) {
+	p.sawDefaultWindowAt = true
+	p.atSeen = at
+	return p.DefaultWindow(ctx, clusterID)
+}
+
+// **写回按出计划那一刻取默认窗口，不取"最新"。**
+//
+// 出计划与推送是两次请求，而推送要把整份计划重算一遍再比指纹。
+// DefaultWindow 取最新摄入窗口，agent 每分钟摄入一次，两次调用之间它必然
+// 已经往前走了 —— 四类计数变了，提交信息与每个文件的注释头跟着变，指纹
+// 永远对不上。UAT 实测：默认窗口这条路连续 12 次全部被拒（包括 P1 的超时
+// 修好、推送变快之后的 3 次），而报错说的是「集群、时间窗或别人的确认
+// 发生了变化」，把人指向别处。
+//
+// 判据是"带上了一个非零的 at"：推送从分支名解析回出计划那一刻的 at，
+// 只要窗口是 at 的函数，两次就必然算出同一个。
+func TestWritebackAsksForTheWindowAsOfThePlanMoment(t *testing.T) {
+	p := &windowProbeReader{}
+	h, cookie := newWindowProbeRouter(t, p)
+
+	_ = authedPostJSON(t, h, cookie,
+		"/api/v1/clusters/"+probeCluster+"/policy-writeback/plan", map[string]any{})
+	if !p.sawDefaultWindowAt {
+		t.Fatal("写回走的仍是 DefaultWindow —— 那取的是最新窗口，" +
+			"出计划与推送两次会拿到不同的窗口，指纹永远对不上")
+	}
+	if p.atSeen.IsZero() {
+		t.Error("传给 DefaultWindowAt 的 at 是零值 —— 那等于不设上界，" +
+			"与直接取最新没有区别")
 	}
 }

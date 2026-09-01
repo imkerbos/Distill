@@ -701,6 +701,14 @@ func (r *FixtureReader) DefaultWindow(ctx context.Context, clusterID string) (Ti
 	return r.DataWindow(), nil
 }
 
+// DefaultWindowAt 与 DefaultWindow 同答：合成数据集只有一个固定范围，
+// 没有随时间推进的摄入窗口，因此不存在 at 能收窄的东西。
+func (r *FixtureReader) DefaultWindowAt(
+	ctx context.Context, clusterID string, _ time.Time,
+) (TimeWindow, error) {
+	return r.DefaultWindow(ctx, clusterID)
+}
+
 // Flows 按条件返回流量列表。筛选条件指向不存在的集群时返回错误。
 func (r *FixtureReader) Flows(ctx context.Context, filter FlowFilter) (FlowPage, error) {
 	// 先于集群校验：缺时间窗是调用方用错了接口，与查哪个集群无关。

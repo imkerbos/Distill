@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"sort"
 	"testing"
+	"time"
 
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -277,6 +278,13 @@ func TestACollectedClusterNeverGetsTheFixtureReader(t *testing.T) {
 			// 尤其安静：拿到窗口的调用方会照常算出一份数字合理的报告，
 			// 而它的全部证据是去年那半分钟的观测。
 			_, err := fr.DefaultWindow(ctx, fixtureBackedID)
+			return wantClusterNotFound(err)
+		}},
+		{method: "DefaultWindowAt", name: "DefaultWindowAt(collected cluster)", leak: func() string {
+			// 与 DefaultWindow 同一格，理由逐字相同：写回走的是这一个，
+			// 它泄漏的后果是一份策略集用去年那半分钟的观测算出四类计数，
+			// 而那些数字是写回门禁的判据。
+			_, err := fr.DefaultWindowAt(ctx, fixtureBackedID, time.Time{})
 			return wantClusterNotFound(err)
 		}},
 		{method: "Topology", name: "Topology(collected cluster)", leak: func() string {

@@ -336,7 +336,16 @@ func planWriteback(
 	w http.ResponseWriter, r *http.Request, d Deps, at time.Time, confirmed []string,
 ) (plannedWriteback, bool) {
 	clusterID := chi.URLParam(r, "clusterID")
-	window, ok, err := parseWindow(r.Context(), r.URL.Query(), d.Reader, clusterID)
+	// **窗口按 at 定，不取"最新"。** 出计划与推送是两次请求，而推送要把
+	// 整份计划重算一遍再比指纹；DefaultWindow 取最新摄入窗口，agent 每分钟
+	// 摄入一次，两次调用之间它必然已经往前走了 —— 四类计数变了，提交信息
+	// 与每个文件的注释头跟着变，指纹永远对不上。UAT 实测：默认窗口这条路
+	// 连续 12 次全部被拒，而报错说的是「集群、时间窗或别人的确认发生了
+	// 变化」，把人指向别处。
+	//
+	// 推送从分支名里解析回出计划那一刻的 at，所以只要窗口是 at 的函数，
+	// 两次就必然算出同一个。显式传了 from/to 时仍以调用方给的为准。
+	window, ok, err := parseWindowAt(r.Context(), r.URL.Query(), d.Reader, clusterID, at)
 	if err != nil {
 		writeReaderError(w, r, d, err)
 		return plannedWriteback{}, false

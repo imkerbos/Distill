@@ -570,3 +570,9 @@ func TestTheGateStillDescribesAnUnattachedExposureAsAService(t *testing.T) {
 		t.Errorf("暴露那一支丢了它自己的处置: %s", msg)
 	}
 }
+
+func (noWindowReader) DefaultWindowAt(
+	ctx context.Context, clusterID string, _ time.Time,
+) (store.TimeWindow, error) {
+	return noWindowReader{}.DefaultWindow(ctx, clusterID)
+}

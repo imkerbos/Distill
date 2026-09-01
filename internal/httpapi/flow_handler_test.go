@@ -367,3 +367,9 @@ func TestFlowsWithoutAClusterExplainsItselfInsteadOf500(t *testing.T) {
 		t.Errorf("cluster named: code = %v, want 0", got)
 	}
 }
+
+func (clusterRequiredReader) DefaultWindowAt(
+	ctx context.Context, clusterID string, _ time.Time,
+) (store.TimeWindow, error) {
+	return clusterRequiredReader{}.DefaultWindow(ctx, clusterID)
+}

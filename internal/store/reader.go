@@ -246,6 +246,18 @@ type Reader interface {
 	// 证据支持，而它算出来的判定与一份有证据的判定在界面上长得一模一样。
 	// 一个还没有摄入过的集群的正确答案是「还没有可用的采集数据」。
 	DefaultWindow(ctx context.Context, clusterID string) (TimeWindow, error)
+	// DefaultWindowAt 同 DefaultWindow，但只看 at 之前结束的那些摄入窗口。
+	//
+	// **写回必须用它，不能用 DefaultWindow。** 出计划与推送是两次请求，
+	// 而推送要把整份计划重算一遍再比指纹；DefaultWindow 取的是"最新"，
+	// agent 每分钟摄入一次，两次调用之间它必然已经往前走了 —— 于是四类
+	// 计数变了、提交信息与每个文件的注释头跟着变，指纹永远对不上。
+	// UAT 实测：默认窗口这条路连续 12 次全部被拒，而报错说的是「集群、
+	// 时间窗或别人的确认发生了变化」，指向的方向不对。
+	//
+	// 推送从分支名里解析回出计划那一刻的 at，因此只要窗口是 at 的函数，
+	// 两次就必然算出同一个窗口。
+	DefaultWindowAt(ctx context.Context, clusterID string, at time.Time) (TimeWindow, error)
 	// Topology 返回指定集群的通信拓扑。集群不存在时返回错误。
 	Topology(ctx context.Context, clusterID string, level TopologyLevel) (Topology, error)
 	// Flows 按条件返回流量列表。筛选条件指向不存在的集群时返回错误。

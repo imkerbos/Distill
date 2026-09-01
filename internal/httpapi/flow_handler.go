@@ -51,6 +51,17 @@ type flowListResponse struct {
 func parseWindow(
 	ctx context.Context, q map[string][]string, rd store.Reader, clusterID string,
 ) (store.TimeWindow, bool, error) {
+	return parseWindowAt(ctx, q, rd, clusterID, time.Time{})
+}
+
+// parseWindowAt 同 parseWindow，但没给 from/to 时把默认窗口按 at 收窄。
+//
+// 写回必须走它：出计划与推送各解析一次窗口，而"最新摄入窗口"每分钟都在动，
+// 于是同一份计划在两次请求里算出两个指纹（见 writeback_handler 那一处说明）。
+// at 为零值时行为与 parseWindow 逐字相同。
+func parseWindowAt(
+	ctx context.Context, q map[string][]string, rd store.Reader, clusterID string, at time.Time,
+) (store.TimeWindow, bool, error) {
 	get := func(k string) string {
 		if v := q[k]; len(v) > 0 {
 			return v[0]
@@ -59,7 +70,7 @@ func parseWindow(
 	}
 	rawFrom, rawTo := get("from"), get("to")
 	if rawFrom == "" && rawTo == "" {
-		win, err := rd.DefaultWindow(ctx, clusterID)
+		win, err := rd.DefaultWindowAt(ctx, clusterID, at)
 		if err != nil {
 			return store.TimeWindow{}, false, err
 		}

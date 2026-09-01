@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -69,4 +70,10 @@ func (noTrafficPreviewReader) PolicyPreviewAtGranularity(
 		TrafficObserved: false,
 		Overridden:      store.OverriddenView{Enabled: enabled},
 	}, nil
+}
+
+func (noTrafficPreviewReader) DefaultWindowAt(
+	ctx context.Context, clusterID string, _ time.Time,
+) (store.TimeWindow, error) {
+	return noTrafficPreviewReader{}.DefaultWindow(ctx, clusterID)
 }

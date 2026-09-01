@@ -1,6 +1,8 @@
 package httpapi_test
 
 import (
+	"time"
+
 	networkingv1 "k8s.io/api/networking/v1"
 
 	"context"
@@ -456,4 +458,22 @@ func TestNeverIngestedSaysNeverIngestedNotNoCollection(t *testing.T) {
 			t.Errorf("%s 在拒绝的同时还给了 data", path)
 		}
 	}
+}
+
+func (brokenReader) DefaultWindowAt(
+	ctx context.Context, clusterID string, _ time.Time,
+) (store.TimeWindow, error) {
+	return brokenReader{}.DefaultWindow(ctx, clusterID)
+}
+
+func (noCollectionReader) DefaultWindowAt(
+	ctx context.Context, clusterID string, _ time.Time,
+) (store.TimeWindow, error) {
+	return noCollectionReader{}.DefaultWindow(ctx, clusterID)
+}
+
+func (noFlowIngestReader) DefaultWindowAt(
+	ctx context.Context, clusterID string, _ time.Time,
+) (store.TimeWindow, error) {
+	return noFlowIngestReader{}.DefaultWindow(ctx, clusterID)
 }

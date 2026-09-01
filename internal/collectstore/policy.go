@@ -283,7 +283,7 @@ func (r *Reader) generate(
 	// 拒绝，按资产回答等于悄悄换掉了他问的那个问题。
 	var t traffic
 	trafficObserved := true
-	if _, werr := r.latestFlowWindow(ctx, clusterID); errors.Is(werr, ErrNoFlowIngest) {
+	if _, werr := r.latestFlowWindowAt(ctx, clusterID, time.Time{}); errors.Is(werr, ErrNoFlowIngest) {
 		trafficObserved = false
 		d, derr := r.describeAssets(ctx, clusterID)
 		if derr != nil {
@@ -1081,7 +1081,7 @@ func (r *Reader) evidenceLagOf(ctx context.Context, clusterID string) (store.Evi
 		lag.AccountedTo = accounted
 	}
 
-	w, err := r.latestFlowWindow(ctx, clusterID)
+	w, err := r.latestFlowWindowAt(ctx, clusterID, time.Time{})
 	switch {
 	case errors.Is(err, ErrNoFlowIngest):
 		// 还没有过流量摄入：证据不更新是因为没有东西可记，不是记账坏了。

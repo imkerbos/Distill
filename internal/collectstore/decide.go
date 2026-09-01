@@ -3,6 +3,7 @@ package collectstore
 import (
 	"context"
 	"fmt"
+	"time"
 
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -110,7 +111,7 @@ func (r *Reader) readLatestTraffic(ctx context.Context, clusterID string) (traff
 	if err != nil {
 		return traffic{}, err
 	}
-	window, err := r.latestFlowWindow(ctx, clusterID)
+	window, err := r.latestFlowWindowAt(ctx, clusterID, time.Time{})
 	if err != nil {
 		return traffic{}, err
 	}

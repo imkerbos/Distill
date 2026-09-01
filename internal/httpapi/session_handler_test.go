@@ -599,3 +599,9 @@ func buildTestRouterWithTrend(
 	}
 	return h, sessions, cookies[0]
 }
+
+func (r windowedReader) DefaultWindowAt(
+	ctx context.Context, clusterID string, _ time.Time,
+) (store.TimeWindow, error) {
+	return r.DefaultWindow(ctx, clusterID)
+}

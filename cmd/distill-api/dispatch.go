@@ -1,6 +1,8 @@
 package main
 
 import (
+	"time"
+
 	networkingv1 "k8s.io/api/networking/v1"
 
 	"context"
@@ -100,6 +102,21 @@ func (d *dispatchReader) DefaultWindow(
 		return store.TimeWindow{}, err
 	}
 	return r.DefaultWindow(ctx, clusterID)
+}
+
+// DefaultWindowAt 同上，按 at 收窄。转发规则逐字相同 —— 两个方法各自决定
+// 转发给谁，就多出一个"同一个集群被两条路读成两个来源"的位置。
+func (d *dispatchReader) DefaultWindowAt(
+	ctx context.Context, clusterID string, at time.Time,
+) (store.TimeWindow, error) {
+	if clusterID == "" {
+		return store.TimeWindow{}, store.ErrClusterRequired
+	}
+	r, err := d.readerOf(ctx, clusterID)
+	if err != nil {
+		return store.TimeWindow{}, err
+	}
+	return r.DefaultWindowAt(ctx, clusterID, at)
 }
 
 // Topology 转发给这个集群登记的来源对应的 Reader。
