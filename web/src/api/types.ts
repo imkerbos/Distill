@@ -749,7 +749,22 @@ export interface GitRepo {
  * 仓库 ID 是不可改键，允许改它等于让一次「改地址」把审计里那一串行变成
  * 无主记录。前端也就不给它编辑入口。
  */
-export type GitRepoWrite = Pick<GitRepo, 'repoId' | 'repoUrl' | 'branch' | 'credentialRef'>
+export type GitRepoWrite = Pick<GitRepo, 'repoId' | 'repoUrl' | 'branch' | 'credentialRef'> & {
+  /**
+   * SSH 私钥（PEM），**只入不出**。
+   *
+   * 它不在 GitRepo 上，因此读回来的仓库不可能带着它——类型层面就没有那个
+   * 字段可以承载它。服务端也不回显（internal/httpapi/repo_handler.go），
+   * 两边各自成立，不是互相依赖。
+   *
+   * 只在这个部署由平台保管凭据（secretsBackend = DB）时才有意义；其余形态
+   * 服务端会明确拒绝带私钥的请求，而不是静默忽略——忽略之后操作者以为钥匙
+   * 配好了，失败会推迟到写回那一刻。
+   *
+   * 缺省表示"不动现有凭据"。改地址时不该顺手把钥匙清掉。
+   */
+  privateKey?: string
+}
 
 /**
  * 集群与一个已存在策略仓库的绑定。

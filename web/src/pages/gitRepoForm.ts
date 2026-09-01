@@ -16,12 +16,20 @@ import {
  * 这里不 import 任何 React，测试可以直接跑它。
  */
 
-/** 仓库表单的可编辑值。四项与 GitRepoWrite 一一对应，不多不少。 */
+/** 仓库表单的可编辑值。 */
 export interface RepoFormValues {
   repoId: string
   repoUrl: string
   branch: string
   credentialRef: string
+  /**
+   * SSH 私钥（PEM），**只入不出**。
+   *
+   * 编辑既有仓库时它永远从空开始，而不是从库里播种：库里根本读不回来
+   * （服务端不回显，GitRepo 上也没有这个字段）。空表示"不动现有凭据"，
+   * 于是一个只想改分支的人不会顺手把钥匙清掉。
+   */
+  privateKey: string
 }
 
 /**
@@ -35,7 +43,7 @@ const REQUIRED_REPO_FIELDS: readonly ['repoId', 'repoUrl', 'branch'] = ['repoId'
 
 /** 新建表单的初始值：全空。 */
 export const blankRepoValues = (): RepoFormValues =>
-  ({ repoId: '', repoUrl: '', branch: '', credentialRef: '' })
+  ({ repoId: '', repoUrl: '', branch: '', credentialRef: '', privateKey: '' })
 
 /**
  * 用仓库现值播种编辑表单。
@@ -51,6 +59,9 @@ export const blankRepoValues = (): RepoFormValues =>
 export function repoFormValuesOf(r: GitRepo): RepoFormValues {
   return {
     repoId: r.repoId, repoUrl: r.repoUrl, branch: r.branch, credentialRef: r.credentialRef,
+    // 私钥不播种，也播种不了：它读不回来。空在提交时表示"不动现有凭据"
+    // ——与其余字段"空就是清空"的语义相反，因此这一条单独写在这里。
+    privateKey: '',
   }
 }
 
@@ -79,10 +90,22 @@ export function resolveGitRepo(values: RepoFormValues): RepoResolution {
   const repoId = values.repoId.trim()
   const repoUrl = values.repoUrl.trim()
   const branch = values.branch.trim()
+  // 私钥只 trim 首尾空白，**不做任何其它整形**：PEM 的换行是内容的一部分，
+  // 顺手规范化会把一把好钥匙改成解析不了的那种，而失败要到写回才显形。
+  const privateKey = values.privateKey.trim()
+  const repo: GitRepoWrite = {
+    repoId, repoUrl, branch, credentialRef: values.credentialRef.trim(),
+  }
+  // 空不带上去：缺省表示"不动现有凭据"，而带一个空串上去是"把凭据清成空"。
+  if (privateKey !== '') {
+    repo.privateKey = privateKey
+  }
   return {
     ok: true,
-    repo: { repoId, repoUrl, branch, credentialRef: values.credentialRef.trim() },
-    summary: `提交后：仓库 ${repoId} 指向 ${repoUrl}@${branch}`,
+    repo,
+    summary: privateKey === ''
+      ? `提交后：仓库 ${repoId} 指向 ${repoUrl}@${branch}`
+      : `提交后：仓库 ${repoId} 指向 ${repoUrl}@${branch}，并保存一把新的 SSH 私钥`,
   }
 }
 

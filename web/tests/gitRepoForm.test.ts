@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
@@ -27,13 +28,20 @@ function verified(result: RepoVerifyResult, at?: string): GitRepo {
 /* 1. 仓库提交体                                                            */
 /* ---------------------------------------------------------------------- */
 
-/** 播种只取四个可写字段：平台自产的两项一旦进了表单，下一个人就会提交它们。 */
-test('仓库表单只播种四个可写字段', () => {
+/**
+ * 播种只取可写字段：平台自产的两项一旦进了表单，下一个人就会提交它们。
+ *
+ * privateKey 也在这里，但它**永远是空的**：它读不回来（服务端不回显，
+ * GitRepo 类型上没有这个字段），播种成任何非空值都是凭空造的。空在提交时
+ * 表示"不动现有凭据"，语义正好对得上。
+ */
+test('仓库表单只播种可写字段，且私钥恒为空', () => {
   assert.deepEqual(repoFormValuesOf(verified('AUTH_FAILED', '2026-08-13T09:30:00Z')), {
     repoId: 'repo-prod-asia-1',
     repoUrl: 'https://gitlab.example.com/net/policies.git',
     branch: 'main',
     credentialRef: '',
+    privateKey: '',
   })
 })
 
@@ -350,4 +358,84 @@ test('仓库页里不出现与写有关的结论措辞', () => {
     assert.equal(PAGE_SRC.includes(banned), false,
       `GitReposPage 里出现了「${banned}」：只读校验得不出与写有关的结论`)
   }
+})
+
+/* ---------------------------------------------------------------------- */
+/* SSH 私钥：只入不出                                                        */
+/* ---------------------------------------------------------------------- */
+
+// 一把真的 PEM 私钥长什么样：多行，靠换行分隔。内容不必能解析——
+// 这一层不解析它，服务端才解析（前端不是安全边界）。
+const PEM = '-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1r\nZXktdjEAAA==\n-----END OPENSSH PRIVATE KEY-----'
+
+// **空私钥不带上请求体。**
+//
+// 缺省表示"不动现有凭据"，而带一个空串上去是"把凭据清成空"。一个只想改
+// 分支的人不该因此把钥匙清掉——那之后写回会报"凭据取不到"，而他改的是分支。
+test('空私钥不出现在写入体里', () => {
+  const r = resolveGitRepo({
+    repoId: 'uat', repoUrl: 'git@h.example.com:i/u.git', branch: 'main',
+    credentialRef: '', privateKey: '',
+  })
+  assert.equal(r.ok, true)
+  if (!r.ok) return
+  assert.equal('privateKey' in r.repo, false, '空私钥被当成"清空凭据"提交了')
+})
+
+// 非空时带上去，且**原样带**。
+//
+// PEM 的换行是内容的一部分，顺手规范化会把一把好钥匙改成解析不了的那种，
+// 而失败要到写回那一刻才显形，报的是"仓库不可达"。
+test('私钥原样提交，换行不被整形', () => {
+  const r = resolveGitRepo({
+    repoId: 'uat', repoUrl: 'git@h.example.com:i/u.git', branch: 'main',
+    credentialRef: '', privateKey: `  ${PEM}  `,
+  })
+  assert.equal(r.ok, true)
+  if (!r.ok) return
+  assert.equal(r.repo.privateKey, PEM, '私钥内容被改动了')
+  assert.equal(r.repo.privateKey?.split('\n').length, 4, '换行被吃掉了')
+})
+
+// 提交前那句回执要说出"这一次会存一把新钥匙"。
+//
+// 换凭据与改地址在界面上长得一样，而前者的影响面大得多。
+test('带私钥时回执说明会保存新凭据', () => {
+  const withKey = resolveGitRepo({
+    repoId: 'uat', repoUrl: 'git@h.example.com:i/u.git', branch: 'main',
+    credentialRef: '', privateKey: PEM,
+  })
+  const without = resolveGitRepo({
+    repoId: 'uat', repoUrl: 'git@h.example.com:i/u.git', branch: 'main',
+    credentialRef: '', privateKey: '',
+  })
+  assert.equal(withKey.ok && withKey.summary.includes('新的 SSH 私钥'), true)
+  assert.equal(without.ok && without.summary.includes('新的 SSH 私钥'), false)
+})
+
+// **编辑既有仓库时私钥永远从空开始。**
+//
+// 它读不回来（服务端不回显，GitRepo 类型上也没有这个字段），所以播种成
+// 任何非空值都是凭空造的。空在提交时表示"不动"，语义正好对得上。
+test('编辑表单不播种私钥', () => {
+  const seeded = repoFormValuesOf({
+    repoId: 'uat', repoUrl: 'git@h.example.com:i/u.git', branch: 'main',
+    credentialRef: 'uat', verifyResult: 'OK', verifiedAt: null,
+  } as never)
+  assert.equal(seeded.privateKey, '', '编辑表单里带出了一个私钥')
+})
+
+// 界面上必须写着"公钥装到仓库、私钥粘到这里"，而且要点名 Deploy keys。
+//
+// 这一步最容易错的是把**错误的东西**粘进来——UAT 上第一次填的就是
+// Deploy token。服务端会拒，但拒绝信息说不出该去哪儿拿对的那一份。
+test('私钥输入旁边有可照做的引导', () => {
+  const src = readFileSync(join(process.cwd(), 'src/pages/GitReposPage.tsx'), 'utf8')
+  for (const must of ['ssh-keygen', 'Deploy keys', '.pub', '写权限']) {
+    assert.ok(src.includes(must), `引导里没有提到 ${must}`)
+  }
+  assert.ok(
+    src.includes('不是 Deploy tokens'),
+    '没有点明 Deploy keys 与 Deploy tokens 的区别 —— 这正是第一次填错的地方',
+  )
 })

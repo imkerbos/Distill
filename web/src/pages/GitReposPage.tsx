@@ -287,6 +287,84 @@ function RepoFields({ values, patch, mode }: {
 }
 
 /**
+ * SSH 私钥输入。
+ *
+ * 与 host key 那一块同一形态：**只用于写入，永远不回显**。服务端不回它，
+ * GitRepo 类型上也没有这个字段——两边各自成立，不是互相依赖。
+ *
+ * 单独一块而不是塞进 FormGrid：它是多行的，而且旁边那段引导是这一块的
+ * 主要内容——一个只有输入框、没有说明的私钥框，会被填进访问令牌或公钥
+ * （UAT 上第一次就是这么填的）。
+ */
+function PrivateKeyField({
+  mode, value, onChange,
+}: {
+  mode: 'create' | 'edit'
+  value: string
+  onChange: (v: string) => void
+}) {
+  return (
+    <div style={{ marginTop: 'var(--space-4)' }}>
+      <label className="block">
+        <span style={fieldLabelStyle}>
+          SSH 私钥（PEM）{mode === 'edit' ? '——留空表示不更换现有凭据' : '（可留空，稍后再配）'}
+        </span>
+        <textarea
+          className="ctl w-full"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          rows={6}
+          placeholder={'-----BEGIN OPENSSH PRIVATE KEY-----\n…\n-----END OPENSSH PRIVATE KEY-----'}
+          spellCheck={false}
+          autoComplete="off"
+        />
+      </label>
+      <PrivateKeyGuidance />
+    </div>
+  )
+}
+
+/**
+ * 生成密钥并把公钥装到仓库上的操作步骤。
+ *
+ * 写在界面上而不是只写进文档：这一步最容易错的是**把错误的东西粘进来**
+ * ——访问令牌、公钥（.pub）、或者带密码短语的私钥。三种都会被服务端拒，
+ * 但拒绝信息只能说"这不是一把能用的私钥"，说不出该去哪儿拿对的那一份。
+ *
+ * 提示里写 RSA 4096 而不是 ed25519：被收紧过的 GitLab 实例常把 ed25519
+ * 关掉，而那时的报错出现在 GitLab 那一侧，与平台无关，排查会绕远。
+ */
+function PrivateKeyGuidance() {
+  return (
+    <SubHeading>
+      <strong>平台不替你生成密钥</strong>，私钥怎么产生始终在你自己的机器上。三步：
+      <ol style={{ margin: 'var(--space-2) 0 0', paddingLeft: '1.2em' }}>
+        <li>
+          本地生成：
+          <code>ssh-keygen -t rsa -b 4096 -C &quot;distill&quot; -f distill-key</code>
+          <br />
+          不加密码短语（<code>-N &quot;&quot;</code>）——平台无人值守，输不了密码短语。
+        </li>
+        <li>
+          把 <code>distill-key.pub</code>（公钥）装到仓库上，
+          <strong>勾上写权限</strong>：
+          <br />
+          GitLab：Settings → Repository → <strong>Deploy keys</strong>（不是 Deploy tokens）
+          <br />
+          GitHub：Settings → Deploy keys → Allow write access
+        </li>
+        <li>
+          把 <code>distill-key</code>（私钥，无 <code>.pub</code> 后缀那个）
+          的完整内容粘进上面的框。
+        </li>
+      </ol>
+      粘进来之后它会被加密保存，<strong>此后任何界面与接口都不会再显示它</strong>；
+      要更换只能覆盖。用 RSA 而不是 ed25519：被收紧过的 GitLab 实例常把 ed25519 关掉。
+    </SubHeading>
+  )
+}
+
+/**
  * 提交前把「这一次会把仓库改成什么」写出来。
  *
  * 四个输入框的不同填法长得都一样，让结果只在提交后从列表里的一行文字
@@ -350,6 +428,10 @@ function CreateRepoSection({ onCreated }: { onCreated: () => void }) {
       <Card className="p-4">
         <form onSubmit={submit}>
           <RepoFields values={values} patch={patch} mode="create" />
+          <PrivateKeyField
+            mode="create" value={values.privateKey}
+            onChange={(v) => patch({ privateKey: v })}
+          />
           <RepoOutcome values={values} />
 
           {error && <ErrorNotice>{error}</ErrorNotice>}
@@ -422,6 +504,10 @@ function EditRepoForm({ repo, onSaved, onCancel }: {
           保存后服务端会把校验结论清成「仓库未校验」，要新结论请再点一次「重新校验」。
         </SubHeading>
         <RepoFields values={values} patch={patch} mode="edit" />
+        <PrivateKeyField
+          mode="edit" value={values.privateKey}
+          onChange={(v) => patch({ privateKey: v })}
+        />
         <RepoOutcome values={values} />
 
         {error && <ErrorNotice>{error}</ErrorNotice>}
