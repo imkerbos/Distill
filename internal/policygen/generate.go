@@ -164,7 +164,7 @@ func Generate(in Input) Result {
 	var bad []UngeneratableItem
 
 	for _, o := range in.Observations {
-		items, gaps := classify(o, in.ClusterID, winners)
+		items, gaps := classify(o, in.ClusterID, in.Assets.Registry.NodeCIDR, winners)
 		for _, it := range items {
 			counts[it.key]++
 		}

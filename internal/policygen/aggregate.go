@@ -2,8 +2,10 @@ package policygen
 
 import (
 	"fmt"
+	"net/netip"
 	"strings"
 
+	"github.com/imkerbos/Distill/internal/cluster"
 	"github.com/imkerbos/Distill/internal/replay"
 )
 
@@ -183,7 +185,7 @@ type keyed struct {
 // resolveWinningKeys：主体侧必须与候选策略的 podSelector 用同一个键，
 // 否则学到的规则会挂到一条选不中这个 Pod 的策略上。
 func classify(
-	o Observation, clusterID string, winners map[nsWorkload]string,
+	o Observation, clusterID, nodeCIDR string, winners map[nsWorkload]string,
 ) ([]keyed, []UngeneratableItem) {
 	// 整条流量级别的排除先做：这两类与方向无关，逐侧判会重复报两次。
 	//
@@ -224,7 +226,7 @@ func classify(
 
 	// 源侧：主体是源 Pod，方向为 egress。
 	if sub, ok, item := subjectOf(o, o.Flow.Source, clusterID, winners); ok {
-		peerNS, peerWL, peerKey, peerCIDR, expressible, peerItem := peerOf(o, o.Flow.Dest, clusterID)
+		peerNS, peerWL, peerKey, peerCIDR, expressible, peerItem := peerOf(o, o.Flow.Dest, clusterID, nodeCIDR)
 		if expressible {
 			items = append(items, keyed{key: aggKey{
 				Cluster: clusterID, Subject: sub.workload, SubjectKey: sub.labelKey, SubjectNS: sub.namespace,
@@ -241,7 +243,7 @@ func classify(
 
 	// 目的侧：主体是目的 Pod，方向为 ingress。
 	if sub, ok, item := subjectOf(o, o.Flow.Dest, clusterID, winners); ok {
-		peerNS, peerWL, peerKey, peerCIDR, expressible, peerItem := peerOf(o, o.Flow.Source, clusterID)
+		peerNS, peerWL, peerKey, peerCIDR, expressible, peerItem := peerOf(o, o.Flow.Source, clusterID, nodeCIDR)
 		if expressible {
 			items = append(items, keyed{key: aggKey{
 				Cluster: clusterID, Subject: sub.workload, SubjectKey: sub.labelKey, SubjectNS: sub.namespace,
@@ -318,7 +320,7 @@ func subjectOf(
 // —— {k8s-app: foo} 恰好就选中那个 Pod，把它改写成赢家的键反而选不中。
 // 两个只差标签键的对端因此是两条不同的规则，FingerprintOf 取规则体而非
 // 展示串，两者的指纹也不同（见 describe.go）。
-func peerOf(o Observation, ep replay.Endpoint, clusterID string) (
+func peerOf(o Observation, ep replay.Endpoint, clusterID, nodeCIDR string) (
 	ns, workload, labelKey, cidr string, ok bool, unexpressible *UngeneratableItem,
 ) {
 	// 本集群内、有身份：只能用 selector，不能退到 IP。
@@ -330,6 +332,23 @@ func peerOf(o Observation, ep replay.Endpoint, clusterID string) (
 		// 看着正常实则空转。与 Task 4 node-agent Baseline 必须用节点网段
 		// 而非 podSelector 是同一个约束，只是这里是对端侧。
 		if replay.IsUnmanaged(*ep.Pod) {
+			// **对端不受管控 ≠ 没有策略需要提到它。** 前者说的是没有策略
+			// 能作用在它身上（podSelector 选不中节点网络里的地址）；而
+			// A → B 这条连接里 A 受管时，A 自己的出站策略必须放行 B。
+			// 原实现把这两件事合成了一个判断，于是把主体这一侧的放行
+			// 一起丢掉了：UAT 上 monitoring/prometheus 有 240 条出站规则、
+			// 没有一条是 9100，下发后它抓 node-exporter 直接断
+			// （design doc 2026-09-07）。
+			//
+			// 地址落在本集群登记的 node 网段内时写成 ipBlock —— 节点在
+			// NetworkPolicy 里只能这么表达，与 KUBELET_PROBE、以及
+			// deriveNodeAgent 的 hostNetwork 分支同一条取舍。
+			if pfx, ok := nodePrefixOf(nodeCIDR, ep.IP); ok {
+				return "", "", "", pfx, true, nil
+			}
+			// 不在登记网段内、或根本没登记：照旧丢弃，**不猜**。一个落在
+			// node 网段外的地址可能是别的集群的节点、同子网的另一台机器，
+			// 写成本集群的 node CIDR 会放开一片与这条流量无关的地址。
 			return "", "", "", "", false, &UngeneratableItem{
 				FlowID: o.FlowID, Reason: ReasonUnmanagedEndpoint,
 				Detail: "对端 " + endpointName(ep.Pod) + " 使用 hostNetwork，不受 NetworkPolicy 管控",
@@ -403,4 +422,30 @@ func endpointName(p *replay.PodRef) string {
 		return p.IP
 	}
 	return p.Namespace + "/" + p.Name
+}
+
+// nodePrefixOf 找出登记网段里**包含**这个地址的那一段。
+//
+// 取包含它的那一段、不是全部登记网段：双栈登记有两段，写全等于把 v6 那段
+// 也放开，而这条流量只证明了 v4 那一段。
+//
+// 地址不在任何一段里、或没有登记时返回 false —— 调用方据此照旧丢弃。
+func nodePrefixOf(nodeCIDR, ip string) (string, bool) {
+	if nodeCIDR == "" || ip == "" {
+		return "", false
+	}
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
+		return "", false
+	}
+	prefixes, ok := cluster.ParsePrefixes(nodeCIDR)
+	if !ok {
+		return "", false
+	}
+	for _, p := range prefixes {
+		if p.Contains(addr) {
+			return p.String(), true
+		}
+	}
+	return "", false
 }

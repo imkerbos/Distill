@@ -38,7 +38,7 @@ func obs(src, dst *replay.PodRef, dstIP string, port int32, d replay.Decision) O
 // 在名册为空、只有这一条流量时的行为——用例关心的是拆分与表达能力，
 // 不是同名 workload 的归属键竞争（那条在 generate_test.go 里单独钉住）。
 func classifyOne(o Observation, clusterID string) ([]keyed, []UngeneratableItem) {
-	return classify(o, clusterID, resolveWinningKeys(Input{
+	return classify(o, clusterID, "", resolveWinningKeys(Input{
 		ClusterID: clusterID, Observations: []Observation{o},
 	}))
 }
@@ -347,7 +347,7 @@ func TestUnresolvedIdentityIsNotBlamedOnTheMesh(t *testing.T) {
 			UnknownReason: replay.ReasonSnapshotMissing,
 		},
 	}
-	_, bad := classify(o, "c1", nil)
+	_, bad := classify(o, "c1", "", nil)
 	if len(bad) != 1 {
 		t.Fatalf("got %d items, want 1: %+v", len(bad), bad)
 	}
@@ -369,7 +369,7 @@ func TestResolvedButUntrustedIdentityStillReportsDegradedEvidence(t *testing.T) 
 		IdentityTrusted: false,
 		Decision:        replay.Decision{Verdict: replay.VerdictAllow},
 	}
-	_, bad := classify(o, "c1", nil)
+	_, bad := classify(o, "c1", "", nil)
 	if len(bad) != 1 || bad[0].Reason != ReasonDegradedEvidence {
 		t.Fatalf("got %+v, want one DEGRADED_EVIDENCE", bad)
 	}
