@@ -236,16 +236,6 @@ func (s *Store) ReconciliationTrend(
 	return out, nil
 }
 
-// maxCoverageWindows 是算覆盖时允许读入的摄入窗口数上限。
-//
-// 超过即报错，不截断：一份被截掉一半的窗口清单算出来的覆盖偏小，看起来
-// 安全，但它会让一个观测其实已经充分的集群永远过不了门禁，而排查方向
-// （"为什么还差 3 天"）根本指不到这里。
-//
-// 15 分钟一个窗口时，10 万行是约三年。真到了这个量级，要解决的是保留策略，
-// 不是让门禁悄悄用一份残缺的清单作答。
-const maxCoverageWindows = 100000
-
 // ObservedCoverage 返回这个集群的观测**跨度**与实际**覆盖**。
 //
 // 两个数不是一回事，而门禁要的是后者（design doc 2026-08-25 §5）：
@@ -269,57 +259,55 @@ func (s *Store) ObservedCoverage(
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT window_start, window_end FROM flow_ingest_run
 		  WHERE cluster_id = ? AND status <> ?
-		  ORDER BY window_start LIMIT ?`,
-		clusterID, string(IngestFailed), maxCoverageWindows+1)
+		  ORDER BY window_start`,
+		clusterID, string(IngestFailed))
 	if err != nil {
 		return 0, 0, false, fmt.Errorf("snapshotstore: read observed coverage: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	type window struct{ from, to time.Time }
-	var windows []window
+	// **边扫边合并，不先攒起来。** 行按 window_start 有序，区间合并因此是
+	// 一次线性扫描，只需要记住"当前这一段"——O(1) 内存，与窗口数无关。
+	//
+	// 这也是这里不再有行数上限的原因：上限当初挡的是"把清单读进内存"，
+	// 而那份清单本来就不必存在。它挡住的是真实规模：推送式接入下每个节点
+	// 各推各的窗口，15 个节点每分钟一次就是 21600 个/天，十万行是 4.6 天。
+	// UAT 上涨到 18 万行之后写回计划直接 500，平台再也出不了规则。
+	var first, curFrom, curTo, last time.Time
+	merged := 0 * time.Second
+	any := false
 	for rows.Next() {
-		var w window
-		if err := rows.Scan(&w.from, &w.to); err != nil {
+		var from, to time.Time
+		if err := rows.Scan(&from, &to); err != nil {
 			return 0, 0, false, fmt.Errorf("snapshotstore: scan observed coverage: %w", err)
 		}
 		// 起止颠倒的行不参与计算：它会让合并后的区间变长，而"覆盖变长"
 		// 正是这个函数最不能出的错。这种行不该存在（写入侧校验过），
 		// 真出现了就当它不存在，而不是让它把结论往放行的方向推。
-		if !w.to.After(w.from) {
+		if !to.After(from) {
 			continue
 		}
-		windows = append(windows, w)
+		if !any {
+			any, first, curFrom, curTo = true, from, from, to
+		} else if from.After(curTo) {
+			merged += curTo.Sub(curFrom)
+			curFrom, curTo = from, to
+		} else if to.After(curTo) {
+			// 相接或重叠：并进当前区间。相邻（from == curTo）也合并 ——
+			// 两个首尾相接的窗口就是连续观测，中间没有缝。
+			curTo = to
+		}
+		if to.After(last) {
+			last = to
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return 0, 0, false, fmt.Errorf("snapshotstore: iterate observed coverage: %w", err)
 	}
-	if len(windows) > maxCoverageWindows {
-		return 0, 0, false, fmt.Errorf(
-			"snapshotstore: cluster %s holds more than %d ingest windows; "+
-				"refusing to answer coverage from a truncated list",
-			clusterID, maxCoverageWindows)
-	}
-	if len(windows) == 0 {
+	if !any {
 		return 0, 0, false, nil
 	}
+	merged += curTo.Sub(curFrom)
 
-	// 已按 window_start 排好序，一次线性合并即可。
-	merged := 0 * time.Second
-	cur := windows[0]
-	for _, w := range windows[1:] {
-		if w.from.After(cur.to) {
-			merged += cur.to.Sub(cur.from)
-			cur = w
-			continue
-		}
-		// 相接或重叠：并进当前区间。相邻（w.from == cur.to）也合并 ——
-		// 两个首尾相接的 15 分钟窗口就是连续观测的 30 分钟，中间没有缝。
-		if w.to.After(cur.to) {
-			cur.to = w.to
-		}
-	}
-	merged += cur.to.Sub(cur.from)
-
-	return windows[len(windows)-1].to.Sub(windows[0].from), merged, true, nil
+	return last.Sub(first), merged, true, nil
 }
