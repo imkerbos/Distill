@@ -80,3 +80,7 @@ coverage.*
 # npm build 的机器上直接编译失败。
 /cmd/distill-api/webui/*
 !/cmd/distill-api/webui/.gitkeep
+
+# 本地文件，不进仓库（见 ~/.claude/CLAUDE.md 铁律四）
+/hack/internal-data-patterns.local.txt
+/local.mk
