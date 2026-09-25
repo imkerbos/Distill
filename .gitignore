@@ -81,6 +81,6 @@ coverage.*
 /cmd/distill-api/webui/*
 !/cmd/distill-api/webui/.gitkeep
 
-# 本地文件，不进仓库（见 ~/.claude/CLAUDE.md 铁律四）
+# 本地文件，不进仓库：带环境细节的东西只留在工作区
 /hack/internal-data-patterns.local.txt
 /local.mk
