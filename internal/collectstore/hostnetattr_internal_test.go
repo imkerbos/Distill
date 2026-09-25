@@ -38,8 +38,8 @@ func TestAHostNetworkEndpointDoesNotBecomeASnapshotGap(t *testing.T) {
 	tr.window = flow.Window{From: attrAt.Add(-time.Minute), To: attrAt.Add(time.Minute)}
 	tr.eval = replay.NewEvaluator("c1", nil, nil)
 	tr.pods = map[podKey]observedPod{
-		{namespace: "g32-game", name: "api-0"}: {
-			namespace: "g32-game", name: "api-0", labels: map[string]string{"app": "api"},
+		{namespace: "demo-game", name: "api-0"}: {
+			namespace: "demo-game", name: "api-0", labels: map[string]string{"app": "api"},
 		},
 	}
 	tr.intervals = map[string][]identity.Interval{
@@ -50,7 +50,7 @@ func TestAHostNetworkEndpointDoesNotBecomeASnapshotGap(t *testing.T) {
 		},
 		"172.16.3.9": {{
 			ClusterID: "c1", PodIP: "172.16.3.9", ValidFrom: attrAt.Add(-time.Hour),
-			Identity: identity.Identity{Namespace: "g32-game", PodName: "api-0"},
+			Identity: identity.Identity{Namespace: "demo-game", PodName: "api-0"},
 		}},
 	}
 
@@ -77,11 +77,11 @@ func TestAResolvedPodMissingFromTheSnapshotIsStillAGap(t *testing.T) {
 	tr.intervals = map[string][]identity.Interval{
 		"172.16.3.9": {{
 			ClusterID: "c1", PodIP: "172.16.3.9", ValidFrom: attrAt.Add(-time.Hour),
-			Identity: identity.Identity{Namespace: "g32-game", PodName: "api-0"},
+			Identity: identity.Identity{Namespace: "demo-game", PodName: "api-0"},
 		}},
 		"172.16.4.2": {{
 			ClusterID: "c1", PodIP: "172.16.4.2", ValidFrom: attrAt.Add(-time.Hour),
-			Identity: identity.Identity{Namespace: "g32-game", PodName: "api-1"},
+			Identity: identity.Identity{Namespace: "demo-game", PodName: "api-1"},
 		}},
 	}
 

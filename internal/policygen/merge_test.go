@@ -41,7 +41,7 @@ func TestMergeOnlyAdds(t *testing.T) {
 	seen := time.Date(2026, 8, 29, 3, 0, 0, 0, time.UTC)
 
 	got, unobserved := policygen.MergeLearned(base,
-		[]policygen.LearnedRule{learnedFor("devops", "nacos", "g32-merchant", seen)})
+		[]policygen.LearnedRule{learnedFor("devops", "nacos", "demo-merchant", seen)})
 
 	if len(got.Policies) != 1 {
 		t.Fatalf("候选策略数变了: %d", len(got.Policies))
@@ -84,7 +84,7 @@ func TestMergeDoesNotDuplicate(t *testing.T) {
 // Pod 的策略——在 NetworkPolicy 语义下那等于一条 default-deny，方向完全反了。
 func TestMergeSkipsWorkloadsWithNoCandidatePolicy(t *testing.T) {
 	got, unobserved := policygen.MergeLearned(windowResult(),
-		[]policygen.LearnedRule{learnedFor("gone-ns", "retired", "g32-base", time.Now().UTC())})
+		[]policygen.LearnedRule{learnedFor("gone-ns", "retired", "demo-base", time.Now().UTC())})
 	if len(got.Policies) != 1 {
 		t.Errorf("给一个不在花名册里的 workload 造了策略: %+v", got.Policies)
 	}
@@ -106,7 +106,7 @@ func TestMergeDoesNotMutateItsInput(t *testing.T) {
 	sentinel := base.Policies[0].Rules[:1]
 
 	policygen.MergeLearned(base,
-		[]policygen.LearnedRule{learnedFor("devops", "nacos", "g32-merchant", time.Now().UTC())})
+		[]policygen.LearnedRule{learnedFor("devops", "nacos", "demo-merchant", time.Now().UTC())})
 
 	if n := len(base.Policies[0].Rules); n != 1 {
 		t.Errorf("入参被改了: 规则数 = %d, want 1", n)
@@ -153,7 +153,7 @@ func TestMergeRecomputesRiskAndEnabled(t *testing.T) {
 
 // 展示串按规则体重新渲染，不沿用存下来的那一份。
 func TestMergeRendersDisplayStrings(t *testing.T) {
-	l := learnedFor("devops", "nacos", "g32-merchant", time.Now().UTC())
+	l := learnedFor("devops", "nacos", "demo-merchant", time.Now().UTC())
 	got, _ := policygen.MergeLearned(windowResult(), []policygen.LearnedRule{l})
 	for _, r := range got.Policies[0].Rules {
 		if r.Fingerprint != l.Fingerprint {

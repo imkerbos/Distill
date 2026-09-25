@@ -1,0 +1,14 @@
+# 门禁误报的报备。本地文件，不进仓库。
+# 一行一个词，命中的文本里含这个词、且两侧不粘着字母数字时放过。
+# 只许加通用英文和本仓库自己编的假名字，真实环境里的东西一个都不许加。
+
+# 测试里编的假口令。都是明显不可能是真的那种。
+correct-horse-battery
+another-correct-horse
+viewer-password-1234
+seeded-password-1234
+brand-new-password-5678
+sk-this-should-never-be-echoed-back
+
+# 初始账号的占位值，本身就是「快去改掉」的意思。
+change_own_password

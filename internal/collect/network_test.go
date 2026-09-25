@@ -436,7 +436,7 @@ func TestServiceSnapshotCarriesLoadBalancerExposure(t *testing.T) {
 // 填一个空串会让它看起来像取到了。
 func TestServiceWithoutLoadBalancerCarriesNoExposure(t *testing.T) {
 	svc := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "g32-game", Name: "backend-tcp"},
+		ObjectMeta: metav1.ObjectMeta{Namespace: "demo-game", Name: "backend-tcp"},
 		Spec: corev1.ServiceSpec{
 			Type:     corev1.ServiceTypeNodePort,
 			Selector: map[string]string{"app.kubernetes.io/name": "backend"},

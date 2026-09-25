@@ -28,7 +28,7 @@ func ingressRule() policygen.Rule {
 		Ingress: &networkingv1.NetworkPolicyIngressRule{
 			From: []networkingv1.NetworkPolicyPeer{{
 				NamespaceSelector: &metav1.LabelSelector{
-					MatchLabels: map[string]string{"kubernetes.io/metadata.name": "g32-base"},
+					MatchLabels: map[string]string{"kubernetes.io/metadata.name": "demo-base"},
 				},
 				PodSelector: &metav1.LabelSelector{
 					MatchLabels: map[string]string{"app.kubernetes.io/name": "base-client-backend"},

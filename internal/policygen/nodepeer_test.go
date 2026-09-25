@@ -142,7 +142,7 @@ func TestWithoutANodeCIDRTheHostNetworkPeerIsStillDropped(t *testing.T) {
 func TestAHostNetworkSubjectStillProducesNoPolicy(t *testing.T) {
 	src := nodePeerPod("monitoring", "node-exporter-x", "10.170.48.94",
 		map[string]string{"app": "node-exporter"}, true)
-	dst := nodePeerPod("g32-game", "api-0", "172.16.3.9",
+	dst := nodePeerPod("demo-game", "api-0", "172.16.3.9",
 		map[string]string{"app": "api"}, false)
 
 	res := policygen.Generate(policygen.Input{
